@@ -1,0 +1,15 @@
+# country,date[,remove]
+# Lunar-calendar holidays are published annually and cannot be derived from rules.
+# Chinese New Year 2025
+CN,2025-01-28
+CN,2025-01-29
+CN,2025-01-30
+CN,2025-01-31
+CN,2025-02-03
+CN,2025-02-04
+# Chinese New Year 2026
+CN,2026-02-16
+CN,2026-02-17
+CN,2026-02-18
+CN,2026-02-19
+CN,2026-02-20

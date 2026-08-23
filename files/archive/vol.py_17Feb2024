@@ -1,0 +1,329 @@
+from cvol import CVol
+from ssabr import SSabr
+from common_functions import *
+
+class Vol:
+    def __init__(self,delta_adjust=None):
+        # not initialized, but set through functions
+        self.atm_vols = None
+        self.sabr_params = np.zeros([3, 4])
+        # should be a matrix like:
+        #      10d slog,25d slog, 25d rho, 10d rho
+        # init
+        # final
+        # decay
+
+        # intermediate variables
+        self.surf_matrix = None
+        self.param_matrix = None
+
+        self.use_overwrite = True
+        # overwrite universe. 0,1,2,3 are 10dslog, 25dslog,25drho, 10d rho
+        self.tenor_overwrites = [{} for _ in range(4)]
+
+        if delta_adjust is None:
+            self.delta_adjust=False
+        else:
+            self.delta_adjust=delta_adjust
+
+    def set_cvol(self, ini_vol, long_vol, rate_vol, short_addon, mean_rev_speed, rate_corr, short_decay):
+        self.atm_vols = CVol(ini_vol, long_vol, rate_vol, short_addon, mean_rev_speed, rate_corr, short_decay)
+
+    def get_surf_matrix(self, input_file, input_tab):
+        # expiry,ST 10D,ST 25D,RR 25D,RR 10D
+        # assume it's an excel file with tabs
+        xls = pd.ExcelFile(input_file)
+        self.surf_matrix = pd.read_excel(xls, input_tab)
+
+    def fit_sabrs(self):
+        # param_matrix should have the same shape
+        s = SSabr()
+        self.param_matrix = deepcopy(self.surf_matrix)
+        for i, r in self.surf_matrix.iterrows():
+            t_str = r['expiry']
+            t = get_years_time(t_str)
+            st_25 = r['ST 25D'] / 100
+            st_10 = r['ST 10D'] / 100
+            rr_25 = r['RR 25D'] / 100
+            rr_10 = r['RR 10D'] / 100
+            atmv = self.atm_vols.getVol(t) / 100
+            [rho_25, slog_25] = s.solveSabrFromMarket(rr_25, st_25, atmv, 0.25, t,self.delta_adjust)
+            [rho_10, slog_10] = s.solveSabrFromMarket(rr_10, st_10, atmv, 0.10, t,self.delta_adjust)
+            self.param_matrix['ST 25D'].iloc[i] = slog_25
+            self.param_matrix['ST 10D'].iloc[i] = slog_10
+            self.param_matrix['RR 25D'].iloc[i] = rho_25
+            self.param_matrix['RR 10D'].iloc[i] = rho_10
+            self.param_matrix['expiry'].iloc[i] = t
+            # add info to tenor overwrite
+            t_key = t_str.lower()
+            self.tenor_overwrites[0][t_key] = slog_10
+            self.tenor_overwrites[1][t_key] = slog_25
+            self.tenor_overwrites[2][t_key] = rho_25
+            self.tenor_overwrites[3][t_key] = rho_10
+
+    def interpolate_sabr(self):
+        # both are similar to backbone, so it's simply fitting to instantaneous. ?
+        # result stored as parameters in the 3x4 matrix of sabr_params
+
+        # first store initial guesses to sabr_params
+        initial_guesses = np.zeros([3, 4])
+        initial_guesses[2, :] = 1
+        initial_guesses[0, :] = self.param_matrix.loc[0].values[1:].astype(float)
+        initial_guesses[1, :] = self.param_matrix.tail(1).values[0][1:].astype(float)
+
+        # 10d SDLog, column 0
+        tmp = min_diff(self.param_matrix[["expiry", "ST 10D"]].values.astype(float), initial_guesses[0, 0],
+                       initial_guesses[1, 0], initial_guesses[2, 0])
+        self.sabr_params[:, 0] = deepcopy(tmp)
+        # 25d SDLog, column 1
+        tmp = min_diff(self.param_matrix[["expiry", "ST 25D"]].values.astype(float), initial_guesses[0, 1],
+                       initial_guesses[1, 1], initial_guesses[2, 1])
+        self.sabr_params[:, 1] = deepcopy(tmp)
+        # 25d rho, column 2
+        tmp = min_diff(self.param_matrix[["expiry", "RR 25D"]].values.astype(float), initial_guesses[0, 2],
+                       initial_guesses[1, 2], initial_guesses[2, 2])
+        self.sabr_params[:, 2] = deepcopy(tmp)
+        # 10d rho, column 3
+        tmp = min_diff(self.param_matrix[["expiry", "RR 10D"]].values.astype(float), initial_guesses[0, 3],
+                       initial_guesses[1, 3], initial_guesses[2, 3])
+        self.sabr_params[:, 3] = deepcopy(tmp)
+
+    def get_sabr_params(self, t):
+        # return sLog10, sLog25, RR25, RR10 params for a given t
+        res = [0, 0, 0, 0]
+        [l_tenor, r_tenor] = get_neighbor_tenors(t)
+        for i in range(4):
+            vt_c = get_inst_x(t, self.sabr_params[0, i], self.sabr_params[1, i], self.sabr_params[2, i])
+            if not self.use_overwrite or not (
+                    l_tenor in self.tenor_overwrites[i] or r_tenor in self.tenor_overwrites[i]):
+                res[i] = vt_c
+            else:
+                t1 = get_years_time(l_tenor)
+                t2 = get_years_time(r_tenor)
+                v1_c = get_inst_x(t1, self.sabr_params[0, i], self.sabr_params[1, i], self.sabr_params[2, i])
+                v2_c = get_inst_x(t2, self.sabr_params[0, i], self.sabr_params[1, i], self.sabr_params[2, i])
+                if l_tenor in self.tenor_overwrites[i]:
+                    v1 = self.tenor_overwrites[i][l_tenor]
+                else:
+                    v1 = v1_c
+                if r_tenor in self.tenor_overwrites[i]:
+                    v2 = self.tenor_overwrites[i][r_tenor]
+                else:
+                    v2 = v2_c
+                c_ratio = (vt_c - v1_c) / (v2_c - v1_c)
+                res[i] = get_inter_point(t1, t2, v1, v2, t, c_ratio, 1)
+        return res
+
+    def get_daily_curve_vol(self,t_0):
+        dt=get_datetime(t_0)
+        t=get_t_from_datetime(dt)
+        ##res=self.atm_vols.getDailyCurveVol(t)
+        res=self.atm_vols.getDailyTotalVol(t)
+        return res
+
+    ## get_atm_daily_vol too?
+    def get_atm_cut_vol(self,t,cut_off="TK"):
+        dt=get_datetime(t)
+        res=self.atm_vols.getCutVol(dt,cut_off)/100
+        return res
+
+
+    def get_vol(self, K, t_0, interp_method="LOWSVI",mode="vol",cut_off="TK"):
+        t=get_t_from_datetime(get_datetime(t_0))
+        #ats = self.atm_vols.getVol(t) / 100
+        dt=get_datetime(t_0)
+        ats=self.atm_vols.getCutVol(dt,cut_off) / 100
+        if ats == 0:
+            return 0
+        [sdlog10, sdlog25, rho25, rho10] = self.get_sabr_params(t)
+        sabr_25 = SSabr(t=t, atmv=ats, rho=rho25, volvol=sdlog25 / math.sqrt(t))
+        sabr_10 = SSabr(t=t, atmv=ats, rho=rho10, volvol=sdlog10 / math.sqrt(t))
+        if mode == 'vol':
+            if interp_method in ["SVI","LOWSVI","VV25","VV10"]:
+                deltas = [-0.1, -0.25, 0.5, 0.25, 0.1]
+                strikes = [0] * 5
+                vols_sln = [0] * 5
+                [strikes[0], vols_sln[0]] = sabr_10.getStrikeFromDelta(deltas[0], t, 0, self.delta_adjust)
+                [strikes[1], vols_sln[1]] = sabr_25.getStrikeFromDelta(deltas[1], t, 0, self.delta_adjust)
+                vols_sln[2] = ats
+                strikes[2] = getDNStrike(vols_sln[2], t, self.delta_adjust)
+                [strikes[3], vols_sln[3]] = sabr_25.getStrikeFromDelta(deltas[3], t, 1, self.delta_adjust)
+                [strikes[4], vols_sln[4]] = sabr_10.getStrikeFromDelta(deltas[4], t, 1, self.delta_adjust)
+            if interp_method == "SVI" or interp_method == "LOWSVI":
+                lnK = [math.log(x) for x in strikes]
+                variances = [x ** 2 for x in vols_sln]
+                if interp_method == "SVI":
+                    sig2use = 0.6
+                else:
+                    sig2use = 0.4
+                [a1, a2, a3, b1, b2, b3, s1, s2, s3, r1, r2, r3, m1, m2, m3] = solve_svi3(lnK, variances, sig2use)
+                res_var = svi3_var_in_lnK(math.log(K), a1, a2, a3, b1, b2, b3, s1, s2, s3, r1, r2, r3, m1, m2, m3)
+                res = math.sqrt(res_var)
+            elif interp_method == "SABR25":
+                res = sabr_25.getStrikeVol(K)
+            elif interp_method == "SABR10":
+                res = sabr_10.getStrikeVol(K)
+            elif interp_method == "VV25":
+                res = getVV(K, t, strikes[1], strikes[2], strikes[3], vols_sln[1], vols_sln[2], vols_sln[3])
+            elif interp_method == "VV10":
+                res = getVV(K, t, strikes[0], strikes[2], strikes[4], vols_sln[0], vols_sln[2], vols_sln[4])
+            else:
+                # otherwise not defined
+                res = ats
+        elif mode in ['rr','st']:
+            # K is place holder for delta
+            d = K
+            sdlog=(sdlog25-sdlog10)*(d-0.1)/0.15+sdlog10
+            rho=(rho25-rho10)*(d-0.1)/0.15+rho10
+            sabr=SSabr(t=t, atmv=ats, rho=rho, volvol=sdlog / math.sqrt(t))
+            if mode == 'rr':
+                res=sabr.getRR(d,t,self.delta_adjust)
+            else:
+                res=sabr.getST(d,t,self.delta_adjust)
+        else:
+            # shouldn't get here
+            res = ats
+        return res
+
+    def set_overwrite(self, tf):
+        self.use_overwrite = tf
+
+    def get_sdelta(self,S,K,t,if_call=True):
+        # return the % smile delta of that strike
+        # atm strike where up valued as call and down valued as put may have problems
+        up_step = 1.001
+        down_step = 0.999
+        s_up_vol=self.get_vol(K/(S*up_step),t)
+        s_down_vol=self.get_vol(K/(S*down_step),t)
+        pv_up=getBSPV(S*up_step,K,s_up_vol,t,if_call,self.delta_adjust)
+        pv_down=getBSPV(S*down_step,K,s_down_vol,t,if_call,self.delta_adjust)
+        # is delta based on % move or actual S move?
+        dS=up_step-down_step
+        if not self.delta_adjust:
+            dS=dS*S
+        sdelta=(pv_up-pv_down)/dS
+        return sdelta
+
+    def get_bsdelta(self,S,K,t,if_call=True):
+        v=self.get_vol(K/S,t)
+        #bs=getDeltaFromStrike(S/K,v,t)
+        bs=getAdjustedDeltaFromStrike(S/K,v,t,if_call,self.delta_adjust)
+        return bs
+
+    def get_bs_digi(self,S,K,t,if_call=True,if_pv=True):
+        # either return PV or delta on black scholes framework
+        v=self.get_vol(K/S,t)
+        if if_pv:
+            res=getAdjustedDeltaFromStrike(S/K,v,t,if_call,0)
+        else: # return delta
+            res=getpctBSGamma(S/K,v,t)
+        return res
+
+    def get_digi_delta(self,S,K,t,if_call=True,use_smile=True):
+        # smile delta
+        step=0.001
+        dS=step*2
+        if use_smile:
+            pv_up=self.get_sdelta(S*(1+step),K,t,if_call)
+            pv_down=self.get_sdelta(S*(1-step),K,t,if_call)
+        else:
+            pv_up=self.get_bsdelta(S*(1+step),K,t,if_call)
+            pv_down=self.get_bsdelta(S*(1-step),K,t,if_call)
+        if not self.delta_adjust:
+            dS=dS*S
+        res=(pv_up-pv_down)/dS
+        return res
+
+    def get_digi(self,S,K,t,ramp=0.5,if_call=True,is_pv=True):
+        # ramp is in terms of percentage, and assume we are buying both call and put digi
+        if if_call:
+            K1=K*(1+ramp/100)
+        else:
+            K1=K*(1-ramp/100)
+        N=K1/abs(K1-K)
+        N1=K/abs(K1-K)
+        v=self.get_vol(K/S,t)
+        v1=self.get_vol(K1/S,t)
+        if is_pv:
+            res=getBSPV(S,K,v,t,if_call,1)*N-getBSPV(S,K1,v1,t,if_call,1)*N1
+        else:
+            res=self.get_sdelta(S,K,t,if_call)*N-self.get_sdelta(S,K1,t,if_call)*N1
+        return res
+
+    def get_delta_strike(self,t,d,if_call):
+        num_iteration=10
+        v=self.get_vol(1,t)
+        i = 0
+        while i<num_iteration:
+            k=getAdjustedStrikeFromDelta(d,v,t,if_call,self.delta_adjust)
+            v=self.get_vol(k,t)
+            i=i+1
+        return [k,v]
+
+    def getRR(self,t,d):
+        [call_strike,call_v]=self.get_delta_strike(t,d,1)
+        [put_strike,put_v]=self.get_delta_strike(t,-1*d,0)
+        return call_v-put_v
+
+    def stranglePVdiff(self,t,d,s):
+        # given v calc BS strangle diff vs curve premiums
+        atv=self.atm_vols.get_vol(t)
+        v=atv+s
+        cs=getAdjustedStrikeFromDelta(d,v,t,1,self.delta_adjust)
+        ps=getAdjustedStrikeFromDelta(-1*d,v,t,0, self.delta_adjust)
+        market_call_prem = black.lognormal_call(cs, 1, t, v, 0, 'call')
+        market_put_prem = black.lognormal_call(ps, 1, t, v, 0, 'put')
+        cv=self.get_vol(cs,t)
+        pv=self.get_vol(ps,t)
+        cp=black.lognormal_call(cs, 1, t, cv, 0, 'call')
+        pp=black.lognormal_call(ps, 1, t, pv, 0, 'put')
+        return market_call_prem+market_put_prem-cp-pp
+
+    def getST(self,t,d):
+        func = lambda s: self.stranglePVdiff(t,d,s)
+        res =fsolve(func,0)[0]
+        return res
+
+    def getDensity(self,t,K):
+        step = 0.001
+        up_step = 1+step
+        down_step = 1-step
+        s_up_vol = self.get_vol(K *up_step, t)
+        s_down_vol = self.get_vol(K *down_step, t)
+        s_vol = self.get_vol(K,t)
+        pv_up = getBSPV( 1, K*up_step, s_up_vol, t, 1, self.delta_adjust)
+        pv_down = getBSPV(1, K*down_step, s_down_vol, t, 1, self.delta_adjust)
+        pv = getBSPV(1,K,s_vol,t,1,self.delta_adjust)
+        # is delta based on % move or actual S move?
+        dS = (up_step - down_step)/2
+        if not self.delta_adjust:
+            dS = dS * S
+        res = (pv_up + pv_down - 2*pv) / (dS**2)
+        return res
+
+    def pnl_opt(self,K,if_call,offset=0):
+        pct=self.get_sdelta(1,K,t,if_call)
+        res = -1*pct*abs(K-1)-offset
+        return res
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

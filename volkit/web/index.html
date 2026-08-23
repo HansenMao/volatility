@@ -1,0 +1,672 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>volkit — FX volatility</title>
+<style>
+:root{
+  --bg:#f7f8fa; --panel:#ffffff; --ink:#12151a; --muted:#667081; --line:#e2e6ec;
+  --accent:#2f6df6; --accent2:#e0562f; --good:#16794a; --warn:#9a6700; --bad:#b3261e;
+  --grid:#eef1f5; --field:#ffffff; --head:#f2f4f8; --edit:#fff8e1;
+}
+@media (prefers-color-scheme:dark){
+  :root{--bg:#0f1216; --panel:#171b21; --ink:#e6e9ee; --muted:#98a2b0; --line:#272d36;
+        --accent:#5b8cff; --accent2:#ff8a5c; --good:#4ec98a; --warn:#e0b341; --bad:#ff6b6b;
+        --grid:#1e242c; --field:#11151a; --head:#1c222a; --edit:#2b2412;}
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);
+  font:13px/1.45 ui-sans-serif,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+header{display:flex;align-items:center;gap:12px;padding:9px 16px;background:var(--panel);
+  border-bottom:1px solid var(--line);position:sticky;top:0;z-index:30;flex-wrap:wrap}
+h1{font-size:15px;margin:0;font-weight:650;letter-spacing:.2px;white-space:nowrap}
+h1 span{color:var(--muted);font-weight:400}
+.grow{flex:1}
+.meta{color:var(--muted);font-size:11.5px;font-variant-numeric:tabular-nums}
+.nav{display:flex;gap:3px;background:var(--bg);padding:3px;border-radius:9px;border:1px solid var(--line)}
+.nav button{width:auto;background:transparent;color:var(--muted);border:none;padding:5px 15px;
+  font-weight:650;font-size:12.5px;border-radius:7px;cursor:pointer}
+.nav button.on{background:var(--panel);color:var(--ink);box-shadow:0 1px 3px rgba(0,0,0,.10)}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px}
+.card h2{font-size:11px;text-transform:uppercase;letter-spacing:.9px;color:var(--muted);
+  margin:0 0 10px;font-weight:650;display:flex;align-items:center;gap:8px}
+label{display:block;font-size:11px;color:var(--muted);margin:9px 0 3px}
+input,select,button{font:inherit;color:var(--ink);background:var(--field);
+  border:1px solid var(--line);border-radius:6px;padding:6px 8px;width:100%}
+input:focus,select:focus{outline:2px solid var(--accent);outline-offset:-1px}
+button{background:var(--accent);color:#fff;border:none;cursor:pointer;font-weight:600}
+button:hover{filter:brightness(1.08)} button:active{transform:translateY(1px)}
+button.ghost{background:transparent;color:var(--ink);border:1px solid var(--line);font-weight:500}
+button.danger{background:transparent;color:var(--bad);border:1px solid var(--line)}
+.row{display:flex;gap:8px} .row>*{flex:1}
+.wrap{padding:14px}
+table{border-collapse:collapse;font-variant-numeric:tabular-nums;font-size:12px}
+th,td{text-align:right;padding:4px 8px;border-bottom:1px solid var(--line);white-space:nowrap}
+th{color:var(--muted);font-weight:600;font-size:10.5px;text-transform:uppercase;letter-spacing:.5px}
+th:first-child,td:first-child{text-align:left}
+
+/* ---- pricing grid ---- */
+.gridwrap{overflow-x:auto;border:1px solid var(--line);border-radius:10px;background:var(--panel)}
+table.grid{width:max-content;min-width:100%;border-collapse:separate;border-spacing:0}
+table.grid th,table.grid td{border-bottom:1px solid var(--line);padding:0;height:31px}
+table.grid td.rh,table.grid th.rh{position:sticky;left:0;z-index:5;background:var(--head);
+  padding:0 10px;text-align:left;color:var(--muted);font-size:11px;font-weight:600;
+  border-right:1px solid var(--line);min-width:132px}
+table.grid tr.sec td{background:var(--bg);font-size:10px;text-transform:uppercase;
+  letter-spacing:.9px;color:var(--muted);font-weight:700;padding:5px 10px;text-align:left}
+table.grid td.cell{min-width:118px;padding:0}
+table.grid td.cell input,table.grid td.cell select{border:none;border-radius:0;background:transparent;
+  text-align:right;height:30px;padding:0 9px;font-variant-numeric:tabular-nums}
+table.grid td.cell input:focus,table.grid td.cell select:focus{background:var(--field);outline:2px solid var(--accent);outline-offset:-2px}
+table.grid td.o{text-align:right;padding:0 9px;font-variant-numeric:tabular-nums;font-size:12px}
+table.grid td.o.big{font-weight:650;font-size:13px}
+table.grid td.err{color:var(--bad);font-size:11px;text-align:left;padding:0 9px;white-space:normal;line-height:1.25}
+table.grid th.colhead{background:var(--head);padding:0 6px;font-size:11px;color:var(--ink);text-align:center}
+.colhead div{display:flex;align-items:center;gap:5px;justify-content:space-between}
+.colhead .x{cursor:pointer;color:var(--muted);font-weight:700;padding:0 3px;border-radius:4px}
+.colhead .x:hover{color:var(--bad);background:var(--bg)}
+.pos{color:var(--good)} .neg{color:var(--bad)}
+.pill{display:inline-block;padding:2px 8px;border-radius:20px;font-size:10.5px;font-weight:650}
+.pill.ok{background:color-mix(in srgb,var(--good) 16%,transparent);color:var(--good)}
+.pill.warn{background:color-mix(in srgb,var(--warn) 18%,transparent);color:var(--warn)}
+.pill.bad{background:color-mix(in srgb,var(--bad) 16%,transparent);color:var(--bad)}
+.toolbar{display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap}
+.toolbar button{width:auto;padding:6px 13px}
+.totals{display:flex;gap:10px;flex-wrap:wrap;margin-top:12px}
+.tot{border:1px solid var(--line);border-radius:9px;padding:9px 13px;background:var(--panel);min-width:172px}
+.tot b{font-size:12px} .tot div{font-size:11.5px;color:var(--muted);
+  display:flex;justify-content:space-between;gap:14px;font-variant-numeric:tabular-nums;margin-top:3px}
+.tot div span:last-child{color:var(--ink);font-weight:600}
+
+/* ---- marking ---- */
+.mgrid{display:grid;grid-template-columns:1.5fr 1fr;gap:14px;align-items:start}
+.mcol{display:flex;flex-direction:column;gap:14px;min-width:0}
+@media (max-width:960px){.mgrid{grid-template-columns:1fr}}
+td.dq{font-variant-numeric:tabular-nums}
+td.dq.big{font-weight:650}
+.diff-ok{color:var(--good)} .diff-warn{color:var(--warn)} .diff-bad{color:var(--bad)}
+.tabs{display:flex;gap:4px;margin-bottom:12px;flex-wrap:wrap}
+.tabs button{width:auto;background:transparent;color:var(--muted);border:1px solid transparent;
+  padding:5px 11px;font-weight:600;font-size:12px;border-radius:7px}
+.tabs button.on{background:var(--bg);color:var(--ink);border-color:var(--line)}
+table.mark{width:100%}
+table.mark input{padding:3px 6px;text-align:right;background:var(--edit);border:1px solid transparent}
+table.mark input:hover{border-color:var(--line)}
+table.mark td{padding:2px 6px}
+.chart{width:100%;height:322px;display:block}
+.chart text{fill:var(--muted);font-size:10px}
+.legend{display:flex;gap:14px;flex-wrap:wrap;color:var(--muted);font-size:11px;margin-top:6px}
+.legend i{display:inline-block;width:11px;height:2.5px;vertical-align:middle;margin-right:5px;border-radius:2px}
+.out{margin-top:12px;padding:11px;border-radius:8px;background:var(--bg);border:1px solid var(--line)}
+.out .v{font-size:26px;font-weight:600;font-variant-numeric:tabular-nums;letter-spacing:-.5px}
+.out .d{color:var(--muted);font-size:11.5px;margin-top:3px;min-height:15px}
+.out.err{border-color:var(--bad)} .out.err .v{font-size:13px;font-weight:500;color:var(--bad);letter-spacing:0}
+#warnbox{margin:0 14px 0;padding:10px 12px;border-radius:9px;
+  background:color-mix(in srgb,var(--warn) 12%,var(--panel));border:1px solid var(--warn);display:none}
+#warnbox summary{cursor:pointer;font-weight:650}
+#warnbox ul{margin:6px 0 0;padding-left:18px} #warnbox li{margin:2px 0}
+.scroll{max-height:392px;overflow:auto}
+.spin{display:inline-block;width:11px;height:11px;border:2px solid var(--line);
+  border-top-color:var(--accent);border-radius:50%;animation:s .7s linear infinite;vertical-align:-1px}
+@keyframes s{to{transform:rotate(360deg)}}
+.hint{color:var(--muted);font-size:11px;margin-top:8px;line-height:1.4}
+.hide{display:none!important}
+table.ev{width:100%;font-size:11.5px}
+table.ev th{font-size:10px}
+table.ev td{padding:2px 4px}
+table.ev input{padding:3px 5px;background:var(--edit);border:1px solid transparent;text-align:left}
+table.ev input:hover{border-color:var(--line)}
+table.ev input.n{text-align:right}
+table.ev td.day{color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap}
+table.ev td.day b{color:var(--warn)}
+table.ev .rm{cursor:pointer;color:var(--muted);font-weight:700;padding:0 4px}
+table.ev .rm:hover{color:var(--bad)}
+.pgrid2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.pgrid2 label{margin:6px 0 2px}
+.msg{font-size:11px;margin-top:8px;min-height:14px}
+.msg.ok{color:var(--good)} .msg.bad{color:var(--bad)} .msg.warn{color:var(--warn)}
+</style>
+</head>
+<body>
+<header>
+  <h1>volkit <span>· fx volatility</span></h1>
+  <div class="nav" id="nav">
+    <button data-p="pricing" class="on">Pricing</button>
+    <button data-p="marking">Vol marking</button>
+  </div>
+  <button class="ghost" style="width:auto" id="reload">Reload workbook</button>
+  <div class="grow"></div>
+  <div class="meta" id="meta"></div>
+</header>
+
+<details id="warnbox"><summary id="warnhead"></summary><ul id="warnlist"></ul></details>
+
+<!-- ============================ PRICING ============================ -->
+<div class="wrap" id="p-pricing">
+  <div class="toolbar">
+    <button id="addleg">+ Option</button>
+    <button class="ghost" id="dupleg">Duplicate last</button>
+    <button class="danger" id="delleg" style="width:auto">− Remove last</button>
+    <button class="ghost" id="priceall">Price</button>
+    <button class="ghost" id="clearlegs">Clear all</button>
+    <label style="margin:0;display:flex;align-items:center;gap:6px;width:auto;color:var(--muted)">
+      <input type="checkbox" id="autoprice" checked style="width:auto"> auto-price
+    </label>
+    <div class="grow"></div>
+    <div class="meta" id="feedstatus"></div>
+    <input id="feedpath" placeholder="spot / forward feed CSV" style="width:230px">
+    <button class="ghost" id="feedload" style="width:auto">Load feed</button>
+    <div class="meta" id="pstatus"></div>
+  </div>
+  <div class="gridwrap"><table class="grid" id="pgrid"></table></div>
+  <div class="totals" id="ptotals"></div>
+  <div class="hint">
+    <b>Strike</b> takes a number, <code>ATM</code>, or a delta — <code>25d</code>, <code>10dp</code>,
+    <code>-25d</code>. A bare <code>25d</code> takes its wing from the option type.
+    <b>Expiry</b> takes a date or a tenor (<code>1M</code>, <code>3M</code>), resolved through
+    spot and the delivery date on the pair's holiday calendar.
+    <b>Fwd pts</b> are added to spot as <code>points / pip</code>.
+    Premiums are per unit of base notional in the term currency, undiscounted — this model
+    carries no rate curve. Amounts scale by the notional in millions.
+    <br><b>Product</b>: <code>vanilla</code>, <code>digital</code> (European, pays at expiry),
+    <code>one_touch</code> / <code>no_touch</code> (continuous monitoring; price is a fraction
+    of the payout, so <i>Notional</i> is the payout in millions).
+    <b>Digital ramp %</b> is the call-spread width used to replicate the digital — zero is the
+    unhedgeable limit, wider is what you can actually run.
+    <b>Overhedge</b> shifts the barrier: <code>extend</code> in parallel for the whole life,
+    <code>bend_front</code> full at inception tapering to nothing at expiry,
+    <code>bend_back</code> the reverse. A bent barrier is time-dependent and has no closed
+    form, so it is simulated and reports its Monte Carlo standard error.
+    Buffers are applied <i>against</i> you: selling gets the conservative shift, buying the
+    other way. Leave <b>Spot</b> blank to take spot and interpolated forward points from the feed.
+  </div>
+</div>
+
+<!-- ============================ MARKING ============================ -->
+<div class="wrap hide" id="p-marking">
+  <div class="mgrid">
+    <!-- column 1: the fitted surface, and the checks on it -->
+    <div class="mcol">
+      <section class="card">
+        <div class="tabs" id="tabs">
+          <button data-t="smile" class="on">Smile</button>
+          <button data-t="term">Term structure</button>
+          <button data-t="daily">Daily vols</button>
+          <div class="grow"></div>
+          <label style="margin:0;display:flex;align-items:center;gap:6px;width:auto;font-size:11px">
+            expiry <input type="date" id="chartexpiry" style="width:auto;padding:3px 6px"></label>
+        </div>
+        <div id="panes"></div>
+      </section>
+
+      <section class="card">
+        <h2>Smile parameters</h2>
+        <div class="scroll"><table class="mark" id="msmile"></table></div>
+        <div class="row" style="margin-top:9px"><button class="danger" id="mclearsmile">Clear smile overwrites</button></div>
+        <div class="hint">Type into a shaded cell and press Enter to overwrite; clear the
+          cell to revert to the fitted value.</div>
+      </section>
+
+      <section class="card">
+        <h2>Implied vs quoted <span class="grow"></span>
+          <span class="meta" id="rfnote"></span></h2>
+        <div class="scroll"><table class="mark" id="rrfly"></table></div>
+        <div class="hint">Risk reversals and butterflies read back off the fitted smile,
+          against the quotes that went in. The smile is fitted per tenor and then given a
+          parameter term structure, so these differ unless <b>anchor</b> is on — which is
+          exactly what this table is for.</div>
+      </section>
+    </div>
+
+    <!-- column 2: the curve, the ATM marks it produces, and the events on it -->
+    <div class="mcol">
+      <section class="card">
+        <h2>Curve parameters <span class="grow"></span>
+          <select id="mpair" style="width:auto;padding:3px 6px;font-size:11px"></select></h2>
+        <div class="row">
+          <div><label>Cut</label><select id="mcut"></select></div>
+          <div><label>Interpolation</label><select id="mmethod"></select></div>
+        </div>
+        <div class="meta" id="ckind" style="margin-top:9px"></div>
+        <div class="pgrid2" id="cparams"></div>
+        <div class="row" style="margin-top:11px">
+          <button id="capply">Apply</button><button class="ghost" id="creset">Reload workbook</button>
+        </div>
+        <div class="msg" id="cmsg"></div>
+      </section>
+
+      <section class="card">
+        <h2>ATM term structure</h2>
+        <label style="display:flex;align-items:center;gap:7px;margin:0 0 9px">
+          <input type="checkbox" id="manchor" style="width:auto"> anchor the smile to quoted tenors</label>
+        <div class="scroll"><table class="mark" id="matm"></table></div>
+        <div class="row" style="margin-top:9px"><button class="danger" id="mclearatm">Clear ATM overwrites</button></div>
+      </section>
+
+      <section class="card">
+        <h2>Events <span class="grow"></span>
+          <select id="ehorizon" style="width:auto;padding:2px 5px;font-size:11px">
+            <option value="0.25">3m</option><option value="0.5">6m</option>
+            <option value="1" selected>1y</option><option value="2">2y</option>
+          </select></h2>
+        <div class="row">
+          <button class="ghost" id="eload">Auto-load</button>
+          <button class="ghost" id="eadd">+ Row</button>
+          <button id="eapply">Apply</button>
+        </div>
+        <div class="scroll" style="margin-top:9px"><table class="ev" id="etable"></table></div>
+        <div class="msg" id="emsg"></div>
+        <div class="hint">Bumps are vol points over the <b>24 hours following the release</b>.
+          The <b>day</b> column shows which volatility day the effect mostly lands in.
+          Auto-loaded dates come from the published central-bank calendars shipped with
+          volkit plus the NFP rule; verify them, and edit
+          <code>volkit/data/econ_events.csv</code> to extend.</div>
+      </section>
+    </div>
+  </div>
+
+<script>
+const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
+const api=async(p,o)=>{const r=await fetch(p,o);const j=await r.json();
+  if(j.error)throw new Error(j.error);return j;};
+const post=(p,b)=>api(p,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});
+const qs=o=>new URLSearchParams(o).toString();
+const esc=s=>String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');
+const num=(v,d=4)=>(v==null||!isFinite(v))?'—':v.toLocaleString(undefined,{minimumFractionDigits:d,maximumFractionDigits:d});
+let STATE={}, PANEL='pricing', TAB='smile', LEGS=[], RESULT=null, MARKS=null;
+
+/* ------------------------------ charts ------------------------------ */
+function chart(el,series,opts={}){
+  const W=el.clientWidth||760,H=opts.height||322,P={t:14,r:opts.r??52,b:26,l:52};
+  const all=series.flatMap(s=>s.pts); if(!all.length){el.innerHTML='';return}
+  const xs=all.map(p=>p[0]); let xmin=Math.min(...xs),xmax=Math.max(...xs);
+  if(xmin===xmax){xmin-=1;xmax+=1}
+  const ax={}; series.forEach(s=>{const a=s.axis||'l';(ax[a]=ax[a]||[]).push(...s.pts.map(p=>p[1]))});
+  const rg={}; for(const k in ax){let lo=Math.min(...ax[k]),hi=Math.max(...ax[k]);
+    if(lo===hi){lo-=1;hi+=1} const pad=(hi-lo)*.1; rg[k]=[lo-pad,hi+pad];}
+  const X=v=>P.l+(v-xmin)/(xmax-xmin)*(W-P.l-P.r);
+  const Y=(v,a)=>H-P.b-(v-rg[a][0])/(rg[a][1]-rg[a][0])*(H-P.t-P.b);
+  let g='';const ny=5;
+  for(let i=0;i<=ny;i++){const y=P.t+i*(H-P.t-P.b)/ny;
+    g+=`<line x1="${P.l}" y1="${y}" x2="${W-P.r}" y2="${y}" stroke="var(--grid)"/>`;
+    g+=`<text x="${P.l-7}" y="${y+3}" text-anchor="end">${(rg.l[1]-i*(rg.l[1]-rg.l[0])/ny).toFixed(opts.ldp??2)}</text>`;
+    if(rg.r)g+=`<text x="${W-P.r+7}" y="${y+3}">${(rg.r[1]-i*(rg.r[1]-rg.r[0])/ny).toFixed(opts.rdp??2)}</text>`;}
+  const nx=Math.min(6,xs.length);
+  for(let i=0;i<=nx;i++){const v=xmin+i*(xmax-xmin)/nx,x=X(v);
+    g+=`<line x1="${x}" y1="${P.t}" x2="${x}" y2="${H-P.b}" stroke="var(--grid)"/>`;
+    g+=`<text x="${x}" y="${H-8}" text-anchor="middle">${opts.xfmt?opts.xfmt(v):v.toFixed(3)}</text>`;}
+  series.forEach(s=>{const a=s.axis||'l';
+    if(s.type==='bar'){const bw=Math.max(1,(W-P.l-P.r)/s.pts.length-1);
+      s.pts.forEach(p=>{const y0=Y(Math.max(0,rg[a][0]),a),y=Y(p[1],a);
+        g+=`<rect x="${X(p[0])-bw/2}" y="${Math.min(y,y0)}" width="${bw}" height="${Math.abs(y0-y)}" fill="${s.color}" opacity=".8"/>`;});
+    }else if(s.type==='dot'){s.pts.forEach((p,i)=>{g+=`<circle cx="${X(p[0])}" cy="${Y(p[1],a)}" r="4" fill="${s.color}" stroke="var(--panel)" stroke-width="1.5"/>`;
+        if(s.labels)g+=`<text x="${X(p[0])}" y="${Y(p[1],a)-9}" text-anchor="middle" font-size="9">${esc(s.labels[i])}</text>`;});
+    }else g+=`<path d="${s.pts.map((p,i)=>(i?'L':'M')+X(p[0])+' '+Y(p[1],a)).join(' ')}" fill="none" stroke="${s.color}" stroke-width="${s.w||1.9}" ${s.dash?'stroke-dasharray="4 3"':''}/>`;});
+  el.innerHTML=`<svg class="chart" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${g}</svg>`;
+}
+const C1='var(--accent)',C2='var(--accent2)',C3='var(--good)';
+
+/* ============================== PRICING ============================== */
+const PIP={JPY:100};
+function defaultLeg(from){
+  if(from)return{...from};
+  const d=new Date((STATE.valuationMs||Date.now())+30*864e5);
+  return{label:'',pair:(STATE.pairs||['USDJPY'])[0],product:'vanilla',expiry:'1M',cut:'TK',
+    method:(STATE.methods||['SVI'])[0],type:'C',strike:'ATM',barrier:'',spot:'',points:'0',
+    notional:'1',side:'buy',pip:'',ramp:'0',overhedge:'none',buffer:'0'};
+}
+function pipFor(leg){
+  if(leg.pip)return parseFloat(leg.pip);
+  return PIP[(leg.pair||'').slice(3,6).toUpperCase()]||10000;
+}
+const IN=[
+ ['label','Label','text'],['pair','Pair','pair'],['product','Product','product'],
+ ['expiry','Expiry','text'],['cut','Cut','cut'],['type','Type','type'],
+ ['strike','Strike','text'],['barrier','Barrier','text'],
+ ['spot','Spot','text'],['points','Fwd pts','text'],['pip','Pip divisor','text'],
+ ['notional','Notional (m)','text'],['side','Side','side'],['method','Interp','method'],
+ ['ramp','Digital ramp %','text'],['overhedge','Overhedge','overhedge'],
+ ['buffer','Barrier buffer %','text'],
+];
+const dash=v=>(v===0||v==null||!isFinite(v))?'—':null;
+const OUT=[
+ ['expiry','Expiry date',v=>esc(v)],['days','Days',v=>num(v,1)],
+ ['spot','Spot',v=>num(v,5)],['forward','Forward',v=>num(v,5)],
+ ['feed_used','From feed',v=>v?'yes':'manual'],
+ ['strike','Strike / barrier',v=>num(v,5)],
+ ['is_call','Type',v=>v?'Call / up':'Put / down'],
+ ['vol','Vol %',v=>num(v,4),'big'],['atm_vol','ATM vol %',v=>num(v,4)],
+ ['barrier_used','Barrier after buffer',v=>dash(v)??num(v,5)],
+ ['premium_dom','Price (term / unit)',v=>num(v,6)],
+ ['premium_pct_base','Price % (of base / payout)',v=>num(v,4)],
+ ['fair_value','Fair value (no buffer)',v=>num(v,6)],
+ ['overhedge_cost','Overhedge cost',v=>dash(v)??num(v,6),'sign'],
+ ['delta_pct','Delta %',v=>num(v,2)],['smile_delta_pct','Smile delta %',v=>num(v,2)],
+ ['vega_dom','Vega per vol pt',v=>num(v,6)],
+ ['premium_amount','Premium amount',v=>num(v,4),'big sign'],
+ ['vega_amount','Vega amount / vol pt',v=>num(v,4),'sign'],
+ ['delta_amount','Delta hedge (m base)',v=>num(v,4),'sign'],
+ ['pricing_method','Method',v=>esc(v)],
+ ['mc_error','MC std error',v=>dash(v)??num(v,6)],
+];
+function ctl(kind,i,key,val){
+  const a=`data-i="${i}" data-k="${key}"`;
+  const opts=(list,v)=>list.map(o=>`<option${String(o)===String(v)?' selected':''}>${esc(o)}</option>`).join('');
+  if(kind==='pair')  return `<select ${a}>${opts(STATE.pairs||[],val)}</select>`;
+  if(kind==='cut')   return `<select ${a}>${opts(STATE.cuts||[],val)}</select>`;
+  if(kind==='method')return `<select ${a}>${opts(STATE.methods||[],val)}</select>`;
+  if(kind==='type')  return `<select ${a}>${opts(['C','P','Auto'],val)}</select>`;
+  if(kind==='product')return `<select ${a}>${opts(STATE.products||['vanilla'],val)}</select>`;
+  if(kind==='overhedge')return `<select ${a}>${opts(STATE.overhedges||['none'],val)}</select>`;
+  if(kind==='side')  return `<select ${a}>${opts(['buy','sell'],val)}</select>`;
+  return `<input ${a} value="${esc(val)}">`;
+}
+function renderGrid(){
+  const g=$('#pgrid');
+  if(!LEGS.length){g.innerHTML=`<tr><td class="rh">No options</td><td class="o" style="padding:12px">
+     Press <b>+ Option</b> to add a column.</td></tr>`; $('#ptotals').innerHTML=''; return;}
+  let h='<thead><tr><th class="rh">Option</th>';
+  LEGS.forEach((L,i)=>{h+=`<th class="colhead"><div><span>${esc(L.label||('#'+(i+1)))}</span>
+      <span class="x" data-del="${i}" title="remove">✕</span></div></th>`;});
+  h+='</tr></thead><tbody>';
+  h+=`<tr class="sec"><td colspan="${LEGS.length+1}">Inputs</td></tr>`;
+  IN.forEach(([k,lab,kind])=>{h+=`<tr><td class="rh">${lab}</td>`;
+    LEGS.forEach((L,i)=>{h+=`<td class="cell">${ctl(kind,i,k,L[k]??'')}</td>`;});h+='</tr>';});
+  h+=`<tr><td class="rh">Remove</td>`;
+  LEGS.forEach((L,i)=>{h+=`<td class="cell" style="text-align:center">
+     <button class="danger rmcol" data-del="${i}" style="width:auto;padding:2px 12px;font-size:11px"
+             title="remove this option">Remove</button></td>`;});
+  h+='</tr>';
+  h+=`<tr class="sec"><td colspan="${LEGS.length+1}">Results</td></tr>`;
+  const res=RESULT?RESULT.legs:[];
+  OUT.forEach(([k,lab,fmt,cls])=>{h+=`<tr><td class="rh">${lab}</td>`;
+    LEGS.forEach((L,i)=>{const r=res[i];
+      if(!r){h+=`<td class="o">—</td>`;return}
+      if(!r.ok){h+=`<td class="err">${k==='expiry'?esc(r.error):''}</td>`;return}
+      const v=r[k]; let c='o '+(cls||'');
+      if((cls||'').includes('sign')&&typeof v==='number')c+=v>0?' pos':(v<0?' neg':'');
+      h+=`<td class="${c}">${fmt(v)}</td>`;});h+='</tr>';});
+  h+='</tbody>';
+  g.innerHTML=h;
+  const t=RESULT?RESULT.totals:{};
+  $('#ptotals').innerHTML=Object.keys(t).length?Object.entries(t).map(([p,v])=>
+    `<div class="tot"><b>${esc(p)}</b>
+      <div><span>premium</span><span class="${v.premium>0?'pos':(v.premium<0?'neg':'')}">${num(v.premium,4)}</span></div>
+      <div><span>vega / vol pt</span><span>${num(v.vega,4)}</span></div>
+      <div><span>delta (m base)</span><span>${num(v.delta,4)}</span></div></div>`).join(''):'';
+}
+function saveLegs(){try{localStorage.setItem('volkit.legs',JSON.stringify(LEGS))}catch(e){}}
+function loadLegs(){try{const r=localStorage.getItem('volkit.legs');if(r)LEGS=JSON.parse(r)}catch(e){LEGS=[]}}
+let _pt=null;
+function schedulePrice(){if($('#autoprice').checked){clearTimeout(_pt);_pt=setTimeout(priceAll,320)}}
+async function priceAll(){
+  if(!LEGS.length){RESULT=null;renderGrid();return}
+  $('#pstatus').innerHTML='<span class="spin"></span> pricing…';
+  try{
+    RESULT=await post('/api/price',{legs:LEGS.map(L=>({...L,pip:pipFor(L)}))});
+    const n=RESULT.errors;
+    $('#pstatus').innerHTML=n?`<span class="pill bad">${n} leg${n>1?'s':''} failed</span>`
+      :`<span class="pill ok">${LEGS.length} priced</span>`;
+  }catch(e){RESULT=null;$('#pstatus').innerHTML=`<span class="pill bad">${esc(e.message)}</span>`;}
+  renderGrid();
+}
+$('#pgrid').addEventListener('change',e=>{
+  const t=e.target; const i=t.dataset.i;
+  if(i===undefined)return;
+  LEGS[+i][t.dataset.k]=t.value; saveLegs();
+  if(t.dataset.k==='label'||t.dataset.k==='pair')renderGrid();
+  schedulePrice();
+});
+$('#pgrid').addEventListener('click',e=>{
+  const el=e.target.closest('[data-del]'); if(!el)return;
+  LEGS.splice(+el.dataset.del,1); saveLegs(); RESULT=null; renderGrid(); schedulePrice();
+});
+$('#addleg').onclick=()=>{LEGS.push(defaultLeg());saveLegs();renderGrid();schedulePrice()};
+$('#dupleg').onclick=()=>{if(LEGS.length){LEGS.push(defaultLeg(LEGS[LEGS.length-1]));saveLegs();renderGrid();schedulePrice()}};
+$('#delleg').onclick=()=>{if(LEGS.length){LEGS.pop();saveLegs();RESULT=null;renderGrid();schedulePrice()}};
+$('#clearlegs').onclick=()=>{LEGS=[];RESULT=null;saveLegs();renderGrid();$('#pstatus').textContent=''};
+$('#priceall').onclick=priceAll;
+function showFeed(f){
+  const el=$('#feedstatus');
+  if(!f||!f.loaded){el.innerHTML='<span class="pill warn">no feed</span>';return}
+  const bad=(f.problems||[]).length;
+  el.innerHTML=`<span class="pill ok">feed: ${f.covered.length} pairs</span>`+
+    (f.asof?` <span class="meta">asof ${esc(f.asof)}</span>`:'')+
+    (bad?` <span class="pill bad">${bad} problem${bad>1?'s':''}</span>`:'');
+  el.title=(f.problems||[]).join('\n')||f.source;
+}
+$('#feedload').onclick=async()=>{
+  const el=$('#feedstatus'); el.innerHTML='<span class="spin"></span> loading…';
+  try{ const f=await post('/api/feed',{path:$('#feedpath').value}); showFeed(f);
+       STATE.feed=f; await priceAll(); }
+  catch(e){ el.innerHTML=`<span class="pill bad">${esc(e.message)}</span>`; }
+};
+
+/* ============================== MARKING ============================== */
+function mq(){return{pair:$('#mpair').value,cut:$('#mcut').value,method:$('#mmethod').value}}
+async function loadMarks(){
+  const o=mq(); MARKS=await api('/api/marks?'+qs({pair:o.pair,cut:o.cut}));
+  $('#manchor').checked=!!MARKS.anchor;
+  $('#matm').innerHTML=`<thead><tr><th>Tenor</th><th>Curve %</th><th>${esc(o.cut)} cut %</th><th>Overwrite %</th></tr></thead><tbody>`+
+    MARKS.atm.map(r=>`<tr><td>${esc(r.tenor)}</td><td>${num(r.curve,4)}</td><td>${num(r.cut,4)}</td>
+      <td><input data-m="atm" data-tenor="${esc(r.tenor)}" value="${r.overwrite==null?'':(r.overwrite*100).toFixed(4)}"
+        placeholder="${num(r.curve,4)}"></td></tr>`).join('')+'</tbody>';
+  const P=['slog25','slog10','rho25','rho10'];
+  $('#msmile').innerHTML=`<thead><tr><th>Tenor</th>${P.map(p=>`<th>${p}</th>`).join('')}</tr></thead><tbody>`+
+    (MARKS.smile.length?MARKS.smile.map(r=>`<tr><td>${esc(r.tenor)}${r.ok?'':' <span class="pill bad">fit</span>'}</td>`+
+      P.map(p=>`<td><input data-m="smile" data-param="${p}" data-tenor="${esc(r.tenor)}"
+        value="${r[p+'_ow']==null?'':r[p+'_ow'].toFixed(4)}" placeholder="${r[p].toFixed(4)}"></td>`).join('')+'</tr>').join('')
+     :`<tr><td colspan="5" class="meta">no smile quotes for this pair</td></tr>`)+'</tbody>';
+}
+async function applyMark(el){
+  const o=mq(), v=el.value.trim();
+  try{
+    if(el.dataset.m==='atm'){
+      if(v==='')await post('/api/overwrite',{pair:o.pair,kind:'clear_atm',tenor:el.dataset.tenor});
+      else await post('/api/overwrite',{pair:o.pair,kind:'atm',tenor:el.dataset.tenor,value:parseFloat(v)});
+    }else{
+      if(v==='')await post('/api/overwrite',{pair:o.pair,kind:'clear_smile'});
+      else await post('/api/overwrite',{pair:o.pair,kind:'smile',param:el.dataset.param,
+        tenor:el.dataset.tenor,value:parseFloat(v)});
+    }
+    await loadMarks(); await redraw(); schedulePrice();
+  }catch(e){alert(e.message)}
+}
+document.addEventListener('change',e=>{if(e.target.dataset&&e.target.dataset.m)applyMark(e.target)});
+$('#mclearatm').onclick=async()=>{await post('/api/overwrite',{pair:mq().pair,kind:'clear_atm'});
+  await loadMarks();await redraw();schedulePrice()};
+$('#mclearsmile').onclick=async()=>{await post('/api/overwrite',{pair:mq().pair,kind:'clear_smile'});
+  await loadMarks();await redraw();schedulePrice()};
+$('#manchor').onchange=async e=>{await post('/api/overwrite',{pair:mq().pair,kind:'anchor',value:e.target.checked});
+  await redraw();schedulePrice()};
+
+async function drawSmile(){
+  const p=$('#panes');p.innerHTML='<div class="meta"><span class="spin"></span> fitting smile…</div>';
+  const o=mq(),ex=$('#chartexpiry').value;
+  const d=await api('/api/smile?'+qs({pair:o.pair,expiry:ex,method:o.method,cut:o.cut}));
+  const f=d.fit?`<span class="pill ${d.fit.arbitrage_free?'ok':'bad'}">${d.fit.arbitrage_free?'arbitrage-free':'ARBITRAGE'}</span>
+    <span class="meta">fit error ${d.fit.max_error_vol_pts.toExponential(1)} vol pts</span>`:'';
+  p.innerHTML=`<div style="display:flex;gap:10px;align-items:center;margin-bottom:8px">
+      <b>${esc(o.pair)}</b><span class="meta">t = ${d.t.toFixed(4)}y · ATM ${d.atm.toFixed(4)}%</span>${f}</div>
+    <div id="c1"></div><div class="legend"><span><i style="background:${C1}"></i>implied vol (%)</span>
+      <span><i style="background:${C2}"></i>risk-neutral density</span>
+      <span><i style="background:${C3};height:8px;width:8px;border-radius:50%"></i>quoted deltas</span></div>
+    <div class="scroll" style="margin-top:12px"><table style="width:100%"><thead><tr><th>Point</th><th>Strike / fwd</th><th>Vol %</th></tr></thead>
+    <tbody>${d.points.map(r=>`<tr><td>${esc(r.label)}</td><td>${num(r.k,6)}</td><td>${num(r.v,4)}</td></tr>`).join('')}</tbody></table></div>
+    ${d.warnings.length?`<div class="hint" style="color:var(--warn)">⚠ ${esc(d.warnings.join(' · '))}</div>`:''}`;
+  chart($('#c1'),[{pts:d.curve.map(r=>[r.k,r.v]),color:C1},
+    {pts:d.density.map(r=>[r.k,r.d]),color:C2,axis:'r',w:1.3,dash:1},
+    {pts:d.points.map(r=>[r.k,r.v]),color:C3,type:'dot',labels:d.points.map(r=>r.label.replace(' put','p').replace(' call','c'))}],
+    {ldp:3,rdp:1,xfmt:v=>v.toFixed(4)});
+}
+async function drawTerm(){
+  const p=$('#panes');p.innerHTML='<div class="meta"><span class="spin"></span> building…</div>';
+  const o=mq(),d=await api('/api/term?'+qs({pair:o.pair,cut:o.cut}));
+  p.innerHTML=`<div id="c1"></div><div class="legend"><span><i style="background:${C1}"></i>marked ATM vol (%)</span>
+      <span><i style="background:${C2}"></i>${esc(o.cut)} cut vol (%)</span></div>
+    ${d.events.length?`<h2 style="margin-top:16px">Events</h2><table style="width:100%"><thead><tr><th>When (UTC)</th><th>Quoted bump %</th><th>Solved height</th></tr></thead>
+      <tbody>${d.events.map(e=>`<tr><td>${esc(e.when.replace('T',' ').slice(0,16))}</td><td>${num(e.bump,3)}</td>
+      <td>${e.height==null?'—':num(e.height,6)}</td></tr>`).join('')}</tbody></table>`:''}`;
+  chart($('#c1'),[{pts:d.curve.map(r=>[r.t,r.vol]),color:C1},
+    {pts:d.curve.map(r=>[r.t,r.cut]),color:C2,dash:1,w:1.5},
+    {pts:d.curve.map(r=>[r.t,r.vol]),color:C1,type:'dot'}],
+    {r:16,ldp:3,xfmt:v=>v<1?(v*12).toFixed(1)+'m':v.toFixed(1)+'y'});
+}
+async function drawDaily(){
+  const p=$('#panes');p.innerHTML='<div class="meta"><span class="spin"></span> integrating…</div>';
+  const o=mq(),d=await api('/api/daily?'+qs({pair:o.pair,cut:o.cut,horizon:1}));
+  const s=d.series,t0=new Date(s[0].date).getTime(),x=r=>(new Date(r.date).getTime()-t0)/864e5;
+  p.innerHTML=`<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+      <b>${esc(o.pair)}</b><span class="meta">${s.length} days, ${esc(o.cut)} cut</span><div class="grow"></div>
+      <a href="/api/export/daily?${qs({pair:o.pair,cut:o.cut,horizon:1,field:'cumulative'})}" style="color:var(--accent);font-weight:600;text-decoration:none">↓ cumulative CSV</a>
+      <a href="/api/export/daily?${qs({pair:o.pair,cut:o.cut,horizon:1,field:'daily'})}" style="color:var(--accent);font-weight:600;text-decoration:none">↓ daily CSV</a></div>
+    <div id="c1"></div><div class="legend"><span><i style="background:${C2}"></i>daily vol (%)</span>
+      <span><i style="background:${C1}"></i>cumulative / term vol (%)</span></div>
+    <div class="scroll" style="margin-top:12px"><table style="width:100%"><thead><tr><th>Date</th><th>Daily %</th><th>Cumulative %</th></tr></thead>
+      <tbody>${s.map(r=>`<tr><td>${esc(r.date)}</td><td>${num(r.daily,4)}</td><td>${num(r.cumulative,4)}</td></tr>`).join('')}</tbody></table></div>`;
+  chart($('#c1'),[{pts:s.map(r=>[x(r),r.daily]),color:C2,type:'bar'},
+    {pts:s.map(r=>[x(r),r.cumulative]),color:C1,w:2}],
+    {r:16,ldp:2,xfmt:v=>new Date(t0+v*864e5).toISOString().slice(2,7)});
+}
+async function loadRRFly(){
+  const o=mq(), el=$('#rrfly');
+  el.innerHTML='<tr><td class="meta"><span class="spin"></span> reading the smile back…</td></tr>';
+  let d;
+  try{ d=await api('/api/rrfly?'+qs({pair:o.pair,method:o.method,cut:o.cut})); }
+  catch(e){ el.innerHTML=`<tr><td class="diff-bad">${esc(e.message)}</td></tr>`; return; }
+  $('#rfnote').textContent=d.anchored?'anchored to quoted tenors':'from the parameter term structure';
+  if(!d.rows.length){el.innerHTML='<tr><td class="meta">no smile quotes for this pair</td></tr>';return}
+  // A tenth of a vol point is about a broker tick; a hundredth is noise.
+  const cls=v=>v==null?'':(Math.abs(v)<0.01?'diff-ok':(Math.abs(v)<0.10?'diff-warn':'diff-bad'));
+  const cell=(v,d_)=>`<td class="dq">${v==null?'—':num(v,4)}</td>`+
+    `<td class="dq ${cls(d_)}" title="quoted ${d_==null?'':num(v-d_,4)}">${d_==null?'—':(d_>0?'+':'')+num(d_,3)}</td>`;
+  el.innerHTML='<thead><tr><th>Tenor</th><th>RR 25</th><th>Δ</th><th>BF 25</th><th>Δ</th>'+
+    '<th>RR 10</th><th>Δ</th><th>BF 10</th><th>Δ</th></tr></thead><tbody>'+
+    d.rows.map(r=>`<tr><td>${esc(r.tenor)}</td>`+
+      cell(r.rr25,r.rr25_d)+cell(r.bf25,r.bf25_d)+
+      cell(r.rr10,r.rr10_d)+cell(r.bf10,r.bf10_d)+'</tr>').join('')+'</tbody>';
+}
+const DRAW={smile:drawSmile,term:drawTerm,daily:drawDaily};
+async function redraw(){if(PANEL!=='marking')return;
+  try{await DRAW[TAB]()}catch(e){$('#panes').innerHTML=`<div class="out err"><div class="v">${esc(e.message)}</div></div>`}
+  loadRRFly();}
+
+/* ---------------------- curve parameters ---------------------- */
+const PLABEL={initial_vol:'Initial vol %',long_term_vol:'Long-term vol %',mean_reversion:'Mean reversion',
+  short_addon:'Short add-on %',short_decay:'Short decay',rate_vol:'Rate vol %',rate_corr:'Rate corr',
+  corr_initial:'Correlation initial',corr_final:'Correlation final',corr_decay:'Correlation decay'};
+const PORDER=['initial_vol','long_term_vol','mean_reversion','short_addon','short_decay','rate_vol','rate_corr',
+  'corr_initial','corr_final','corr_decay'];
+let CURVE=null, EVENTS=[];
+async function loadCurve(){
+  CURVE=await api('/api/curve?'+qs({pair:mq().pair}));
+  $('#ckind').textContent=CURVE.is_cross?`cross of ${CURVE.legs.join(' / ')} · signs ${CURVE.leg_signs.join(',')}`:'backbone';
+  $('#cparams').innerHTML=PORDER.filter(k=>k in CURVE.params).map(k=>
+    `<div><label>${PLABEL[k]}</label><input data-cp="${k}" value="${(+CURVE.params[k]).toFixed(4)}"></div>`).join('');
+  EVENTS=CURVE.events.map(e=>({when:e.when,bump:(+e.bump).toFixed(3),label:e.label,
+    vol_day:e.vol_day,rolls_over:e.rolls_over,height:e.height}));
+  renderEvents();
+}
+$('#capply').onclick=async()=>{
+  const params={}; $$('#cparams input').forEach(i=>params[i.dataset.cp]=i.value);
+  const m=$('#cmsg');
+  try{
+    const r=await post('/api/curve',{pair:mq().pair,params});
+    if(r.problems&&r.problems.length){m.className='msg bad';m.textContent=r.problems.join('; ');}
+    else{m.className='msg ok';m.textContent='applied';}
+    await loadCurve(); await loadMarks(); await redraw(); schedulePrice();
+  }catch(e){m.className='msg bad';m.textContent=e.message}
+};
+$('#creset').onclick=async()=>{$('#cmsg').textContent='reloading workbook…';
+  await post('/api/reload',{}); await boot();};
+
+/* ---------------------- events ---------------------- */
+function renderEvents(){
+  const t=$('#etable');
+  if(!EVENTS.length){t.innerHTML='<tr><td class="meta" style="padding:8px">No events. Auto-load or add a row.</td></tr>';return}
+  t.innerHTML='<thead><tr><th>When (UTC)</th><th>Bump %</th><th>Label</th><th>Vol day</th><th></th></tr></thead><tbody>'+
+    EVENTS.map((e,i)=>`<tr>
+      <td><input data-ev="${i}" data-f="when" value="${esc(e.when)}" style="width:132px"></td>
+      <td><input class="n" data-ev="${i}" data-f="bump" value="${esc(e.bump)}" style="width:54px"></td>
+      <td><input data-ev="${i}" data-f="label" value="${esc(e.label)}" style="width:84px"></td>
+      <td class="day">${e.vol_day?(e.rolls_over?'<b>'+esc(e.vol_day)+'</b>':esc(e.vol_day)):'—'}</td>
+      <td><span class="rm" data-rm="${i}">✕</span></td></tr>`).join('')+'</tbody>';
+}
+$('#etable').addEventListener('change',e=>{const i=e.target.dataset.ev;
+  if(i!==undefined)EVENTS[+i][e.target.dataset.f]=e.target.value;});
+$('#etable').addEventListener('click',e=>{const i=e.target.dataset.rm;
+  if(i!==undefined){EVENTS.splice(+i,1);renderEvents()}});
+$('#eadd').onclick=()=>{const d=new Date((STATE.valuationMs||Date.now())+7*864e5);
+  EVENTS.push({when:d.toISOString().slice(0,16),bump:'1.000',label:'',vol_day:null});renderEvents()};
+$('#eload').onclick=async()=>{
+  const m=$('#emsg');m.className='msg';m.innerHTML='<span class="spin"></span> loading calendar…';
+  try{
+    const d=await api('/api/events/suggest?'+qs({pair:mq().pair,horizon:$('#ehorizon').value}));
+    const have=new Set(EVENTS.map(e=>e.when));
+    let added=0, approx=0;
+    d.events.forEach(e=>{ if(have.has(e.when))return;
+      EVENTS.push({when:e.when,bump:(+e.bump).toFixed(3),label:e.name,vol_day:e.vol_day,
+        rolls_over:false,approximate:e.approximate});
+      added++; if(e.approximate)approx++;});
+    EVENTS.sort((a,b)=>a.when<b.when?-1:1); renderEvents();
+    m.className='msg ok';
+    m.textContent=`added ${added} event${added===1?'':'s'}${approx?` (${approx} with approximate dates)`:''} — review, then Apply`;
+  }catch(e){m.className='msg bad';m.textContent=e.message}
+};
+$('#eapply').onclick=async()=>{
+  const m=$('#emsg');m.className='msg';m.innerHTML='<span class="spin"></span> solving event heights…';
+  try{
+    const r=await post('/api/events',{pair:mq().pair,events:EVENTS.map(e=>
+      ({when:e.when,bump:e.bump,label:e.label}))});
+    EVENTS=r.events.map(e=>({when:e.when,bump:(+e.bump).toFixed(3),label:e.label,
+      vol_day:e.vol_day,rolls_over:e.rolls_over,height:e.height}));
+    renderEvents();
+    m.className=r.problems.length?'msg warn':'msg ok';
+    m.textContent=r.problems.length?r.problems.join('; '):`${EVENTS.length} event heights solved`;
+    await loadMarks(); await redraw(); schedulePrice();
+  }catch(e){m.className='msg bad';m.textContent=e.message}
+};
+
+/* ============================== SHELL ============================== */
+$('#nav').onclick=e=>{const b=e.target.closest('button');if(!b)return;
+  [...$('#nav').children].forEach(x=>x.classList.toggle('on',x===b));
+  PANEL=b.dataset.p;
+  $('#p-pricing').classList.toggle('hide',PANEL!=='pricing');
+  $('#p-marking').classList.toggle('hide',PANEL!=='marking');
+  if(PANEL==='marking')redraw(); else renderGrid();};
+$('#tabs').onclick=e=>{const b=e.target.closest('button');if(!b)return;
+  [...$('#tabs').children].forEach(x=>x.classList.toggle('on',x===b));TAB=b.dataset.t;redraw();};
+$('#mpair').onchange=async()=>{await loadCurve();await loadMarks();redraw()};
+$('#mcut').onchange=async()=>{await loadMarks();redraw()};
+$('#mmethod').onchange=redraw;
+$('#chartexpiry').onchange=redraw;
+$('#reload').onclick=async()=>{$('#meta').innerHTML='<span class="spin"></span> reloading…';
+  await post('/api/reload',{});await boot();};
+window.addEventListener('resize',()=>{clearTimeout(window._rz);window._rz=setTimeout(redraw,220)});
+
+async function boot(){
+  STATE=await api('/api/state');
+  STATE.valuationMs=STATE.valuation?new Date(STATE.valuation).getTime():Date.now();
+  const opt=(l,sel)=>l.map(x=>`<option${x===sel?' selected':''}>${esc(x)}</option>`).join('');
+  $('#mpair').innerHTML=opt(STATE.pairs||[]);
+  $('#mcut').innerHTML=opt(STATE.cuts||[],'TK');
+  $('#mmethod').innerHTML=opt(STATE.methods||[]);
+  $('#meta').textContent=`valuation ${STATE.valuation?STATE.valuation.replace('T',' ').slice(0,16)+'Z':''} · ${STATE.source||''}`;
+  $('#chartexpiry').value=new Date(STATE.valuationMs+90*864e5).toISOString().slice(0,10);
+  const w=(STATE.warnings||[]).slice(); if(STATE.error)w.unshift(STATE.error);
+  $('#warnbox').style.display=w.length?'block':'none';
+  $('#warnhead').textContent=`${w.length} message${w.length===1?'':'s'} from the workbook`;
+  $('#warnlist').innerHTML=w.slice(0,60).map(x=>`<li>${esc(x)}</li>`).join('');
+  showFeed(STATE.feed);
+  if(STATE.feed&&STATE.feed.source)$('#feedpath').value=STATE.feed.source;
+  loadLegs();
+  if(!LEGS.length)LEGS=[defaultLeg()];
+  LEGS=LEGS.filter(L=>(STATE.pairs||[]).includes(L.pair));
+  if(!LEGS.length)LEGS=[defaultLeg()];
+  renderGrid(); await loadCurve(); await loadMarks(); await priceAll();
+}
+boot();
+</script>
+</body>
+</html>

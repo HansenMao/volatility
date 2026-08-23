@@ -1,0 +1,17 @@
+# Managed / pegged trading bands.  pair,lower,upper[,note]
+#
+# These are policy settings, not market data. Check them against the central
+# bank before use, and delete a pair whose regime changes.
+#
+# A band here means a HARD, defended range for the spot. Only put a pair in
+# this file if that is true: the model gives strikes outside the band zero
+# in-band value, which is right for a defended peg and wrong for anything else.
+USDHKD,7.75,7.85,HKMA Convertibility Undertakings under the Linked Exchange Rate System
+#
+# Deliberately NOT listed:
+#   USDCNY - the +/-2% limit is around a daily fixing, so the band moves every
+#            day and is not a fixed range for a multi-month option.
+#   USDCNH - offshore, not subject to the onshore limit at all.
+#   DKK    - ERM II central rate 7.46038 with a +/-2.25% formal band, but the
+#            Nationalbank runs a far tighter de facto range; add it only with
+#            a range you are prepared to defend.

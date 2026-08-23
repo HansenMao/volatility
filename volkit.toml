@@ -1,0 +1,21 @@
+# volkit configuration.
+#
+# Replaces the old `config` file, which hard-coded
+#   FILE_PATH=/home/colin/Desktop/vol/files/
+# so the tool only ran on one machine. Paths here are relative to this file.
+
+[data]
+workbook = "files/vol_marks.xlsx"
+
+[daily]
+horizon_years = 1.0
+cut = "NY"
+
+[server]
+host = "127.0.0.1"
+port = 8765
+
+[calendars]
+# Extra holiday dates, as country,YYYY-MM-DD[,remove] rows.
+# Chinese New Year moves every year and must be listed here.
+overrides = "files/holiday_overrides.csv"

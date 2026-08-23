@@ -1,0 +1,374 @@
+#!/usr/bin/python:
+
+from tkinter import *
+from tkcalendar import DateEntry
+from vols import Vols
+##from vols import param_file
+from datetime import datetime,time
+from common_functions import *
+from openpyxl import load_workbook
+import xlrd
+import configparser
+
+config = configparser.RawConfigParser()
+config.read("config")
+file_path=config.get('Config_Section','FILE_PATH')
+daily_vol_end_time=config.get('Config_Section','DAILY_VOL_END_TIME')
+
+vp=Vols(file_path+"vol_marks.xlsx")
+
+def run_indication():
+    # indication parameters
+    ind_config_tab="Indication Config"
+    ind_tab="Indication"
+    dt_format="%d-%b-%y"
+    ##wb=xlrd.open_workbook(param_file)
+    wb=xlrd.open_workbook(FILE_PATH+"vol_marks.xlsx")
+    ws=wb.sheet_by_name('INDIC_CONFIG')
+    config_file=ws.cell(0,0).value
+    xls=pd.ExcelFile(config_file)
+    config = pd.read_excel(xls, ind_config_tab,index_col=0)
+    ind = pd.read_excel(xls,ind_tab)
+    dfo = pd.DataFrame(columns=['d','v','s','f','p'], index=ind.index)
+    for i in ind.index:
+        # loop through rows
+        d = ind['DATE'][i]
+        f = ind['FWD'][i]
+        c = ind['CCY'][i]
+        s = ind['STRIKE'][i]
+        r = ind['ROUNDING'][i]
+        ot = ind['TYPE'][i]
+        # add feature so if d is already a date string no need to call this function
+        #if isinstance(d,str) and re.match("[0-9]+[w|W|m|M]{1}",d):
+         #   exp_date = getbday(c,d)
+        #else:
+        #    exp_date = datetime.strptime(d, dt_format)
+        if isinstance(d,str):
+            exp_date = getbday(c,d)
+        else:
+            exp_date = d
+        spot = config["SPOT"][c]
+        swap = config[f.upper()][c]
+        fwd = spot + swap / 10000
+        strike = spot + s / 10000
+        if isinstance(r,int):
+            strike = round(strike,r)
+        vol = vp.vs[c].get_vol(float(strike) / float(fwd), exp_date, "SVI") * 100
+        vol2use = vol - config[f.upper()+"_SP"][c]
+        cur_dt=datetime.combine(date.today(),time())
+        t=(exp_date-cur_dt).days/365
+        if ot.upper() == 'C':
+            if_call = True
+        elif ot.upper() == 'P':
+            if_call = False
+        else:
+            if_call = strike > fwd
+        prem=getBSPV(fwd,strike,vol2use/100,t,if_call,True)
+        dfo.loc[i] = pd.Series({'d':exp_date.strftime(dt_format),'v':vol2use,'s':strike,'f':fwd,'p':prem})
+    book = load_workbook(config_file)
+    writer = pd.ExcelWriter(config_file,engine='openpyxl')
+    writer.book=book
+    writer.sheets=dict((ws.title,ws) for ws in book.worksheets)
+    dfo.to_excel(writer,ind_tab,header=None,index=False,startcol=6, startrow=1)
+    writer.save()
+
+def print_daily_vols():
+    #generate list of dates
+    cur = ccyvar.get()
+    daily_vol_output_file=file_path+cur+"_daily_vol"
+    f=open(daily_vol_output_file,"w")
+    end_t=float(daily_vol_end_time)
+    t0=datetime.utcnow()
+    tn=t0+timedelta(days=end_t*365)
+    t=t0
+    tenor_daily = tenor_daily_var.get()
+    cut=cutvar.get()
+    while t<tn:
+        exp_dt = datetime.combine(t,time())
+        exp_dt = exp_dt.replace(hour=0,minute=0,second=0)
+        if tenor_daily:
+            dvol = vp.vs[cur].get_atm_cut_vol(exp_dt,cut) * 100
+        else:
+            dvol = vp.vs[cur].get_daily_curve_vol(exp_dt)
+        ##print ('{}: {}'.format(t,dvol))
+        f.write('{}, {}\n'.format(t.strftime("%Y/%m/%d"),dvol))
+        t=t+timedelta(hours=24)
+    f.close()
+
+def print_daily_vols_new():
+    #generate list of dates
+    cur = ccyvar.get()
+    daily_vol_output_file=file_path+cur+"_daily_vol"
+    f=open(daily_vol_output_file,"w")
+    end_t=float(daily_vol_end_time)
+    t0=datetime.utcnow()
+    tn=t0+timedelta(days=end_t*365)
+    t=t0
+    tenor_daily = tenor_daily_var.get()
+    cut=cutvar.get()
+    if not tenor_daily:
+#        while t<tn:
+#            exp_dt = datetime.combine(t,time())
+#            exp_dt = exp_dt.replace(hour=0,minute=0,second=0)
+#            #if tenor_daily:
+#            #    dvol = vp.vs[cur].get_atm_cut_vol(exp_dt,cut) * 100
+#            #else:
+#            dvol = vp.vs[cur].get_daily_curve_vol(exp_dt)
+#            ##print ('{}: {}'.format(t,dvol))
+#            f.write('{}, {}\n'.format(t.strftime("%Y/%m/%d"),dvol))
+#            t=t+timedelta(hours=24)
+        vp.vs[cur].atm_vols.refreshDailyCumulativeVols(end_t,cut)
+        dvols = vp.vs[cur].atm_vols.daily_vols
+        for d in dvols:
+            f.write('{}, {}\n'.format(d,dvols[d]))
+    else:
+        # print daily which can be directly read off your internal property
+        vp.vs[cur].atm_vols.refreshDailyCumulativeVols(end_t,cut)
+        dvols = vp.vs[cur].atm_vols.daily_cumulative_vols
+        for d in dvols:
+            f.write('{}, {}\n'.format(d,dvols[d]))
+    f.close()
+
+
+
+def loadgroup():
+    for name, var in choices.items():
+        if var.get() == 1:
+            vp.load_ccy(name)
+
+def fitSabr():
+    cur=ccyvar.get()
+    target_list=[]
+    for name,var in choices2.items():
+        if var.get() == 1:
+            target_list.append(name)
+    vp.fit_sabr(cur,target_list)
+
+def interpSabr():
+    cur=ccyvar.get()
+    vp.interp_sabr(cur)
+
+def reload():
+    vp.reload_data()
+
+def load_vol():
+    cur=ccyvar.get()
+    vp.load_vol(cur)
+
+def load_surf():
+    cur=ccyvar.get()
+    vp.load_surf(cur)
+
+def calc():
+    cur=ccyvar.get()
+    #exp=tenor.get_date().strftime('%m/%d/%Y')
+    exp = tenor.get_date()
+    exp_dt=datetime.combine(exp,time())
+#    dt_str=exp_dt.strftime("%m/%d/%Y")
+    c=cutvar.get()
+#    if c == "TK":
+#        exp_dt=exp_dt.replace(hour=6)
+#    elif c == "NY":
+#        exp_dt=exp_dt.replace(hour=14)
+#    exp_t=get_t_from_datetime(exp_dt)
+    # new york 10 is UTC 14
+    # tokyo 3 pm is UTC 6
+ #   svol=vp.vs[cur].get_vol(float(strikevar.get())/float(fwdvar.get()),exp_t,interpvar.get())
+    atm_only=atm_only_var.get()
+    if atm_only:
+        svol=vp.vs[cur].get_atm_cut_vol(exp_dt,c)*100
+    else:
+        try:
+            svol = vp.vs[cur].get_vol(float(strikevar.get()) / float(fwdvar.get()), exp_dt, interpvar.get(), "vol", c) * 100
+        except:
+            svol = 0
+    outputvar.set('%.4f' % svol)
+
+
+def calc_daily_curve():
+    #nyc to nyc so there's no cut input. just curve daily no surface either
+    cur=ccyvar.get()
+    exp = tenor.get_date()
+    exp_dt = datetime.combine(exp,time())
+    ## make sure it falls into the right NYC day and convert equivalent UTC day for daily vol
+    exp_dt = exp_dt.replace(hour=0,minute=0,second=0)
+    dvol = vp.vs[cur].get_daily_curve_vol(exp_dt)
+    outputvar.set('%.4f' % dvol)
+
+def print_out():
+    print_type=print_var.get()
+    if print_type == "Tenor":
+        print_tenor()
+    elif print_type == "Surf":
+        print_surf_param()
+    elif print_type == "SABR":
+        print_sabr()     
+    else:
+        print("ERROR")
+
+
+
+def print_tenor():
+    cur = ccyvar.get()
+    pt.delete('1.0',END)
+    for tp in vp.tenor_points:
+        pt.insert(END,str(tp) + "\t" + '%.3f' % vp.vs[cur].atm_vols.getVol(get_years_time(tp))+'\n')
+    #for name, var in choices.items():
+    #    pt.insert(END,str(name)+"\t" + '%d' % var.get() + '\n')
+    pt.pack()
+
+def print_surf_param():
+    cur = ccyvar.get()
+    pt.delete('1.0',END)
+    target_mx = vp.vs[cur].param_matrix
+    target_raw = vp.vs[cur].surf_matrix
+    pt.insert(END,"EXPIRY\trho25\trho10\tslog25\tslog10\n")
+    for i,r in target_mx.iterrows():
+        time_str=target_raw['expiry'].iloc[i]
+        pt.insert(END, str(time_str) + '\t%.2f\t%.2f\t%.2f\t%.2f\n' % (r['RR 25D'],r['RR 10D'],r['ST 25D'],r['ST 10D']))
+    pt.pack()
+
+def print_sabr():
+    cur = ccyvar.get()
+    pt.delete('1.0',END)
+    sbm = vp.vs[cur].sabr_params
+    pt.insert(END,"\trho25\trho10\tslog25\tslog10\n")
+    pt.insert(END,'init\t%.2f\t%.2f\t%.2f\t%.2f\n' % (sbm[0,2],sbm[0,3],sbm[0,1],sbm[0,0]))
+    pt.insert(END,'final\t%.2f\t%.2f\t%.2f\t%.2f\n' % (sbm[1,2],sbm[1,3],sbm[1,1],sbm[1,0]))
+    pt.insert(END,'decay\t%.2f\t%.2f\t%.2f\t%.2f\n' % (sbm[2,2],sbm[2,3],sbm[2,1],sbm[2,0]))
+    pt.pack()
+
+
+
+def make_window():
+    global ccyvar,tenor,strikevar,fwdvar,outputvar,interpvar,cutvar,pt,choices,atm_only_var,tenor_daily_var,print_var,choices2
+    win=Tk()
+
+    frame1=Frame(win)
+    frame1.pack()
+
+    #ccy_list=["USDCNH","USDJPY","EURUSD","AUDUSD","AUDJPY","EURJPY","EURCNH"]
+    ccy_list=list(vp.vs.keys())
+
+    Label(frame1,text="Currency").grid(row=0,column=0,sticky=W)
+    ccyvar=StringVar()
+    ccyvar.set(ccy_list[0])
+    #ccy=Entry(frame1,textvariable=ccyvar)
+    ccy=OptionMenu(frame1,ccyvar,*ccy_list)
+    ccy.grid(row=0,column=1,sticky=W)
+    b2=Button(frame1,text= "Load Vol",command=load_vol)
+    b3=Button(frame1,text= "Load Surface",command=load_surf)
+    b2.grid(row=0,column=2,sticky=W)
+    b3.grid(row=0,column=3,sticky=W)
+    b1 = Button(frame1, text="Reload Data", command=reload)
+    b1.grid(row=0,column=4,sticky=W)
+
+    Label(frame1,text="Expiry").grid(row=1,column=0,sticky=W)
+    #tenor=Entry(frame1,textvariable=tenorvar)
+    tenor=DateEntry(frame1)
+    tenor.grid(row=1,column=1,sticky=W)
+
+    Label(frame1, text="Strike").grid(row=2, column=0, sticky=W)
+    strikevar = StringVar()
+    strike = Entry(frame1, textvariable=strikevar)
+    strike.grid(row=2, column=1, sticky=W)
+
+    Label(frame1, text="Forward").grid(row=3, column=0, sticky=W)
+    fwdvar = StringVar()
+    fwd = Entry(frame1, textvariable=fwdvar)
+    fwd.grid(row=3, column=1, sticky=W)
+
+    interp_options=["SVI","LOWSVI","SABR25","SABR10","VV25","VV10"]
+    cut_options=["TK","NY"]
+    print_options=["Tenor","Surf","SABR"]
+    target_expiry_options=["1W","2W","1M","2M","3M","6M","9M","1Y","2Y"]
+
+    menubutton2 = Menubutton(frame1,text='Tenors',indicatoron=True,borderwidth=1,relief="raised")
+    menu2=Menu(menubutton2,tearoff=False)
+    menubutton2.configure(menu=menu2)
+    #menubutton.pack(padx=10,pady=10)
+    choices2={}
+    for choice in target_expiry_options:
+        choices2[choice]=IntVar(value=0)
+        menu2.add_checkbutton(label=choice,variable=choices2[choice],onvalue=1,offvalue=0)
+    menubutton2.grid(row=1,column=3,sticky=W)
+
+    b_fitsabr = Button(frame1, text="Fit Sabr",command=fitSabr)
+    b_fitsabr.grid(row=1,column=2,sticky=W)
+
+    b_interpsabr = Button(frame1, text="Interp Sabr",command=interpSabr)
+    b_interpsabr.grid(row=1,column=4,sticky=W)
+
+
+    print_var = StringVar()
+    print_var.set(print_options[0])
+
+    b4 = Button(frame1, text="Calc", command=calc)
+    b4.grid(row=3,column=2,sticky=W)
+
+    cutvar = StringVar()
+    cutvar.set(cut_options[0])
+
+    cut=OptionMenu(frame1,cutvar,*cut_options)
+    cut.grid(row=3,column=3,sticky=W)
+
+    interpvar = StringVar()
+    interpvar.set(interp_options[0])
+
+    interp = OptionMenu(frame1, interpvar, *interp_options)
+    interp.grid(row=3,column=4,sticky=W)
+
+    b4_2 = Button(frame1, text="Day Vol",command=calc_daily_curve)
+    b4_2.grid(row=4,column=2,sticky=W)
+
+    atm_only_var=BooleanVar()
+    cb_1 = Checkbutton(frame1,text="atm",variable=atm_only_var,onvalue=True,offvalue=False)
+    cb_1.grid(row=4,column=3,sticky=W)
+    
+    tenor_daily_var=BooleanVar()
+    cb_2 = Checkbutton(frame1,text="tenor",variable=tenor_daily_var,onvalue=True,offvalue=False)
+    cb_2.grid(row=4,column=4,sticky=W)
+
+    Label(frame1, text="Output").grid(row=4, column=0, sticky=W)
+    outputvar = StringVar()
+    output = Entry(frame1, textvariable=outputvar)
+    output.grid(row=4, column=1, sticky=W)
+    output.config(state='readonly')
+
+    menubutton = Menubutton(frame1,text='Ccy',indicatoron=True,borderwidth=1,relief="raised")
+    menu=Menu(menubutton,tearoff=False)
+    menubutton.configure(menu=menu)
+    #menubutton.pack(padx=10,pady=10)
+    choices={}
+    for choice in ccy_list:
+        choices[choice]=IntVar(value=0)
+        menu.add_checkbutton(label=choice,variable=choices[choice],onvalue=1,offvalue=0)
+    #b5 = Button(frame1, text="Print Tenors", command=print_tenor)
+    b5 = Button(frame1, text="Print", command=print_out)
+    b5.grid(row=5,column=0,sticky=W)
+
+    printO=OptionMenu(frame1,print_var,*print_options)
+    printO.grid(row=5,column=1,sticky=W)
+
+    b7 = Button(frame1, text="Load",command=loadgroup)
+    b7.grid(row=5,column=2,sticky=W)
+    menubutton.grid(row=5,column=3,sticky=W)
+    ##b6 = Button(frame1, text="cal day vol", command=calc_daily_curve)
+    ##b6 = Button(frame1, text="Save Day Vol", command=print_daily_vols)
+    b6 = Button(frame1, text="Save Day Vol", command=print_daily_vols_new)
+    b6.grid(row=5,column=4,sticky=W)
+    #b8 = Button(frame1, text="Print surf", command=print_surf_param)
+    #b8.grid(row=5,column=5,sticky=W)
+    #b9 = Button(frame1, text="Print sabr", command=print_sabr)
+    #b9.grid(row=5,column=6,sticky=W)
+    pt=Text(win)
+
+    return win
+
+##def main():
+win=make_window()
+win.mainloop()
+
+
+
+
