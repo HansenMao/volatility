@@ -17,6 +17,7 @@ the browser stays responsive while a book reloads.
 from __future__ import annotations
 
 import json
+import math
 import threading
 import traceback
 import webbrowser
@@ -33,7 +34,22 @@ from .exotics import TOUCH_MODES
 from .book import Book
 from .cross import CrossAtmCurve
 from .feed import FeedError, MarketFeed
+from .listed import UNDERLYINGS, WEIGHTINGS, panel_from_request
+from .knowledge import KnowledgeBank, KnowledgeError, RULE_INSTRUMENTS, RULE_KINDS, SIZE_BASES
+from .marketmaker import (BACKBONE_KNOBS, CROSS_KNOBS, DEFAULT_BACKBONE_FREE,
+                          DEFAULT_CROSS_FREE, TARGET_SOURCES, learn_from_panel)
+from .marketmaker import panel_from_request as mm_panel_from_request
+from .marketmaker import rules_from_request
+from .quotes import FLY_CONVENTIONS
+from .quotes import VOL_UNITS as QUOTE_VOL_UNITS
+from .surface import PARAM_NAMES
+from .analytics import TARGETS, carry_table, fair_value_table, realized_table, triangle_table
+from .banded import BAND_MODES, BandTreatment, band_panel
+from .curves import CURVE_FIELDS, CURVE_KINDS, FIELD_LABELS, KIND_LABELS
+from .curves import panel_from_request as curve_panel_from_request
+from .history import ANNUALISATIONS, VOL_UNITS, HistoryError, load_history
 from .pricing import PRODUCTS, OptionLeg, price_strip
+from . import screens
 from .smile import INTERPOLATORS
 from .timeutil import UTC, Clock, parse_datetime, tenor_to_years
 
@@ -52,14 +68,35 @@ PARAM_LABELS = {
 class BookService:
     """Thread-safe wrapper around a Book, with the request handlers."""
 
-    def __init__(self, path: str, clock: Clock | None = None, feed_path: str | None = None):
+    def __init__(self, path: str, clock: Clock | None = None, feed_path: str | None = None,
+                 history_path: str | None = None, bank_path: str | None = None):
         self.path = path
         self.clock = clock or Clock.utcnow()
         self.feed_path = feed_path
         self._lock = threading.RLock()
         self.book: Book | None = None
         self.load_error: str | None = None
+        # The historical workbook is optional and is held separately from the
+        # book: it is a different file with a different life, and a failure to
+        # read it must not stop the marks loading.
+        self.history = None
+        self.history_path = history_path
+        self.history_error: str | None = None
+        # The knowledge bank is the desk's own file and has a different life
+        # again: a bad rule in it must not stop the marks loading either.
+        self.bank_path = bank_path
+        self.bank_error: str | None = None
+        try:
+            self.bank = KnowledgeBank.load(bank_path)
+        except KnowledgeError as exc:
+            self.bank = KnowledgeBank(path=bank_path)
+            self.bank_error = str(exc)
         self.reload()
+        if history_path:
+            try:
+                self.load_history({"path": history_path})
+            except Exception as exc:  # noqa: BLE001 - surfaced in /api/state
+                self.history_error = f"{type(exc).__name__}: {exc}"
 
     def reload(self) -> dict:
         with self._lock:
@@ -75,8 +112,12 @@ class BookService:
     def state(self) -> dict:
         with self._lock:
             if self.book is None:
-                return {"pairs": [], "error": self.load_error, "warnings": []}
+                return {"pairs": [], "error": self.load_error, "warnings": [],
+                        "screens": list(screens.enabled())}
             return {
+                # Which tabs this build has.  The page hides the rest, and
+                # their routes are refused below rather than 404-ing blankly.
+                "screens": list(screens.enabled()),
                 "pairs": self.book.pairs,
                 "tenors": list(self.book.data.tenor_points),
                 "methods": list(INTERPOLATORS),
@@ -84,6 +125,44 @@ class BookService:
                 "overhedges": list(TOUCH_MODES),
                 "feed": self.feed_state(),
                 "cuts": sorted(CUTS),
+                "analysis": {
+                    "targets": [{"key": k, "label": v} for k, v in TARGETS.items()],
+                    "annualisations": list(ANNUALISATIONS),
+                    "vol_units": list(VOL_UNITS),
+                    "history": self.history_state(),
+                    "curve_kinds": [{"key": k, "label": KIND_LABELS[k]} for k in CURVE_KINDS],
+                    "curve_fields": [{"key": f, "label": FIELD_LABELS[f]} for f in CURVE_FIELDS],
+                },
+                # Managed / pegged pairs.  The page only shows the band card
+                # for a pair that has one, and there is no point offering the
+                # BAND method on a free floater.
+                "bands": {
+                    "pairs": self.book.banded_pairs(),
+                    "modes": list(BAND_MODES),
+                    "default": BandTreatment().to_request(),
+                },
+                "marketmaker": {
+                    "target_sources": list(TARGET_SOURCES),
+                    "backbone_knobs": list(BACKBONE_KNOBS),
+                    "cross_knobs": list(CROSS_KNOBS),
+                    "default_free": list(DEFAULT_BACKBONE_FREE),
+                    "default_cross_free": list(DEFAULT_CROSS_FREE),
+                    "smile_params": list(PARAM_NAMES),
+                    "fly_conventions": list(FLY_CONVENTIONS),
+                    "vol_units": list(QUOTE_VOL_UNITS),
+                    "rule_kinds": list(RULE_KINDS),
+                    "rule_instruments": list(RULE_INSTRUMENTS),
+                    "size_bases": list(SIZE_BASES),
+                    "bank": self.bank_state(),
+                },
+                "listed": {
+                    "underlyings": [
+                        {"code": u.code, "name": u.name, "pair": u.pair,
+                         "invert": u.invert, "scale": u.scale, "note": u.note}
+                        for u in UNDERLYINGS.values()
+                    ],
+                    "weightings": list(WEIGHTINGS),
+                },
                 "valuation": self.book.clock.now.isoformat(),
                 "source": str(self.path),
                 "warnings": self.book.all_problems(),
@@ -479,12 +558,267 @@ class BookService:
             surface.invalidate()
             return {"ok": True}
 
+    # -- analysis ---------------------------------------------------------
+    def history_state(self) -> dict:
+        h = self.history
+        return {
+            "loaded": h is not None,
+            "source": (h.source if h is not None else (self.history_path or "")),
+            "error": self.history_error,
+            "pairs": (h.summary() if h is not None else []),
+            "problems": (list(h.problems) + list(h.skipped_sheets)) if h is not None else [],
+        }
+
+    def load_history(self, payload: dict) -> dict:
+        with self._lock:
+            path = (payload or {}).get("path") or self.history_path
+            if not path:
+                raise ValueError("no historical workbook path was given")
+            known = self.book.pairs if self.book is not None else None
+            try:
+                self.history = load_history(path, known,
+                                            vol_unit=(payload or {}).get("vol_unit") or "auto")
+                self.history_path = path
+                self.history_error = None
+            except HistoryError as exc:
+                self.history = None
+                self.history_error = str(exc)
+                raise
+            return self.history_state()
+
+    def analysis(self, q: dict) -> dict:
+        """Every section of the analysis screen for one pair.
+
+        Sections are built independently and each carries its own reason for
+        being empty, so a missing forward feed does not take the realized
+        statistics down with it and a pair that is not a cross simply has no
+        triangle.
+        """
+        with self._lock:
+            if self.book is None:
+                raise ValueError(self.load_error or "no workbook is loaded")
+            pair = q["pair"]
+            if pair not in self.book:
+                raise ValueError(f"{pair} is not built in this book")
+            cut = q.get("cut", "NY")
+            method = q.get("method") or None
+            target = q.get("target", "atm")
+            horizon = float(q.get("horizon_days") or 30.0)
+            lookback_raw = q.get("lookback_days")
+            lookback = None if lookback_raw in (None, "", "match") else float(lookback_raw)
+            annualisation = q.get("annualisation") or "weighted"
+            with_noise = str(q.get("noise", "1")).lower() not in ("0", "false", "no")
+
+            out = {
+                "pair": pair, "cut": cut, "method": method, "target": target,
+                "target_label": TARGETS.get(target, target),
+                "horizon_days": horizon,
+                "lookback_days": lookback, "annualisation": annualisation,
+                "valuation": self.book.clock.now.isoformat(),
+                "tenors": list(self.book.data.tenor_points),
+                "is_cross": bool(self.book.data.pairs[pair].is_cross),
+                "legs": list(self.book.data.pairs[pair].legs),
+                "has_feed": bool(self.book.feed is not None
+                                 and pair.upper() in getattr(self.book.feed, "pairs", {})),
+                "carry": None, "fair": None, "realized": None, "triangle": None,
+                "unavailable": {},
+            }
+
+            rows = carry_table(self.book, pair, horizon_days=horizon, target=target,
+                               method=method, cut=cut)
+            out["carry"] = [asdict(r) for r in rows]
+
+            hist = None
+            if self.history is not None and pair in self.history:
+                hist = self.history[pair]
+            elif self.history is None:
+                out["unavailable"]["history"] = (
+                    "no historical workbook is loaded, so there is nothing to compare the "
+                    "marks against")
+            else:
+                out["unavailable"]["history"] = (
+                    f"the historical workbook has no sheet for {pair}; it holds "
+                    f"{', '.join(sorted(self.history.pairs))}")
+
+            out["fair"] = [asdict(r) for r in fair_value_table(
+                self.book, pair, hist, horizon_days=horizon,
+                lookback_days=lookback, method=method, cut=cut, annualisation=annualisation)]
+            if hist is not None:
+                out["realized"] = [asdict(r) for r in realized_table(
+                    self.book, pair, hist, lookback_days=lookback, method=method,
+                    cut=cut, annualisation=annualisation)]
+
+            if out["is_cross"]:
+                try:
+                    out["triangle"] = [asdict(r) for r in triangle_table(
+                        self.book, pair, method=method, cut=cut, with_noise=with_noise)]
+                except ValueError as exc:
+                    out["unavailable"]["triangle"] = str(exc)
+            else:
+                out["unavailable"]["triangle"] = (
+                    f"{pair} is not a cross, so there is no triangle to check")
+            return out
+
+    def compare_curves(self, payload: dict) -> dict:
+        """Several curves side by side, and the same curve on other dates.
+
+        The panel is the browser's, posted whole, so ``volkit analysis
+        --compare`` reproduces the screen exactly and this stays a pure
+        function of its request plus the book.
+        """
+        with self._lock:
+            if self.book is None:
+                raise ValueError(self.load_error or "no workbook is loaded")
+            return curve_panel_from_request(payload).run(self.book, self.history)
+
+    # -- managed bands ----------------------------------------------------
+    def band(self, q: dict) -> dict:
+        """The band read-out for one pair, under the treatment now marked."""
+        with self._lock:
+            if self.book is None:
+                raise ValueError(self.load_error or "no workbook is loaded")
+            pair = q["pair"]
+            if pair not in self.book:
+                raise ValueError(f"{pair} is not built in this book")
+            surface = self.book[pair]
+            tenors = [q["tenor"]] if q.get("tenor") else list(self.book.data.tenor_points)
+            out = band_panel(surface, tenors, cut=q.get("cut", "NY"))
+            out["has_feed"] = bool(self.book.feed is not None
+                                   and pair.upper() in getattr(self.book.feed, "pairs", {}))
+            return out
+
+    def set_band(self, payload: dict) -> dict:
+        """Re-mark the band treatment for one pair, then report it.
+
+        The treatment lives on the surface beside the parameter shifts, for
+        the same reason: it is part of how the pair is marked, not part of a
+        screen's state, and every screen that prices this pair must see the
+        same one.
+        """
+        with self._lock:
+            if self.book is None:
+                raise ValueError(self.load_error or "no workbook is loaded")
+            pair = payload["pair"]
+            if pair not in self.book:
+                raise ValueError(f"{pair} is not built in this book")
+            surface = self.book[pair]
+            warnings = surface.set_band_treatment(BandTreatment.from_request(payload))
+            out = self.band(payload)
+            out["warnings"] = list(dict.fromkeys(list(out["warnings"]) + warnings))
+            return out
+
+    # -- market maker -----------------------------------------------------
+    def bank_state(self, q: dict | None = None) -> dict:
+        """What is in the knowledge bank, and where it came from."""
+        with self._lock:
+            out = {
+                "path": self.bank.path,
+                "pairs": sorted(self.bank.pairs),
+                "problems": list(self.bank.problems),
+                "error": self.bank_error,
+            }
+            pair = (q or {}).get("pair")
+            if pair:
+                pk = self.bank.for_pair(pair)
+                out["pair"] = pair.upper()
+                out["rules"] = [asdict(r) for r in pk.rules]
+                out["describe"] = [r.describe() for r in pk.rules]
+                out["updated"] = pk.updated
+                out["source_note"] = pk.source_note
+            return out
+
+    def mm_fit(self, payload: dict) -> dict:
+        """Fit, fine tune and quote one market-maker panel.
+
+        Like the listed screen, the server keeps no panel state: the browser
+        owns the panel and posts it whole, so the same call reproduces the
+        same screen from the command line.  The knowledge bank is the one
+        thing that *is* server state, because it is a file the desk keeps.
+        """
+        with self._lock:
+            if self.book is None:
+                raise ValueError(self.load_error or "no workbook is loaded")
+            panel = mm_panel_from_request(payload)
+            hist = None
+            if self.history is not None and panel.pair in self.history:
+                hist = self.history[panel.pair]
+            out = panel.run(self.book, bank=self.bank, hist=hist)
+            out["bank"]["error"] = self.bank_error
+            return out
+
+    def mm_learn(self, payload: dict) -> dict:
+        """Propose bank rules from the widths the pasted market showed.
+
+        Proposing and saving are deliberately two steps: a paste that happens
+        to contain one wide quote should not be able to rewrite the desk's
+        ladder without somebody looking at it.
+        """
+        with self._lock:
+            if self.book is None:
+                raise ValueError(self.load_error or "no workbook is loaded")
+            rules, notes, parse = learn_from_panel(payload, self.book.clock)
+            return {"rules": [asdict(r) for r in rules],
+                    "describe": [r.describe() for r in rules],
+                    "notes": notes, "parse": parse}
+
+    def mm_save_bank(self, payload: dict) -> dict:
+        """Replace one pair's rules and write the file.
+
+        The whole set is posted and validated together; a set with a bad rule
+        in it is rejected whole rather than saved half applied, so the file on
+        disk is never a state the screen never showed.
+        """
+        with self._lock:
+            pair = str(payload.get("pair") or "").strip().upper()
+            if not pair:
+                raise ValueError("a currency pair is required to save knowledge against")
+            rules = rules_from_request(payload)
+            problems = self.bank.set_pair(pair, rules, self.clock.now,
+                                          str(payload.get("source_note") or ""))
+            if problems:
+                return {"ok": False, "problems": problems, **self.bank_state({"pair": pair})}
+            written = self.bank.save(self.bank_path)
+            self.bank_error = None
+            return {"ok": True, "problems": [], "written": written,
+                    **self.bank_state({"pair": pair})}
+
+    def listed_fit(self, payload: dict) -> dict:
+        """Fit one exchange-traded panel and compare it with the marked surface.
+
+        The server keeps no panel state: the browser owns the list of panels
+        and posts a whole one each time, so a fit is a pure function of its
+        request plus the loaded book.  That is what makes the same call
+        reproducible from the command line.
+        """
+        with self._lock:
+            if self.book is None:
+                raise ValueError(self.load_error or "no workbook is loaded")
+            return panel_from_request(payload).run(self.book)
+
     def export_daily(self, q: dict) -> str:
         with self._lock:
             surface = self.book[q["pair"]]
             series = surface.atm.daily_series(float(q.get("horizon", 1.0)), q.get("cut", "NY"))
             field = q.get("field", "cumulative")
             return "".join(f"{k}, {v[field] * 100}\n" for k, v in series.items())
+
+
+def _finite(obj):
+    """Replace every non-finite float with ``None``, recursively."""
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    if isinstance(obj, dict):
+        return {k: _finite(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_finite(v) for v in obj]
+    if isinstance(obj, np.floating):
+        v = float(obj)
+        return v if math.isfinite(v) else None
+    if isinstance(obj, np.integer):
+        return int(obj)
+    if isinstance(obj, np.ndarray):
+        return [_finite(v) for v in obj.tolist()]
+    return obj
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -503,7 +837,11 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _json(self, payload, code: int = 200) -> None:
-        self._send(code, json.dumps(payload, default=str).encode(), "application/json")
+        # NaN and Infinity are what Python's json emits for a non-finite float
+        # and what JSON.parse refuses to read, so a single unavailable cell
+        # would take a whole response down in the browser.  They become null,
+        # which the front end already renders as a dash.
+        self._send(code, json.dumps(_finite(payload), default=str).encode(), "application/json")
 
     def _error(self, exc: Exception) -> None:
         # Surfacing the actual message is the whole point: the legacy UI
@@ -514,6 +852,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         url = urlparse(self.path)
         q = {k: v[0] for k, v in parse_qs(url.query).items()}
+        gone = screens.route_refusal(url.path)
+        if gone is not None:
+            return self._json({"error": gone}, code=404)
         try:
             if url.path in ("/", "/index.html"):
                 self._send(200, (STATIC_DIR / "index.html").read_bytes(), "text/html; charset=utf-8")
@@ -533,6 +874,14 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self.service.feed_state(q))
             elif url.path == "/api/events/suggest":
                 self._json(self.service.suggest_events(q))
+            elif url.path == "/api/analysis":
+                self._json(self.service.analysis(q))
+            elif url.path == "/api/history":
+                self._json(self.service.history_state())
+            elif url.path == "/api/band":
+                self._json(self.service.band(q))
+            elif url.path == "/api/mm/bank":
+                self._json(self.service.bank_state(q))
             elif url.path == "/api/term":
                 self._json(self.service.term(q))
             elif url.path == "/api/daily":
@@ -558,6 +907,9 @@ class Handler(BaseHTTPRequestHandler):
             payload = json.loads(self.rfile.read(length) or b"{}")
         except json.JSONDecodeError as exc:
             return self._error(exc)
+        gone = screens.route_refusal(url.path)
+        if gone is not None:
+            return self._json({"error": gone}, code=404)
         try:
             if url.path == "/api/reload":
                 self._json(self.service.reload())
@@ -573,6 +925,22 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self.service.set_events(payload))
             elif url.path == "/api/feed":
                 self._json(self.service.load_feed(payload))
+            elif url.path == "/api/listed/fit":
+                self._json(self.service.listed_fit(payload))
+            elif url.path == "/api/mm/fit":
+                self._json(self.service.mm_fit(payload))
+            elif url.path == "/api/mm/learn":
+                self._json(self.service.mm_learn(payload))
+            elif url.path == "/api/mm/bank":
+                self._json(self.service.mm_save_bank(payload))
+            elif url.path == "/api/analysis":
+                self._json(self.service.analysis(payload))
+            elif url.path == "/api/history":
+                self._json(self.service.load_history(payload))
+            elif url.path == "/api/analysis/curves":
+                self._json(self.service.compare_curves(payload))
+            elif url.path == "/api/band":
+                self._json(self.service.set_band(payload))
             else:
                 self._json({"error": f"unknown endpoint {url.path}"}, code=404)
         except Exception as exc:  # noqa: BLE001
@@ -581,14 +949,21 @@ class Handler(BaseHTTPRequestHandler):
 
 def serve(path: str, host: str = "127.0.0.1", port: int = 8765,
           clock: Clock | None = None, open_browser: bool = True,
-          feed_path: str | None = None) -> None:
+          feed_path: str | None = None, history_path: str | None = None,
+          bank_path: str | None = None) -> None:
     """Start the local server (blocking)."""
-    Handler.service = BookService(path, clock, feed_path)
+    Handler.service = BookService(path, clock, feed_path, history_path, bank_path)
     httpd = ThreadingHTTPServer((host, port), Handler)
     url = f"http://{host}:{port}/"
     print(f"volkit serving {path}\n  -> {url}\n  (Ctrl-C to stop)")
+    if screens.summary():
+        print(f"  {screens.summary()}")
     if Handler.service.load_error:
         print(f"  ! load error: {Handler.service.load_error}")
+    if Handler.service.history_error:
+        print(f"  ! history: {Handler.service.history_error}")
+    if Handler.service.bank_error:
+        print(f"  ! knowledge bank: {Handler.service.bank_error}")
     if open_browser:
         threading.Timer(0.6, lambda: webbrowser.open(url)).start()
     try:

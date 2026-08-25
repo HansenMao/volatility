@@ -164,10 +164,169 @@ Things that were broken outright:
 | Full smile calibration, 9 tenors | — | 0.66 s |
 | Event height calibration | nested `fsolve` over `quad`, per event | 4 ms |
 | Whole 13-pair book | — | 5.2 s |
+| Re-marking a curve and reading 9 tenors | — | 3.5 ms (was 60 ms, see below) |
 
 The three structural causes were: rebuilding the smile per query, `scipy.stats.
 norm`'s generic dispatch in the inner loops (`scipy.special.ndtr` is ~50×
 faster), and adaptive quadrature on a discontinuous integrand.
+
+**A fourth, found while building the market-maker fit.** `AtmCurve.invalidate`
+dropped the intraday/holiday weight profile along with the cached integrals.
+That profile is a pure function of the pair, the clock and the horizon — none
+of which a backbone or event change can touch — and rebuilding it costs about
+20 ms against 2 ms for every integral that genuinely had to go. Worse, each
+tenor asks for a longer horizon than the last, so a nine-tenor read after a
+parameter change rebuilt it several times over: 60 ms where 3.5 ms was needed.
+
+`invalidate` no longer clears it. **No number changes** — the profile it was
+discarding was identical to the one it rebuilt — but every re-mark got 17×
+faster, which the Vol marking tab feels as well. A caller that mutates the
+weighting or its calendars in place owns calling `weighting.clear_cache()`;
+nothing in the package does. A test pins that the cache survives a parameter
+change *and* that the numbers still move.
+
+## 4b. Exchange traded options — new, and moves nothing
+
+The listed-options tab is new functionality; the legacy tool had no equivalent
+and it changes no existing mark. It is recorded here only because it reads the
+same marked surface and could otherwise look like a second source of truth.
+
+It is not. The panel **displays** the marked surface alongside a curve fitted
+to an exchange's own settlement volatilities; it never writes to the book, and
+no calibration, overwrite or event height is affected by anything done in it.
+
+Two conventions in it are worth knowing before reading a difference as a
+mispricing:
+
+* **Inversion.** A CME yen future is quoted in USD per JPY. Its strikes are
+  the reciprocal of USDJPY's, so the wings swap sides. Lognormal implied
+  volatility is invariant under that inversion, so volatilities compare
+  directly once strikes are mapped — but *deltas do not*, which is why every
+  comparison is made at matched physical strikes and the reported risk
+  reversals are the book's own delta strikes read off both curves. Negating a
+  risk reversal to make an inverted contract line up would be §1.1 again.
+* **Three things not corrected for.** Exchange settlement volatilities on
+  American-style options are not European volatilities; a future is not a
+  forward once rates move with the underlying; and the exchange settlement
+  time is rarely an FX cut. Each is reported rather than absorbed.
+
+## 4c. Analysis — new, and moves nothing
+
+The analysis tab is new. The legacy tool had `rv.py`, whose `RV.calc` wrote
+results through chained indexing and so silently produced an empty matrix on
+any current pandas; nothing else in it corresponds. No existing mark changes.
+
+Three conventions in it are worth knowing before reading a number off it.
+
+* **Realized volatility is annualised on volatility time.** The weighting in
+  this model multiplies the *instantaneous* volatility, so variance time is the
+  integral of the squared weight -- weekends near zero, holidays reduced, the
+  intraday profile not flat. A calendar year holds about 0.78 years of it.
+  Annualising realized returns by calendar days, or by a flat 252, measures
+  them on a different clock from the implied volatility they are being compared
+  with, and lands roughly a tenth low. All three are reported; only the
+  weighted one is like for like. `history.volatility_time` is pinned against
+  `AtmCurve.integrated_vol` by a test, so the two cannot drift apart.
+
+* **Skew and kurtosis are horizon-dependent.** The realized figures are of
+  daily returns; the ones a smile implies are of the whole return to expiry.
+  Under independence skewness falls as `1/sqrt(n)` and excess kurtosis as
+  `1/n`, so the daily numbers are projected onto each tenor before being
+  compared. Real returns are not independent, which is why the raw daily
+  figures are shown beside the projected ones rather than being replaced by
+  them.
+
+* **The cross triangle for RR and fly is a choice, not an identity.** Two
+  marginals and a correlation do not determine a joint distribution. The legs'
+  densities are combined under a Gaussian copula, which assumes a tail
+  dependence the market does not quote, and the change of measure between the
+  legs' domestic currencies is not corrected for. The noise floor printed
+  beside it -- the same machinery run on each leg alone -- is the floor below
+  which a difference means nothing. The at-the-money row *is* an identity and
+  is computed as one.
+
+  The two at-the-money triangles differ by design: the variance triangle uses
+  each leg's at-the-money volatility, the distribution triangle uses each leg's
+  whole density. The gap is the convexity of the legs' smiles, typically a
+  fifth of a vol point, and is what the book's own construction leaves out.
+
+* **The curve comparison panel compares what it says it compares.** A curve
+  from the workbook carries the *marked* at-the-money term structure and the
+  *quoted* risk reversals and market strangles; one from the fitted surface
+  carries the surface's own, read at a cut. The difference between the two is
+  the fit residual and nothing else -- the same quantity the marking screen's
+  implied-vs-quoted table shows, extended across the whole grid. A historical
+  sheet's butterfly column, though, is whatever that desk quoted, and no
+  header tells you which convention that was; the panel says so rather than
+  differencing a market strangle against a smile fly in silence. Dated rows
+  snap **backwards** to the last row on or before the date asked for, because
+  a workbook has no weekend rows and snapping forward would compare a Friday
+  mark against the following Monday's; each curve reports the day it landed on.
+
+## 4d. Market making — new, and moves nothing by itself
+
+The market-maker tab is new; the legacy tool had no equivalent. It is recorded
+here because, unlike the listed and analysis tabs, it *can* write to the loaded
+book — so the boundary needs stating precisely.
+
+**By default it writes nothing.** `Panel.run` fits, reports, and then restores
+the backbone parameters and the smile shifts exactly as it found them; a test
+pins the whole ATM tenor table and the shift dictionary across a run. Ticking
+**keep the marks** leaves the fitted values on the loaded book *in memory
+only* — the workbook on disk is never touched by this screen, and a reload
+discards them. The panel says so on every applied run.
+
+Three things in it are worth knowing before reading a number off it.
+
+* **The objective is a hinge, not a least squares.** There is no penalty
+  anywhere inside a quoted bid and offer. That is deliberate and it is the
+  whole brief: a market maker needs their mid *inside* the market, not sitting
+  on somebody else's mid. A least squares through the quoted mids would satisfy
+  none of a dozen quotes while a hinge satisfies all of them.
+
+  A hinge has a flat bottom, so a small pull toward the quoted mids picks one
+  answer out of the many that work. That pull, and the pull back toward the
+  marked shifts, have to be **scaled to the market they compete with** — a
+  parameter shift is O(0.1) and a volatility violation is O(0.001), so a raw
+  weight of 0.02 on the shift is not a tie-breaker, it is twenty times the
+  violation it is meant to defer to. Unscaled, the fit stopped short of a
+  market it could reach and reported that it had converged. Both weights are
+  shown on the panel so a fit being driven by them rather than by the market is
+  visible.
+
+* **The wing adjustment is curve-wide, and that is a modelling choice.**
+  `VolSurface.param_shifts` moves a smile parameter's *level* across the whole
+  term structure and leaves its shape alone. That is what re-marking a wing
+  against a broker run means; an overwrite, which the marking screen already
+  offers, would replace the parameter and flatten the term structure instead. A
+  handful of quotes does not determine a shape, so where one shift cannot
+  satisfy two tenors that disagree, the panel names the quotes it could not
+  reach rather than bending the surface to whichever one the optimiser
+  weighted most. Re-marking those tenors individually remains the marking
+  screen's job.
+
+* **The interpolation does not always pass through its own anchors.** The fit
+  can read a 25- or 10-delta quote straight off the SABR wing instead of
+  solving the interpolation, which avoids a 19 ms SVI solve per expiry per
+  evaluation. That shortcut is exact *when the interpolation reproduces the
+  anchors it was built through* — and the arbitrage-constrained SVI cannot do
+  so when the marked anchors imply a butterfly arbitrage. On this workbook nine
+  slices in fifty-two miss, USDCNY by 0.15 vol points at a week; those three
+  are already flagged by the smile's own warning, the crosses miss by about
+  0.01 and are not.
+
+  So the shortcut is **measured, never assumed**: `anchor_gap` checks each
+  expiry before the fit uses it, the answer is re-read through the full
+  interpolation afterwards, and if the fitted shifts have moved the smile
+  somewhere the interpolation can no longer follow, the whole fit is run again
+  on the exact path. The quote sheet is always read off the interpolation,
+  because that is what the rest of the tool prices on.
+
+The knowledge bank (`mm_knowledge.json`) is new user data, created beside the
+workbook the first time one is saved. It is never bundled into the executable
+and its absence is not an error — an empty bank simply means no quote gets a
+width until a rule exists or a fallback is typed, which the panel says outright
+rather than filling in a plausible default.
 
 ## 5. Things I did **not** change
 
@@ -520,10 +679,63 @@ and the model risk reversal rises to +0.142%. **Most of the quoted USDHKD skew
 is a peg-break premium, not a band-shape effect** — which is exactly why the
 jump leg, not the boundary, is where the modelling effort belongs.
 
+## Putting it on the surface
+
+Until now this model was library and CLI only. The obstacle was not the model:
+`VolSurface` works in **strike over forward** and a band is an **absolute**
+price range, and there was no honest way to place 7.75–7.85 against a moneyness
+of 1.02. That plumbing is now in place, and the rule it follows is worth
+stating because it is the only place the two spaces meet.
+
+The regime mixture is **scale invariant** — jump sizes are logarithmic and the
+post-break volatilities are relative — so dividing the band edges and the
+forward by the same number moves the whole model into moneyness exactly. The
+number is the outright forward at the expiry, taken from the spot/forward feed.
+`VolSurface.band_for_slice` does it, and does three things rather than two:
+
+* a slice built at an outright forward that the band contains is already in the
+  band's space and is left alone;
+* a slice in moneyness divides the band by the feed's outright;
+* with **no feed**, it refuses and names the feed. A guessed level would put a
+  hard barrier in the wrong place, which is worse than no answer. So does a
+  forward the band does not contain — either the peg has moved and `bands.csv`
+  is stale, or the feed is wrong, and both are worth knowing.
+
+`BAND` is then an interpolation method like `SVI` or `VV25`, available anywhere
+a method is chosen. It moves no existing mark: it is a new method, and every
+pair without a band refuses it by name.
+
+What is marked alongside it is a `BandTreatment` — the hazard, the jump sizes
+and post-break volatilities, an override of the band edges, and a blend weight
+against the lognormal smile. Three points of discipline in it:
+
+* **The treatment is part of the smile cache key.** Two hazards are two smiles.
+  A cache that could not tell them apart would serve the first answer for the
+  rest of the session, which is precisely the class of silent staleness this
+  rebuild exists to remove.
+* **A blend strictly between 0 and 100% is a weighted average of two implied
+  volatilities.** It is arbitrage free in neither model's sense, it exists
+  because a regime is not switched on overnight, and it warns every time.
+* **Percentages at the edge, decimals in the middle.** A hazard is typed as
+  `3` and held as `0.03`, converted once in `BandTreatment.from_request` — the
+  same rule the pasted broker run and the knowledge bank follow.
+
+One diagnosis changed while this was being wired. `calibrate_band_smile` failed
+with a single message naming the break-risk **floor** — the at-the-money the
+jump legs alone impose — whichever bound had actually been missed. But the
+concentration has two ends: a Beta collapsed to a point gives the floor, and a
+Beta sitting entirely on the band's edges gives a **ceiling**, and a quote
+above *that* means the band is too narrow to be the whole story. Reporting the
+floor for both sent a marker to lower a hazard that was not the problem. Both
+bounds are now computed and the message names the one that was missed.
+
 ## Using it
 
-Bands live in `files/bands.csv` — they are policy, not market data. Only
-USDHKD ships enabled. USDCNY is deliberately excluded: its ±2% limit is around
+Bands live in `files/bands.csv` — they are policy, not market data. They are
+loaded automatically now (`Book.from_excel` finds the file beside the exe or in
+`files/`) rather than only when `Book.load_bands` was called by hand, so a
+pegged pair is flagged on every screen instead of on whichever one remembered
+to ask. Only USDHKD ships enabled. USDCNY is deliberately excluded: its ±2% limit is around
 a *daily fixing*, so it is a moving band, not a fixed range an option can be
 priced against. USDCNH is not subject to it at all.
 

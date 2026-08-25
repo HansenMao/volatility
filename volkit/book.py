@@ -56,11 +56,55 @@ class Book:
 
     @classmethod
     def from_excel(cls, path: str | Path, clock: Clock | None = None, *,
-                   legacy_cross_sign: bool = False,
+                   legacy_cross_sign: bool = False, bands: str | Path | None = None,
                    econ: EconCalendar | None = None, **kw) -> "Book":
-        return cls(data=ExcelSource(path, **kw).load(), clock=clock or Clock.utcnow(),
+        book = cls(data=ExcelSource(path, **kw).load(), clock=clock or Clock.utcnow(),
                    legacy_cross_sign=legacy_cross_sign,
                    econ=econ if econ is not None else EconCalendar.load())
+        book.bands = book._default_bands(bands)
+        return book
+
+    def _default_bands(self, path: str | Path | None) -> dict[str, Band]:
+        """The managed bands to hand the surfaces, from ``bands.csv``.
+
+        Loaded here rather than left to the caller because a peg is a property
+        of the pair, not of the screen looking at it: a build where the
+        pricing tab knew about the band and the analysis tab did not would be
+        the same silent half-answer as a swallowed error.  A file that cannot
+        be read is a warning, not a failed book -- the rest of the marks are
+        unaffected by it.
+        """
+        from .paths import find_data_file
+        found = Path(path) if path else find_data_file("bands.csv", "files/bands.csv")
+        if found is None:
+            return {}
+        try:
+            return {k: v for k, v in load_bands(found).items() if v.upper > v.lower > 0}
+        except (OSError, ValueError) as exc:
+            self.warnings.append(f"managed bands: {found} could not be read ({exc})")
+            return {}
+
+    def forward_at(self, pair: str, t: float) -> float | None:
+        """The outright forward from the feed, or None when there is no feed.
+
+        None rather than a fallback: the one caller is the band model, and a
+        guessed level would place a hard barrier in the wrong place.
+        """
+        feed = self.feed
+        if feed is None or pair.upper() not in getattr(feed, "pairs", {}):
+            return None
+        return float(feed.quote(pair, t)["forward"])
+
+    def _attach_band(self, name: str, surface: VolSurface) -> None:
+        """Give a surface its band and a way to place it.
+
+        The lookup is a closure over the book rather than a captured feed, so
+        a feed loaded *after* the book was built -- which is what ``serve``
+        and the analysis CLI both do -- is picked up on the next query.
+        """
+        surface.band = self.bands.get(name.upper())
+        if surface.band is not None:
+            surface.forward_lookup = lambda t, p=name: self.forward_at(p, t)
 
     # -- construction -----------------------------------------------------
     def build_order(self) -> list[str]:
@@ -174,10 +218,12 @@ class Book:
             self.warnings.extend(f"{name}: {p}" for p in problems)
             self.warnings.extend(f"{name}: {w}" for w in atm.event_leakage_warnings())
 
-        return VolSurface(
+        surface = VolSurface(
             pair=name, atm=atm,
             conv=DeltaConvention(spec.resolved_premium_adjusted()),
         )
+        self._attach_band(name, surface)
+        return surface
 
     # -- calibration ------------------------------------------------------
     def calibrate_smiles(self, pairs: list[str] | None = None) -> "Book":
@@ -214,8 +260,12 @@ class Book:
         """Attach managed-band definitions and hand them to their surfaces."""
         self.bands = {k: v for k, v in load_bands(path).items() if v.upper > v.lower > 0}
         for name, surface in self.surfaces.items():
-            surface.band = self.bands.get(name.upper())
+            self._attach_band(name, surface)
         return self
+
+    def banded_pairs(self) -> list[str]:
+        """Built pairs that have a managed band, in the order they were built."""
+        return [n for n, s in self.surfaces.items() if s.band is not None]
 
     def __getitem__(self, pair: str) -> VolSurface:
         try:

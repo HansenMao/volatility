@@ -22,6 +22,7 @@ from scipy.optimize import least_squares
 
 from . import black, sabr
 from .atm import AtmCurve
+from .banded import BandTreatment
 from .black import DeltaConvention
 from .numerics import ConvergenceError, fixed_point, solve_scalar
 from .sabr import SabrCalibration, SabrParams
@@ -122,7 +123,24 @@ class VolSurface:
     # Set for managed / pegged pairs.  The lognormal smile below is not a valid
     # model outside a hard band, so queries there are flagged.
     band: object | None = None
+    # How much notice to take of that band: flag it, ignore it, or price the
+    # regime mixture (method "BAND").  Marked, never inferred -- a wider body
+    # and a higher hazard both raise the at-the-money, so a joint fit is
+    # degenerate.  See banded.BandTreatment and CLAUDE.md section 6.
+    band_treatment: BandTreatment = field(default_factory=BandTreatment)
+    # A band is an absolute price range and this surface works in strike over
+    # forward, so placing one needs the outright forward at the expiry.  The
+    # Book sets this from the spot / forward feed; without it the band model
+    # refuses rather than guessing a level.  Signature: (t years) -> forward
+    # or None.
+    forward_lookup: object | None = None
     param_overwrites: dict[str, dict[str, float]] = field(default_factory=dict)
+    # Additive adjustments to the four smile parameters, applied across the
+    # whole curve.  An overwrite *replaces* a parameter and so flattens its
+    # term structure; a shift moves the level and keeps the shape, which is
+    # what re-marking a wing against a broker run actually means.  The
+    # market-maker screen tunes these; zero is the marked surface.
+    param_shifts: dict[str, float] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
@@ -222,7 +240,7 @@ class VolSurface:
             if name in out and "curve" in ow:
                 out[name] = float(ow["curve"])
         if not self.anchor_tenors or not self.fits:
-            return out
+            return self._shifted(out)
 
         ts = [f.t for f in self.fits]
         if t <= ts[0] or t >= ts[-1]:
@@ -242,7 +260,67 @@ class VolSurface:
             # the interval, instead of dividing by (almost) zero.
             ratio = (ct - c1) / denom if abs(denom) > 1e-12 else (t - t1) / (t2 - t1)
             out[name] = v1 + ratio * (v2 - v1)
+        return self._shifted(out)
+
+    def _shifted(self, out: dict[str, float]) -> dict[str, float]:
+        """Apply ``param_shifts`` to a parameter set.
+
+        The correlations are clamped just inside their domain because SABR is
+        undefined at |rho| = 1, not to hide anything: ``shift_warnings`` reports
+        every clamp, and the market-maker fit bounds the shifts so it cannot ask
+        for one in the first place.
+        """
+        if not self.param_shifts:
+            return out
+        for name, delta in self.param_shifts.items():
+            if name not in out or not delta:
+                continue
+            value = out[name] + float(delta)
+            if name.startswith("rho"):
+                value = min(max(value, -0.999), 0.999)
+            elif name.startswith("slog"):
+                value = max(value, 1e-6)
+            out[name] = value
         return out
+
+    def shift_warnings(self) -> list[str]:
+        """Flag shifts that the clamp in ``_shifted`` is silently absorbing."""
+        out = []
+        if not self.param_shifts or not self.term:
+            return out
+        ts = [f.t for f in self.fits] or [0.25]
+        for name, delta in self.param_shifts.items():
+            if name not in PARAM_NAMES or not delta:
+                continue
+            raw = [float(self.term[name](t)) + float(delta) for t in ts]
+            if name.startswith("rho") and any(abs(v) > 0.999 for v in raw):
+                out.append(
+                    f"{self.pair}: the {name} shift of {delta:+.4f} pushes rho past "
+                    f"{max(raw, key=abs):+.4f} at one of the quoted tenors and is being clamped "
+                    f"to +/-0.999; the wing cannot get any steeper at this beta")
+            if name.startswith("slog") and any(v <= 1e-6 for v in raw):
+                out.append(
+                    f"{self.pair}: the {name} shift of {delta:+.4f} takes the volatility of "
+                    f"volatility to zero or below at one of the quoted tenors and is being "
+                    f"clamped; the smile is flat there")
+        return out
+
+    def set_param_shifts(self, shifts: dict[str, float]) -> list[str]:
+        """Replace the whole shift set.  Returns problems; a bad set is rejected."""
+        problems = [f"unknown smile parameter {k!r}; expected one of {PARAM_NAMES}"
+                    for k in shifts if k not in PARAM_NAMES]
+        problems += [f"the {k} shift must be a finite number, got {v!r}"
+                     for k, v in shifts.items() if not isinstance(v, (int, float))
+                     or not math.isfinite(float(v))]
+        if problems:
+            return problems
+        self.param_shifts = {k: float(v) for k, v in shifts.items() if v}
+        self._slices.clear()
+        return []
+
+    def clear_param_shifts(self) -> None:
+        self.param_shifts.clear()
+        self._slices.clear()
 
     def _anchor_value(self, name: str, index: int) -> float:
         fit = self.fits[index]
@@ -271,7 +349,12 @@ class VolSurface:
         t = self.clock.years_to(dt)
         if t <= 0:
             raise ValueError(f"expiry {dt:%Y-%m-%d %H:%M} is not in the future")
-        key = (round(t, 10), method, cut.upper(), round(forward, 10))
+        # The treatment is part of the key, not just a field: two slices for
+        # the same expiry under different hazards are different smiles, and a
+        # cache that could not tell them apart would serve the first answer
+        # for the rest of the session.
+        key = (round(t, 10), method, cut.upper(), round(forward, 10),
+               self.band_treatment if method == "BAND" else None)
         hit = self._slices.get(key)
         if hit is not None:
             return hit
@@ -289,32 +372,96 @@ class VolSurface:
             alpha=sabr.alpha_from_atm(atm_vol, black.dns_strike(forward, atm_vol, t, self.conv),
                                       p["rho10"], p["slog10"] / sqt, t, forward),
             rho=p["rho10"], volvol=p["slog10"] / sqt, t=t, f=forward)
-        sl = SmileSlice.build(t, atm_vol, s25, s10, self.conv, forward=forward, method=method)
+        band = self.band_for_slice(t, forward) if method == "BAND" else None
+        sl = SmileSlice.build(t, atm_vol, s25, s10, self.conv, forward=forward, method=method,
+                              band=band, treatment=self.band_treatment)
         self._slices[key] = sl
         return sl
+
+    # -- managed bands ----------------------------------------------------
+    def band_for_slice(self, t: float, forward: float):
+        """This pair's band, moved into the space a slice at ``forward`` uses.
+
+        The outstanding piece of plumbing for the band model was exactly this:
+        the surface works in strike over forward while a band is an absolute
+        price range.  A slice built at the outright forward already lives in
+        the band's own space; one built in moneyness (forward 1.0, which is
+        every query that does not name a forward) needs the outright to divide
+        by, and that comes from the feed.  Without one there is no honest way
+        to place 7.75-7.85 against a moneyness of 1.02, so this refuses and
+        says what to load.
+        """
+        if self.band is None:
+            raise ValueError(
+                f"{self.pair} has no managed band, so there is no barrier to treat; "
+                f"the BAND method applies to pegged pairs listed in bands.csv")
+        band = self.band_treatment.effective_band(self.band)
+        if band.contains(forward):
+            return band
+        absolute = None
+        if self.forward_lookup is not None:
+            absolute = self.forward_lookup(t)
+        if not absolute:
+            raise ValueError(
+                f"{self.pair}: the {band.pair} band is the absolute range "
+                f"[{band.lower:g}, {band.upper:g}] and this smile is being read in moneyness "
+                f"against a forward of {forward:g}. Load a spot / forward feed for {self.pair} "
+                f"(volkit serve --feed ...) so the band can be placed, or price at an outright "
+                f"forward instead")
+        absolute = float(absolute)
+        if not band.contains(absolute):
+            raise ValueError(
+                f"{self.pair}: the {t:.4f}-year forward of {absolute:.5f} is outside the band "
+                f"[{band.lower:g}, {band.upper:g}]. Either the peg has moved and bands.csv is "
+                f"stale, or the feed is wrong; the band model cannot be calibrated to a forward "
+                f"it does not contain")
+        return self.band_treatment.scaled(self.band, forward / absolute)
+
+    def set_band_treatment(self, treatment: BandTreatment) -> list[str]:
+        """Re-mark how the band is treated.  Returns what it wants said."""
+        if not isinstance(treatment, BandTreatment):
+            raise TypeError(f"expected a BandTreatment, got {type(treatment).__name__}")
+        self.band_treatment = treatment
+        self._slices.clear()
+        out = list(treatment.warnings())
+        if self.band is None and treatment.mode != "warn":
+            out.append(f"{self.pair} has no band in bands.csv, so this treatment does nothing")
+        return out
 
     # -- the pricing surface ----------------------------------------------
     def vol(self, strike_ratio, expiry, method: str | None = None, cut: str = "TK"):
         """Implied volatility for a strike/forward ratio.  Vectorised over strikes."""
         return self.slice_at(expiry, method, cut).vol(strike_ratio)
 
-    def band_check(self, strike_abs, forward_abs: float) -> list[str]:
+    def band_check(self, strike_abs, forward_abs: float, method: str | None = None) -> list[str]:
         """Warn about strikes a lognormal smile has no business pricing.
 
-        For a pegged pair the terminal distribution has compact support, so an
+        For a pegged pair the terminal distribution is a regime mixture, so an
         option struck outside the band is worth only whatever the peg breaking
         is worth -- not what a lognormal wing says it is.
+
+        The treatment decides whether this is said at all: ``off`` is a
+        deliberate marking that this range is not defended, and a strike
+        priced with the ``BAND`` method already has the peg in it.  Everything
+        else is flagged.
         """
-        if self.band is None:
+        if self.band is None or self.band_treatment.mode == "off":
             return []
+        if (method or self.method) == "BAND":
+            return []
+        band = self.band_treatment.effective_band(self.band)
         ks = np.atleast_1d(np.asarray(strike_abs, dtype=float))
-        bad = ks[(ks < self.band.lower) | (ks > self.band.upper)]
+        bad = ks[(ks < band.lower) | (ks > band.upper)]
         if bad.size == 0:
             return []
+        fix = ("Price it with the BAND interpolation method for a defensible value."
+               if self.band_treatment.mode == "warn" else
+               "The band treatment is set to the regime mixture, but this price was made "
+               "with the lognormal smile; switch the method to BAND.")
         return [
             f"{self.pair} strike {float(bad[0]):.5f} lies outside the managed band "
-            f"[{self.band.lower}, {self.band.upper}]; the lognormal smile prices it as if "
-            f"the peg did not exist. Use the band model for a defensible value."
+            f"[{band.lower:g}, {band.upper:g}]; the lognormal smile prices it as if "
+            f"the peg did not exist. " + fix
         ]
 
     def atm_vol(self, expiry, cut: str = "TK") -> float:

@@ -535,11 +535,21 @@ class AtmCurve(VolCurve):
         return problems
 
     def invalidate(self) -> None:
-        """Drop cached integrals after a parameter change."""
+        """Drop cached integrals after a parameter or event change.
+
+        The intraday/holiday weight profile is deliberately *not* dropped.  It
+        is a pure function of the pair, the clock and the horizon, none of
+        which a backbone or event change can touch, and rebuilding it costs
+        around 20ms against 2ms for every integral this method actually
+        invalidates.  Re-marking a curve therefore used to spend 95% of its
+        time recomputing a weight profile that could not have changed, which
+        matters the moment anything re-marks in a loop -- the market-maker fit
+        does thousands of these.  A caller that mutates the weighting itself
+        (or its calendars) in place owns calling ``weighting.clear_cache()``.
+        """
         self._int_cache.clear()
         self._edges = np.zeros(0)
         self._horizon = 0.0
-        self.weighting.clear_cache()
 
     def tenor_table(self) -> list[tuple[str, float]]:
         return [(tp, self.term_vol(tenor_to_years(tp))) for tp in self.tenor_points]

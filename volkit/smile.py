@@ -248,7 +248,14 @@ def vanna_volga_vol(K, t, K1, K2, K3, s1, s2, s3):
 # --------------------------------------------------------------------------
 # The cached slice
 # --------------------------------------------------------------------------
-INTERPOLATORS = ("SVI", "VV25", "VV10", "SABR25", "SABR10")
+# ``BAND`` is not an interpolation of the five anchors like the others: it is
+# the regime mixture in banded.py, calibrated to the same at-the-money mark and
+# priced instead of the lognormal smile.  It is only available for a pair that
+# has a managed band, and it says so for one that does not.
+INTERPOLATORS = ("SVI", "VV25", "VV10", "SABR25", "SABR10", "BAND")
+
+#: The methods that need nothing but the five anchors.
+LOGNORMAL_INTERPOLATORS = tuple(m for m in INTERPOLATORS if m != "BAND")
 
 
 @dataclass
@@ -271,11 +278,19 @@ class SmileSlice:
     method: str = "SVI"
     svi: SVIFit | None = None
     warnings: tuple[str, ...] = ()
+    # Set only for method="BAND": the calibrated regime mixture and the report
+    # from calibrating it.  The band here has already been moved into this
+    # slice's own space (see VolSurface.slice_at), so its edges are directly
+    # comparable with self.strikes.
+    band: object | None = None
+    band_smile: object | None = None
+    band_report: dict | None = None
+    band_blend: float = 1.0
 
     @classmethod
     def build(cls, t: float, atm_vol: float, sabr_25: SabrParams, sabr_10: SabrParams,
               conv: DeltaConvention | bool, *, forward: float = 1.0,
-              method: str = "SVI") -> "SmileSlice":
+              method: str = "SVI", band=None, treatment=None) -> "SmileSlice":
         """Construct the 10d/25d/ATM/25d/10d anchor set, then fit."""
         if method not in INTERPOLATORS:
             raise ValueError(f"unknown interpolation method {method!r}; expected one of {INTERPOLATORS}")
@@ -295,20 +310,55 @@ class SmileSlice:
             warn.append("anchor strikes are not monotone in delta; the smile may be malformed")
             strikes, vols = strikes[order], vols[order]
 
+        band_smile = band_report = None
+        blend = 1.0
+        if method == "BAND":
+            from .banded import BandTreatment, calibrate_band_smile
+            treatment = treatment or BandTreatment(mode="mixture")
+            blend = treatment.blend
+            if band is None:
+                raise ValueError(
+                    "the BAND method prices a managed band and this pair has none; "
+                    "add it to bands.csv, or pick one of "
+                    + ", ".join(LOGNORMAL_INTERPOLATORS))
+            # The wings only *report* against the mixture unless the hazard is
+            # being solved from them, but which pair of anchors they came from
+            # is still part of the answer, so it is recorded rather than
+            # assumed to be the 25 delta.
+            wing = 0.25 if treatment.delta >= 0.175 else 0.10
+            i_put, i_call = (1, 3) if wing == 0.25 else (0, 4)
+            rr = float(vols[i_call] - vols[i_put])
+            st = float(0.5 * (vols[i_call] + vols[i_put]) - atm_vol)
+            band_smile, band_report = calibrate_band_smile(
+                band, forward, t, atm_vol, risk_reversal=rr, strangle=st, delta=wing,
+                conv=conv, jump=treatment.jump, solve_hazard=treatment.solve_hazard)
+            band_report["wing_delta"] = wing
+            band_report["blend"] = blend
+            if wing != treatment.delta:
+                warn.append(f"the band wings were read at the {wing:.0%} anchor, the nearest "
+                            f"one to the marked {treatment.delta:.0%}")
+            if band_report.get("hazard_note"):
+                warn.append(band_report["hazard_note"])
+            warn.extend(treatment.warnings())
+
         svi_fit = None
-        if method == "SVI":
+        if method == "SVI" or (method == "BAND" and blend < 1.0):
             svi_fit = fit_svi(strikes, vols, t, forward)
             warn.extend(svi_fit.warnings)
         return cls(t=t, forward=forward, atm_vol=atm_vol, strikes=strikes, vols=vols,
                    deltas=deltas, sabr_25=sabr_25, sabr_10=sabr_10, conv=conv,
-                   method=method, svi=svi_fit, warnings=tuple(warn))
+                   method=method, svi=svi_fit, warnings=tuple(warn),
+                   band=band, band_smile=band_smile, band_report=band_report,
+                   band_blend=blend)
 
     def vol(self, K):
         """Implied volatility at strike ``K`` (or an array of strikes)."""
         K = np.asarray(K, dtype=float)
         if np.any(K <= 0):
             raise ValueError("strike must be positive")
-        if self.method == "SVI":
+        if self.method == "BAND":
+            out = self._band_vol(K)
+        elif self.method == "SVI":
             out = self.svi.params.vol(np.log(K / self.forward))
         elif self.method == "SABR25":
             out = sabr.lognormal_vol(K, self.sabr_25)
@@ -324,6 +374,32 @@ class SmileSlice:
             raise ValueError(f"unknown interpolation method {self.method!r}")
         return float(out) if np.isscalar(K) or out.ndim == 0 else np.asarray(out)
 
+    def _band_vol(self, K):
+        """The regime mixture repriced as a Black volatility, blended if asked.
+
+        A strike the mixture gives no time value to has no Black volatility at
+        all, and that comes back as NaN rather than as a number.  A scalar
+        query -- which is a price about to be made -- refuses instead; an array
+        keeps the gap, because a chart with a hole in it says the same thing
+        without taking the rest of the curve down with it.
+        """
+        # implied_vol() answers one strike at a time and hands back a flat
+        # array; reshaping to the query keeps a scalar query scalar, which is
+        # what every other method here does and what the caller below relies
+        # on to tell a price from a curve.
+        K = np.asarray(K, dtype=float)
+        v = np.asarray(self.band_smile.implied_vol(K), dtype=float).reshape(K.shape)
+        if self.band_blend < 1.0:
+            log_normal = self.svi.params.vol(np.log(K / self.forward))
+            v = self.band_blend * v + (1.0 - self.band_blend) * np.asarray(log_normal, dtype=float)
+        if v.ndim == 0 and not np.isfinite(v):
+            raise ValueError(
+                f"the band model gives strike {float(np.asarray(K)):.6g} no time value: under "
+                f"every regime it is worth its intrinsic, so no Black volatility reprices it. "
+                f"The band is [{self.band.lower:.6g}, {self.band.upper:.6g}] against a forward "
+                f"of {self.forward:.6g}")
+        return v
+
     def strike_from_delta(self, target_delta: float, is_call: bool, **kw) -> tuple[float, float]:
         """Delta strike on the *interpolated* smile, not on a single SABR."""
         from .numerics import fixed_point
@@ -333,7 +409,73 @@ class SmileSlice:
             K = black.strike_from_delta(target_delta, self.forward, v, self.t, is_call, self.conv)
             return float(self.vol(K))
 
-        vol = fixed_point(step, vol, tol=kw.get("tol", 1e-11), max_iter=kw.get("max_iter", 80),
-                          what=f"{target_delta:+.2f}-delta strike")
+        try:
+            vol = fixed_point(step, vol, tol=kw.get("tol", 1e-11),
+                              max_iter=kw.get("max_iter", 80),
+                              what=f"{target_delta:+.2f}-delta strike")
+        except (ConvergenceError, ValueError) as exc:
+            # ValueError too: on a band with no break risk the very first
+            # iterate can land outside the support, where there is no
+            # volatility to read at all.  The bracketed walk below either
+            # finds the strike or re-raises this, so nothing is masked.
+            return self._delta_strike_bracketed(target_delta, is_call, exc)
         K = black.strike_from_delta(target_delta, self.forward, vol, self.t, is_call, self.conv)
         return K, vol
+
+    def _delta_strike_bracketed(self, target_delta: float, is_call: bool,
+                                why: Exception) -> tuple[float, float]:
+        """The same strike, solved one level down, when the iteration will not
+        contract.
+
+        ``v -> vol(K(v))`` contracts only while the smile is gentle.  A band
+        smile is not gentle: its wings fall away where the peg's support runs
+        out, so a small change in volatility moves the strike a long way and
+        back again.  Delta itself is still monotone in strike, so the answer is
+        available from a bracketed solve on delta -- which is what the rest of
+        this package does everywhere, and what the fixed point was only ever a
+        cheaper route to.
+
+        Kept as a *fallback* rather than made the primary path: the fixed point
+        converges for every lognormal method here, and replacing it would move
+        published numbers in the last decimal for no reason.
+        """
+        from .numerics import solve_scalar
+
+        def gap(K: float) -> float:
+            try:
+                v = float(self.vol(K))
+            except ValueError:
+                # A strike the model gives no time value to has no volatility
+                # at all.  That is the end of the smile, not an error here:
+                # the walk stops and says how far it got.
+                return float("nan")
+            if not math.isfinite(v) or v <= 0:
+                return float("nan")
+            return float(black.delta(self.forward, K, v, self.t, is_call,
+                                     self.conv)) - target_delta
+
+        k0 = float(self.strikes[2])
+        g0 = gap(k0)
+        if not math.isfinite(g0):
+            raise why
+        # Delta falls with strike whichever way the option is struck -- a call
+        # from 1 to 0, a put from 0 to -1 -- so the sign of the gap at the
+        # money is on its own enough to say which way the root lies.
+        factor = 1.02 if g0 > 0 else 1.0 / 1.02
+        prev_k, prev_g = k0, g0
+        for _ in range(220):
+            k = prev_k * factor
+            g = gap(k)
+            if not math.isfinite(g):
+                break
+            if g == 0.0 or (g > 0.0) != (prev_g > 0.0):
+                lo, hi = min(prev_k, k), max(prev_k, k)
+                root = solve_scalar(gap, 0.5 * (lo + hi), bracket=(lo, hi),
+                                    what=f"{target_delta:+.2f}-delta strike")
+                return root, float(self.vol(root))
+            prev_k, prev_g = k, g
+        raise ConvergenceError(
+            f"this smile never reaches a {target_delta:+.2f} delta: the furthest strike it "
+            f"can be read at is {prev_k:.6g}, where the delta is "
+            f"{prev_g + target_delta:+.4f}. On a managed band that is the peg's support "
+            f"running out rather than a solver failure. ({why})")

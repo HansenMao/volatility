@@ -1,0 +1,1506 @@
+"""Making a two-way price: fit the curve, fine tune the wings, then quote.
+
+The other three screens answer "what is this worth".  This one answers "what
+do I show", which is a different question with three parts to it, and the
+module keeps them apart because they fail for different reasons and a desk
+needs to see which one broke.
+
+**1. The curve, fitted to a target at-the-money.**  ``fit_atm_curve`` puts the
+backbone parameters through a target term structure -- the tenor overwrites
+the marking screen has pinned, a pasted curve, or the at-the-money quotes
+themselves.  It is a *cold* fit: the level parameters are read off the targets
+and the two shape parameters are swept before anything is polished, so it does
+not depend on a starting guess, exactly as ``sabr.calibrate`` and
+``listed.fit_sabr`` do not.  For a cross the level is not the backbone's to
+set -- it comes from the legs -- so what gets fitted there is the correlation
+term structure instead, and the panel says so rather than fitting a parameter
+that cannot move the answer.
+
+**2. The wings, fine tuned against the quoted market.**  This one is
+deliberately *not* a cold fit.  It starts from the marked surface, because
+that is the thing being adjusted, and it moves the four smile parameters by an
+additive shift across the whole curve (``VolSurface.param_shifts``).  A shift
+rather than an overwrite because a broker run should move the level of a wing,
+not flatten its term structure; curve-wide rather than per tenor because a
+handful of quotes does not determine a shape, and a curve-wide shift that
+cannot reach a tenor says so in its residual instead of quietly bending the
+surface to a single quote.
+
+The objective is a **hinge**: zero penalty anywhere inside the quoted bid and
+offer, and the distance to the nearer side outside it.  That is literally the
+brief -- our mid has to fall inside the market, not on top of somebody's mid --
+and it is what lets a dozen quotes be satisfied at once when a least-squares
+through their mids could satisfy none of them.  A hinge alone has a flat
+bottom, so any point inside the market would do and the answer would be
+arbitrary; a small pull toward the quoted mids picks one, and being small it
+never overrides an actual violation.
+
+**3. The quote.**  A mid is not a price.  The width comes from the pair's
+knowledge bank (:mod:`volkit.knowledge`), the mid is shaded by what the fair
+value screen says about richness and by the vega already on the book, and both
+shadings are capped as a fraction of the width so an axe can lean the price
+but never walk it out of the market on its own.  Every number that moved the
+quote is reported next to it with the rule or the input that moved it.
+
+Two things this deliberately does *not* do.  It does not apply a fair value or
+a vega axe to a risk reversal or a butterfly: a break-even against realized
+volatility is a statement about the *level*, and a pasted vega profile is a
+vega position, and neither says anything about where the skew should be
+marked.  Those rows show the model mid with the bank's width and say why there
+is no shading.  And it does not invent a width: a quote no rule matches gets
+no bid and no offer, with the reason on the row.
+
+Volatilities are decimals inside this module and volatility points at the
+panel boundary, the same split :mod:`volkit.listed` uses.
+"""
+
+from __future__ import annotations
+
+import copy
+import math
+import time
+from dataclasses import dataclass, field
+
+import numpy as np
+from scipy.optimize import least_squares
+
+from . import black, sabr
+from .cross import CrossAtmCurve
+from .knowledge import KnowledgeBank, PairKnowledge, Rule, rule_from_dict, suggest_rules
+from .numerics import ConvergenceError
+from .quotes import (FLY_CONVENTIONS, MarketQuote, VOL_UNITS, parse_quotes,
+                     parse_vega_profile)
+from .sabr import SabrParams
+from .smile import INTERPOLATORS
+from .surface import PARAM_NAMES
+from .timeutil import DAYS_IN_YEAR, tenor_to_years
+
+TARGET_SOURCES = ("overwrites", "paste", "quotes", "current", "none")
+BACKBONE_KNOBS = ("initial_vol", "long_term_vol", "mean_reversion", "short_addon", "short_decay")
+CROSS_KNOBS = ("corr_initial", "corr_final", "corr_decay", "short_addon", "short_decay")
+DEFAULT_BACKBONE_FREE = ("initial_vol", "long_term_vol", "mean_reversion", "short_addon")
+DEFAULT_CROSS_FREE = ("corr_initial", "corr_final")
+
+# Parameters that are volatilities and are therefore typed in points.
+_PERCENT_KNOBS = ("initial_vol", "long_term_vol", "short_addon", "rate_vol")
+
+# Bounds for every knob, in decimals.  ``short_addon`` is held non-negative:
+# it is the front-end lift, and a front end *below* the backbone is what
+# ``initial_vol`` under ``long_term_vol`` already expresses.  Letting both do
+# it makes the pair degenerate.
+_BOUNDS = {
+    "initial_vol": (1e-4, 3.0), "long_term_vol": (1e-4, 3.0),
+    "mean_reversion": (0.0, 200.0), "short_addon": (0.0, 0.5), "short_decay": (0.0, 500.0),
+    "corr_initial": (-0.999, 0.999), "corr_final": (-0.999, 0.999), "corr_decay": (0.0, 200.0),
+}
+_SHIFT_BOUNDS = {"rho25": (-1.5, 1.5), "rho10": (-1.5, 1.5),
+                 "slog25": (-1.0, 1.0), "slog10": (-1.0, 1.0)}
+
+
+# ===========================================================================
+# knobs
+# ===========================================================================
+
+
+class _Knobs:
+    """Read and write a curve's free parameters without caring which kind it is.
+
+    A plain pair's level lives in its backbone; a cross's level lives in its
+    legs and only its correlation is this curve's to mark.  Everything above
+    this class works in names and numbers and never branches on the two.
+    """
+
+    def __init__(self, atm):
+        self.atm = atm
+        self.is_cross = isinstance(atm, CrossAtmCurve)
+        self.available = CROSS_KNOBS if self.is_cross else BACKBONE_KNOBS
+        self.default_free = DEFAULT_CROSS_FREE if self.is_cross else DEFAULT_BACKBONE_FREE
+
+    def get(self) -> dict[str, float]:
+        p = self.atm.params
+        out = {"short_addon": p.short_addon, "short_decay": p.short_decay}
+        if self.is_cross:
+            c = self.atm.correlation
+            out.update(corr_initial=c.initial, corr_final=c.final, corr_decay=c.decay)
+        else:
+            out.update(initial_vol=p.initial_vol, long_term_vol=p.long_term_vol,
+                       mean_reversion=p.mean_reversion, rate_vol=p.rate_vol,
+                       rate_corr=p.rate_corr)
+        return out
+
+    def set(self, values: dict[str, float]) -> list[str]:
+        problems: list[str] = []
+        if self.is_cross:
+            c = self.atm.correlation
+            problems += self.atm.set_correlation(
+                values.get("corr_initial", c.initial), values.get("corr_final", c.final),
+                values.get("corr_decay", c.decay))
+        backbone = {k: v for k, v in values.items() if k in BACKBONE_KNOBS
+                    and (not self.is_cross or k in ("short_addon", "short_decay"))}
+        if backbone:
+            problems += self.atm.set_params(**backbone)
+        return problems
+
+
+# ===========================================================================
+# 1. the at-the-money curve
+# ===========================================================================
+
+
+@dataclass(frozen=True)
+class CurveTarget:
+    tenor: str
+    t: float
+    vol: float
+    source: str = ""
+
+
+@dataclass(frozen=True)
+class CurveFit:
+    """A backbone (or correlation) put through a target term structure."""
+
+    before: dict[str, float]
+    after: dict[str, float]
+    free: tuple[str, ...]
+    targets: tuple[CurveTarget, ...]
+    achieved_before: tuple[float, ...]
+    achieved_after: tuple[float, ...]
+    rmse: float
+    max_error: float
+    max_error_tenor: str
+    converged: bool
+    message: str
+    evaluations: int
+    seconds: float
+    warnings: tuple[str, ...] = ()
+
+
+def _curve_vols(atm, ts: list[float]) -> list[float]:
+    """Curve volatility at each of ``ts``, ignoring tenor overwrites.
+
+    Sorted and accumulated segment by segment rather than integrated from zero
+    nine times over.  Variance is additive over the day grid -- the invariant
+    the whole integrator is built on -- so this is the same number to 2e-16
+    and roughly three times less work, which matters inside a fit.
+    """
+    order = sorted(range(len(ts)), key=lambda i: ts[i])
+    out = [0.0] * len(ts)
+    acc, prev = 0.0, 0.0
+    for i in order:
+        t = ts[i]
+        if t <= prev:
+            out[i] = math.sqrt(acc / t) if t > 0 and acc > 0 else 0.0
+            continue
+        acc += atm.integrated_variance(t, prev)
+        prev = t
+        out[i] = math.sqrt(acc / t) if acc > 0 else 0.0
+    return out
+
+
+def fit_atm_curve(atm, targets: list[CurveTarget], *, free: tuple[str, ...] | None = None,
+                  weights: list[float] | None = None) -> CurveFit:
+    """Fit the free curve parameters through a target term structure.
+
+    The fit runs on a copy, so the curve handed in is untouched whatever
+    happens; the caller applies ``CurveFit.after`` when it wants to keep it.
+
+    There is no starting guess.  The two level parameters are read straight off
+    the shortest and longest targets, and the two shape parameters -- which
+    have no such reading -- are swept over the range that matters before any
+    polishing.  A local minimum in mean reversion is easy to land in from a
+    bad start and impossible to see afterwards.
+    """
+    knobs = _Knobs(atm)
+    free = tuple(free) if free is not None else knobs.default_free
+    unknown = [f for f in free if f not in knobs.available]
+    if unknown:
+        raise ValueError(
+            f"{', '.join(unknown)} cannot be fitted on a "
+            f"{'cross' if knobs.is_cross else 'single'} pair curve; the knobs here are "
+            f"{', '.join(knobs.available)}")
+    if not free:
+        raise ValueError("no curve parameter was left free, so there is nothing to fit")
+    targets = sorted(targets, key=lambda x: x.t)
+    if len(targets) < len(free):
+        raise ValueError(
+            f"{len(targets)} target(s) cannot determine {len(free)} free parameter(s) "
+            f"({', '.join(free)}); pin more tenors or free fewer parameters")
+
+    work = copy.deepcopy(atm)
+    work_knobs = _Knobs(work)
+    before = knobs.get()
+    ts = [x.t for x in targets]
+    goals = np.array([x.vol for x in targets], dtype=float)
+    w = np.ones(len(targets)) if weights is None else np.asarray(weights, dtype=float)
+    if w.shape != goals.shape or np.any(w <= 0):
+        raise ValueError("target weights must be positive and one per target")
+    w = w / float(np.mean(w))
+
+    calls = 0
+
+    def achieved(values: dict[str, float]) -> np.ndarray | None:
+        nonlocal calls
+        calls += 1
+        if work_knobs.set(values):
+            return None
+        try:
+            return np.array(_curve_vols(work, ts), dtype=float)
+        except (ValueError, ArithmeticError):
+            return None
+
+    def residuals(x: np.ndarray) -> np.ndarray:
+        got = achieved({k: float(v) for k, v in zip(free, x)})
+        if got is None or not np.all(np.isfinite(got)):
+            return np.full(len(targets), 1e3)
+        return w * (got - goals)
+
+    lo = np.array([_BOUNDS[k][0] for k in free], dtype=float)
+    hi = np.array([_BOUNDS[k][1] for k in free], dtype=float)
+
+    # -- starting points: levels read off the data, shapes swept -----------
+    short_vol, long_vol = float(goals[0]), float(goals[-1])
+    seeds: list[dict[str, float]] = []
+    def seeded(candidate: dict) -> dict:
+        """A sweep node may only move a *free* parameter.
+
+        Sweeping a frozen one and then keeping whatever the best node happened
+        to hold would change a parameter the caller deliberately pinned, which
+        is the silent-edit failure this project exists to remove.
+        """
+        return {**before, **{k: v for k, v in candidate.items() if k in free}}
+
+    if knobs.is_cross:
+        # The level of a cross is its legs'; the shape this curve owns is the
+        # correlation's decay, so that is what gets swept.
+        for decay in (0.25, 1.0, 4.0, 16.0, 64.0):
+            for front in (10.0, 50.0, 200.0):
+                seeds.append(seeded({"corr_decay": decay, "short_decay": front}))
+    else:
+        for reversion in (0.5, 2.0, 6.0, 20.0, 60.0):
+            for decay in (10.0, 50.0, 200.0):
+                seeds.append(seeded({
+                    "mean_reversion": reversion, "short_decay": decay,
+                    "initial_vol": short_vol, "long_term_vol": long_vol,
+                    "short_addon": max(before.get("short_addon", 0.0), 0.0)}))
+
+    t0 = time.perf_counter()
+    best_seed, best_cost = None, math.inf
+    for seed in seeds:
+        got = achieved(seed)
+        if got is None or not np.all(np.isfinite(got)):
+            continue
+        cost = float(np.sum((w * (got - goals)) ** 2))
+        if cost < best_cost:
+            best_cost, best_seed = cost, seed
+    if best_seed is None:
+        raise ConvergenceError(
+            f"no admissible curve exists anywhere on the sweep for targets "
+            f"{goals.min():.4%}-{goals.max():.4%}; the parameters cannot reach them at all")
+
+    x0 = np.clip(np.array([best_seed[k] for k in free], dtype=float), lo + 1e-12, hi - 1e-12)
+    try:
+        sol = least_squares(residuals, x0, bounds=(lo, hi), xtol=1e-13, ftol=1e-13,
+                            gtol=1e-13, max_nfev=600)
+        values = {**best_seed, **{k: float(v) for k, v in zip(free, sol.x)}}
+        ok = bool(sol.success)
+        why = "converged" if ok else f"least-squares stopped: {sol.message}"
+    except Exception as exc:  # noqa: BLE001 - fall back to the sweep, but say so
+        values, ok = best_seed, False
+        why = f"polish failed ({type(exc).__name__}: {exc}); reporting the best sweep node"
+
+    got = achieved(values)
+    if got is None:
+        raise ConvergenceError(f"the fitted parameters are not a valid curve: {values}")
+    seconds = time.perf_counter() - t0
+
+    err = got - goals
+    j = int(np.argmax(np.abs(err)))
+    rmse = float(math.sqrt(np.mean((w * err) ** 2)))
+
+    # The "before" achieved curve, measured on the untouched original.
+    achieved_before = _curve_vols(atm, ts)
+
+    warnings: list[str] = []
+    if rmse > 0.0015:
+        warnings.append(
+            f"the curve cannot pass through these targets: weighted RMSE {rmse * 100:.3f} vol "
+            f"points, worst {err[j] * 100:+.3f} at {targets[j].tenor}. A five-parameter backbone "
+            f"has one hump in it; a target curve with two does not fit, and forcing it here only "
+            f"spreads the error. Pin those tenors on the marking screen instead")
+    for k in free:
+        v = values[k]
+        span = _BOUNDS[k][1] - _BOUNDS[k][0]
+        if min(abs(v - _BOUNDS[k][0]), abs(v - _BOUNDS[k][1])) < 1e-6 * max(span, 1.0):
+            warnings.append(
+                f"{k} came to rest on its bound at {v:.6g}; the targets want more than the "
+                f"parameter can give, so the shape is being limited rather than fitted")
+    if len(targets) == len(free):
+        warnings.append(
+            f"{len(free)} free parameters against {len(targets)} targets is an exact solve, not "
+            f"a fit: the residuals will be zero whatever the targets say and are no evidence the "
+            f"shape is right")
+    return CurveFit(
+        before=before, after={k: values[k] for k in knobs.available},
+        free=free, targets=tuple(targets),
+        achieved_before=tuple(achieved_before), achieved_after=tuple(float(v) for v in got),
+        rmse=rmse, max_error=float(err[j]), max_error_tenor=targets[j].tenor,
+        converged=ok, message=why, evaluations=calls, seconds=seconds,
+        warnings=tuple(warnings),
+    )
+
+
+# ===========================================================================
+# 2. evaluating a quote on the surface
+# ===========================================================================
+
+
+# How close the interpolation has to sit to its own anchors before the fit is
+# allowed to read the anchors instead of building it.  A ten-millionth of a
+# volatility point: far below anything a market quotes, far above the delta
+# solve's own fixed-point tolerance.
+ANCHOR_TOLERANCE = 1e-9
+
+
+def anchor_wing(method: str, delta: float | None) -> int | None:
+    """Which SABR wing *should* reproduce the interpolated smile at ``delta``.
+
+    The interpolators are built through five anchor points taken off the two
+    SABR wings, and each is meant to reproduce the anchors it was built
+    through: SVI has five parameters for five points, vanna-volga reprices its
+    own three by construction, and the SABR methods simply *are* one wing.
+    Where that holds, the wing and the interpolation are the same number and
+    the fit can skip a 19ms SVI solve per expiry per evaluation without
+    approximating anything.
+
+    It does not always hold.  SVI here is **arbitrage constrained**, so five
+    parameters through five points is not a free interpolation: when the marked
+    anchors imply a butterfly arbitrage the constrained fit cannot pass through
+    them and lands up to a tenth of a volatility point away.  On this
+    workbook that is nine slices in fifty-two -- USDCNY, a managed pair whose
+    marked wings are the least well behaved, misses by 0.15 points at a week.
+
+    So this function says only where the shortcut is *plausible*.  Whether it
+    is actually exact is measured per expiry by :func:`anchor_gap` and checked
+    before the fit uses it; ``None`` means there is no shortcut at all.
+    """
+    if method in ("SABR25", "SABR10"):
+        return 25 if method == "SABR25" else 10
+    if delta is None:
+        return None
+    if abs(delta - 0.25) < 1e-12 and method in ("SVI", "VV25"):
+        return 25
+    if abs(delta - 0.10) < 1e-12 and method in ("SVI", "VV10"):
+        return 10
+    return None
+
+
+class Evaluator:
+    """Reads quote values off a surface, caching each expiry within one pass.
+
+    Built fresh for every objective evaluation: the parameters move underneath
+    it, so a cache that outlived one pass would be a stale-number bug of
+    exactly the kind this project exists to remove.
+
+    By default it is **exact**: every delta goes through the interpolated
+    smile, which is the number the pricing screen shows.  ``fast_at`` names
+    the expiries where :func:`anchor_gap` has *measured* the wings and the
+    interpolation to agree, and only those are allowed the shortcut.  An
+    unverified fast path is how a fit ends up marking to a smile the rest of
+    the tool does not use.
+    """
+
+    def __init__(self, surface, method: str, cut: str, fast_at: frozenset | None = None):
+        self.s = surface
+        self.method = method or surface.method
+        self.cut = cut
+        self.fast_at = fast_at or frozenset()
+        self._atm: dict[float, float] = {}
+        self._wing: dict[tuple[float, int], SabrParams] = {}
+        self.slices_built = 0
+
+    def atm(self, dt, t: float) -> float:
+        hit = self._atm.get(t)
+        if hit is None:
+            hit = float(self.s.atm.cut_vol(dt, self.cut))
+            if hit <= 0:
+                raise ValueError(
+                    f"{self.s.pair}: the at-the-money volatility at {dt:%Y-%m-%d} is zero. "
+                    f"An expiry inside today's volatility day has no volatility days in it")
+            self._atm[t] = hit
+        return hit
+
+    def wing(self, dt, t: float, which: int) -> SabrParams:
+        key = (t, which)
+        hit = self._wing.get(key)
+        if hit is None:
+            atm_vol = self.atm(dt, t)
+            p = self.s.params_at(t)
+            rho, slog = p[f"rho{which}"], p[f"slog{which}"]
+            nu = slog / math.sqrt(t)
+            alpha = sabr.alpha_from_atm(
+                atm_vol, black.dns_strike(1.0, atm_vol, t, self.s.conv), rho, nu, t, 1.0)
+            hit = SabrParams(alpha=alpha, rho=rho, volvol=nu, t=t, f=1.0)
+            self._wing[key] = hit
+        return hit
+
+    def delta_vol(self, dt, t: float, delta: float, is_call: bool) -> float:
+        """Volatility at a delta, off the wing when that was verified, else the slice."""
+        which = anchor_wing(self.method, delta)
+        signed = abs(delta) if is_call else -abs(delta)
+        if which is not None and round(t, 10) in self.fast_at:
+            _, vol = sabr.smile_strike_and_vol(self.wing(dt, t, which), signed, t, is_call,
+                                               self.s.conv)
+            return float(vol)
+        self.slices_built += 1
+        return float(self.s.slice_at(dt, self.method, self.cut).strike_from_delta(signed, is_call)[1])
+
+    def strike_vol(self, dt, t: float, ratio: float) -> float:
+        self.slices_built += 1
+        return float(self.s.vol(ratio, dt, self.method, self.cut))
+
+    def strangle(self, dt, t: float, delta: float) -> float:
+        self.slices_built += 1
+        return float(self.s.strangle(dt, delta, self.method, self.cut))
+
+    # -- the instruments ---------------------------------------------------
+    def leg_value(self, kind: str, q: MarketQuote, dt, t: float,
+                  forward: float | None) -> float:
+        if kind == "atm":
+            return self.atm(dt, t)
+        if kind == "rr":
+            return (self.delta_vol(dt, t, q.delta, True)
+                    - self.delta_vol(dt, t, q.delta, False))
+        if kind == "fly":
+            if q.fly_kind == "market":
+                return self.strangle(dt, t, q.delta)
+            return 0.5 * (self.delta_vol(dt, t, q.delta, True)
+                          + self.delta_vol(dt, t, q.delta, False)) - self.atm(dt, t)
+        if kind == "outright":
+            if q.strike is not None:
+                if forward is None:
+                    raise ValueError(
+                        f"a strike of {q.strike:g} needs an outright forward to become a "
+                        f"moneyness, and there is no forward feed for {self.s.pair}. Load a feed, "
+                        f"or quote the option by its delta")
+                return self.strike_vol(dt, t, q.strike / forward)
+            return self.delta_vol(dt, t, q.delta, bool(q.is_call))
+        raise ValueError(f"cannot value a {kind!r} quote")
+
+    def value(self, q: MarketQuote, expiries: dict, forwards: dict) -> float:
+        """The model's mid for one quote, in decimals."""
+        if q.instrument == "spread":
+            near_dt, near_t = expiries[_key(q.expiry)]
+            far_dt, far_t = expiries[_key(q.expiry_far)]
+            kind = q.leg or "atm"
+            return (self.leg_value(kind, q, far_dt, far_t, forwards.get(_key(q.expiry_far)))
+                    - self.leg_value(kind, q, near_dt, near_t, forwards.get(_key(q.expiry))))
+        dt, t = expiries[_key(q.expiry)]
+        return self.leg_value(q.instrument, q, dt, t, forwards.get(_key(q.expiry)))
+
+
+def anchor_gap(surface, dt, t: float, method: str, cut: str) -> float:
+    """How far the interpolated smile sits from the wings at their own anchors.
+
+    Zero to rounding when the interpolation passes through its anchors, which
+    is the ordinary case; up to a tenth of a volatility point when an
+    arbitrage-constrained fit could not.  Building the slice costs one SVI
+    solve, which is why this is measured once per expiry rather than assumed.
+    """
+    sl = surface.slice_at(dt, method, cut)
+    ev = Evaluator(surface, method, cut, fast_at=frozenset({round(t, 10)}))
+    worst = 0.0
+    for delta, is_call in ((0.25, True), (0.25, False), (0.10, True), (0.10, False)):
+        if anchor_wing(method, delta) is None:
+            continue
+        fast = ev.delta_vol(dt, t, delta, is_call)
+        slow = float(sl.strike_from_delta(delta if is_call else -delta, is_call)[1])
+        worst = max(worst, abs(fast - slow))
+    return worst
+
+
+def verified_fast_expiries(surface, quotes, expiries, method: str,
+                           cut: str) -> tuple[frozenset, list[str]]:
+    """Which expiries the fit may read off the wings, measured rather than assumed."""
+    wanted = set()
+    for q in quotes:
+        for value in (q.expiry, q.expiry_far):
+            if value is None:
+                continue
+            if anchor_wing(method, q.delta) is not None:
+                wanted.add(_key(value))
+    ok, notes = set(), []
+    for key in sorted(wanted):
+        dt, t = expiries[key]
+        try:
+            gap = anchor_gap(surface, dt, t, method, cut)
+        except (ValueError, ArithmeticError, ConvergenceError) as exc:
+            notes.append(f"{key}: could not be checked against its own anchors ({exc}); "
+                         f"the full interpolation is being used")
+            continue
+        if gap <= ANCHOR_TOLERANCE:
+            ok.add(round(t, 10))
+        else:
+            notes.append(
+                f"{key}: the {method} smile does not pass through its own anchor points -- it "
+                f"misses by {gap * 100:.4f} volatility points. The arbitrage constraint is "
+                f"binding, so the wings and the smile you price on are not the same curve "
+                f"there. The fit is using the full interpolation for this expiry, which is "
+                f"slower and correct")
+    return frozenset(ok), notes
+
+
+def informative_params(quotes, method: str) -> tuple[set, list[str]]:
+    """Which smile parameters the pasted quotes can actually determine.
+
+    A 25-delta quote reads off the 25-delta anchor, and that anchor is built
+    from ``rho25`` and ``slog25`` alone -- the ten-delta parameters do not
+    enter it.  Leaving them free anyway does not make the fit better informed;
+    it makes the objective flat in two directions, and the optimiser then
+    spends its whole budget wandering along that plateau chasing the
+    tie-breakers, each step a fresh interpolation solve per expiry.
+
+    Quotes that do not sit on an anchor -- an absolute strike, an odd delta, a
+    market strangle read through the interpolation -- depend on the shape of
+    the whole slice and so inform all four.  This is the same rule the curve
+    fit applies to its targets: a fit may not have more free parameters than
+    the market gave it.
+    """
+    informed: set = set()
+    reasons: list[str] = []
+    for q in quotes:
+        kind = q.leg if q.instrument == "spread" else q.instrument
+        wing = anchor_wing(method, q.delta) or (
+            25 if q.delta is not None and abs(q.delta - 0.25) < 1e-9 else
+            10 if q.delta is not None and abs(q.delta - 0.10) < 1e-9 else None)
+        if wing is None:
+            # No delta to hang it on -- an absolute strike or an odd delta reads
+            # the interpolation wherever it lands, so it informs everything.
+            informed |= set(PARAM_NAMES)
+            reasons.append(f"{q.describe()} has no anchor delta, so it depends on the "
+                           f"whole slice")
+            continue
+        informed |= {f"rho{wing}", f"slog{wing}"}
+        if kind == "fly" and q.fly_kind == "market":
+            reasons.append(
+                f"{q.describe()} is a market strangle, so it is read through the interpolation "
+                f"and depends weakly on the far wing as well as on its own; it is being counted "
+                f"against the {wing}-delta parameters it actually moves")
+    return informed, reasons
+
+
+def _key(expiry) -> str:
+    return str(expiry)
+
+
+def resolve_expiries(clock, quotes) -> dict[str, tuple]:
+    """Map every expiry mentioned in a run to a (datetime, years) pair.
+
+    A tenor goes through ``tenor_to_years`` and back out of the clock, which is
+    how the rest of the package turns a quoted tenor into a date; a written
+    date is taken as it stands.
+    """
+    out: dict[str, tuple] = {}
+    for q in quotes:
+        for value in (q.expiry, q.expiry_far):
+            if value is None or _key(value) in out:
+                continue
+            if isinstance(value, str):
+                t = tenor_to_years(value)
+                out[_key(value)] = (clock.datetime_from_years(t), t)
+            else:
+                dt = clock.coerce_datetime(value)
+                out[_key(value)] = (dt, clock.years_to(dt))
+    return out
+
+
+# ===========================================================================
+# 3. the fine tune
+# ===========================================================================
+
+
+@dataclass(frozen=True)
+class TuneResult:
+    before: dict[str, float]
+    after: dict[str, float]
+    free: tuple[str, ...]
+    inside_before: int
+    inside_after: int
+    worst_before: float
+    worst_after: float
+    converged: bool
+    message: str
+    evaluations: int
+    slices: int
+    seconds: float
+    warnings: tuple[str, ...] = ()
+
+
+def _hinge(value: float, bid: float, ask: float) -> float:
+    """Signed distance outside the quoted market; zero anywhere inside it."""
+    if value < bid:
+        return value - bid
+    if value > ask:
+        return value - ask
+    return 0.0
+
+
+def tune_smile_shifts(surface, quotes, expiries, forwards, *, method: str, cut: str,
+                      free: tuple[str, ...] = PARAM_NAMES, mid_pull: float = 0.05,
+                      prior_pull: float = 0.02, max_nfev: int = 300) -> TuneResult:
+    """Move the four smile parameters until the quoted wings are satisfied.
+
+    Mutates ``surface.param_shifts``; the caller restores them when it is only
+    reporting.  The at-the-money level is *not* free here -- it is set by the
+    curve fit above, which is the order a desk marks in (level first, then
+    wings) and which also keeps a level quote and a wing quote from fighting
+    over the same vol point.  Quotes that depend on both still constrain the
+    wings; they simply cannot move the level.
+
+    The objective is a hinge: zero anywhere inside the quoted bid and offer,
+    and the distance to the nearer side outside it.
+
+    ``mid_pull`` and ``prior_pull`` are small on purpose.  The hinge has a flat
+    bottom, so without them any shift that lands inside every market would do
+    and the answer would depend on where the optimiser happened to stop; with
+    them the answer is the smallest adjustment that satisfies the market and
+    then sits nearest the quoted mids.
+
+    Both are also *scaled to the market they are competing with*, which is the
+    part that is easy to get wrong.  The hinge and the mid pull are already in
+    volatility, but a parameter shift is not: a shift of 0.1 against a hinge of
+    0.001 means a raw prior weight of 0.02 is not a tie-breaker at all, it is
+    twenty times the violation it is supposed to defer to -- and the fit stops
+    short of a market it could reach while reporting that it converged.  The
+    prior is therefore multiplied by the market's own half width.
+
+    The search may read an expiry off the SABR wings instead of solving the
+    interpolation, but only where the two have been *measured* to agree, and
+    the answer is always re-read through the interpolation afterwards.  If the
+    fitted shifts have moved the smile somewhere the interpolation can no
+    longer follow the wings, the whole fit is run again on the slow, exact
+    path rather than the drift being reported and left in.
+    """
+    free = tuple(f for f in free if f in PARAM_NAMES)
+    if not free:
+        raise ValueError(f"no smile parameter left free; expected some of {PARAM_NAMES}")
+    if not quotes:
+        raise ValueError("no quote constrains the wings, so there is nothing to fine tune")
+
+    informed, why_all = informative_params(quotes, method)
+    dropped = [f for f in free if f not in informed]
+    free = tuple(f for f in free if f in informed)
+    pinned_note = ""
+    if dropped:
+        pinned_note = (
+            f"{', '.join(dropped)} were left where they are: nothing in the paste reads off the "
+            f"{'/'.join(sorted({d[-2:] for d in dropped}))}-delta anchor, so freeing them would "
+            f"only make the objective flat in those directions")
+    if not free:
+        raise ValueError(
+            f"none of {', '.join(PARAM_NAMES)} is both free and informed by the paste; the "
+            f"quotes read off the {', '.join(sorted(informed)) or 'no'} anchor(s)")
+    if len(free) > len(quotes):
+        raise ValueError(
+            f"{len(quotes)} wing quote(s) cannot determine {len(free)} free smile parameter(s) "
+            f"({', '.join(free)}"
+            + (f"; {'; '.join(why_all[:2])}" if why_all else "")
+            + "). Quote more of the smile, or pin parameters on the panel")
+
+    before = {k: float(surface.param_shifts.get(k, 0.0)) for k in PARAM_NAMES}
+    bids = np.array([q.bid for q in quotes], dtype=float)
+    asks = np.array([q.ask for q in quotes], dtype=float)
+    mids = 0.5 * (bids + asks)
+    widths = asks - bids
+    live = widths[widths > 0]
+    # The scale the prior is expressed in.  A run of choice prices has no width
+    # to borrow, so a thousandth of the typical quote stands in for one.
+    prior_scale = float(np.median(live) / 2.0) if live.size else max(
+        float(np.median(np.abs(mids))) * 1e-3, 1e-6)
+
+    lo = np.array([_SHIFT_BOUNDS[k][0] for k in free], dtype=float)
+    hi = np.array([_SHIFT_BOUNDS[k][1] for k in free], dtype=float)
+    x0 = np.clip(np.array([before[k] for k in free], dtype=float), lo + 1e-12, hi - 1e-12)
+
+    def inside_of(got) -> int:
+        return int(sum(1 for v, b, a in zip(got, bids, asks) if b <= v <= a))
+
+    def worst_of(got) -> float:
+        return float(np.max(np.abs([_hinge(v, b, a) for v, b, a in zip(got, bids, asks)])))
+
+    counters = {"calls": 0, "slices": 0}
+
+    def solve(fast_at: frozenset, x_start=None):
+        counters["calls"] = counters["slices"] = 0
+        x_start = x0 if x_start is None else x_start
+
+        def values_at(shifts: dict[str, float]):
+            counters["calls"] += 1
+            if surface.set_param_shifts({**before, **shifts}):
+                return None
+            ev = Evaluator(surface, method, cut, fast_at=fast_at)
+            try:
+                got = np.array([ev.value(q, expiries, forwards) for q in quotes], dtype=float)
+            except (ValueError, ArithmeticError, ConvergenceError):
+                return None
+            counters["slices"] += ev.slices_built
+            return got
+
+        def residuals(x: np.ndarray) -> np.ndarray:
+            got = values_at({k: float(v) for k, v in zip(free, x)})
+            if got is None or not np.all(np.isfinite(got)):
+                return np.full(2 * len(quotes) + len(free), 1e3)
+            hinge = np.array([_hinge(v, b, a) for v, b, a in zip(got, bids, asks)])
+            return np.concatenate([hinge, mid_pull * (got - mids),
+                                   prior_pull * prior_scale * x])
+
+        start = values_at({k: before[k] for k in free})
+        if start is None:
+            raise ConvergenceError(
+                "the surface cannot be evaluated at the marks it already carries, so there is "
+                "nothing to fine tune from; fix the marks first")
+        try:
+            # Tolerances are set against what a volatility quote can resolve,
+            # not as tight as the solver will go.  On the flat bottom of the
+            # hinge the only gradient left is the tie-breakers', so a 1e-12
+            # step tolerance grinds through hundreds of evaluations chasing
+            # movement a ten-millionth of a vol point wide -- each one a fresh
+            # SVI solve per expiry.  1e-9 in a shift is 1e-8 of a vol point.
+            sol = least_squares(residuals, x_start, bounds=(lo, hi), xtol=1e-9, ftol=1e-11,
+                                gtol=1e-11, max_nfev=max_nfev,
+                                diff_step=np.full(len(free), 1e-4))
+            after = {**before, **{k: float(v) for k, v in zip(free, sol.x)}}
+            ok = bool(sol.success)
+            why = "converged" if ok else f"least-squares stopped: {sol.message}"
+        except Exception as exc:  # noqa: BLE001
+            after, ok = dict(before), False
+            why = f"the fine tune failed ({type(exc).__name__}: {exc}); the marks were left alone"
+        got = values_at(after)
+        if got is None:
+            surface.set_param_shifts(before)
+            raise ConvergenceError(f"the tuned shifts do not produce a valid surface: {after}")
+        return start, after, got, ok, why
+
+    notes: list[str] = []
+    fast_at, anchor_notes = verified_fast_expiries(surface, quotes, expiries, method, cut)
+    notes.extend(anchor_notes)
+
+    t0 = time.perf_counter()
+    start, after, got, ok, why = solve(fast_at)
+    calls, slices = counters["calls"], counters["slices"]
+
+    if fast_at:
+        # What the desk will price on is the interpolation.  Check the shortcut
+        # at the answer rather than trusting it there.
+        exact = Evaluator(surface, method, cut)
+        try:
+            settled = np.array([exact.value(q, expiries, forwards) for q in quotes], dtype=float)
+            drift = float(np.max(np.abs(settled - got)))
+        except (ValueError, ArithmeticError, ConvergenceError) as exc:
+            drift = float("inf")
+            notes.append(f"the tuned surface could not be re-read through the full "
+                         f"interpolation: {exc}")
+        if not math.isfinite(drift) or drift > ANCHOR_TOLERANCE:
+            notes.append(
+                f"the shifts moved the smile into a shape the arbitrage-constrained {method} fit "
+                f"can no longer follow the wings through -- they had drifted "
+                f"{drift * 100:.4f} volatility points apart at the answer. The fit was run again "
+                f"on the full interpolation, which is what the quote sheet prices on")
+            # Started from the shortcut's answer rather than from the marks:
+            # it is a good point, and the tune is a local refinement by
+            # construction, so re-sweeping from scratch buys nothing.
+            start, after, got, ok, why = solve(
+                frozenset(),
+                np.clip(np.array([after[k] for k in free], dtype=float), lo + 1e-12, hi - 1e-12))
+            calls += counters["calls"]
+            slices += counters["slices"]
+        else:
+            notes.append(
+                f"{len(fast_at)} expiry(ies) were read off the SABR wings rather than through a "
+                f"{method} solve, after checking that the two agree there to "
+                f"{ANCHOR_TOLERANCE * 100:.0e} volatility points, at the start and at the answer")
+    seconds = time.perf_counter() - t0
+
+    inside_before, worst_before = inside_of(start), worst_of(start)
+    inside_after, worst_after = inside_of(got), worst_of(got)
+
+    warnings: list[str] = notes + list(surface.shift_warnings())
+    if pinned_note:
+        warnings.append(pinned_note)
+    if inside_after < len(quotes):
+        missed = [q.describe() for q, v, b, a in zip(quotes, got, bids, asks) if not b <= v <= a]
+        warnings.append(
+            f"{len(missed)} of {len(quotes)} wing quote(s) are still outside their market after "
+            f"the fine tune ({', '.join(missed[:6])}"
+            f"{', ...' if len(missed) > 6 else ''}). A shift moves the whole curve, so quotes that "
+            f"disagree across tenors cannot all be met; re-mark those tenors individually on the "
+            f"marking screen, or accept that the market is telling you the term structure is wrong")
+    if inside_after < inside_before:
+        warnings.append(
+            f"the fine tune has fewer quotes inside their market than it started with "
+            f"({inside_after} against {inside_before}). The mid pull is trading a small miss "
+            f"everywhere against a large one somewhere; lower it, or free fewer parameters")
+    if calls >= max_nfev:
+        warnings.append(
+            f"the fine tune used its whole budget of {max_nfev} evaluations and stopped there; "
+            f"the answer is where it had got to, not where it was going")
+    if worst_after > 0 and calls < max_nfev and inside_after < len(quotes):
+        warnings.append(
+            f"the pulls toward the quoted mids and the marked shifts are worth "
+            f"{mid_pull:g} and {prior_pull:g} of the market's own half width; if the fit is "
+            f"stopping short of a quote it could reach, they are what is holding it back")
+    return TuneResult(before=before, after=after, free=free,
+                      inside_before=inside_before, inside_after=inside_after,
+                      worst_before=worst_before, worst_after=worst_after,
+                      converged=ok, message=why, evaluations=calls, slices=slices,
+                      seconds=seconds, warnings=tuple(warnings))
+
+
+# ===========================================================================
+# 4. skewing the mid
+# ===========================================================================
+
+# Instruments a level statement can legitimately shade.  A risk reversal and a
+# butterfly are excluded on purpose: a break-even against realized volatility
+# and a vega position are both statements about the *level*, and neither says
+# anything about where the skew belongs.
+_LEVEL_INSTRUMENTS = ("atm", "outright")
+
+
+@dataclass(frozen=True)
+class Skew:
+    fair: float
+    axe: float
+    bank: float
+    total: float
+    capped: bool
+    cap: float | None
+    reason: str = ""
+
+
+def _interp(ts: list[float], values: list[float], t: float) -> float | None:
+    if not ts:
+        return None
+    return float(np.interp(t, ts, values))
+
+
+def skew_for(q: MarketQuote, t: float, *, half_width: float | None, richness, axe,
+             fair_weight: float, axe_weight: float, cap_ratio: float,
+             bank_shift: float) -> Skew:
+    """How far to lean the mid, and why.
+
+    Both leans point the same way: a rich market and a long position are both
+    reasons to *want to sell*, and you attract a seller's trade by shading the
+    price down, not up.  Both are capped as a fraction of the width, so an axe
+    can lean the price inside the market but cannot on its own walk it out of
+    the market -- which would stop being a quote and start being a bet.
+    """
+    level = q.instrument in _LEVEL_INSTRUMENTS or (
+        q.instrument == "spread" and (q.leg or "atm") in _LEVEL_INSTRUMENTS)
+    reason = ""
+    fair = axe_part = 0.0
+    if not level:
+        reason = (f"a {q.instrument} is not a level, so neither the fair-value richness nor a "
+                  f"vega position says where it should be marked; only the bank's own shift "
+                  f"applies")
+    else:
+        if richness is not None:
+            fair = -fair_weight * richness
+        if axe is not None and half_width is not None:
+            axe_part = -axe_weight * max(-1.0, min(1.0, axe)) * half_width
+        elif axe is not None:
+            reason = "there is no width for this quote, so the axe has nothing to lean against"
+    total = fair + axe_part + bank_shift
+    cap = None if half_width is None else cap_ratio * half_width
+    capped = False
+    if cap is not None and abs(total) > cap:
+        total = math.copysign(cap, total)
+        capped = True
+    return Skew(fair=fair, axe=axe_part, bank=bank_shift, total=total,
+                capped=capped, cap=cap, reason=reason)
+
+
+# ===========================================================================
+# 5. the panel
+# ===========================================================================
+
+
+@dataclass
+class Panel:
+    """One pair's making screen: the unit the browser owns and posts whole."""
+
+    pair: str
+    cut: str = "NY"
+    method: str | None = None
+    label: str = ""
+
+    # the market
+    text: str = ""
+    vol_unit: str = "auto"
+    fly_convention: str = "market"
+
+    # the target at-the-money curve
+    target_source: str = "overwrites"
+    target_text: str = ""
+    fit_curve: bool = True
+    free: tuple[str, ...] | None = None
+
+    # the wings
+    tune_wings: bool = True
+    smile_free: tuple[str, ...] = PARAM_NAMES
+    mid_pull: float = 0.05
+    max_nfev: int = 300
+
+    # skewing the mid
+    vega_text: str = ""
+    vega_scale: float = 0.0
+    fair_weight: float = 0.25
+    axe_weight: float = 0.5
+    skew_cap: float = 1.0
+    horizon_days: float = 30.0
+    lookback_days: float | None = None
+
+    # widths
+    fallback_spread: float | None = None       # volatility points
+
+    apply: bool = False
+    notes: tuple[str, ...] = field(default_factory=tuple)
+
+    # -- helpers ----------------------------------------------------------
+    def _targets(self, surface, quotes, expiries) -> tuple[list[CurveTarget], str]:
+        """Where the target at-the-money curve comes from, and what it is."""
+        atm = surface.atm
+        if self.target_source == "none":
+            return [], "no target curve; the level was left as marked"
+        if self.target_source == "overwrites":
+            pinned = dict(atm.tenor_overwrites)
+            if not pinned:
+                raise ValueError(
+                    "no tenor is pinned on the marking screen, so there is no target curve to "
+                    "fit to. Pin the at-the-money levels you want, paste a curve, or fit to the "
+                    "at-the-money quotes instead")
+            targets = [CurveTarget(tenor.upper(), tenor_to_years(tenor), vol, "pinned tenor")
+                       for tenor, vol in pinned.items()]
+            return sorted(targets, key=lambda x: x.t), (
+                f"{len(targets)} tenor(s) pinned on the marking screen")
+        if self.target_source == "quotes":
+            atms = [q for q in quotes if q.instrument == "atm"]
+            if not atms:
+                raise ValueError("the paste has no at-the-money quote to fit the curve to")
+            targets = [CurveTarget(str(q.expiry), expiries[_key(q.expiry)][1], q.mid,
+                                   f"mid of {q.bid * 100:.3f}/{q.ask * 100:.3f}") for q in atms]
+            return sorted(targets, key=lambda x: x.t), (
+                f"the mid of {len(targets)} at-the-money quote(s) in the paste")
+        if self.target_source == "current":
+            targets = [CurveTarget(tp.upper(), tenor_to_years(tp), atm.curve_vol(tenor_to_years(tp)),
+                                   "the curve as it stands")
+                       for tp in atm.tenor_points]
+            return targets, "the curve as it stands, as a no-op check on the fit itself"
+        if self.target_source == "paste":
+            targets, bad = [], []
+            for n, line in enumerate(self.target_text.splitlines(), start=1):
+                body = line.split("#")[0].replace(",", " ").replace(":", " ").strip()
+                if not body:
+                    continue
+                bits = body.split()
+                if len(bits) < 2:
+                    bad.append(f"line {n}: expected a tenor and a volatility")
+                    continue
+                try:
+                    t = tenor_to_years(bits[0])
+                    vol = float(bits[1])
+                except Exception as exc:  # noqa: BLE001
+                    bad.append(f"line {n}: {exc}")
+                    continue
+                targets.append(CurveTarget(bits[0].upper(), t, vol, f"pasted line {n}"))
+            if bad:
+                raise ValueError("the pasted target curve has bad lines: " + "; ".join(bad))
+            if not targets:
+                raise ValueError("the pasted target curve is empty")
+            levels = [x.vol for x in targets]
+            if max(levels) >= 1.0:
+                targets = [CurveTarget(x.tenor, x.t, x.vol / 100.0, x.source) for x in targets]
+                unit = "read as volatility points"
+            else:
+                unit = "read as decimals"
+            return sorted(targets, key=lambda x: x.t), (
+                f"{len(targets)} pasted line(s), {unit}")
+        raise ValueError(f"unknown target source {self.target_source!r}; "
+                         f"expected one of {TARGET_SOURCES}")
+
+    # -- the run ----------------------------------------------------------
+    def run(self, book, *, bank: KnowledgeBank | None = None, hist=None) -> dict:
+        if book is None:
+            raise ValueError("the market-maker screen needs a loaded book")
+        if self.pair not in book:
+            raise ValueError(f"{self.pair} is not built in this book; it holds "
+                             f"{', '.join(book.pairs)}")
+        surface = book[self.pair]
+        method = self.method or surface.method
+        if method not in INTERPOLATORS:
+            raise ValueError(f"unknown interpolation method {method!r}; "
+                             f"expected one of {INTERPOLATORS}")
+        clock = book.clock
+        knobs = _Knobs(surface.atm)
+
+        out: dict = {
+            "pair": self.pair, "cut": self.cut, "method": method, "label": self.label,
+            "valuation": clock.now.isoformat(),
+            "is_cross": knobs.is_cross,
+            "knobs": list(knobs.available),
+            "applied": bool(self.apply),
+            "notes": list(self.notes), "warnings": [], "unavailable": {},
+            "curve": None, "wings": None, "sheet": None, "bank": None,
+            "axe": None, "fair": None,
+        }
+
+        # -- the paste -----------------------------------------------------
+        run_ = parse_quotes(self.text, pair=self.pair, vol_unit=self.vol_unit,
+                            fly_convention=self.fly_convention)
+        quotes = list(run_.quotes)
+        expiries = resolve_expiries(clock, quotes)
+        stale = [k for k, (_, t) in expiries.items() if t <= 0]
+        if stale:
+            raise ValueError(
+                f"{', '.join(stale)} is not in the future at the valuation time "
+                f"{clock.now:%Y-%m-%d %H:%M}Z")
+        forwards, forward_notes = self._forwards(book, expiries)
+
+        # -- the position and the fair value -------------------------------
+        axe_at, axe_block = self._axe(clock)
+        out["axe"] = axe_block
+        rich_at, fair_block = self._fair(book, hist, method)
+        out["fair"] = fair_block
+
+        # -- what the surface says before anything moves --------------------
+        before_knobs = knobs.get()
+        before_shifts = {k: float(surface.param_shifts.get(k, 0.0)) for k in PARAM_NAMES}
+        ev0 = Evaluator(surface, method, self.cut)
+        model_before: list[float | None] = []
+        row_errors: list[str] = []
+        for q in quotes:
+            try:
+                model_before.append(ev0.value(q, expiries, forwards))
+                row_errors.append("")
+            except (ValueError, ArithmeticError, ConvergenceError) as exc:
+                model_before.append(None)
+                row_errors.append(f"{type(exc).__name__}: {exc}")
+
+        # -- 1. the curve ---------------------------------------------------
+        curve_fit = None
+        if self.fit_curve:
+            try:
+                targets, evidence = self._targets(surface, quotes, expiries)
+                if targets:
+                    curve_fit = fit_atm_curve(surface.atm, targets, free=self.free)
+                    problems = knobs.set(curve_fit.after)
+                    if problems:
+                        raise ValueError("; ".join(problems))
+                    surface.invalidate()
+                    out["curve"] = self._curve_block(curve_fit, evidence, knobs)
+                else:
+                    out["unavailable"]["curve"] = evidence
+            except (ValueError, ConvergenceError) as exc:
+                out["unavailable"]["curve"] = f"{type(exc).__name__}: {exc}"
+        else:
+            out["unavailable"]["curve"] = "the curve fit is switched off on this panel"
+
+        # -- 2. the wings ---------------------------------------------------
+        tune = None
+        # Anything whose value depends on the shape of the smile constrains the
+        # wings.  A pure at-the-money quote does not, and is the curve's job.
+        wing_quotes = [q for q, e in zip(quotes, row_errors) if not e and (
+            q.instrument in ("rr", "fly", "outright")
+            or (q.instrument == "spread" and q.leg in ("rr", "fly")))]
+        if self.tune_wings:
+            try:
+                if not wing_quotes:
+                    raise ValueError(
+                        "the paste has no risk reversal, butterfly or outright in it, so nothing "
+                        "constrains the wings; the at-the-money quotes are the curve's job")
+                tune = tune_smile_shifts(
+                    surface, wing_quotes, expiries, forwards, method=method, cut=self.cut,
+                    free=tuple(self.smile_free), mid_pull=self.mid_pull, max_nfev=self.max_nfev)
+                out["wings"] = {
+                    "before": {k: v for k, v in tune.before.items()},
+                    "after": {k: v for k, v in tune.after.items()},
+                    "free": list(tune.free),
+                    "inside_before": tune.inside_before, "inside_after": tune.inside_after,
+                    "quotes": len(wing_quotes),
+                    "worst_before": tune.worst_before * 100.0,
+                    "worst_after": tune.worst_after * 100.0,
+                    "converged": tune.converged, "message": tune.message,
+                    "evaluations": tune.evaluations, "slices": tune.slices,
+                    "seconds": tune.seconds, "mid_pull": self.mid_pull,
+                    "warnings": list(tune.warnings),
+                }
+                out["warnings"].extend(tune.warnings)
+            except (ValueError, ConvergenceError) as exc:
+                out["unavailable"]["wings"] = f"{type(exc).__name__}: {exc}"
+        else:
+            out["unavailable"]["wings"] = "the wing fine tune is switched off on this panel"
+
+        # -- what the surface says now ---------------------------------------
+        ev1 = Evaluator(surface, method, self.cut)
+        model_after: list[float | None] = []
+        for q, err in zip(quotes, row_errors):
+            if err:
+                model_after.append(None)
+                continue
+            try:
+                model_after.append(ev1.value(q, expiries, forwards))
+            except (ValueError, ArithmeticError, ConvergenceError):
+                model_after.append(None)
+
+        # -- 3. the sheet ----------------------------------------------------
+        bank = bank if bank is not None else KnowledgeBank()
+        pk = bank.for_pair(self.pair)
+        out["bank"] = {
+            "pair": self.pair.upper(),
+            "path": bank.path,
+            "rules": [_rule_json(r) for r in pk.rules],
+            "updated": pk.updated,
+            "source_note": pk.source_note,
+            "problems": list(bank.problems),
+        }
+        out["sheet"] = self._sheet(quotes, expiries, model_before, model_after, row_errors,
+                                   pk, rich_at, axe_at, run_, forward_notes)
+
+        # -- restore unless asked to keep -------------------------------------
+        if not self.apply:
+            problems = knobs.set(before_knobs)
+            surface.set_param_shifts(before_shifts)
+            surface.invalidate()
+            if problems:
+                out["warnings"].append(
+                    "the marks could not be put back exactly after the fit: "
+                    + "; ".join(problems) + ". Reload the workbook before trusting this book")
+        else:
+            out["warnings"].append(
+                f"the fitted marks were written into the loaded book for {self.pair}. They are "
+                f"in memory only -- the workbook on disk is unchanged, and a reload discards them")
+        out["warnings"].extend(surface.warnings[-6:])
+        return out
+
+    # -- pieces of the run --------------------------------------------------
+    def _forwards(self, book, expiries) -> tuple[dict, list[str]]:
+        from .analytics import _forward_at
+        forwards, notes = {}, []
+        for key, (_, t) in expiries.items():
+            fwd, real, note = _forward_at(book, self.pair, t)
+            forwards[key] = fwd if real else None
+            if note and real:
+                notes.append(f"{key}: {note}")
+        if not any(v is not None for v in forwards.values()):
+            notes.append(
+                f"there is no forward feed for {self.pair}, so a quote written against an "
+                f"absolute strike cannot be turned into a moneyness and is reported as "
+                f"unavailable rather than priced at a forward of 1")
+        return forwards, notes
+
+    def _axe(self, clock) -> tuple[object, dict]:
+        if not self.vega_text.strip():
+            return None, {"available": False,
+                          "reason": "no vega profile was given, so no position is leaning the mid",
+                          "profile": {}, "scale": self.vega_scale, "notes": [], "skipped": []}
+        profile, notes, skipped = parse_vega_profile(self.vega_text)
+        block = {"available": bool(profile), "reason": "",
+                 "profile": {k: v for k, v in sorted(profile.items(), key=lambda kv: tenor_to_years(kv[0]))},
+                 "scale": self.vega_scale, "notes": list(notes),
+                 "skipped": [{"line": n, "text": t, "why": w} for n, t, w in skipped]}
+        if not profile:
+            block["reason"] = "every line of the vega profile was rejected"
+            return None, block
+        if not self.vega_scale or self.vega_scale <= 0:
+            block["available"] = False
+            block["reason"] = (
+                "a vega profile was given but the axe scale is not set, so there is nothing to "
+                "measure the position against. The scale is the position that counts as a full "
+                "axe, in whatever unit the profile is written in")
+            return None, block
+        ts = sorted(tenor_to_years(k) for k in profile)
+        vals = [profile[k] / self.vega_scale
+                for k in sorted(profile, key=tenor_to_years)]
+        block["reason"] = (f"{len(profile)} tenor(s), against an axe scale of "
+                           f"{self.vega_scale:g}; held flat outside the pasted range")
+        return (lambda t: _interp(ts, vals, t)), block
+
+    def _fair(self, book, hist, method) -> tuple[object, dict]:
+        from .analytics import fair_value_table
+        if hist is None:
+            return None, {"available": False, "rows": [],
+                          "reason": ("no historical workbook is loaded, so there is no realized "
+                                     "volatility and no fair value to shade the mid with")}
+        try:
+            rows = fair_value_table(book, self.pair, hist, horizon_days=self.horizon_days,
+                                    lookback_days=self.lookback_days, method=method,
+                                    cut=self.cut)
+        except Exception as exc:  # noqa: BLE001 - a section that fails empties only itself
+            return None, {"available": False, "rows": [],
+                          "reason": f"the fair value table could not be built: {exc}"}
+        live = [r for r in rows if r.richness is not None]
+        block = {
+            "available": bool(live),
+            "reason": "" if live else ("the fair value table has no richness in it; the pair may "
+                                       "have no sheet in the historical workbook"),
+            "horizon_days": self.horizon_days, "lookback_days": self.lookback_days,
+            "rows": [{"tenor": r.tenor, "t": r.t, "implied": r.implied * 100.0,
+                      "realized": None if r.realized is None else r.realized * 100.0,
+                      "fair": None if r.fair is None else r.fair * 100.0,
+                      "richness": None if r.richness is None else r.richness * 100.0}
+                     for r in rows],
+        }
+        if not live:
+            return None, block
+        ts = [r.t for r in live]
+        vals = [r.richness for r in live]
+        return (lambda t: _interp(ts, vals, t)), block
+
+    def _curve_block(self, fit: CurveFit, evidence: str, knobs: _Knobs) -> dict:
+        def unit(name, value):
+            return value * 100.0 if name in _PERCENT_KNOBS else value
+        return {
+            "evidence": evidence,
+            "source": self.target_source,
+            "free": list(fit.free),
+            "before": {k: unit(k, v) for k, v in fit.before.items()},
+            "after": {k: unit(k, v) for k, v in fit.after.items()},
+            "rows": [
+                {"tenor": tg.tenor, "days": tg.t * DAYS_IN_YEAR, "source": tg.source,
+                 "target": tg.vol * 100.0, "before": b * 100.0, "after": a * 100.0,
+                 "diff": (a - tg.vol) * 100.0, "moved": (a - b) * 100.0}
+                for tg, b, a in zip(fit.targets, fit.achieved_before, fit.achieved_after)
+            ],
+            "rmse": fit.rmse * 100.0, "max_error": fit.max_error * 100.0,
+            "max_error_tenor": fit.max_error_tenor,
+            "converged": fit.converged, "message": fit.message,
+            "evaluations": fit.evaluations, "seconds": fit.seconds,
+            "warnings": list(fit.warnings),
+        }
+
+    def _sheet(self, quotes, expiries, before, after, errors, pk: PairKnowledge,
+               rich_at, axe_at, run_, forward_notes) -> dict:
+        rows = []
+        # The bank is written in volatility points -- what the desk says out
+        # loud -- and everything inside the model is decimals.  The conversion
+        # happens here, once, on the way out of the lookup, and nowhere else.
+        fallback = None if self.fallback_spread in (None, "") else float(self.fallback_spread)
+        for q, mb, ma, err in zip(quotes, before, after, errors):
+            dt, t = expiries[_key(q.expiry_far if q.instrument == "spread" else q.expiry)]
+            days = t * DAYS_IN_YEAR
+            row = {
+                "line": q.line, "raw": q.raw, "label": q.label, "describe": q.describe(),
+                "instrument": q.instrument, "leg": q.leg, "delta": q.delta,
+                "strike": q.strike, "is_call": q.is_call, "fly_kind": q.fly_kind,
+                "tenor": _key(q.expiry), "tenor_far": (None if q.expiry_far is None
+                                                       else _key(q.expiry_far)),
+                "days": days, "size": q.size, "size_basis": q.size_basis,
+                "market_bid": q.bid * 100.0, "market_ask": q.ask * 100.0,
+                "market_mid": q.mid * 100.0, "market_width": q.spread * 100.0,
+                "model_before": None if mb is None else mb * 100.0,
+                "model_after": None if ma is None else ma * 100.0,
+                "model_move": None if (mb is None or ma is None) else (ma - mb) * 100.0,
+                "position": None, "edge": None,
+                "skew_fair": None, "skew_axe": None, "skew_bank": None,
+                "skew_total": None, "skew_capped": False, "skew_reason": "",
+                "our_mid": None, "our_bid": None, "our_ask": None,
+                "width": None, "width_source": None, "floor": None,
+                "crossing": "", "verdict": "",
+                "richness": None, "axe": None,
+                # The bank's prose kept apart from the reader's own notes: a
+                # note exists to be read, and burying it among parser chatter
+                # is most of the way to not applying it at all.
+                "advice": [], "notes": list(q.notes), "warnings": [],
+            }
+            if err:
+                row["verdict"] = "not priced"
+                row["warnings"].append(err)
+                rows.append(row)
+                continue
+
+            row["position"] = ("inside" if q.bid <= ma <= q.ask
+                               else ("below" if ma < q.bid else "above"))
+            row["edge"] = _hinge(ma, q.bid, q.ask) * 100.0
+
+            overlay = pk.overlay(instrument=q.instrument, days=days, tenor=_key(q.expiry),
+                                 size=q.size, size_basis=q.size_basis, delta=q.delta,
+                                 fallback=fallback)
+            width = None if overlay.spread is None else overlay.spread / 100.0
+            row["width"] = overlay.spread
+            row["width_source"] = overlay.spread_rule or (
+                "panel fallback" if width is not None else None)
+            row["floor"] = overlay.floor
+            row["advice"] = list(overlay.notes)
+            if overlay.reason:
+                row["warnings"].append(overlay.reason)
+            row["notes"].extend(f"beaten: {b}" for b in overlay.beaten)
+
+            # A calendar spread's level statement is the *difference* of the two
+            # legs' statements.  Taking the far leg's richness alone would shade a
+            # 1M/3M spread by the whole of the 3M richness, which is not what
+            # owning the spread exposes anybody to.
+            if q.instrument == "spread":
+                t_near = expiries[_key(q.expiry)][1]
+                richness = (None if rich_at is None else rich_at(t) - rich_at(t_near))
+                axe = (None if axe_at is None else axe_at(t) - axe_at(t_near))
+                row["notes"].append(
+                    f"the width and the shading are taken across the spread: the bank rule is "
+                    f"matched on the {_key(q.expiry_far)} leg, and the richness and the axe are "
+                    f"the {_key(q.expiry_far)} figure less the {_key(q.expiry)} one")
+            else:
+                richness = None if rich_at is None else rich_at(t)
+                axe = None if axe_at is None else axe_at(t)
+            row["richness"] = None if richness is None else richness * 100.0
+            row["axe"] = axe
+            skew = skew_for(q, t, half_width=None if width is None else width / 2.0,
+                            richness=richness, axe=axe, fair_weight=self.fair_weight,
+                            axe_weight=self.axe_weight, cap_ratio=self.skew_cap,
+                            bank_shift=overlay.shift / 100.0)
+            row["skew_fair"] = skew.fair * 100.0
+            row["skew_axe"] = skew.axe * 100.0
+            row["skew_bank"] = skew.bank * 100.0
+            row["skew_total"] = skew.total * 100.0
+            row["skew_cap"] = None if skew.cap is None else skew.cap * 100.0
+            row["skew_capped"] = skew.capped
+            row["skew_reason"] = skew.reason
+            if overlay.shift_rule:
+                row["notes"].append(f"bank shift: {overlay.shift_rule}")
+
+            our_mid = ma + skew.total
+            row["our_mid"] = our_mid * 100.0
+            if width is not None:
+                bid, ask = our_mid - width / 2.0, our_mid + width / 2.0
+                row["our_bid"], row["our_ask"] = bid * 100.0, ask * 100.0
+                if bid > q.ask:
+                    row["crossing"] = "our bid is through their offer"
+                elif ask < q.bid:
+                    row["crossing"] = "our offer is through their bid"
+                elif bid > q.bid and ask < q.ask:
+                    row["crossing"] = "inside their market on both sides"
+                row["verdict"] = row["crossing"] or (
+                    "in line" if row["position"] == "inside" else
+                    f"our mid is {row['position']} their market")
+            else:
+                row["verdict"] = "no width"
+            rows.append(row)
+
+        inside = sum(1 for r in rows if r["position"] == "inside")
+        priced = sum(1 for r in rows if r["our_bid"] is not None)
+        return {
+            "rows": rows,
+            "vol_unit": run_.vol_unit,
+            "unit_evidence": run_.unit_evidence,
+            "notes": list(run_.notes) + list(forward_notes),
+            "skipped": [{"line": n, "text": t, "why": w} for n, t, w in run_.skipped],
+            "n_quotes": len(rows), "inside": inside, "priced": priced,
+            "fly_convention": self.fly_convention,
+            "fallback_spread": self.fallback_spread,
+        }
+
+
+def _rule_json(r: Rule) -> dict:
+    from dataclasses import asdict
+    out = asdict(r)
+    out["describe"] = r.describe()
+    return out
+
+
+def panel_from_request(payload: dict) -> Panel:
+    """Build a Panel from a JSON body or a CLI namespace-like mapping."""
+    def opt_float(key, default=None):
+        v = payload.get(key)
+        if v in (None, "", "-"):
+            return default
+        return float(v)
+
+    def opt_bool(key, default):
+        v = payload.get(key)
+        if v in (None, ""):
+            return default
+        if isinstance(v, bool):
+            return v
+        return str(v).strip().lower() in ("1", "true", "yes", "on")
+
+    def opt_tuple(key, default):
+        v = payload.get(key)
+        if v in (None, "", []):
+            return default
+        if isinstance(v, str):
+            v = [x for x in v.replace(",", " ").split() if x]
+        return tuple(str(x) for x in v)
+
+    pair = str(payload.get("pair") or "").strip().upper()
+    if not pair:
+        raise ValueError("a currency pair is required")
+    vol_unit = str(payload.get("vol_unit") or "auto").strip().lower()
+    if vol_unit not in VOL_UNITS:
+        raise ValueError(f"unknown volatility unit {vol_unit!r}; expected one of {VOL_UNITS}")
+    fly = str(payload.get("fly_convention") or "market").strip().lower()
+    if fly not in FLY_CONVENTIONS:
+        raise ValueError(f"unknown butterfly convention {fly!r}; "
+                         f"expected one of {FLY_CONVENTIONS}")
+    source = str(payload.get("target_source") or "overwrites").strip().lower()
+    if source not in TARGET_SOURCES:
+        raise ValueError(f"unknown target source {source!r}; expected one of {TARGET_SOURCES}")
+
+    return Panel(
+        pair=pair,
+        cut=str(payload.get("cut") or "NY").strip().upper(),
+        method=(str(payload["method"]).strip() if payload.get("method") else None),
+        label=str(payload.get("label") or ""),
+        text=str(payload.get("text") or ""),
+        vol_unit=vol_unit,
+        fly_convention=fly,
+        target_source=source,
+        target_text=str(payload.get("target_text") or ""),
+        fit_curve=opt_bool("fit_curve", True),
+        free=opt_tuple("free", None),
+        tune_wings=opt_bool("tune_wings", True),
+        smile_free=opt_tuple("smile_free", PARAM_NAMES),
+        mid_pull=opt_float("mid_pull", 0.05),
+        max_nfev=int(opt_float("max_nfev", 300)),
+        vega_text=str(payload.get("vega_text") or ""),
+        vega_scale=opt_float("vega_scale", 0.0) or 0.0,
+        fair_weight=opt_float("fair_weight", 0.25),
+        axe_weight=opt_float("axe_weight", 0.5),
+        skew_cap=opt_float("skew_cap", 1.0),
+        horizon_days=opt_float("horizon_days", 30.0),
+        lookback_days=opt_float("lookback_days", None),
+        fallback_spread=opt_float("fallback_spread", None),
+        apply=opt_bool("apply", False),
+    )
+
+
+# ===========================================================================
+# 6. learning from a paste
+# ===========================================================================
+
+
+def learn_from_panel(payload: dict, clock) -> tuple[list[Rule], list[str], dict]:
+    """Propose bank rules from the widths a pasted market actually showed.
+
+    Returns the proposed rules, the notes explaining them, and the parse so the
+    caller can report what the paste contained.  Nothing is saved here: the
+    browser is shown the proposal and saves it, which is what keeps a stray
+    paste from silently rewriting the desk's ladder.
+    """
+    panel = panel_from_request(payload)
+    run_ = parse_quotes(panel.text, pair=panel.pair, vol_unit=panel.vol_unit,
+                        fly_convention=panel.fly_convention)
+    expiries = resolve_expiries(clock, run_.quotes)
+
+    def days_of(q):
+        got = expiries.get(_key(q.expiry_far if q.instrument == "spread" else q.expiry))
+        return None if got is None else got[1] * DAYS_IN_YEAR
+
+    rules, notes = suggest_rules(run_.quotes, days_of=days_of)
+    # Widths are in decimals inside the parser and volatility points in the bank.
+    rules = [Rule(**{**vars(r), "value": r.value * 100.0}) for r in rules]
+    return rules, notes, {
+        "n_quotes": len(run_.quotes), "vol_unit": run_.vol_unit,
+        "skipped": [{"line": n, "text": t, "why": w} for n, t, w in run_.skipped],
+        "notes": list(run_.notes),
+    }
+
+
+def rules_from_request(payload: dict) -> list[Rule]:
+    return [rule_from_dict(r) for r in (payload.get("rules") or [])]

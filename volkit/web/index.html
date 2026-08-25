@@ -125,7 +125,113 @@ table.ev .rm:hover{color:var(--bad)}
 .pgrid2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 .pgrid2 label{margin:6px 0 2px}
 .msg{font-size:11px;margin-top:8px;min-height:14px}
+/* ---- analysis ---- */
+.anbar{display:flex;gap:9px;align-items:flex-end;flex-wrap:wrap;margin-bottom:14px}
+.anbar .f label{margin:0 0 3px}
+.anbar .f input,.anbar .f select{padding:5px 7px;font-size:12px}
+.anbar .acts{display:flex;gap:6px;align-items:flex-end}
+.anbar .acts button{width:auto;padding:6px 13px;font-size:12px}
+.ancards{display:flex;flex-direction:column;gap:14px}
+.ancards .card h2 small{font-weight:400;text-transform:none;letter-spacing:0;color:var(--muted)}
+.antop{display:grid;grid-template-columns:minmax(320px,1.15fr) minmax(340px,1fr);gap:16px}
+@media (max-width:1120px){.antop{grid-template-columns:1fr}}
+.antop table{width:100%}
+.anwide{overflow-x:auto;border:1px solid var(--line);border-radius:8px}
+.anwide table{width:max-content;min-width:100%}
+.anwide th,.anwide td{white-space:nowrap}
+.anwide th.grp{text-align:center;border-left:1px solid var(--line)}
+.anwide td.grp{border-left:1px solid var(--line)}
+.annone{color:var(--muted);font-size:12px;padding:10px 2px}
+.ankey{display:flex;gap:16px;flex-wrap:wrap;color:var(--muted);font-size:11.5px;margin-top:9px;
+  font-variant-numeric:tabular-nums}
+.ankey b{color:var(--ink);font-weight:600}
+/* curve comparison: one row per curve, then a chart beside its table */
+.cmprow{display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;padding:7px 0;
+  border-top:1px solid var(--line)}
+.cmprow:first-child{border-top:none}
+.cmprow .f label{margin:0 0 3px}
+.cmprow .f input,.cmprow .f select{padding:5px 7px;font-size:12px}
+.cmprow .acts{display:flex;gap:6px;align-items:center;margin-left:auto}
+.cmprow .acts button{width:auto;padding:5px 10px;font-size:11.5px}
+.cmprow textarea{width:100%;min-height:52px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  font-size:11.5px;padding:6px 8px}
+.cmpbase{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--muted)}
+.cmpbase input{width:auto}
+.cmpempty{color:var(--muted);font-size:12px;padding:8px 2px}
+.cmpsrc{color:var(--muted);font-size:11px;margin-top:3px}
+.cmpsrc b{color:var(--ink);font-weight:600}
+/* ---- managed band ---- */
+.bandgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(118px,1fr));gap:8px}
+.bandgrid .f label{margin:0 0 3px;font-size:10.5px}
+.bandgrid .f input,.bandgrid .f select{padding:5px 7px;font-size:12px}
+.bandnone{color:var(--muted);font-size:12px;padding:8px 2px}
+
+/* ---- exchange traded options ---- */
+.eto{display:flex;flex-direction:column;gap:14px}
+.etohead{display:flex;gap:9px;align-items:flex-end;flex-wrap:wrap}
+.etohead .f label{margin:0 0 3px}
+.etohead .f input,.etohead .f select{padding:5px 7px;font-size:12px}
+.etohead .acts{display:flex;gap:6px;margin-left:auto}
+.etohead .acts button{width:auto;padding:5px 11px;font-size:12px}
+.etobody{display:grid;grid-template-columns:minmax(230px,1fr) minmax(340px,1.85fr);gap:14px;margin-top:12px}
+.etobody textarea{width:100%;height:330px;resize:vertical;border-radius:6px;padding:8px;
+  font:11.5px/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  color:var(--ink);background:var(--field);border:1px solid var(--line)}
+.etobody textarea:focus{outline:2px solid var(--accent);outline-offset:-1px}
+.etostat{display:flex;gap:15px;flex-wrap:wrap;font-size:11.5px;color:var(--muted);
+  font-variant-numeric:tabular-nums;margin-top:9px}
+.etostat b{color:var(--ink);font-weight:600}
+.etotables{display:grid;grid-template-columns:1.45fr 1fr;gap:14px;margin-top:12px}
+.etotables table{width:100%}
+.etotables .scroll{max-height:300px}
+@media (max-width:1080px){.etobody,.etotables{grid-template-columns:1fr}}
+td.pos{color:var(--good)} td.neg{color:var(--bad)}
+tr.sep td{border-top:1px solid var(--line);color:var(--muted);font-size:10.5px;
+  text-transform:uppercase;letter-spacing:.5px}
+.etonote{color:var(--muted);font-size:11px;margin-top:3px}
+.etowarn{color:var(--warn);font-size:11.5px;margin-top:3px}
+.etoerr{color:var(--bad);font-size:11.5px;margin-top:3px}
+.etoempty{color:var(--muted);text-align:center;padding:44px 10px;border:1px dashed var(--line);
+  border-radius:10px}
 .msg.ok{color:var(--good)} .msg.bad{color:var(--bad)} .msg.warn{color:var(--warn)}
+
+/* ---- market maker ---- */
+.mmbar{display:flex;gap:9px;align-items:flex-end;flex-wrap:wrap;margin-bottom:12px}
+.mmbar .f label{margin:0 0 3px}
+.mmbar .f input,.mmbar .f select{padding:5px 7px;font-size:12px}
+.mmbar .acts{display:flex;gap:8px;align-items:center}
+.mmbar .acts button{width:auto;padding:6px 13px;font-size:12px}
+.mmgrid{display:grid;grid-template-columns:minmax(280px,1fr) minmax(560px,2.35fr);gap:14px;align-items:start}
+@media (max-width:1180px){.mmgrid{grid-template-columns:1fr}}
+.mmleft,.mmright{display:flex;flex-direction:column;gap:14px;min-width:0}
+.mmleft textarea{width:100%;resize:vertical;border-radius:6px;padding:8px;
+  font:11.5px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  color:var(--ink);background:var(--field);border:1px solid var(--line)}
+.mmleft textarea:focus{outline:2px solid var(--accent);outline-offset:-1px}
+.mmwide{overflow-x:auto}
+.mmwide table{width:max-content;min-width:100%}
+.mmknob{display:flex;gap:12px;flex-wrap:wrap;font-size:11.5px;color:var(--muted)}
+.mmknob label{display:flex;align-items:center;gap:5px;margin:0;width:auto;font-size:11.5px}
+.mmknob input{width:auto}
+.mmstat{display:flex;gap:15px;flex-wrap:wrap;font-size:11.5px;color:var(--muted);
+  font-variant-numeric:tabular-nums;margin-bottom:9px}
+.mmstat b{color:var(--ink);font-weight:600}
+table.mmrules{width:100%;font-size:11.5px}
+table.mmrules th{font-size:10px}
+table.mmrules td{padding:2px 4px}
+table.mmrules input,table.mmrules select{padding:3px 5px;background:var(--edit);
+  border:1px solid transparent;font-size:11.5px}
+table.mmrules input:hover,table.mmrules select:hover{border-color:var(--line)}
+table.mmrules input.n{text-align:right}
+table.mmrules .rm{cursor:pointer;color:var(--muted);font-weight:700;padding:0 4px}
+table.mmrules .rm:hover{color:var(--bad)}
+td.mmv{font-variant-numeric:tabular-nums}
+td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;line-height:1.3}
+.mmtag{display:inline-block;padding:1px 7px;border-radius:20px;font-size:10px;font-weight:650}
+.mmtag.in{background:color-mix(in srgb,var(--good) 16%,transparent);color:var(--good)}
+.mmtag.out{background:color-mix(in srgb,var(--warn) 18%,transparent);color:var(--warn)}
+.mmtag.thru{background:color-mix(in srgb,var(--bad) 16%,transparent);color:var(--bad)}
+.mmtag.none{background:var(--bg);color:var(--muted)}
 </style>
 </head>
 <body>
@@ -134,6 +240,9 @@ table.ev .rm:hover{color:var(--bad)}
   <div class="nav" id="nav">
     <button data-p="pricing" class="on">Pricing</button>
     <button data-p="marking">Vol marking</button>
+    <button data-p="listed">Exchange traded</button>
+    <button data-p="analysis">Analysis</button>
+    <button data-p="mm">Market maker</button>
   </div>
   <button class="ghost" style="width:auto" id="reload">Reload workbook</button>
   <div class="grow"></div>
@@ -244,6 +353,12 @@ table.ev .rm:hover{color:var(--bad)}
         <div class="row" style="margin-top:9px"><button class="danger" id="mclearatm">Clear ATM overwrites</button></div>
       </section>
 
+      <section class="card" id="bandcard">
+        <h2>Managed band <span class="grow"></span>
+          <span class="meta" id="bandedges"></span></h2>
+        <div id="bandbody"></div>
+      </section>
+
       <section class="card">
         <h2>Events <span class="grow"></span>
           <select id="ehorizon" style="width:auto;padding:2px 5px;font-size:11px">
@@ -265,6 +380,249 @@ table.ev .rm:hover{color:var(--bad)}
       </section>
     </div>
   </div>
+</div>
+
+<!-- ======================= EXCHANGE TRADED ======================= -->
+<div class="wrap hide" id="p-listed">
+  <div class="toolbar">
+    <button id="etoadd">+ Panel</button>
+    <button class="ghost" id="etodup">Duplicate last</button>
+    <button class="ghost" id="etofitall">Fit all</button>
+    <label style="margin:0;display:flex;align-items:center;gap:6px;width:auto;color:var(--muted)">
+      <input type="checkbox" id="etoauto" checked style="width:auto"> auto-fit</label>
+    <button class="danger" id="etoclear" style="width:auto">Clear all</button>
+    <div class="grow"></div>
+    <div class="meta" id="etostatus"></div>
+  </div>
+  <div class="eto" id="etolist"></div>
+  <div class="hint">
+    One panel is one <b>expiry / underlying</b> combination. Paste the exchange's strike and
+    volatility columns into the box — tabs, commas or spaces, with or without a header row,
+    percent or decimal, bid/ask or mid. Every column choice the parser makes is reported under
+    the table, and every line it cannot use is listed with the reason.
+    <br><b>Futures price</b> is the forward the curve is fitted around, in the contract's own
+    quoted units; it is not taken from the FX feed, because a listed future is its own market.
+    <b>Expiry</b> carries a time of day — use the exchange's cut, not midnight, or the curve is
+    fitted at the wrong maturity.
+    <br>The fit is a vega-weighted least squares over three SABR parameters at fixed
+    <code>beta</code>, swept over the whole admissible box before polishing, so it does not
+    depend on a starting guess. With exactly three strikes it is an exact interpolation and the
+    zero residuals mean nothing — the panel says so.
+    <br><b>Comparison.</b> When the contract maps to a pair in the book, the marked surface is
+    read at the <i>same physical strikes</i>. For a contract quoted the other way up
+    (<code>6J</code> is USD per JPY) strikes are reciprocated and the wings swap sides;
+    volatility itself is unchanged by that inversion. The delta points in the right-hand table
+    are <i>the book's</i> delta strikes with both curves read off them, so the risk reversals
+    below them are a slope comparison at fixed strikes, not two quotes in two conventions.
+    <br><b>Caveats this model does not correct for:</b> exchange settlement volatilities on
+    American-style options are not European volatilities; a future is not a forward once rates
+    move with the underlying; and the exchange's settlement time is rarely an FX cut.
+  </div>
+</div>
+
+<!-- =========================== ANALYSIS =========================== -->
+<div class="wrap hide" id="p-analysis">
+  <div class="anbar">
+    <div class="f"><label>Pair</label><select id="anpair" style="width:120px"></select></div>
+    <div class="f"><label>Cut</label><select id="ancut" style="width:74px"></select></div>
+    <div class="f"><label>Interp</label><select id="anmethod" style="width:94px"></select></div>
+    <div class="f"><label>Roll target</label><select id="antarget" style="width:170px"></select></div>
+    <div class="f"><label>Horizon (days)</label><input id="anhorizon" value="30" style="width:96px"></div>
+    <div class="f"><label>Lookback (days)</label><input id="anlookback" value="match" style="width:104px"></div>
+    <div class="f"><label>Annualise realized</label><select id="anann" style="width:104px"></select></div>
+    <label style="margin:0;display:flex;align-items:center;gap:6px;width:auto;color:var(--muted);font-size:11px">
+      <input type="checkbox" id="annoise" checked style="width:auto"> triangle noise floor</label>
+    <div class="acts">
+      <button id="anrun">Run</button>
+      <label style="margin:0;display:flex;align-items:center;gap:6px;width:auto;color:var(--muted);font-size:11px">
+        <input type="checkbox" id="anauto" checked style="width:auto"> auto</label>
+    </div>
+    <div class="grow"></div>
+    <div class="f"><label>Historical workbook</label>
+      <input id="anhist" placeholder="vol_history.xlsx — or files/history_sample.xlsx" style="width:260px"></div>
+    <div class="acts"><button class="ghost" id="anload">Load history</button></div>
+  </div>
+  <div class="meta" id="anstatus" style="margin-bottom:10px"></div>
+
+  <div class="ancards">
+    <section class="card"><h2>Carry and rolldown <small id="ancarryhead"></small></h2>
+      <div id="ancarry"></div></section>
+    <section class="card"><h2>Fair value <small>at-the-money implied against realized plus the roll</small></h2>
+      <div id="anfair"></div></section>
+    <section class="card"><h2>Realized against implied <small id="anrealhead"></small></h2>
+      <div id="anreal"></div></section>
+    <section class="card"><h2>Cross triangle <small id="antrihead"></small></h2>
+      <div id="antri"></div></section>
+    <section class="card"><h2>Curve comparison <small id="cmphead"></small></h2>
+      <div class="toolbar">
+        <button id="cmpadd">+ Curve</button>
+        <button class="ghost" id="cmpdup">Duplicate last</button>
+        <button class="ghost" id="cmprun">Compare</button>
+        <div class="f"><label>Show</label><select id="cmpfield" style="width:150px"></select></div>
+        <label style="margin:0;display:flex;align-items:center;gap:6px;width:auto;color:var(--muted);font-size:11px">
+          <input type="checkbox" id="cmpauto" checked style="width:auto"> auto</label>
+        <button class="danger" id="cmpclear" style="width:auto">Clear all</button>
+        <div class="grow"></div>
+        <div class="meta" id="cmpstatus"></div>
+      </div>
+      <div id="cmplist"></div>
+      <div id="cmpout"></div></section>
+  </div>
+
+  <div class="hint">
+    <b>Carry and rolldown.</b> Every tenor is revalued after the horizon at a <i>fixed absolute
+    strike</i> — the option you own keeps its strike while both the maturity and the forward move
+    under it. The roll splits into the slide along the term structure (same moneyness, shorter
+    maturity) and the slide across the smile (same maturity, forward moved), so the forward
+    curve's contribution is separable rather than buried. <b>/atm</b> is the roll per year as a
+    fraction of the at-the-money level. Without a forward feed for the pair the strike is held in
+    moneyness instead of price, the smile slide is zero by construction, and the row says so.
+    <br><b>Fair value.</b> Hold the <code>T</code> at-the-money option for the horizon
+    <code>h</code> and delta hedge it. The mark slides by <code>roll</code>, worth
+    <code>vega(T−h)·roll</code>; the gamma against theta earns roughly <code>h/T</code> of the
+    option's life at <code>σ_realized − σ_implied</code>. Setting the two to cancel gives
+    <code>fair = realized + roll·(T/h)·vega(T−h)/vega(T)</code>, and <b>richness</b> is the implied
+    less that. Positive means the market is charging more than realized volatility and the carry
+    together justify. The roll here is always the at-the-money roll, whatever the carry table above
+    is displaying.
+    <br><b>Realized against implied.</b> Realized volatility is annualised by the same
+    <i>volatility time</i> the model integrates variance with — weekends near zero, holidays
+    reduced, the intraday profile not flat. Calendar and 252-day annualisations are shown beside it
+    because they answer a different question and are typically a tenth lower. Skew and kurtosis need
+    the same care in the other direction: the realized figures are daily, the implied ones are for
+    the whole return to expiry, so the daily numbers are projected onto each tenor
+    (<code>skew/√n</code>, <code>kurtosis/n</code>) before being compared. Both are shown, with
+    standard errors — a skew inside one standard error of zero is not a skew.
+    <br><b>Cross triangle.</b> The at-the-money row has an exact answer and gets one: the variance
+    triangle the book itself is built on. The risk reversal and butterfly have no exact answer from
+    two marginals and a correlation, so each leg's whole marked density is read off its smile, the
+    two are tied together with a Gaussian copula at the marked correlation, and the cross's smile is
+    integrated out. That assumes a dependence structure the market does not quote and ignores the
+    change of measure between the legs' domestic currencies; the <b>noise floor</b> is the same
+    machinery run on each leg alone, where it should reproduce the input exactly. A difference
+    smaller than the noise is not a difference.
+    <br><b>Curve comparison.</b> Any number of curves side by side, differenced against whichever
+    one is marked <b>base</b>. A curve is the <i>fitted surface</i> at the cut and interpolation
+    chosen above, the <i>workbook quotes</i> that went into it, one dated row of the historical
+    workbook, or a curve pasted in — one line per tenor,
+    <code>1M 8.20 -0.35 0.22 -0.60 0.75</code>, with the columns in the order of the
+    <b>Show</b> menu and anything after the first optional. A pasted curve's unit is decided once
+    from its at-the-money column and <i>refused</i> if the levels straddle 1.0, because 0.35 is
+    an ordinary risk reversal in points and an ordinary at-the-money in decimals.
+    <b>Dates</b> take <code>latest</code>, a date, or an offset back from the last row
+    (<code>-30d</code>, <code>-3m</code>); the row used is the last one <i>on or before</i> what
+    was asked for, and the curve says which day it landed on. A tenor a source does not quote is
+    blank rather than absent, and a curve that could not be built keeps its place and carries the
+    reason. One caution the panel repeats: a historical sheet's butterfly column is whatever that
+    desk quoted, while the book's is a market strangle.
+  </div>
+</div>
+
+<!-- ========================= MARKET MAKER ========================= -->
+<div class="wrap hide" id="p-mm">
+  <div class="mmbar">
+    <div class="f"><label>Pair</label><select id="mmpair" style="width:118px"></select></div>
+    <div class="f"><label>Cut</label><select id="mmcut" style="width:72px"></select></div>
+    <div class="f"><label>Interp</label><select id="mmmethod" style="width:92px"></select></div>
+    <div class="f"><label>Target ATM curve</label><select id="mmsource" style="width:150px"></select></div>
+    <div class="f"><label>&ldquo;fly&rdquo; means</label><select id="mmfly" style="width:120px"></select></div>
+    <div class="f"><label>Vol unit</label><select id="mmunit" style="width:86px"></select></div>
+    <div class="f"><label>Fallback width</label><input id="mmfallback" placeholder="none" style="width:96px"></div>
+    <div class="f"><label>Axe scale</label><input id="mmscale" placeholder="off" style="width:82px"></div>
+    <div class="f"><label>Fair wt</label><input id="mmfair" value="0.25" style="width:62px"></div>
+    <div class="f"><label>Axe wt</label><input id="mmaxe" value="0.5" style="width:62px"></div>
+    <div class="f"><label>Skew cap</label><input id="mmcap" value="1" style="width:66px"></div>
+    <div class="f"><label>FV horizon (d)</label><input id="mmhorizon" value="30" style="width:88px"></div>
+    <div class="acts">
+      <button id="mmrun">Fit and quote</button>
+      <label style="margin:0;display:flex;align-items:center;gap:6px;width:auto;color:var(--muted);font-size:11px">
+        <input type="checkbox" id="mmauto" style="width:auto"> auto</label>
+      <label style="margin:0;display:flex;align-items:center;gap:6px;width:auto;color:var(--muted);font-size:11px">
+        <input type="checkbox" id="mmapply" style="width:auto"> keep the marks</label>
+    </div>
+    <div class="grow"></div>
+    <div class="meta" id="mmstatus"></div>
+  </div>
+
+  <div class="mmgrid">
+    <div class="mmleft">
+      <section class="card"><h2>The market <small>paste the run, one quote a line</small></h2>
+        <textarea id="mmtext" spellcheck="false" style="height:250px"
+          placeholder="1M ATM 8.20/8.60 in 100mm vega&#10;3M 25d RR 0.35/0.55 eur call over&#10;2M 25d fly 0.20/0.28&#10;6M 1.1000 call 7.90/8.40&#10;1M/3M ATM spread 0.30/0.55"></textarea>
+        <div class="msg" id="mmparse"></div></section>
+
+      <section class="card hide" id="mmtargetcard">
+        <h2>Target at-the-money curve <small>tenor and level, one a line</small></h2>
+        <textarea id="mmtarget" spellcheck="false" style="height:132px"
+          placeholder="1W 8.10&#10;1M 8.35&#10;3M 8.60&#10;1Y 9.05"></textarea></section>
+
+      <section class="card"><h2>Your vega profile <small>optional; a long position shades the mid down</small></h2>
+        <textarea id="mmvega" spellcheck="false" style="height:110px"
+          placeholder="1M  250&#10;3M -120&#10;1Y  400"></textarea>
+        <div class="msg" id="mmaxemsg"></div></section>
+
+      <section class="card"><h2>What the fit may move</h2>
+        <label>At-the-money curve</label><div class="mmknob" id="mmfree"></div>
+        <label>Smile parameters</label><div class="mmknob" id="mmsmilefree"></div>
+        <div class="hint" id="mmknobhint"></div></section>
+    </div>
+
+    <div class="mmright">
+      <section class="card"><h2>Quote sheet <small id="mmsheethead"></small></h2>
+        <div id="mmsheet"></div></section>
+      <section class="card"><h2>At-the-money curve <small id="mmcurvehead"></small></h2>
+        <div id="mmcurve"></div></section>
+      <section class="card"><h2>Wings <small id="mmwinghead"></small></h2>
+        <div id="mmwings"></div></section>
+      <section class="card"><h2>Knowledge bank <small id="mmbankhead"></small></h2>
+        <div class="toolbar">
+          <button id="mmrule">+ Rule</button>
+          <button class="ghost" id="mmlearn">Learn widths from this paste</button>
+          <button id="mmsave">Save bank</button>
+          <div class="grow"></div>
+          <div class="meta" id="mmbankmsg"></div>
+        </div>
+        <div id="mmbank"></div></section>
+    </div>
+  </div>
+
+  <div class="hint">
+    <b>What this screen does, in the order it does it.</b> The at-the-money curve is fitted to a
+    target term structure &mdash; the tenors pinned on the marking screen, a pasted curve, or the
+    mid of the at-the-money quotes in the paste. Then the four smile parameters are moved by an
+    additive shift across the whole curve until the quoted wings are satisfied. Then the mid is
+    shaded and a width is put round it. Each stage reports separately, so one that cannot run
+    leaves the others alone.
+    <br><b>The wing fit is a hinge, not a least squares.</b> There is no penalty anywhere inside a
+    quoted bid and offer &mdash; the brief is that our mid falls <i>inside</i> the market, not on
+    top of somebody's mid. Because a hinge has a flat bottom, a small pull toward the quoted mids
+    picks one answer out of the many that satisfy the market; it is small enough never to override
+    an actual violation. The shift is <i>curve-wide</i> on purpose: a handful of quotes does not
+    determine a shape, and a shift that cannot reach a tenor says so in its residual instead of
+    bending the surface to one quote.
+    <br><b>Conventions the paste decides once.</b> The volatility unit comes from the whole paste's
+    at-the-money and outright lines, never line by line &mdash; a small risk reversal read on its
+    own looks exactly like a decimal at-the-money. A risk reversal with a direction word
+    (<code>EUR call over</code>) is resolved against the pair; one without is read in the book's
+    own convention, and the paste says so. An unqualified <code>fly</code> means whichever
+    butterfly the selector above says, and the market strangle is the one the workbook marks.
+    <br><b>Shading the mid.</b> A rich market and a long vega position both point the same way:
+    both are reasons to want to sell, and you attract a seller's trade by shading the price down.
+    Both are capped as a fraction of the width, so an axe can lean the price inside the market but
+    cannot walk it out of the market on its own. Neither is applied to a risk reversal or a
+    butterfly &mdash; a break-even against realized volatility and a vega position are statements
+    about the <i>level</i>, and neither says where the skew belongs. Those rows say so.
+    <br><b>The knowledge bank</b> is the desk's own file, kept beside the workbook. A
+    <code>spread</code> sets the width, a <code>floor</code> is a minimum width, a
+    <code>shift</code> moves the mid, and a <code>note</code> is prose that is shown beside the
+    quote and <i>never</i> applied. The narrowest matching rule wins and every row names the rule
+    that set it. There is no built-in default: a quote no rule matches gets no bid and no offer
+    unless a fallback width is typed above, and says which it was.
+    <br><b>Nothing here touches the workbook.</b> The fit reports and then puts the marks back.
+    Tick <b>keep the marks</b> to leave them on the loaded book &mdash; still in memory only, and
+    a reload discards them.
+  </div>
+</div>
 
 <script>
 const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
@@ -275,6 +633,13 @@ const qs=o=>new URLSearchParams(o).toString();
 const esc=s=>String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');
 const num=(v,d=4)=>(v==null||!isFinite(v))?'—':v.toLocaleString(undefined,{minimumFractionDigits:d,maximumFractionDigits:d});
 let STATE={}, PANEL='pricing', TAB='smile', LEGS=[], RESULT=null, MARKS=null;
+/* Which screens this build has.  The server decides -- a build can be made
+   without a tab (build_exe.py --exclude-tab) and then its routes are refused,
+   so the page must not show it, boot it, or leave it as the open tab. */
+const PANELROOT={pricing:'#p-pricing',marking:'#p-marking',listed:'#p-listed',
+                 analysis:'#p-analysis',mm:'#p-mm'};
+let SCREENS=Object.keys(PANELROOT);
+const has=n=>SCREENS.indexOf(n)>=0;
 
 /* ------------------------------ charts ------------------------------ */
 function chart(el,series,opts={}){
@@ -368,16 +733,11 @@ function renderGrid(){
      Press <b>+ Option</b> to add a column.</td></tr>`; $('#ptotals').innerHTML=''; return;}
   let h='<thead><tr><th class="rh">Option</th>';
   LEGS.forEach((L,i)=>{h+=`<th class="colhead"><div><span>${esc(L.label||('#'+(i+1)))}</span>
-      <span class="x" data-del="${i}" title="remove">✕</span></div></th>`;});
+      <span class="x" data-del="${i}" title="remove this option">✕</span></div></th>`;});
   h+='</tr></thead><tbody>';
   h+=`<tr class="sec"><td colspan="${LEGS.length+1}">Inputs</td></tr>`;
   IN.forEach(([k,lab,kind])=>{h+=`<tr><td class="rh">${lab}</td>`;
     LEGS.forEach((L,i)=>{h+=`<td class="cell">${ctl(kind,i,k,L[k]??'')}</td>`;});h+='</tr>';});
-  h+=`<tr><td class="rh">Remove</td>`;
-  LEGS.forEach((L,i)=>{h+=`<td class="cell" style="text-align:center">
-     <button class="danger rmcol" data-del="${i}" style="width:auto;padding:2px 12px;font-size:11px"
-             title="remove this option">Remove</button></td>`;});
-  h+='</tr>';
   h+=`<tr class="sec"><td colspan="${LEGS.length+1}">Results</td></tr>`;
   const res=RESULT?RESULT.legs:[];
   OUT.forEach(([k,lab,fmt,cls])=>{h+=`<tr><td class="rh">${lab}</td>`;
@@ -628,43 +988,1050 @@ $('#eapply').onclick=async()=>{
   }catch(e){m.className='msg bad';m.textContent=e.message}
 };
 
+
+/* ====================== EXCHANGE TRADED OPTIONS ====================== */
+/* One panel is one expiry/underlying combination.  The server keeps no
+   panel state -- the whole panel is posted on every fit -- so the list
+   lives here and in localStorage, and a fit is reproducible from the CLI. */
+let PANELS=[], PRES={}, PSEQ=1, ETIMER={};
+
+function savePanels(){try{localStorage.setItem('volkit.listed',JSON.stringify(PANELS))}catch(e){}}
+function loadPanels(){
+  try{const r=localStorage.getItem('volkit.listed');if(r)PANELS=JSON.parse(r)}catch(e){PANELS=[]}
+  if(!Array.isArray(PANELS))PANELS=[];
+  PANELS.forEach(p=>{p.id='p'+(PSEQ++)});
+}
+function defaultPanel(from){
+  const d=new Date((STATE.valuationMs||Date.now())+90*864e5);
+  const base={label:'',underlying:'6E',pair:'',invert:'',scale:'',
+    expiry:d.toISOString().slice(0,16),forward:'',beta:'1',weighting:'vega',
+    cut:'NY',method:(STATE.methods||['SVI'])[0],vol_unit:'auto',
+    strike_column:'',vol_column:'',text:''};
+  const p=Object.assign(base,from||{});
+  p.id='p'+(PSEQ++);
+  return p;
+}
+/* strike axes run from 0.0068 to 145 depending on the contract, so decimals
+   are chosen from the magnitude rather than fixed. */
+function kdp(x){x=Math.abs(x)||1;return Math.min(8,Math.max(2,5-Math.floor(Math.log10(x))))}
+const sgn=(v,d)=>(v==null||!isFinite(v))?'—':(v>=0?'+':'')+v.toFixed(d);
+const cls=v=>(v==null||!isFinite(v))?'':(v>0?' class="pos"':(v<0?' class="neg"':''));
+
+const EF=[
+ ['label','Label','text',132],
+ ['underlying','Contract','contract',210],
+ ['pair','FX pair','pair',118],
+ ['invert','Strikes','invert',122],
+ ['scale','Strike scale','text',94],
+ ['expiry','Expiry (UTC)','datetime',180],
+ ['forward','Futures price','text',108],
+ ['beta','Beta','text',58],
+ ['weighting','Weighting','weighting',92],
+ ['cut','Book cut','cut',74],
+ ['method','Book interp','method',94],
+ ['vol_unit','Vol unit','volunit',88],
+ ['strike_column','K col','text',56],
+ ['vol_column','Vol col','text',56],
+];
+function optlist(pairs,cur){
+  return pairs.map(o=>{const v=String(o[0]);
+    return '<option value="'+esc(v)+'"'+(v===String(cur==null?'':cur)?' selected':'')+'>'+esc(o[1])+'</option>'}).join('');
+}
+function efield(pan,i,f){
+  const k=f[0],lab=f[1],kind=f[2],w=f[3];
+  const a='data-p="'+i+'" data-k="'+k+'" style="width:'+w+'px"';
+  const cur=pan[k]==null?'':pan[k];
+  let el;
+  if(kind==='contract'){
+    const us=(STATE.listed&&STATE.listed.underlyings)||[{code:'CUSTOM',name:'custom'}];
+    el='<select '+a+'>'+optlist(us.map(u=>[u.code,u.code==='CUSTOM'?'custom (pick a pair)':u.code+' · '+u.name]),cur)+'</select>';
+  }else if(kind==='pair'){
+    el='<select '+a+'>'+optlist([['','(from contract)']].concat((STATE.pairs||[]).map(x=>[x,x])),cur)+'</select>';
+  }else if(kind==='invert'){
+    el='<select '+a+'>'+optlist([['','(from contract)'],['false','as quoted'],['true','reciprocal']],cur)+'</select>';
+  }else if(kind==='weighting'){
+    el='<select '+a+'>'+optlist(((STATE.listed&&STATE.listed.weightings)||['vega']).map(x=>[x,x]),cur)+'</select>';
+  }else if(kind==='cut'){
+    el='<select '+a+'>'+optlist((STATE.cuts||['NY']).map(x=>[x,x]),cur)+'</select>';
+  }else if(kind==='method'){
+    el='<select '+a+'>'+optlist((STATE.methods||['SVI']).map(x=>[x,x]),cur)+'</select>';
+  }else if(kind==='volunit'){
+    el='<select '+a+'>'+optlist([['auto','auto'],['percent','percent'],['decimal','decimal']],cur)+'</select>';
+  }else if(kind==='datetime'){
+    el='<input type="datetime-local" '+a+' value="'+esc(cur)+'">';
+  }else{
+    el='<input '+a+' value="'+esc(cur)+'">';
+  }
+  return '<div class="f"><label>'+esc(lab)+'</label>'+el+'</div>';
+}
+function panelShell(pan,i){
+  return '<section class="card" data-panel="'+i+'">'+
+    '<div class="etohead">'+EF.map(f=>efield(pan,i,f)).join('')+
+      '<div class="acts">'+
+        '<button data-fit="'+i+'">Fit</button>'+
+        '<button class="ghost" data-copy="'+i+'">Duplicate</button>'+
+        '<button class="danger" data-del="'+i+'">Remove</button>'+
+      '</div></div>'+
+    '<div class="etobody">'+
+      '<div><label>Market data — strike and volatility, as pasted</label>'+
+        '<textarea data-p="'+i+'" data-k="text" spellcheck="false" '+
+        'placeholder="Strike\tIV\n1.0800\t7.42\n1.0900\t7.15\n1.1000\t7.31">'+esc(pan.text||'')+'</textarea></div>'+
+      '<div class="etoout"></div>'+
+    '</div>'+
+    '<div class="etotables"></div>'+
+    '<div class="etomsg"></div></section>';
+}
+function renderPanels(){
+  const host=$('#etolist');
+  if(!PANELS.length){host.innerHTML='<div class="etoempty">No panels yet — <b>+ Panel</b> starts one.</div>';return}
+  host.innerHTML=PANELS.map(panelShell).join('');
+  PANELS.forEach((pan,i)=>paintPanel(i));
+}
+function panelNode(i){return $('#etolist').querySelector('[data-panel="'+i+'"]')}
+
+function paintPanel(i){
+  const node=panelNode(i); if(!node)return;
+  const out=node.querySelector('.etoout'), tab=node.querySelector('.etotables'),
+        msg=node.querySelector('.etomsg'), st=PRES[PANELS[i].id];
+  if(!st){out.innerHTML='<div class="out"><div class="v">—</div><div class="d">not fitted yet</div></div>';
+    tab.innerHTML='';msg.innerHTML='';return}
+  if(st.busy){out.innerHTML='<div class="out"><div class="v"><span class="spin"></span></div><div class="d">fitting…</div></div>';
+    return}
+  if(!st.ok){out.innerHTML='<div class="out err"><div class="v">'+esc(st.msg)+'</div></div>';
+    tab.innerHTML='';msg.innerHTML='';return}
+  const d=st.data, f=d.fit, c=d.comparison, dp=kdp(d.forward);
+
+  out.innerHTML='<div class="etochart"></div>'+
+    '<div class="legend"><span><i style="background:'+C1+'"></i>SABR fit</span>'+
+    '<span><i style="background:'+C2+'"></i>pasted market</span>'+
+    (c?'<span><i style="background:'+C3+'"></i>'+esc(c.pair)+' vol mark</span>':'')+'</div>'+
+    '<div class="etostat">'+
+      '<span>vol at forward <b>'+num(f.atm_vol,4)+'%</b></span>'+
+      (c?'<span>marked ATM <b>'+num(c.book_atm,4)+'%</b></span>':'')+
+      '<span>weighted RMSE <b>'+num(f.rmse,4)+'</b> vol pts</span>'+
+      '<span>worst <b>'+sgn(f.max_error,4)+'</b> at '+num(f.max_error_strike,dp)+'</span>'+
+      '<span>alpha <b>'+num(f.alpha,6)+'</b></span>'+
+      '<span>rho <b>'+sgn(f.rho,4)+'</b></span>'+
+      '<span>nu&#8730;t <b>'+num(f.log_volvol,4)+'</b></span>'+
+      '<span>beta <b>'+num(f.beta,2)+'</b></span>'+
+      '<span>'+d.n_quotes+' quotes, '+f.dof+' d.o.f.</span>'+
+      '<span>'+num(d.days,2)+' days</span>'+
+    '</div>';
+
+  const series=[{color:C1,pts:d.curve.strikes.map((k,j)=>[k,d.curve.fit[j]])}];
+  if(d.curve.book)series.push({color:C3,dash:true,w:1.6,pts:d.curve.strikes.map((k,j)=>[k,d.curve.book[j]])});
+  series.push({type:'dot',color:C2,pts:d.rows.map(r=>[r.strike,r.market_vol])});
+  chart(out.querySelector('.etochart'),series,{xfmt:v=>v.toFixed(dp)});
+
+  let q='<div><h2 style="margin:0 0 8px">Quotes vs fit'+(c?' vs mark':'')+'</h2><div class="scroll"><table><thead><tr>'+
+    '<th>Strike</th><th>K/F</th><th>Mkt %</th><th>Fit %</th><th>Fit−mkt</th>'+
+    (c?'<th>Mark %</th><th>Fit−mark</th>':'')+'</tr></thead><tbody>';
+  d.rows.forEach(r=>{
+    q+='<tr><td>'+num(r.strike,dp)+'</td><td>'+num(r.moneyness,4)+'</td>'+
+       '<td>'+num(r.market_vol,4)+'</td><td>'+num(r.fit_vol,4)+'</td>'+
+       '<td'+cls(r.fit_diff)+'>'+sgn(r.fit_diff,4)+'</td>'+
+       (c?'<td>'+num(r.book_vol,4)+'</td><td'+cls(r.book_diff)+'>'+sgn(r.book_diff,4)+'</td>':'')+'</tr>';});
+  q+='</tbody></table></div></div>';
+
+  let a='';
+  if(c){
+    a='<div><h2 style="margin:0 0 8px">At the '+esc(c.pair)+' delta strikes</h2><table><thead><tr>'+
+      '<th>Point</th><th>Listed K</th><th>Mark %</th><th>Listed %</th><th>Diff</th></tr></thead><tbody>';
+    c.anchors.forEach(x=>{a+='<tr><td>'+esc(x.label)+'</td><td>'+num(x.listed_strike,dp)+'</td>'+
+      '<td>'+num(x.book_vol,4)+'</td><td>'+num(x.fit_vol,4)+'</td>'+
+      '<td'+cls(x.diff)+'>'+sgn(x.diff,4)+'</td></tr>';});
+    a+='<tr class="sep"><td colspan="5">read off both curves at those strikes</td></tr>';
+    ['rr25','fly25','rr10','fly10'].forEach(k=>{
+      if(c.rr_book[k]==null)return;
+      const dd=c.rr_listed[k]-c.rr_book[k];
+      a+='<tr><td>'+k+'</td><td></td><td>'+num(c.rr_book[k],4)+'</td><td>'+num(c.rr_listed[k],4)+
+         '</td><td'+cls(dd)+'>'+sgn(dd,4)+'</td></tr>';});
+    a+='<tr><td>ATM</td><td>'+num(d.forward,dp)+'</td><td>'+num(c.book_atm,4)+'</td><td>'+
+       num(f.atm_vol,4)+'</td><td'+cls(c.atm_diff)+'>'+sgn(c.atm_diff,4)+'</td></tr>';
+    a+='</tbody></table><div class="etonote">The mark column is the marked '+esc(c.pair)+
+       ' surface (cut '+esc(c.cut)+', '+esc(c.method)+') at forward '+num(c.forward_fx,kdp(c.forward_fx))+
+       '. Labels follow the FX pair\'s convention'+(d.underlying.invert?
+       ', so a call there is a put on the listed contract':'')+'.</div></div>';
+  }else{
+    a='<div class="etonote">This contract is not mapped to a pair in the book, so there is '+
+      'nothing to compare against. Pick an FX pair to turn the comparison on.</div>';
+  }
+  tab.innerHTML=q+a;
+
+  msg.innerHTML=(d.warnings||[]).map(w=>'<div class="etowarn">! '+esc(w)+'</div>').join('')+
+    (d.notes||[]).map(n=>'<div class="etonote">· '+esc(n)+'</div>').join('')+
+    (f.converged?'':'<div class="etowarn">! '+esc(f.message)+'</div>');
+}
+
+function panelPayload(pan){
+  const out={};
+  EF.forEach(f=>{out[f[0]]=pan[f[0]]});
+  out.text=pan.text||'';
+  return out;
+}
+async function fitPanel(i){
+  const pan=PANELS[i]; if(!pan)return;
+  if(!(pan.text||'').trim()){PRES[pan.id]={ok:false,msg:'paste a strike/volatility table first'};paintPanel(i);return}
+  PRES[pan.id]={busy:true};paintPanel(i);
+  try{
+    PRES[pan.id]={ok:true,data:await post('/api/listed/fit',panelPayload(pan))};
+  }catch(e){PRES[pan.id]={ok:false,msg:e.message}}
+  paintPanel(i);
+}
+async function fitAll(){
+  $('#etostatus').innerHTML='<span class="spin"></span> fitting '+PANELS.length+'…';
+  for(let i=0;i<PANELS.length;i++)await fitPanel(i);
+  const bad=PANELS.filter(p=>PRES[p.id]&&!PRES[p.id].ok).length;
+  $('#etostatus').textContent=PANELS.length?
+    (bad?bad+' of '+PANELS.length+' panel(s) failed':PANELS.length+' panel(s) fitted'):'';
+}
+function scheduleFit(i){
+  if(!$('#etoauto').checked)return;
+  const id=PANELS[i].id;                 /* per panel: editing one must not cancel another */
+  clearTimeout(ETIMER[id]);
+  ETIMER[id]=setTimeout(()=>fitPanel(i),520);}
+
+$('#etolist').addEventListener('input',e=>{
+  const t=e.target; if(t.dataset.p==null||t.dataset.k==null)return;
+  if(t.tagName==='SELECT')return;        /* change handles those, or it fits twice */
+  PANELS[+t.dataset.p][t.dataset.k]=t.value; savePanels(); scheduleFit(+t.dataset.p);});
+$('#etolist').addEventListener('change',e=>{
+  const t=e.target; if(t.dataset.p==null||t.dataset.k==null)return;
+  PANELS[+t.dataset.p][t.dataset.k]=t.value; savePanels();
+  if(t.dataset.k!=='text')fitPanel(+t.dataset.p);});
+$('#etolist').addEventListener('click',e=>{
+  const b=e.target.closest('button'); if(!b)return;
+  if(b.dataset.fit!=null){fitPanel(+b.dataset.fit);return}
+  if(b.dataset.copy!=null){PANELS.push(defaultPanel(PANELS[+b.dataset.copy]));savePanels();renderPanels();
+    fitPanel(PANELS.length-1);return}
+  if(b.dataset.del!=null){const g=PANELS.splice(+b.dataset.del,1)[0];delete PRES[g.id];
+    savePanels();renderPanels();}});
+
+$('#etoadd').onclick=()=>{PANELS.push(defaultPanel());savePanels();renderPanels()};
+$('#etodup').onclick=()=>{PANELS.push(defaultPanel(PANELS[PANELS.length-1]));savePanels();renderPanels();
+  if(PANELS.length>1)fitPanel(PANELS.length-1)};
+$('#etofitall').onclick=fitAll;
+$('#etoclear').onclick=()=>{PANELS=[];PRES={};savePanels();renderPanels();$('#etostatus').textContent=''};
+
+
+/* ============================== ANALYSIS ============================== */
+/* Four sections, each built and reported independently on the server, so a
+   missing forward feed empties one card and leaves the rest alone. */
+let ANA=null, _ant=null;
+const AKEYS=['atm','rr25','fly25','rr10','fly10'];
+
+function anq(){return{
+  pair:$('#anpair').value, cut:$('#ancut').value, method:$('#anmethod').value,
+  target:$('#antarget').value, horizon_days:$('#anhorizon').value,
+  lookback_days:$('#anlookback').value, annualisation:$('#anann').value,
+  noise:$('#annoise').checked?'1':'0'};}
+function saveAn(){try{localStorage.setItem('volkit.analysis',JSON.stringify(anq()))}catch(e){}}
+function loadAn(){
+  let v=null; try{v=JSON.parse(localStorage.getItem('volkit.analysis')||'null')}catch(e){}
+  if(!v)return;
+  const set=(id,val)=>{const el=$(id); if(el&&val!=null&&val!=='')el.value=val};
+  set('#anpair',v.pair); set('#ancut',v.cut); set('#anmethod',v.method); set('#antarget',v.target);
+  set('#anhorizon',v.horizon_days); set('#anlookback',v.lookback_days); set('#anann',v.annualisation);
+  if(v.noise!=null)$('#annoise').checked=v.noise!=='0';
+}
+/* the tenor axis is categorical; the chart takes numbers, so index maps to label */
+function anTenorFmt(list){return v=>{const i=Math.round(v);return (i>=0&&i<list.length)?list[i]:''}}
+function tblHtml(head,rows,cls){
+  return '<table'+(cls?' class="'+cls+'"':'')+'><thead><tr>'+head+'</tr></thead><tbody>'+
+    rows.join('')+'</tbody></table>';
+}
+const anPct=(v,d=3)=>(v==null||!isFinite(v))?'—':(v*100).toFixed(d);
+const anSgn=(v,d=3)=>(v==null||!isFinite(v))?'—':((v*100>=0?'+':'')+(v*100).toFixed(d));
+const anRaw=(v,d=3)=>(v==null||!isFinite(v))?'—':((v>=0?'+':'')+v.toFixed(d));
+
+function renderCarry(d){
+  const host=$('#ancarry'), rows=d.carry||[];
+  $('#ancarryhead').textContent=d.target_label+' · '+d.horizon_days+'-day horizon'+
+    (d.has_feed?'':' · no forward feed for this pair');
+  const live=rows.filter(r=>r.expiry);
+  if(!live.length){host.innerHTML='<div class="annone">Nothing could be rolled — '+
+    esc((rows[0]&&rows[0].warnings[0])||'no tenors')+'</div>';return}
+  const names=live.map(r=>r.tenor);
+  host.innerHTML='<div class="antop"><div><div class="anchart"></div>'+
+    '<div class="legend"><span><i style="background:'+C1+'"></i>level now</span>'+
+    '<span><i style="background:'+C3+'"></i>after the roll</span>'+
+    '<span><i style="background:'+C2+'"></i>roll per year (right)</span></div></div><div>'+
+    tblHtml('<th>Tenor</th><th>Forward</th><th>Strike</th><th>Level %</th><th>Rolled %</th>'+
+      '<th>Roll</th><th>Term</th><th>Smile</th><th>Per yr</th><th>/atm</th>'+
+      (live[0].pnl==null?'':'<th>P&amp;L (bp)</th>'),
+      live.map(r=>'<tr><td>'+esc(r.tenor)+'</td><td>'+num(r.forward,5)+'</td><td>'+
+        (r.strike==null?'—':num(r.strike,5))+'</td><td>'+anPct(r.level)+'</td><td>'+
+        anPct(r.level_rolled)+'</td><td'+cls(r.roll)+'>'+anSgn(r.roll)+'</td><td'+cls(r.roll_term)+
+        '>'+anSgn(r.roll_term)+'</td><td'+cls(r.roll_smile)+'>'+anSgn(r.roll_smile)+'</td><td'+
+        cls(r.roll_annual)+'>'+anSgn(r.roll_annual,2)+'</td><td'+cls(r.ratio_atm)+'>'+
+        anRaw(r.ratio_atm)+'</td>'+(r.pnl==null?'':'<td'+cls(r.pnl)+'>'+anSgn(r.pnl,2)+'</td>')+
+        '</tr>'))+'</div></div>'+
+    rows.filter(r=>!r.expiry).map(r=>'<div class="etonote">· '+esc(r.warnings[0])+'</div>').join('')+
+    [...new Set([].concat.apply([],live.map(r=>r.warnings)))].map(w=>
+      '<div class="etowarn">! '+esc(w)+'</div>').join('');
+  chart(host.querySelector('.anchart'),[
+    {color:C1,pts:live.map((r,i)=>[i,r.level*100])},
+    {color:C3,dash:true,pts:live.map((r,i)=>[i,r.level_rolled*100])},
+    {type:'bar',color:C2,axis:'r',pts:live.map((r,i)=>[i,r.roll_annual*100])},
+  ],{xfmt:anTenorFmt(names),ldp:2,rdp:2});
+}
+
+function renderFair(d){
+  const host=$('#anfair'), rows=(d.fair||[]).filter(r=>r.implied!=null);
+  if(!rows.length){host.innerHTML='<div class="annone">No tenor could be rolled over this horizon.</div>';return}
+  const haveR=rows.some(r=>r.realized!=null);
+  const names=rows.map(r=>r.tenor);
+  host.innerHTML='<div class="antop"><div><div class="anchart"></div>'+
+    '<div class="legend"><span><i style="background:'+C1+'"></i>implied ATM</span>'+
+    (haveR?'<span><i style="background:'+C2+'"></i>realized</span>'+
+      '<span><i style="background:'+C3+'"></i>fair = realized + roll</span>':'')+'</div></div><div>'+
+    tblHtml('<th>Tenor</th><th>Implied %</th><th>Realized %</th><th>Window</th><th>Roll</th>'+
+      '<th>&times;</th><th>Roll value</th><th>of which fwd</th><th>Fair %</th><th>Rich</th>',
+      rows.map(r=>'<tr><td>'+esc(r.tenor)+'</td><td>'+anPct(r.implied)+'</td><td>'+
+        anPct(r.realized)+'</td><td>'+(r.realized_window_days==null?'—':num(r.realized_window_days,0))+
+        '</td><td'+cls(r.roll)+'>'+anSgn(r.roll)+'</td><td>'+anRaw(r.roll_multiplier,1)+'</td><td'+
+        cls(r.roll_value)+'>'+anSgn(r.roll_value)+'</td><td'+cls(r.forward_value)+'>'+
+        anSgn(r.forward_value)+'</td><td>'+anPct(r.fair)+'</td><td'+cls(r.richness)+'>'+
+        anSgn(r.richness)+'</td></tr>'))+'</div></div>'+
+    (haveR?'':'<div class="etonote">· '+esc(d.unavailable.history||'no realized data')+'</div>')+
+    [...new Set([].concat.apply([],rows.map(r=>r.warnings)))].map(w=>
+      '<div class="etowarn">! '+esc(w)+'</div>').join('');
+  const series=[{color:C1,pts:rows.map((r,i)=>[i,r.implied*100])}];
+  if(haveR){
+    series.push({color:C2,pts:rows.filter(r=>r.realized!=null).map(r=>[names.indexOf(r.tenor),r.realized*100])});
+    series.push({color:C3,dash:true,pts:rows.filter(r=>r.fair!=null).map(r=>[names.indexOf(r.tenor),r.fair*100])});
+  }
+  chart(host.querySelector('.anchart'),series,{xfmt:anTenorFmt(names),ldp:2,r:16});
+}
+
+function renderRealized(d){
+  const host=$('#anreal'), rows=d.realized;
+  $('#anrealhead').textContent=rows?('annualised on '+d.annualisation+' time'+
+    (d.lookback_days?' · '+d.lookback_days+'-day window':' · window matched to each tenor')):'';
+  if(!rows){host.innerHTML='<div class="annone">'+esc(d.unavailable.history||
+    'no historical workbook is loaded')+'</div>';return}
+  const live=rows.filter(r=>r.observations>0), names=live.map(r=>r.tenor);
+  host.innerHTML='<div class="antop"><div><div class="anchart"></div>'+
+    '<div class="legend"><span><i style="background:'+C1+'"></i>implied ATM</span>'+
+    '<span><i style="background:'+C2+'"></i>realized</span>'+
+    '<span><i style="background:'+C3+'"></i>premium (right)</span></div></div><div class="anwide">'+
+    tblHtml('<th>Tenor</th><th>Win</th><th>Obs</th><th>Real %</th><th>Cal %</th><th>252 %</th>'+
+      '<th>Impl %</th><th>Prem</th><th class="grp">Skew d</th><th>&rarr;T</th><th>&plusmn;se</th>'+
+      '<th>Implied</th><th class="grp">Kurt d</th><th>&rarr;T</th><th>&plusmn;se</th><th>Implied</th>'+
+      '<th class="grp">ATM %ile</th>',
+      rows.map(r=>{
+        if(!r.observations)return '<tr><td>'+esc(r.tenor)+'</td><td colspan="16" style="text-align:left;color:var(--muted)">'+
+          esc(r.warnings[0]||'unavailable')+'</td></tr>';
+        const h=r.history&&r.history.atm;
+        return '<tr><td>'+esc(r.tenor)+'</td><td>'+num(r.window_days,0)+'</td><td>'+r.observations+
+          '</td><td>'+anPct(r.realized)+'</td><td>'+anPct(r.realized_calendar)+'</td><td>'+
+          anPct(r.realized_count)+'</td><td>'+anPct(r.implied)+'</td><td'+cls(r.premium)+'>'+
+          anSgn(r.premium)+'</td><td class="grp">'+anRaw(r.realized_skew)+'</td><td>'+
+          anRaw(r.realized_skew_scaled)+'</td><td>'+num(r.skew_se,3)+'</td><td>'+
+          anRaw(r.implied_skew)+'</td><td class="grp">'+anRaw(r.realized_kurtosis)+'</td><td>'+
+          anRaw(r.realized_kurtosis_scaled)+'</td><td>'+num(r.kurtosis_se,3)+'</td><td>'+
+          anRaw(r.implied_kurtosis)+'</td><td class="grp">'+(h&&h.percentile!=null?num(h.percentile,0):'—')+
+          '</td></tr>';}))+'</div></div>'+
+    [...new Set([].concat.apply([],rows.map(r=>r.warnings)))].slice(0,8).map(w=>
+      '<div class="etowarn">! '+esc(w)+'</div>').join('');
+  chart(host.querySelector('.anchart'),[
+    {color:C1,pts:live.map((r,i)=>[i,r.implied*100])},
+    {color:C2,pts:live.map((r,i)=>[i,r.realized*100])},
+    {type:'bar',color:C3,axis:'r',pts:live.map((r,i)=>[i,r.premium*100])},
+  ],{xfmt:anTenorFmt(names),ldp:2,rdp:2});
+}
+
+function renderTriangle(d){
+  const host=$('#antri'), rows=d.triangle;
+  $('#antrihead').textContent=rows&&rows.length?
+    (d.pair+' vs '+d.legs.join(' and ')+' · coefficients ('+rows[0].coefficients.join(', ')+
+     ') · correlation '+num(rows[0].rho,3)):'';
+  if(!rows||!rows.length){host.innerHTML='<div class="annone">'+esc(d.unavailable.triangle||
+    'no triangle available')+'</div>';return}
+  let head='<th>Tenor</th><th>&rho;</th><th>implied &rho;</th>';
+  AKEYS.forEach(k=>{head+='<th class="grp">'+k+' mark</th><th>'+k+' tri</th><th>diff</th>'});
+  const body=rows.map(r=>{
+    let line='<tr><td>'+esc(r.tenor)+'</td><td>'+anRaw(r.rho)+'</td><td>'+
+      anRaw(r.implied_correlation)+'</td>';
+    AKEYS.forEach(k=>{
+      const dv=r.difference[k], nf=r.noise[k];
+      const weak=(dv!=null&&nf!=null&&Math.abs(dv)<=nf);
+      line+='<td class="grp">'+anPct(r.marked[k])+'</td><td>'+anPct(r.triangle[k])+'</td><td'+
+        (weak?'':cls(dv))+'>'+(weak?'~0':anSgn(dv))+'</td>';});
+    return line+'</tr>';});
+  const noise={}; rows.forEach(r=>AKEYS.forEach(k=>{
+    if(r.noise[k]!=null)noise[k]=Math.max(noise[k]||0,Math.abs(r.noise[k]))}));
+  host.innerHTML='<div class="anwide">'+tblHtml(head,body)+'</div>'+
+    '<div class="ankey"><span>variance triangle ATM at '+esc(rows[0].tenor)+' <b>'+
+    anPct(rows[0].variance_triangle_atm)+'%</b></span>'+
+    '<span>the distribution triangle sits <b>'+anSgn(rows[0].smile_convexity)+
+    '</b> above it — the convexity of the legs&#39; own smiles, not a marking error</span>'+
+    (Object.keys(noise).length?'<span>noise floor: '+AKEYS.filter(k=>noise[k]!=null)
+      .map(k=>k+' <b>'+(noise[k]*100).toFixed(4)+'</b>').join(', ')+
+      ' — a diff inside it shows as ~0</span>':'')+'</div>'+
+    [...new Set([].concat.apply([],rows.map(r=>r.warnings)))].slice(0,6).map(w=>
+      '<div class="etowarn">! '+esc(w)+'</div>').join('');
+}
+
+async function runAnalysis(){
+  if(!$('#anpair').value)return;
+  saveAn();
+  $('#anstatus').innerHTML='<span class="spin"></span> computing…';
+  try{
+    ANA=await post('/api/analysis',anq());
+    renderCarry(ANA); renderFair(ANA); renderRealized(ANA); renderTriangle(ANA);
+    const h=(STATE.analysis&&STATE.analysis.history)||{};
+    $('#anstatus').textContent='valuation '+String(ANA.valuation).replace('T',' ').slice(0,16)+'Z'+
+      (h.loaded?' · history '+h.source:' · no historical workbook');
+  }catch(e){
+    $('#anstatus').textContent='';
+    ['#ancarry','#anfair','#anreal','#antri'].forEach(id=>{$(id).innerHTML=''});
+    $('#ancarry').innerHTML='<div class="out err"><div class="v">'+esc(e.message)+'</div></div>';
+  }
+}
+function scheduleAnalysis(){if($('#anauto').checked){clearTimeout(_ant);_ant=setTimeout(runAnalysis,340)}}
+
+$('#anrun').onclick=()=>{runAnalysis();runCompare()};
+['#anpair','#ancut','#anmethod','#antarget','#anann','#annoise'].forEach(id=>{
+  $(id).onchange=scheduleAnalysis});
+/* the comparison reads the same pair, cut and interpolation, so it follows
+   them; the other three belong to the carry and realized sections only. */
+['#anpair','#ancut','#anmethod'].forEach(id=>{
+  const prev=$(id).onchange; $(id).onchange=()=>{prev();scheduleCompare()}});
+['#anhorizon','#anlookback'].forEach(id=>{$(id).oninput=scheduleAnalysis});
+$('#anload').onclick=async()=>{
+  $('#anstatus').innerHTML='<span class="spin"></span> reading the historical workbook…';
+  try{
+    const r=await post('/api/history',{path:$('#anhist').value});
+    STATE.analysis.history=r;
+    $('#anstatus').textContent=r.pairs.length+' sheet(s): '+r.pairs.map(x=>x.pair).join(', ')+
+      (r.problems.length?' · '+r.problems.length+' note(s): '+r.problems.slice(0,2).join('; '):'');
+    renderCmp();          /* the dated sources it offers have just changed */
+    await runAnalysis();
+    await runCompare();
+  }catch(e){$('#anstatus').innerHTML='<span style="color:var(--bad)">'+esc(e.message)+'</span>'}
+};
+
+/* ============================= MANAGED BAND =============================
+   Pegged pairs only.  The band itself is policy and comes from bands.csv;
+   what is marked here is how much notice to take of it -- and none of it can
+   be inferred from the quotes, because a wider body and a higher hazard both
+   raise the at-the-money.  The card is not shown for a pair with no band. */
+let BAND=null, BANDT={};
+const BFIELDS=[
+ ['hazard','Hazard %/yr'],
+ ['weak_share','Weak side %'],
+ ['weak_jump','Weak jump %'],
+ ['weak_vol','Weak vol %'],
+ ['strong_jump','Strong jump %'],
+ ['strong_vol','Strong vol %'],
+ ['lower','Lower edge'],
+ ['upper','Upper edge'],
+ ['blend','Band weight %'],
+ ['delta','Wing delta'],
+];
+function bandPaired(){return ((STATE.bands&&STATE.bands.pairs)||[]).indexOf($('#mpair').value)>=0}
+function bandPayload(){
+  const out={pair:$('#mpair').value,cut:$('#mcut').value,mode:$('#bandmode').value,
+             solve_hazard:$('#bandsolve').checked};
+  BFIELDS.forEach(f=>{const el=$('#bf-'+f[0]); if(el)out[f[0]]=el.value});
+  return out;
+}
+async function loadBand(){
+  const card=$('#bandcard');
+  card.classList.toggle('hide',!bandPaired());
+  if(!bandPaired()){BAND=null;return}
+  try{
+    BAND=await api('/api/band?'+qs({pair:$('#mpair').value,cut:$('#mcut').value}));
+    renderBand();
+  }catch(e){
+    $('#bandbody').innerHTML='<div class="out err"><div class="v">'+esc(e.message)+'</div></div>';
+  }
+}
+async function applyBand(){
+  $('#bandbody').innerHTML='<div class="bandnone"><span class="spin"></span> recalibrating…</div>';
+  try{ BAND=await post('/api/band',bandPayload()); renderBand(); }
+  catch(e){ $('#bandbody').innerHTML='<div class="out err"><div class="v">'+
+    esc(e.message)+'</div></div>'; }
+}
+function renderBand(){
+  const d=BAND; if(!d)return;
+  const t=d.treatment||{};
+  const b=d.band||{};
+  $('#bandedges').textContent=d.has_band?
+    ('['+num(b.effective_lower,4)+', '+num(b.effective_upper,4)+']'+
+     (b.overridden?' (policy ['+num(b.lower,4)+', '+num(b.upper,4)+'])':'')):'';
+  if(!d.has_band){$('#bandbody').innerHTML='<div class="bandnone">'+esc(d.message||'')+'</div>';return}
+  const modes=(STATE.bands&&STATE.bands.modes)||['warn','off','mixture'];
+  const mlab={warn:'flag strikes outside it',off:'ignore the band',
+              mixture:'price the regime mixture'};
+  let f='<div class="bandgrid">'+
+    '<div class="f" style="grid-column:span 2"><label>Treatment</label>'+
+      '<select id="bandmode">'+optlist(modes.map(m=>[m,mlab[m]||m]),t.mode)+'</select></div>'+
+    BFIELDS.map(x=>'<div class="f"><label>'+esc(x[1])+'</label>'+
+      '<input id="bf-'+x[0]+'" value="'+esc(t[x[0]]==null?'':t[x[0]])+'"'+
+      (x[0]==='lower'||x[0]==='upper'?' placeholder="policy"':'')+'></div>').join('')+
+    '</div>'+
+    '<div class="row" style="margin-top:10px;align-items:center">'+
+      '<button id="bandapply">Apply</button>'+
+      '<label style="display:flex;align-items:center;gap:6px;margin:0;width:auto;'+
+        'color:var(--muted);font-size:11px"><input type="checkbox" id="bandsolve"'+
+        (t.solve_hazard?' checked':'')+' style="width:auto"> solve the hazard from the wings</label>'+
+    '</div>'+
+    '<div class="meta" style="margin-top:8px">'+esc(d.describe||'')+'</div>';
+  if(!d.has_feed)
+    f+='<div class="etowarn">! no spot / forward feed for '+esc(d.pair)+'. A band is an '+
+       'absolute price range and the surface works in strike over forward, so the model '+
+       'cannot be placed without one.</div>';
+  f+=(d.warnings||[]).map(w=>'<div class="etowarn">! '+esc(w)+'</div>').join('');
+  const rows=(d.rows||[]).map(r=>{
+    if(r.message)return '<tr><td>'+esc(r.tenor)+'</td>'+
+      '<td colspan="8" style="text-align:left;color:var(--muted);white-space:normal">'+
+      esc(r.message)+'</td></tr>';
+    return '<tr><td>'+esc(r.tenor)+'</td><td>'+num(r.forward,5)+'</td><td>'+anPct(r.atm)+
+      '</td><td>'+anPct(r.prob_broken,3)+'</td><td>'+anPct(r.prob_outside_band,3)+
+      '</td><td>'+anPct(r.prob_below,3)+'</td><td>'+anPct(r.prob_above,3)+
+      '</td><td'+cls(r.in_band_mean_shift)+'>'+num(r.in_band_mean_shift,5)+
+      '</td><td>'+anSgn(r.model_rr)+' / '+anSgn(r.lognormal_rr)+'</td></tr>';});
+  f+='<div class="anwide" style="margin-top:9px">'+tblHtml(
+    '<th>Tenor</th><th>Forward</th><th>ATM %</th><th>P(break) %</th><th>P(out) %</th>'+
+    '<th>P(below) %</th><th>P(above) %</th><th>Body shift</th><th>RR band / logn</th>',
+    rows)+'</div>'+
+    '<div class="hint">Break risk is a <b>marked input</b>, never inferred from a butterfly: a '+
+    'wider body and a higher hazard both raise the at-the-money, so a joint fit is degenerate. '+
+    'Out-of-band probability is an <i>output</i>, and it is real. Choosing <b>BAND</b> as the '+
+    'interpolation prices this mixture instead of the lognormal smile; a band weight between '+
+    '0 and 100 blends the two, which is a marking convenience and not a model.</div>';
+  $('#bandbody').innerHTML=f;
+  $('#bandapply').onclick=applyBand;
+}
+
+/* ========================== CURVE COMPARISON ==========================
+   Several curves side by side, and the same curve on other dates.  Same
+   discipline as the listed and market-maker panels: the browser owns the
+   list and posts it whole, so `volkit analysis --compare` reproduces this
+   screen exactly and the server keeps none of it. */
+let CMP=[], CMPBASE=0, CMPR=null, _cmpt=null;
+const CMPC=[C1,C2,C3,'var(--warn)','var(--bad)','#7a5af5','#0e9aa7','#c2185b'];
+const CF=[
+ ['kind','Source'],
+ ['pair','Pair'],
+ ['date','Date'],
+ ['label','Label'],
+ ['text','Pasted curve'],
+ ['on','Include'],
+];
+function cmpDefault(from){
+  return Object.assign({kind:'surface',pair:$('#anpair').value||'',date:'',label:'',
+                        text:'',on:true},from||{});
+}
+function cmpPayload(){return{
+  curves:CMP.map(c=>({kind:c.kind,pair:c.pair,date:c.date,label:c.label,text:c.text,on:!!c.on})),
+  cut:$('#ancut').value, method:$('#anmethod').value,
+  field:$('#cmpfield').value||'atm', base:CMPBASE};}
+function saveCmp(){try{localStorage.setItem('volkit.compare',
+  JSON.stringify({curves:CMP,base:CMPBASE,field:$('#cmpfield').value}))}catch(e){}}
+function loadCmp(){
+  let v=null; try{v=JSON.parse(localStorage.getItem('volkit.compare')||'null')}catch(e){}
+  if(v&&Array.isArray(v.curves)){CMP=v.curves.map(cmpDefault);CMPBASE=v.base|0;
+    if(v.field)$('#cmpfield').value=v.field}
+}
+function cmpPairs(){
+  const h=((STATE.analysis&&STATE.analysis.history)||{}).pairs||[];
+  return [...new Set((STATE.pairs||[]).concat(h.map(x=>x.pair)))];
+}
+function cmpRow(c,i){
+  const a=k=>'data-c="'+i+'" data-k="'+k+'"';
+  const kinds=(STATE.analysis&&STATE.analysis.curve_kinds)||[{key:'surface',label:'fitted surface'}];
+  let f='<div class="cmprow">'+
+    '<div class="cmpbase"><input type="radio" name="cmpbase" data-base="'+i+'"'+
+      (i===CMPBASE?' checked':'')+'> base</div>'+
+    '<div class="f"><label>Source</label><select '+a('kind')+' style="width:150px">'+
+      optlist(kinds.map(k=>[k.key,k.label]),c.kind)+'</select></div>';
+  if(c.kind!=='paste')
+    f+='<div class="f"><label>Pair</label><select '+a('pair')+' style="width:112px">'+
+       optlist(cmpPairs().map(x=>[x,x]),c.pair)+'</select></div>';
+  if(c.kind==='history')
+    f+='<div class="f"><label>Date</label><input '+a('date')+' style="width:130px" '+
+       'placeholder="latest, -30d, 2024-01-15" value="'+esc(c.date||'')+'"></div>';
+  f+='<div class="f"><label>Label</label><input '+a('label')+' style="width:150px" '+
+     'placeholder="(automatic)" value="'+esc(c.label||'')+'"></div>'+
+    '<div class="acts">'+
+      '<label class="cmpbase"><input type="checkbox" '+a('on')+(c.on?' checked':'')+'> on</label>'+
+      '<button class="ghost" data-cdup="'+i+'">Duplicate</button>'+
+      '<button class="danger" data-cdel="'+i+'">Remove</button>'+
+    '</div>';
+  if(c.kind==='paste')
+    f+='<textarea '+a('text')+' spellcheck="false" placeholder="1M 8.20 -0.35 0.22 -0.60 0.75'+
+       '&#10;3M 8.45 -0.40 0.24">'+esc(c.text||'')+'</textarea>';
+  return f+'</div>';
+}
+function renderCmp(){
+  const host=$('#cmplist');
+  host.innerHTML=CMP.length?CMP.map(cmpRow).join(''):
+    '<div class="cmpempty">No curves yet — <b>+ Curve</b> adds one. '+
+    'The first is what the others are differenced against.</div>';
+}
+async function runCompare(){
+  if(!CMP.filter(c=>c.on).length){$('#cmpout').innerHTML='';$('#cmphead').textContent='';
+    CMPR=null;return}
+  saveCmp();
+  $('#cmpstatus').innerHTML='<span class="spin"></span> building…';
+  try{
+    CMPR=await post('/api/analysis/curves',cmpPayload());
+    paintCompare(CMPR);
+    $('#cmpstatus').textContent='';
+  }catch(e){
+    $('#cmpstatus').textContent='';
+    $('#cmpout').innerHTML='<div class="out err"><div class="v">'+esc(e.message)+'</div></div>';
+  }
+}
+function scheduleCompare(){if($('#cmpauto').checked){clearTimeout(_cmpt);
+  _cmpt=setTimeout(runCompare,420)}}
+function cmpValue(curve,tenor,key,field){
+  const p=(curve.points||[]).find(x=>String(x.tenor).toUpperCase()===tenor);
+  return p?p[key][field]:null;
+}
+function paintCompare(d){
+  const host=$('#cmpout'), live=d.curves.filter(c=>c.ok&&c.points.length);
+  const label=(d.fields.find(f=>f.key===d.field)||{}).label||d.field;
+  $('#cmphead').textContent=label+' · '+live.length+' of '+d.curves.length+
+    ' curve(s) built'+(d.base_label?' · against '+d.base_label:'');
+  if(!d.tenors.length){
+    host.innerHTML='<div class="annone">'+
+      (d.curves.map(c=>c.ok?'':esc(c.label+': '+c.message)).filter(Boolean).join('<br>')||
+       'nothing to compare')+'</div>';
+    return;
+  }
+  let head='<th>Tenor</th>';
+  d.curves.forEach(c=>{head+='<th class="grp">'+esc(c.label)+(c.is_base?' (base)':'')+'</th>'+
+    (c.is_base?'':'<th>diff</th>')});
+  const body=d.tenors.map(t=>{
+    let line='<tr><td>'+esc(t)+'</td>';
+    d.curves.forEach(c=>{
+      const v=cmpValue(c,t,'values',d.field), dv=cmpValue(c,t,'diffs',d.field);
+      line+='<td class="grp">'+anPct(v,4)+'</td>'+
+        (c.is_base?'':'<td'+cls(dv)+'>'+anSgn(dv,4)+'</td>');});
+    return line+'</tr>';});
+  host.innerHTML='<div class="antop"><div><div class="cmpchart"></div>'+
+    '<div class="legend">'+live.map((c,i)=>'<span><i style="background:'+
+      CMPC[d.curves.indexOf(c)%CMPC.length]+'"></i>'+esc(c.label)+'</span>').join('')+
+    '</div></div><div class="anwide">'+tblHtml(head,body)+'</div></div>'+
+    d.curves.map(c=>'<div class="cmpsrc">· <b>'+esc(c.label)+'</b> — '+
+      esc(c.ok?(c.source||c.kind_label):('unavailable: '+c.message))+'</div>'+
+      (c.warnings||[]).map(w=>'<div class="etowarn">! '+esc(w)+'</div>').join('')).join('')+
+    (d.notes||[]).map(n=>'<div class="etonote">· '+esc(n)+'</div>').join('');
+  chart(host.querySelector('.cmpchart'),live.map(c=>({
+    color:CMPC[d.curves.indexOf(c)%CMPC.length],
+    pts:d.tenors.map((t,i)=>[i,cmpValue(c,t,'values',d.field)]).filter(pt=>pt[1]!=null)
+                .map(pt=>[pt[0],pt[1]*100]),
+  })),{xfmt:anTenorFmt(d.tenors),ldp:3,r:16});
+}
+$('#cmpadd').onclick=()=>{CMP.push(cmpDefault());saveCmp();renderCmp();runCompare()};
+$('#cmpdup').onclick=()=>{if(!CMP.length)return;
+  CMP.push(cmpDefault(JSON.parse(JSON.stringify(CMP[CMP.length-1]))));saveCmp();renderCmp();runCompare()};
+$('#cmpclear').onclick=()=>{CMP=[];CMPBASE=0;CMPR=null;saveCmp();renderCmp();
+  $('#cmpout').innerHTML='';$('#cmphead').textContent=''};
+$('#cmprun').onclick=runCompare;
+$('#cmpfield').onchange=()=>{saveCmp();runCompare()};
+$('#cmplist').onclick=e=>{
+  const b=e.target.closest('button'); if(!b)return;
+  if(b.dataset.cdel!=null)CMP.splice(+b.dataset.cdel,1);
+  else if(b.dataset.cdup!=null)CMP.splice(+b.dataset.cdup+1,0,
+    cmpDefault(JSON.parse(JSON.stringify(CMP[+b.dataset.cdup]))));
+  else return;
+  if(CMPBASE>=CMP.length)CMPBASE=0;
+  saveCmp();renderCmp();runCompare();
+};
+$('#cmplist').onchange=e=>{
+  const el=e.target;
+  if(el.dataset.base!=null){CMPBASE=+el.dataset.base;saveCmp();runCompare();return}
+  const i=el.dataset.c, k=el.dataset.k;
+  if(i==null||!k)return;
+  CMP[+i][k]=(el.type==='checkbox')?el.checked:el.value;
+  saveCmp();
+  /* the row's own fields change with the source, so it is repainted */
+  if(k==='kind')renderCmp();
+  runCompare();
+};
+$('#cmplist').oninput=e=>{
+  const i=e.target.dataset.c, k=e.target.dataset.k;
+  if(i==null||!k||e.target.tagName==='SELECT')return;
+  CMP[+i][k]=e.target.value; scheduleCompare();
+};
+
+/* ============================ MARKET MAKER ============================ */
+/* Same discipline as the listed tab: the browser owns the panel and posts it
+   whole, so `volkit mm` reproduces a screen exactly.  The one thing the
+   server does keep is the knowledge bank, because that is a file the desk
+   owns rather than a screen. */
+let MM={}, MMR=null, MMRULES=[], _mmt=null;
+
+/* Every field here has to be one panel_from_request reads; a test pins it. */
+const MF=[
+ ['pair','#mmpair'],['cut','#mmcut'],['method','#mmmethod'],
+ ['target_source','#mmsource'],['fly_convention','#mmfly'],['vol_unit','#mmunit'],
+ ['fallback_spread','#mmfallback'],['vega_scale','#mmscale'],['fair_weight','#mmfair'],
+ ['axe_weight','#mmaxe'],['skew_cap','#mmcap'],['horizon_days','#mmhorizon'],
+ ['text','#mmtext'],['target_text','#mmtarget'],['vega_text','#mmvega'],
+ ['apply','#mmapply'],
+];
+const MMKNOBS=['#mmfree','#mmsmilefree'];
+
+function mmPayload(){
+  const out={};
+  MF.forEach(f=>{const el=$(f[1]);out[f[0]]=el.type==='checkbox'?el.checked:el.value});
+  out.free=[...$('#mmfree').querySelectorAll('input:checked')].map(x=>x.dataset.k);
+  out.smile_free=[...$('#mmsmilefree').querySelectorAll('input:checked')].map(x=>x.dataset.k);
+  out.fit_curve=out.free.length>0&&out.target_source!=='none';
+  out.tune_wings=out.smile_free.length>0;
+  return out;
+}
+function saveMM(){try{localStorage.setItem('volkit.mm',JSON.stringify(mmPayload()))}catch(e){}}
+function loadMM(){
+  try{const r=localStorage.getItem('volkit.mm');if(r)MM=JSON.parse(r)}catch(e){MM={}}
+  if(!MM||typeof MM!=='object')MM={};
+  MF.forEach(f=>{const el=$(f[1]),v=MM[f[0]];if(v==null)return;
+    if(el.type==='checkbox')el.checked=!!v; else el.value=v;});
+}
+
+/* -- which parameters the fit may move -------------------------------- */
+function mmKnobList(){
+  const S=STATE.marketmaker||{}, pair=$('#mmpair').value;
+  const cross=(STATE.crosses||{})[pair]!=null;
+  return {names:cross?(S.cross_knobs||[]):(S.backbone_knobs||[]),
+          on:cross?(S.default_cross_free||[]):(S.default_free||[]),
+          smile:S.smile_params||[], cross:cross};
+}
+function renderKnobs(){
+  const k=mmKnobList();
+  const want=(MM.free&&MM.free.length)?MM.free:k.on;
+  const wantS=(MM.smile_free&&MM.smile_free.length)?MM.smile_free:k.smile;
+  $('#mmfree').innerHTML=k.names.map(n=>'<label><input type="checkbox" data-k="'+esc(n)+'"'+
+    (want.indexOf(n)>=0?' checked':'')+'> '+esc(n)+'</label>').join('');
+  $('#mmsmilefree').innerHTML=k.smile.map(n=>'<label><input type="checkbox" data-k="'+esc(n)+'"'+
+    (wantS.indexOf(n)>=0?' checked':'')+'> '+esc(n)+'</label>').join('');
+  $('#mmknobhint').innerHTML=k.cross?
+    ('A cross gets its level from its legs, so the backbone cannot set it. What this curve owns '+
+     'is the correlation term structure, and that is what is fitted.'):
+    ('A target curve cannot determine more parameters than it has points. '+
+     '<code>short_decay</code> is normally left pinned: nine tenors barely see it.');
+}
+
+/* -- the run ----------------------------------------------------------- */
+async function runMM(){
+  const body=mmPayload();
+  if(!(body.text||'').trim()){
+    $('#mmstatus').textContent='paste a market first';
+    $('#mmsheet').innerHTML='<div class="annone">Nothing pasted yet.</div>';return}
+  $('#mmstatus').innerHTML='<span class="spin"></span> fitting…';
+  try{
+    MMR=await post('/api/mm/fit',body);
+    saveMM();
+    paintMM();
+    $('#mmstatus').textContent=(MMR.warnings||[]).length?
+      (MMR.warnings.length+' message(s)'):'done';
+  }catch(e){
+    MMR=null;
+    $('#mmstatus').innerHTML='<span style="color:var(--bad)">'+esc(e.message)+'</span>';
+    $('#mmsheet').innerHTML='<div class="out err"><div class="v">'+esc(e.message)+'</div></div>';
+    $('#mmcurve').innerHTML='';$('#mmwings').innerHTML='';
+  }
+}
+function scheduleMM(){if($('#mmauto').checked){clearTimeout(_mmt);_mmt=setTimeout(runMM,600)}}
+
+function paintMM(){
+  const d=MMR; if(!d)return;
+  paintSheet(d); paintCurve(d); paintWings(d); paintAxe(d);
+  MMRULES=((d.bank||{}).rules||[]).slice();
+  renderRules();
+  $('#mmbankhead').textContent=(d.bank&&d.bank.path?d.bank.path:'no file yet')+
+    (d.bank&&d.bank.updated?' · updated '+d.bank.updated.replace('T',' ').slice(0,16):'');
+  const sh=d.sheet||{};
+  $('#mmparse').innerHTML=(sh.notes||[]).map(n=>'<div class="etonote">· '+esc(n)+'</div>').join('')+
+    (sh.skipped||[]).map(x=>'<div class="etowarn">! line '+x.line+' skipped ('+esc(x.why)+'): '+
+      esc(String(x.text).slice(0,70))+'</div>').join('');
+}
+
+const MMTAG={'inside':'in','below':'out','above':'out'};
+function mmVerdictTag(r){
+  if(r.our_bid==null)return '<span class="mmtag none">'+esc(r.verdict||'—')+'</span>';
+  if((r.crossing||'').indexOf('through')>=0)return '<span class="mmtag thru">'+esc(r.verdict)+'</span>';
+  const c=MMTAG[r.position]||'none';
+  return '<span class="mmtag '+c+'">'+esc(r.verdict)+'</span>';
+}
+function paintSheet(d){
+  const sh=d.sheet, host=$('#mmsheet');
+  $('#mmsheethead').textContent=sh.n_quotes+' quote(s) · '+sh.inside+' with our mid inside · '+
+    sh.priced+' with a width · fly = '+sh.fly_convention+' · '+sh.vol_unit;
+  if(!sh.rows.length){host.innerHTML='<div class="annone">No quote could be read from the paste.</div>';return}
+  let h='<div class="mmwide"><table><thead><tr>'+
+    '<th>Quote</th><th>Size</th><th>Their bid</th><th>Their ask</th><th>Model</th><th>Moved</th>'+
+    '<th>Fair</th><th>Axe</th><th>Bank</th><th>Skew</th>'+
+    '<th>Our bid</th><th>Our ask</th><th>Width</th><th>Verdict</th></tr></thead><tbody>';
+  sh.rows.forEach(r=>{
+    h+='<tr><td>'+esc(r.describe)+(r.label?' <small>'+esc(r.label)+'</small>':'')+'</td>'+
+       '<td class="mmv">'+(r.size==null?'—':num(r.size,0)+'mm')+'</td>'+
+       '<td class="mmv">'+num(r.market_bid,4)+'</td><td class="mmv">'+num(r.market_ask,4)+'</td>'+
+       '<td class="mmv">'+num(r.model_after,4)+'</td>'+
+       '<td class="mmv"'+cls(r.model_move)+'>'+sgn(r.model_move,4)+'</td>'+
+       '<td class="mmv">'+sgn(r.skew_fair,3)+'</td>'+
+       '<td class="mmv">'+sgn(r.skew_axe,3)+'</td>'+
+       '<td class="mmv">'+sgn(r.skew_bank,3)+'</td>'+
+       '<td class="mmv"'+cls(r.skew_total)+'>'+sgn(r.skew_total,3)+(r.skew_capped?' *':'')+'</td>'+
+       '<td class="mmv"><b>'+num(r.our_bid,4)+'</b></td>'+
+       '<td class="mmv"><b>'+num(r.our_ask,4)+'</b></td>'+
+       '<td class="mmv">'+num(r.width,3)+'</td>'+
+       '<td>'+mmVerdictTag(r)+'</td></tr>';
+    const why=[].concat(r.warnings||[],r.width_source?['width: '+r.width_source]:[],
+      r.skew_reason?[r.skew_reason]:[],r.notes||[]);
+    const advice=(r.advice||[]).map(x=>'<b>'+esc(x)+'</b>').join(' &nbsp;·&nbsp; ');
+    if(why.length||advice)h+='<tr><td class="mmwhy" colspan="14">'+
+      (advice?advice+(why.length?' &nbsp;·&nbsp; ':''):'')+why.map(esc).join(' &nbsp;·&nbsp; ')+'</td></tr>';
+  });
+  h+='</tbody></table></div>';
+  const capped=sh.rows.filter(r=>r.skew_capped).length;
+  if(capped)h+='<div class="etonote">· * '+capped+' row(s) had the shading capped at the skew cap '+
+    'times the half width; the axe wanted to lean the price further than a quote may lean.</div>';
+  host.innerHTML=h;
+}
+
+function paintCurve(d){
+  const c=d.curve, host=$('#mmcurve');
+  if(!c){$('#mmcurvehead').textContent='';
+    host.innerHTML='<div class="annone">'+esc((d.unavailable||{}).curve||'not fitted')+'</div>';return}
+  $('#mmcurvehead').textContent=c.evidence+' · free: '+c.free.join(', ');
+  const names=c.rows.map(r=>r.tenor);
+  let h='<div class="mmstat"><span>weighted RMSE <b>'+num(c.rmse,4)+'</b> vol pts</span>'+
+    '<span>worst <b>'+sgn(c.max_error,4)+'</b> at '+esc(c.max_error_tenor)+'</span>'+
+    '<span>'+c.evaluations+' evaluations, '+num(c.seconds,2)+'s</span>'+
+    '<span>'+esc(c.message)+'</span></div>'+
+    '<div class="antop"><div><div class="mmchart"></div>'+
+    '<div class="legend"><span><i style="background:'+C2+'"></i>target</span>'+
+    '<span><i style="background:'+C1+'"></i>fitted</span>'+
+    '<span><i style="background:'+C3+'"></i>as it was</span></div></div><div>'+
+    '<table><thead><tr><th>Tenor</th><th>Target</th><th>Was</th><th>Now</th><th>Miss</th>'+
+    '<th>Moved</th></tr></thead><tbody>'+
+    c.rows.map(r=>'<tr><td>'+esc(r.tenor)+'</td><td class="mmv">'+num(r.target,4)+'</td>'+
+      '<td class="mmv">'+num(r.before,4)+'</td><td class="mmv">'+num(r.after,4)+'</td>'+
+      '<td class="mmv"'+cls(r.diff)+'>'+sgn(r.diff,4)+'</td>'+
+      '<td class="mmv"'+cls(r.moved)+'>'+sgn(r.moved,4)+'</td></tr>').join('')+
+    '</tbody></table><table style="margin-top:10px"><thead><tr><th>Parameter</th><th>Was</th>'+
+    '<th>Now</th></tr></thead><tbody>'+
+    Object.keys(c.after).map(k=>'<tr><td>'+esc(k)+(c.free.indexOf(k)<0?' <small>(pinned)</small>':'')+
+      '</td><td class="mmv">'+num(c.before[k],5)+'</td><td class="mmv">'+num(c.after[k],5)+
+      '</td></tr>').join('')+'</tbody></table></div></div>'+
+    (c.warnings||[]).map(w=>'<div class="etowarn">! '+esc(w)+'</div>').join('');
+  host.innerHTML=h;
+  chart(host.querySelector('.mmchart'),[
+    {color:C3,dash:true,pts:c.rows.map((r,i)=>[i,r.before])},
+    {color:C1,pts:c.rows.map((r,i)=>[i,r.after])},
+    {type:'dot',color:C2,pts:c.rows.map((r,i)=>[i,r.target])},
+  ],{xfmt:anTenorFmt(names),ldp:2,r:16});
+}
+
+function paintWings(d){
+  const w=d.wings, host=$('#mmwings');
+  if(!w){$('#mmwinghead').textContent='';
+    host.innerHTML='<div class="annone">'+esc((d.unavailable||{}).wings||'not tuned')+'</div>';return}
+  $('#mmwinghead').textContent=w.inside_before+' → '+w.inside_after+' of '+w.quotes+
+    ' wing quote(s) inside their market';
+  host.innerHTML='<div class="mmstat">'+
+    '<span>worst miss <b>'+num(w.worst_before,4)+'</b> → <b>'+num(w.worst_after,4)+'</b> vol pts</span>'+
+    '<span>mid pull <b>'+num(w.mid_pull,3)+'</b></span>'+
+    '<span>'+w.evaluations+' evaluations, '+w.slices+' smile fits, '+num(w.seconds,2)+'s</span>'+
+    '<span>'+esc(w.message)+'</span></div>'+
+    '<table><thead><tr><th>Smile parameter</th><th>Shift was</th><th>Shift now</th>'+
+    '<th>Moved</th></tr></thead><tbody>'+
+    Object.keys(w.after).map(k=>'<tr><td>'+esc(k)+(w.free.indexOf(k)<0?' <small>(pinned)</small>':'')+
+      '</td><td class="mmv">'+sgn(w.before[k],5)+'</td><td class="mmv">'+sgn(w.after[k],5)+'</td>'+
+      '<td class="mmv"'+cls(w.after[k]-w.before[k])+'>'+sgn(w.after[k]-w.before[k],5)+
+      '</td></tr>').join('')+'</tbody></table>'+
+    (w.warnings||[]).map(x=>'<div class="etowarn">! '+esc(x)+'</div>').join('');
+}
+
+function paintAxe(d){
+  const a=d.axe||{}, f=d.fair||{};
+  const bits=[];
+  bits.push(a.available?('axe: '+Object.keys(a.profile).map(k=>k+' '+num(a.profile[k],0)).join(', ')+
+    ' against a scale of '+num(a.scale,0)):('axe: '+esc(a.reason||'off')));
+  bits.push(f.available?('fair value: '+f.rows.filter(r=>r.richness!=null).length+
+    ' tenor(s) of richness over a '+num(f.horizon_days,0)+'-day horizon'):
+    ('fair value: '+esc(f.reason||'off')));
+  $('#mmaxemsg').innerHTML=bits.map(x=>'<div class="etonote">· '+x+'</div>').join('')+
+    ((a.skipped||[]).map(x=>'<div class="etowarn">! line '+x.line+': '+esc(x.why)+'</div>').join(''));
+}
+
+/* -- the knowledge bank ------------------------------------------------ */
+const RF=[
+ ['kind','kind',72],['value','n',66],['instrument','instrument',96],['tenor','t',60],
+ ['min_days','n',62],['max_days','n',62],['max_size','n',68],['size_basis','basis',86],
+ ['delta','n',58],['text','t',210],
+];
+function ropt(list,cur){
+  return list.map(v=>'<option value="'+esc(v)+'"'+(String(v)===String(cur==null?'':cur)?
+    ' selected':'')+'>'+esc(v)+'</option>').join('');
+}
+function renderRules(){
+  const S=STATE.marketmaker||{};
+  const head='<tr><th>Kind</th><th>Value</th><th>Applies to</th><th>Tenor</th><th>&ge; days</th>'+
+    '<th>&le; days</th><th>&le; size</th><th>Basis</th><th>Delta</th><th>Note / evidence</th>'+
+    '<th></th></tr>';
+  const body=MMRULES.map((r,i)=>{
+    let row='<tr>';
+    RF.forEach(f=>{
+      const k=f[0],kind=f[1],w=f[2];
+      const a='data-r="'+i+'" data-k="'+k+'" style="width:'+w+'px"';
+      const cur=r[k]==null?'':r[k];
+      if(k==='kind')row+='<td><select '+a+'>'+ropt(S.rule_kinds||['spread'],cur)+'</select></td>';
+      else if(k==='instrument')row+='<td><select '+a+'>'+ropt(S.rule_instruments||['any'],cur)+'</select></td>';
+      else if(k==='size_basis')row+='<td><select '+a+'>'+ropt(S.size_bases||['any'],cur)+'</select></td>';
+      else row+='<td><input class="'+(kind==='n'?'n':'')+'" '+a+' value="'+esc(cur)+'"></td>';
+    });
+    return row+'<td><span class="rm" data-del="'+i+'">&times;</span></td></tr>';
+  }).join('');
+  $('#mmbank').innerHTML='<div class="mmwide"><table class="mmrules"><thead>'+head+'</thead><tbody>'+
+    (body||'<tr><td colspan="11" class="mmwhy">No rule for this pair yet. Nothing gets a width '+
+     'until one exists, or until a fallback width is typed above &mdash; the tool will not invent '+
+     'one. <b>Learn widths from this paste</b> proposes a ladder from what the market actually '+
+     'showed.</td></tr>')+'</tbody></table></div>'+
+    (((MMR||{}).bank||{}).problems||[]).map(x=>'<div class="etowarn">! '+esc(x)+'</div>').join('');
+}
+$('#mmbank').addEventListener('input',e=>{const t=e.target;
+  if(t.dataset.r==null)return; MMRULES[+t.dataset.r][t.dataset.k]=t.value;});
+$('#mmbank').addEventListener('change',e=>{const t=e.target;
+  if(t.dataset.r==null)return; MMRULES[+t.dataset.r][t.dataset.k]=t.value;});
+$('#mmbank').addEventListener('click',e=>{const b=e.target.closest('[data-del]');
+  if(!b)return; MMRULES.splice(+b.dataset.del,1); renderRules();});
+$('#mmrule').onclick=()=>{MMRULES.push({kind:'spread',value:'',instrument:'any',tenor:'',
+  min_days:'',max_days:'',max_size:'',size_basis:'any',delta:'',text:''});renderRules()};
+$('#mmlearn').onclick=async()=>{
+  $('#mmbankmsg').innerHTML='<span class="spin"></span> reading the widths…';
+  try{
+    const r=await post('/api/mm/learn',mmPayload());
+    r.rules.forEach(x=>MMRULES.push(x));
+    renderRules();
+    $('#mmbankmsg').textContent=r.rules.length+' rule(s) proposed from '+r.parse.n_quotes+
+      ' quote(s) — check them, then Save';
+  }catch(e){$('#mmbankmsg').innerHTML='<span style="color:var(--bad)">'+esc(e.message)+'</span>'}
+};
+$('#mmsave').onclick=async()=>{
+  $('#mmbankmsg').innerHTML='<span class="spin"></span> saving…';
+  try{
+    const r=await post('/api/mm/bank',{pair:$('#mmpair').value,rules:MMRULES});
+    if(!r.ok){$('#mmbankmsg').innerHTML='<span style="color:var(--bad)">'+
+      esc(r.problems.join('; '))+'</span>';return}
+    $('#mmbankmsg').textContent='saved to '+r.written;
+    await runMM();
+  }catch(e){$('#mmbankmsg').innerHTML='<span style="color:var(--bad)">'+esc(e.message)+'</span>'}
+};
+
+function mmTargetVisible(){
+  $('#mmtargetcard').classList.toggle('hide',$('#mmsource').value!=='paste');
+}
+$('#mmrun').onclick=runMM;
+$('#mmpair').onchange=()=>{MM=mmPayload();renderKnobs();saveMM();scheduleMM()};
+['#mmcut','#mmmethod','#mmfly','#mmunit','#mmapply'].forEach(id=>{
+  $(id).onchange=()=>{saveMM();scheduleMM()}});
+$('#mmsource').onchange=()=>{mmTargetVisible();saveMM();scheduleMM()};
+['#mmfallback','#mmscale','#mmfair','#mmaxe','#mmcap','#mmhorizon'].forEach(id=>{
+  $(id).oninput=()=>{saveMM();scheduleMM()}});
+['#mmtext','#mmtarget','#mmvega'].forEach(id=>{$(id).oninput=()=>{saveMM();scheduleMM()}});
+MMKNOBS.forEach(id=>{$(id).addEventListener('change',()=>{MM=mmPayload();saveMM();scheduleMM()})});
+
+
 /* ============================== SHELL ============================== */
-$('#nav').onclick=e=>{const b=e.target.closest('button');if(!b)return;
-  [...$('#nav').children].forEach(x=>x.classList.toggle('on',x===b));
-  PANEL=b.dataset.p;
-  $('#p-pricing').classList.toggle('hide',PANEL!=='pricing');
-  $('#p-marking').classList.toggle('hide',PANEL!=='marking');
-  if(PANEL==='marking')redraw(); else renderGrid();};
+function applyScreens(){
+  SCREENS=(STATE.screens&&STATE.screens.length)?STATE.screens:Object.keys(PANELROOT);
+  [...$('#nav').children].forEach(b=>b.classList.toggle('hide',!has(b.dataset.p)));
+  Object.keys(PANELROOT).forEach(k=>{if(!has(k))$(PANELROOT[k]).classList.add('hide')});
+}
+function showPanel(name){
+  if(!has(name))name=SCREENS[0];
+  PANEL=name;
+  [...$('#nav').children].forEach(x=>x.classList.toggle('on',x.dataset.p===PANEL));
+  Object.keys(PANELROOT).forEach(k=>$(PANELROOT[k]).classList.toggle('hide',k!==PANEL));
+  if(PANEL==='marking')redraw();
+  else if(PANEL==='listed')PANELS.forEach((p,i)=>paintPanel(i));
+  else if(PANEL==='analysis'){if(!ANA)runAnalysis(); else{renderCarry(ANA);renderFair(ANA);
+    renderRealized(ANA);renderTriangle(ANA)}
+    if(CMPR)paintCompare(CMPR); else runCompare();}
+  else if(PANEL==='mm'){if(MMR)paintMM(); else renderRules()}
+  else if(PANEL==='pricing')renderGrid();
+}
+$('#nav').onclick=e=>{const b=e.target.closest('button');if(!b)return;showPanel(b.dataset.p);};
 $('#tabs').onclick=e=>{const b=e.target.closest('button');if(!b)return;
   [...$('#tabs').children].forEach(x=>x.classList.toggle('on',x===b));TAB=b.dataset.t;redraw();};
-$('#mpair').onchange=async()=>{await loadCurve();await loadMarks();redraw()};
-$('#mcut').onchange=async()=>{await loadMarks();redraw()};
+$('#mpair').onchange=async()=>{await loadCurve();await loadMarks();await loadBand();redraw()};
+$('#mcut').onchange=async()=>{await loadMarks();await loadBand();redraw()};
 $('#mmethod').onchange=redraw;
 $('#chartexpiry').onchange=redraw;
 $('#reload').onclick=async()=>{$('#meta').innerHTML='<span class="spin"></span> reloading…';
   await post('/api/reload',{});await boot();};
-window.addEventListener('resize',()=>{clearTimeout(window._rz);window._rz=setTimeout(redraw,220)});
+window.addEventListener('resize',()=>{clearTimeout(window._rz);window._rz=setTimeout(()=>{
+  redraw(); if(PANEL==='listed')PANELS.forEach((p,i)=>paintPanel(i));
+  if(PANEL==='analysis'&&ANA){renderCarry(ANA);renderFair(ANA);renderRealized(ANA);renderTriangle(ANA)}
+  if(PANEL==='analysis'&&CMPR)paintCompare(CMPR);
+  if(PANEL==='mm'&&MMR)paintMM()},220)});
 
 async function boot(){
   STATE=await api('/api/state');
   STATE.valuationMs=STATE.valuation?new Date(STATE.valuation).getTime():Date.now();
+  applyScreens();
   const opt=(l,sel)=>l.map(x=>`<option${x===sel?' selected':''}>${esc(x)}</option>`).join('');
-  $('#mpair').innerHTML=opt(STATE.pairs||[]);
-  $('#mcut').innerHTML=opt(STATE.cuts||[],'TK');
-  $('#mmethod').innerHTML=opt(STATE.methods||[]);
+  if(has('marking')){
+    $('#mpair').innerHTML=opt(STATE.pairs||[]);
+    $('#mcut').innerHTML=opt(STATE.cuts||[],'TK');
+    $('#mmethod').innerHTML=opt(STATE.methods||[]);
+  }
+  if(has('analysis')){
+    $('#anpair').innerHTML=opt(STATE.pairs||[]);
+    $('#ancut').innerHTML=opt(STATE.cuts||[],'NY');
+    $('#anmethod').innerHTML=opt(STATE.methods||[]);
+    const AN=STATE.analysis||{};
+    $('#antarget').innerHTML=(AN.targets||[{key:'atm',label:'at-the-money'}]).map(x=>
+      '<option value="'+esc(x.key)+'">'+esc(x.label)+'</option>').join('');
+    $('#anann').innerHTML=opt(AN.annualisations||['weighted']);
+    $('#cmpfield').innerHTML=(AN.curve_fields||[{key:'atm',label:'at-the-money'}]).map(x=>
+      '<option value="'+esc(x.key)+'">'+esc(x.label)+'</option>').join('');
+    if(AN.history&&AN.history.source)$('#anhist').value=AN.history.source;
+    loadAn();
+    loadCmp(); renderCmp();
+  }
+  if(has('mm')){
+    const MMS=STATE.marketmaker||{};
+    $('#mmpair').innerHTML=opt(STATE.pairs||[]);
+    $('#mmcut').innerHTML=opt(STATE.cuts||[],'NY');
+    $('#mmmethod').innerHTML=opt(STATE.methods||[]);
+    $('#mmsource').innerHTML=opt(MMS.target_sources||['overwrites']);
+    $('#mmfly').innerHTML=(MMS.fly_conventions||['market']).map(x=>
+      '<option value="'+esc(x)+'">'+esc(x==='market'?'market strangle':'smile butterfly')+
+      '</option>').join('');
+    $('#mmunit').innerHTML=opt(MMS.vol_units||['auto']);
+    loadMM();
+    renderKnobs(); mmTargetVisible(); renderRules();
+  }
   $('#meta').textContent=`valuation ${STATE.valuation?STATE.valuation.replace('T',' ').slice(0,16)+'Z':''} · ${STATE.source||''}`;
-  $('#chartexpiry').value=new Date(STATE.valuationMs+90*864e5).toISOString().slice(0,10);
+  if(has('marking'))
+    $('#chartexpiry').value=new Date(STATE.valuationMs+90*864e5).toISOString().slice(0,10);
   const w=(STATE.warnings||[]).slice(); if(STATE.error)w.unshift(STATE.error);
   $('#warnbox').style.display=w.length?'block':'none';
   $('#warnhead').textContent=`${w.length} message${w.length===1?'':'s'} from the workbook`;
   $('#warnlist').innerHTML=w.slice(0,60).map(x=>`<li>${esc(x)}</li>`).join('');
   showFeed(STATE.feed);
   if(STATE.feed&&STATE.feed.source)$('#feedpath').value=STATE.feed.source;
-  loadLegs();
-  if(!LEGS.length)LEGS=[defaultLeg()];
-  LEGS=LEGS.filter(L=>(STATE.pairs||[]).includes(L.pair));
-  if(!LEGS.length)LEGS=[defaultLeg()];
-  renderGrid(); await loadCurve(); await loadMarks(); await priceAll();
+  if(has('pricing')){
+    loadLegs();
+    if(!LEGS.length)LEGS=[defaultLeg()];
+    LEGS=LEGS.filter(L=>(STATE.pairs||[]).includes(L.pair));
+    if(!LEGS.length)LEGS=[defaultLeg()];
+    renderGrid();
+  }
+  if(has('listed')){loadPanels(); renderPanels();}
+  showPanel(PANEL);
+  if(has('marking')){await loadCurve(); await loadMarks(); await loadBand();}
+  if(has('pricing'))await priceAll();
+  if(has('listed')&&PANELS.length)await fitAll();
 }
 boot();
 </script>

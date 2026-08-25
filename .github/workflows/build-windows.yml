@@ -3,9 +3,27 @@ name: build-windows
 # Builds volkit.exe on a hosted Windows runner, so a Windows machine is not
 # needed. PyInstaller cannot cross-compile: it bundles the host interpreter
 # and host-compiled extension modules, so the build must happen on Windows.
+#
+# The whole build is build_exe.py -- dependencies, tests, PyInstaller, staging
+# the trader's data files and smoke-testing the result. Keeping the steps in
+# the script rather than in this file is what makes a local Windows build and
+# a CI build the same build.
 
 on:
   workflow_dispatch:
+    inputs:
+      onefile:
+        description: "Single self-extracting volkit.exe instead of a folder"
+        type: boolean
+        default: false
+      exclude_tabs:
+        description: "Screens to leave out, comma separated: pricing, marking, listed, analysis, mm"
+        type: string
+        default: ""
+      hidden_tabs:
+        description: "Screens to build but hide until volkit.exe --enable-tab NAME, comma separated"
+        type: string
+        default: ""
   push:
     tags: ["v*"]
 
@@ -18,32 +36,14 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          # tzdata is not optional on Windows - there is no system IANA database.
-          pip install tzdata pyinstaller
-
-      - name: Run the test suite
-        run: python -m unittest discover -s tests -v
-
       - name: Build
-        run: python -m PyInstaller volkit.spec --noconfirm --clean
-
-      - name: Stage data files beside the exe
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force dist/volkit | Out-Null
-          Copy-Item files/vol_marks.xlsx, files/market_feed.csv, files/bands.csv,
-                    files/holiday_overrides.csv, USER_MANUAL.md dist/volkit/ -ErrorAction SilentlyContinue
-
-      - name: Smoke-test the executable
-        run: |
-          dist\volkit\volkit.exe check -w files\vol_marks.xlsx
-          dist\volkit\volkit.exe tenors USDJPY --asof "2024-02-28 12:00"
+        run: >-
+          python build_exe.py --zip
+          ${{ inputs.onefile && '--onefile' || '' }}
+          ${{ inputs.exclude_tabs && format('--exclude-tab {0}', inputs.exclude_tabs) || '' }}
+          ${{ inputs.hidden_tabs && format('--hidden-tab {0}', inputs.hidden_tabs) || '' }}
 
       - uses: actions/upload-artifact@v4
         with:
           name: volkit-windows
-          path: dist/volkit/
+          path: dist/volkit-windows.zip
