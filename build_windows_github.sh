@@ -186,13 +186,15 @@ import json, sys
 jobs = json.load(sys.stdin).get("jobs", [])
 hit = False
 for j in jobs:
-    for s in j.get("steps", []):
-        if s.get("conclusion") in ("failure", "cancelled", "timed_out"):
+    for st in j.get("steps", []):
+        if st.get("conclusion") in ("failure", "cancelled", "timed_out"):
             hit = True
-            print(f"  {j[\"name\"]} -> step {s[\"number\"]}: {s[\"name\"]}  [{s[\"conclusion\"]}]")
+            print("  %s -> step %s: %s  [%s]" % (
+                j.get("name", "?"), st.get("number", "?"),
+                st.get("name", "?"), st.get("conclusion")))
 if not hit:
     print("  no failed step reported; the job may have been cancelled or the runner died")
-'
+' || warn "could not list the failed steps"
   if [ -n "$GH" ]; then
     say ""
     gh run view "$run_id" --repo "$SLUG" --log-failed 2>/dev/null | tail -60 \
@@ -227,10 +229,10 @@ if [ -n "$EXPLAIN_ONLY" ]; then
     RUN_ID="$EXPLAIN_ONLY"
   fi
   api GET "repos/$SLUG/actions/runs/$RUN_ID" | py '
-import json,sys
+import json, sys
 r = json.load(sys.stdin)
-print(f"  run {r[\"id\"]}  {r[\"status\"]}/{r.get(\"conclusion\")}  {r[\"created_at\"]}")
-print(f"  {r[\"html_url\"]}")'
+print("  run %s  %s/%s  %s" % (r["id"], r["status"], r.get("conclusion"), r["created_at"]))
+print("  " + r["html_url"])' || warn "could not read the run"
   print_failure "$RUN_ID"
   exit 0
 fi
