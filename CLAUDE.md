@@ -17,7 +17,7 @@ A rebuild of a legacy tool (`vol.py`, `cvol.py`, `ssabr.py`, `vols.py`,
 `common_functions.py`, `__main__.py`, `rv.py`), which is **still present in the
 repo root, untouched, for comparison**. Nothing in `volkit/` imports it.
 
-- ~14,300 lines across 34 modules, 345 tests, `unittest` only (no pytest).
+- ~14,300 lines across 34 modules, 347 tests, `unittest` only (no pytest).
 - Runtime deps: numpy, scipy, pandas, openpyxl. Plus `tzdata` on Windows.
 - Deliberately no `pysabr`, `xlrd`, `tkcalendar`, and no web framework.
 - **Five screens**, each with a command-line equivalent: Pricing, Vol marking,
@@ -293,7 +293,7 @@ missing input does not empty the others.
 ## 10. Working on this
 
 ```
-python -m unittest discover -s tests        # 345 tests, ~2.5m
+python -m unittest discover -s tests        # 347 tests, ~2.5m
 pip install esprima                         # enables the front-end JS syntax test
 python -m volkit check                      # validate the workbook
 python -m volkit serve --feed files/market_feed.csv --history vol_history.xlsx
@@ -327,6 +327,13 @@ python -m volkit analysis EURUSD --history files/history_sample.xlsx \
   - the markup balances and the five panel roots are **siblings**. A missing
     `</div>` once nested one panel inside another, which browsers repair
     silently while the tab renders nothing.
+- **`volkit/__init__.py` binds its public names lazily** (PEP 562). Not a
+  startup optimisation: `build_exe.py` reads `volkit.screens` to decide what
+  to build, and it does that *before* its own dependency-install step -- it is
+  what installs numpy. An eager `from .atm import ...` there dragged the
+  numeric stack in behind `from volkit import screens` and killed the Windows
+  build at its first line. Nothing in `screens`, `paths` or `config` may import
+  numpy, scipy or pandas, directly or otherwise; a test pins it.
 - **PyInstaller cannot cross-compile.** A Windows exe must be built on Windows
   or by the GitHub Actions workflow. `build_exe.py` is the single build entry
   point -- preflight, deps, the full test suite, `volkit.spec`, staging the

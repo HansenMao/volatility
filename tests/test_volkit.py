@@ -2647,6 +2647,42 @@ class TestScreens(unittest.TestCase):
         self.assertIn('id="clearlegs"', html)            # Clear all
 
 
+class TestPackageImport(unittest.TestCase):
+    """The package has to be importable before its dependencies exist."""
+
+    ROOT = Path(__file__).resolve().parents[1]
+
+    def test_reading_the_screen_list_does_not_import_numpy(self):
+        """build_exe.py asks volkit.screens what to build, and it does that
+        *before* installing numpy -- it is the thing that installs numpy.
+
+        An eager ``from .atm import AtmCurve`` in volkit/__init__.py dragged
+        the whole numeric stack in behind ``from volkit import screens``, so
+        the Windows build died at ``import numpy`` on atm.py before printing
+        its first line. Nothing in screens, paths or config needs it.
+        """
+        import subprocess
+        probe = ("import volkit.screens, volkit.paths, volkit.config, sys; "
+                 "print(sorted(m for m in ('numpy', 'scipy', 'pandas') if m in sys.modules))")
+        out = subprocess.run([sys.executable, "-c", probe], cwd=str(self.ROOT),
+                             capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(out.stdout.strip(), "[]")
+
+    def test_every_documented_name_still_resolves(self):
+        """Lazy binding must not quietly drop a name from the public API."""
+        import volkit
+        for name in volkit.__all__:
+            with self.subTest(name):
+                self.assertTrue(hasattr(volkit, name))
+        from volkit import Book, Clock            # the README's own first line
+        self.assertTrue(callable(Book.from_excel))
+        self.assertTrue(callable(Clock.utcnow))
+        self.assertIn("Book", dir(volkit))
+        with self.assertRaises(AttributeError):
+            getattr(volkit, "NotAThing")
+
+
 class TestPackaging(unittest.TestCase):
     """The Windows build.
 

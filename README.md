@@ -748,7 +748,7 @@ and why.
 ## Tests
 
 ```bash
-python3 -m unittest discover -s tests -v      # 345 tests, no pytest needed
+python3 -m unittest discover -s tests -v      # 347 tests, no pytest needed
 ```
 
 `pip install esprima` additionally enables a syntax check on the front-end

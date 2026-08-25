@@ -10,27 +10,68 @@ market data and the user interface are separable.
     usdjpy.vol(1.02, "2024-05-28")        # strike/forward ratio -> implied vol
     usdjpy.atm_vol("2024-05-28", "TK")    # ATM at the Tokyo cut
     usdjpy.risk_reversal("2024-05-28", 0.25)
+
+The names above are bound **lazily**, on first use, rather than imported when
+the package is.  That is not a startup-time optimisation; it is what lets the
+package be imported at all before its dependencies exist.
+
+``build_exe.py`` reads ``volkit.screens`` to find out which screens a build
+should contain, and it does that *before* its own dependency-install step --
+it is the thing that installs numpy, scipy and pandas in the first place.  An
+eager ``from .atm import AtmCurve`` here dragged the entire numeric stack in
+behind ``from volkit import screens``, so on a machine that did not have it
+yet the packaging script died at ``import numpy`` before printing its first
+line.  Nothing in ``screens``, ``paths`` or ``config`` needs numpy, and now
+nothing makes them ask for it.
 """
 
-from .atm import AtmCurve, BackboneParams
-from .black import DeltaConvention
-from .book import Book
-from .calendars import CalendarSet
-from .cross import CorrelationCurve, CrossAtmCurve
-from .events import Event, EventSchedule
-from .marketdata import ExcelSource, MarketData, MarketDataError
-from .numerics import ConvergenceError
-from .smile import SmileSlice, SVIParams
-from .sabr import SabrParams
-from .surface import SmileMark, VolSurface
-from .timeutil import Clock, tenor_to_years
-from .timeweight import TimeWeighting
+from importlib import import_module
 
 __version__ = "2.0.0"
 
-__all__ = [
-    "AtmCurve", "BackboneParams", "Book", "CalendarSet", "Clock", "ConvergenceError",
-    "CorrelationCurve", "CrossAtmCurve", "DeltaConvention", "Event", "EventSchedule",
-    "ExcelSource", "MarketData", "MarketDataError", "SabrParams", "SmileMark",
-    "SmileSlice", "SVIParams", "TimeWeighting", "VolSurface", "tenor_to_years",
-]
+#: Public name -> the submodule that defines it.  One entry per name in
+#: ``__all__``; a name here that no longer exists is caught by a test rather
+#: than by an AttributeError in somebody's script.
+_EXPORTS = {
+    "AtmCurve": "atm",
+    "BackboneParams": "atm",
+    "DeltaConvention": "black",
+    "Book": "book",
+    "CalendarSet": "calendars",
+    "CorrelationCurve": "cross",
+    "CrossAtmCurve": "cross",
+    "Event": "events",
+    "EventSchedule": "events",
+    "ExcelSource": "marketdata",
+    "MarketData": "marketdata",
+    "MarketDataError": "marketdata",
+    "ConvergenceError": "numerics",
+    "SmileSlice": "smile",
+    "SVIParams": "smile",
+    "SabrParams": "sabr",
+    "SmileMark": "surface",
+    "VolSurface": "surface",
+    "Clock": "timeutil",
+    "tenor_to_years": "timeutil",
+    "TimeWeighting": "timeweight",
+}
+
+__all__ = sorted(_EXPORTS)
+
+
+def __getattr__(name: str):
+    """Import the defining submodule on first use (PEP 562).
+
+    The resolved object is written into the module namespace, so this runs
+    once per name and every later lookup is an ordinary attribute access.
+    """
+    where = _EXPORTS.get(name)
+    if where is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    value = getattr(import_module(f".{where}", __name__), name)
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(_EXPORTS))
