@@ -17,7 +17,7 @@ A rebuild of a legacy tool (`vol.py`, `cvol.py`, `ssabr.py`, `vols.py`,
 `common_functions.py`, `__main__.py`, `rv.py`), which is **still present in the
 repo root, untouched, for comparison**. Nothing in `volkit/` imports it.
 
-- ~14,300 lines across 34 modules, 344 tests, `unittest` only (no pytest).
+- ~14,300 lines across 34 modules, 345 tests, `unittest` only (no pytest).
 - Runtime deps: numpy, scipy, pandas, openpyxl. Plus `tzdata` on Windows.
 - Deliberately no `pysabr`, `xlrd`, `tkcalendar`, and no web framework.
 - **Five screens**, each with a command-line equivalent: Pricing, Vol marking,
@@ -293,7 +293,7 @@ missing input does not empty the others.
 ## 10. Working on this
 
 ```
-python -m unittest discover -s tests        # 344 tests, ~2.5m
+python -m unittest discover -s tests        # 345 tests, ~2.5m
 pip install esprima                         # enables the front-end JS syntax test
 python -m volkit check                      # validate the workbook
 python -m volkit serve --feed files/market_feed.csv --history vol_history.xlsx
@@ -303,6 +303,8 @@ python -m volkit mm EURUSD --learn < run.txt          # propose widths, --save w
 python3 files/make_history_sample.py        # regenerate the example history
 python3 build_exe.py --host-check           # validate the packaging (Windows exe: on Windows)
 python3 build_exe.py --only-tabs pricing,marking   # a build without the other three
+./build_windows_github.sh                   # drive the Windows build on CI, fetch the exe
+./build_windows_github.sh --explain         # print a failed run's own log
 python3 build_exe.py --hidden-tab mm        # built, off until --enable-tab mm
 python -m volkit band USDHKD --feed files/market_feed.csv --hazard 3
 python -m volkit analysis EURUSD --history files/history_sample.xlsx \

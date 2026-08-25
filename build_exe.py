@@ -333,20 +333,33 @@ def smoke_test(exe: Path, chosen: tuple[str, ...], shy: tuple[str, ...] = ()) ->
         print(f"  ok       {name}")
 
 
+def zip_entries(exe: Path, onefile: bool) -> list[tuple[Path, str]]:
+    """``(file, name inside the archive)`` for the handover zip.
+
+    Split out from :func:`make_zip` so the layout can be checked without
+    building anything.  It has to keep the rule ``stage_data`` follows: the
+    trader's own files sit beside the exe where ``paths.app_dir()`` finds
+    them, and synthetic samples go in ``samples/``, never where
+    ``find_data_file()`` would pick one up.  The one-file branch used to
+    flatten both to the top level, which put the synthetic history sample
+    exactly there.
+    """
+    if not onefile:
+        root = exe.parent
+        return [(p, f"volkit/{p.relative_to(root).as_posix()}")
+                for p in sorted(root.rglob("*")) if p.is_file()]
+    out = [(exe, exe.name)]
+    out += [(ROOT / rel, Path(rel).name) for rel in USER_DATA if (ROOT / rel).exists()]
+    out += [(ROOT / rel, f"samples/{Path(rel).name}")
+            for rel in SAMPLE_DATA if (ROOT / rel).exists()]
+    return out
+
+
 def make_zip(exe: Path, onefile: bool) -> Path:
     target = ROOT / "dist" / "volkit-windows.zip"
-    root = exe.parent
     with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as zf:
-        if onefile:
-            zf.write(exe, exe.name)
-            for rel in USER_DATA + SAMPLE_DATA:
-                src = ROOT / rel
-                if src.exists():
-                    zf.write(src, src.name)
-        else:
-            for path in sorted(root.rglob("*")):
-                if path.is_file():
-                    zf.write(path, str(Path("volkit") / path.relative_to(root)))
+        for src, arcname in zip_entries(exe, onefile):
+            zf.write(src, arcname)
     return target
 
 

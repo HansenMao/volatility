@@ -705,15 +705,50 @@ trimmed run into a green build.
 host-compiled extension modules, so a Windows exe can only be built on
 Windows. Run this on macOS or Linux and it refuses rather than handing back
 something unusable, and prints the two routes that work: a Windows machine, or
-the hosted Windows runner (`gh workflow run build-windows.yml`, then
-`gh run download --name volkit-windows`). `--host-check` builds the identical
-spec for the host instead, which catches a missing hidden import or an
-unbundled resource without leaving the desk.
+the hosted Windows runner. `--host-check` builds the identical spec for the
+host instead, which catches a missing hidden import or an unbundled resource
+without leaving the desk.
+
+### Driving the Windows build from here
+
+`build_windows_github.sh` is the second route, wrapped: it dispatches the
+workflow, waits, and unwraps the artifact into `dist-windows/`.
+
+```bash
+./build_windows_github.sh                    # standalone exe, Analysis hidden
+./build_windows_github.sh --folder --no-hidden
+./build_windows_github.sh --hidden-tab mm --exclude-tab listed
+./build_windows_github.sh --explain          # why did the last run fail?
+```
+
+It needs a credential — `brew install gh && gh auth login`, or a
+`$GITHUB_TOKEN` with Actions read/write.
+
+**It commits and pushes first.** The runner builds what is on GitHub, so
+anything left in the working tree would silently not be in the exe. Rather
+than refuse, the script prints what it is about to commit, commits it, pushes,
+and confirms `origin/BRANCH` is at your HEAD before dispatching. Two things it
+will not do on its own: it will not commit an untracked file larger than 10 MB
+— that is build output, not source, and an unguarded `git add -A` is how a
+`dist/` folder ends up in a repository — and it will not resolve a diverged
+branch, because a merge or a rebase is a decision about someone else's work
+and not a build step. `-m` sets the commit message, `--no-commit` refuses
+instead of committing, and `--allow-dirty` builds the pushed commit and leaves
+local changes alone.
+
+It then checks that the workflow file on that branch actually declares the
+inputs about to be sent. An input the workflow does not declare is dropped in
+silence, and the build would come back with every tab showing.
+
+`--explain` is the reason it exists. A failed run reports *process completed
+with exit code 1* and buries the cause several clicks away; this prints the
+failing step's own log, where `build_exe.py` says which of its six steps died
+and why.
 
 ## Tests
 
 ```bash
-python3 -m unittest discover -s tests -v      # 344 tests, no pytest needed
+python3 -m unittest discover -s tests -v      # 345 tests, no pytest needed
 ```
 
 `pip install esprima` additionally enables a syntax check on the front-end

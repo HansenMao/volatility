@@ -2766,6 +2766,27 @@ class TestPackaging(unittest.TestCase):
         for rel in build_exe.USER_DATA:
             self.assertNotIn("screens.txt", rel)
 
+    def test_the_handover_zip_keeps_samples_out_of_the_exes_own_folder(self):
+        """The one-file zip flattened everything to the top level.
+
+        That put the synthetic history workbook exactly where
+        ``find_data_file()`` looks, which is the failure staging it into
+        samples/ exists to prevent -- the folder build got this right and the
+        one-file build quietly did not.
+        """
+        import build_exe
+        entries = {str(src): arc for src, arc in
+                   build_exe.zip_entries(self.ROOT / "dist" / "volkit.exe", onefile=True)}
+        self.assertTrue(entries)
+        for rel in build_exe.SAMPLE_DATA:
+            arc = entries.get(str(self.ROOT / rel))
+            if arc is not None:
+                self.assertTrue(arc.startswith("samples/"), f"{rel} lands at {arc!r}")
+        for rel in build_exe.USER_DATA:
+            arc = entries.get(str(self.ROOT / rel))
+            if arc is not None:
+                self.assertNotIn("/", arc)      # beside the exe, where app_dir() looks
+
     def test_samples_are_not_staged_beside_the_exe(self):
         """Synthetic data must not sit where find_data_file() would pick it up.
 
