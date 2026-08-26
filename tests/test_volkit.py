@@ -3463,6 +3463,7 @@ class TestTextFilesAreUtf8(unittest.TestCase):
         file and of the first pair name of a feed -- a heading nobody typed
         and nothing matches.
         """
+        import codecs
         import tempfile
         from volkit import config, paths
 
@@ -3475,10 +3476,14 @@ class TestTextFilesAreUtf8(unittest.TestCase):
             feed.write_bytes("\ufeffUSDJPY,SPOT,150.25\n".encode("utf-8"))
             self.assertIn("USDJPY", MarketFeed.load(feed))
 
-            # And what the tool writes carries no mark of its own.
+            # And what the tool writes carries no mark of its own.  Only the
+            # first bytes are asserted: Windows translates the line ending on
+            # the way out and that is its business, while a mark it did not
+            # ask for would be read back as part of the first field.
             out = Path(tmp) / "written.txt"
             paths.write_text(out, "USDJPY\n")
-            self.assertEqual(out.read_bytes(), b"USDJPY\n")
+            self.assertFalse(out.read_bytes().startswith(codecs.BOM_UTF8))
+            self.assertEqual(paths.read_text(out).splitlines(), ["USDJPY"])
 
     def test_a_file_that_is_not_utf8_names_itself(self):
         """A decoding failure that does not say which file it was is the
