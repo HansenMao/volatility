@@ -336,6 +336,31 @@ def parse_pasted_curve(text: str, *, label: str = "pasted curve") -> Curve:
     return curve
 
 
+def build_curve(req: CurveRequest, book, history=None, *, cut: str = "NY",
+                method: str = "SVI") -> Curve:
+    """One curve from one request, whichever of the four sources it names.
+
+    The comparison panel and the monitor screen both need exactly this, and a
+    second copy of the dispatch would be a second place for a source to be
+    added to only one of them.
+    """
+    if req.kind == "paste":
+        return parse_pasted_curve(req.text, label=req.label or "pasted curve")
+    if req.kind == "history":
+        if history is None:
+            raise CurveError("no historical workbook is loaded, so no dated curve can be read")
+        if req.pair not in history:
+            raise CurveError(
+                f"the historical workbook has no sheet for {req.pair}; it holds "
+                f"{', '.join(sorted(history.pairs)) or 'nothing readable'}")
+        return history_curve(history[req.pair], req.date)
+    if book is None:
+        raise CurveError("no workbook is loaded")
+    if req.kind == "surface":
+        return surface_curve(book, req.pair, cut=cut, method=method)
+    return marks_curve(book, req.pair)
+
+
 # --------------------------------------------------------------------------
 # the panel
 # --------------------------------------------------------------------------
@@ -365,21 +390,7 @@ class ComparePanel:
 
     # -- building ---------------------------------------------------------
     def _build_one(self, req: CurveRequest, book, history) -> Curve:
-        if req.kind == "paste":
-            return parse_pasted_curve(req.text, label=req.label or "pasted curve")
-        if req.kind == "history":
-            if history is None:
-                raise CurveError("no historical workbook is loaded, so no dated curve can be read")
-            if req.pair not in history:
-                raise CurveError(
-                    f"the historical workbook has no sheet for {req.pair}; it holds "
-                    f"{', '.join(sorted(history.pairs)) or 'nothing readable'}")
-            return history_curve(history[req.pair], req.date)
-        if book is None:
-            raise CurveError("no workbook is loaded")
-        if req.kind == "surface":
-            return surface_curve(book, req.pair, cut=self.cut, method=self.method)
-        return marks_curve(book, req.pair)
+        return build_curve(req, book, history, cut=self.cut, method=self.method)
 
     def default_label(self, req: CurveRequest, curve: Curve) -> str:
         if req.label.strip():

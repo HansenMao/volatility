@@ -34,7 +34,8 @@ from .exotics import TOUCH_MODES
 from .book import Book
 from .cross import CrossAtmCurve
 from .feed import FeedError, MarketFeed
-from .listed import UNDERLYINGS, WEIGHTINGS, panel_from_request
+from .listed import (GREEK_FIELDS, UNDERLYINGS, WEIGHTINGS, panel_from_request,
+                     positions_from_request)
 from .knowledge import KnowledgeBank, KnowledgeError, RULE_INSTRUMENTS, RULE_KINDS, SIZE_BASES
 from .marketmaker import (BACKBONE_KNOBS, CROSS_KNOBS, DEFAULT_BACKBONE_FREE,
                           DEFAULT_CROSS_FREE, TARGET_SOURCES, learn_from_panel)
@@ -47,9 +48,11 @@ from .analytics import TARGETS, carry_table, fair_value_table, realized_table, t
 from .banded import BAND_MODES, BandTreatment, band_panel
 from .curves import CURVE_FIELDS, CURVE_KINDS, FIELD_LABELS, KIND_LABELS
 from .curves import panel_from_request as curve_panel_from_request
+from .monitor import DEFAULT_WAS_DATE, DEFAULT_WAS_KIND, MAX_TILES
+from .monitor import panel_from_request as monitor_panel_from_request
 from .history import ANNUALISATIONS, VOL_UNITS, HistoryError, load_history
-from .pricing import PRODUCTS, OptionLeg, price_strip
-from . import screens
+from .pricing import PRODUCTS, OptionLeg, price_strip, resolve_expiry
+from . import screens, session
 from .smile import INTERPOLATORS
 from .timeutil import UTC, Clock, parse_datetime, tenor_to_years
 
@@ -69,13 +72,48 @@ class BookService:
     """Thread-safe wrapper around a Book, with the request handlers."""
 
     def __init__(self, path: str, clock: Clock | None = None, feed_path: str | None = None,
-                 history_path: str | None = None, bank_path: str | None = None):
+                 history_path: str | None = None, bank_path: str | None = None,
+                 session_path: str | None = None, auto_reload: float = 0.0):
         self.path = path
         self.clock = clock or Clock.utcnow()
         self.feed_path = feed_path
+        # When the feed file was last written, as of the read that is in the
+        # book now.  Comparing it with the file on disk is what tells the
+        # pricing screen there is fresher spot to be had, without the screen
+        # having to poll the numbers themselves.
+        self.feed_mtime: float | None = None
         self._lock = threading.RLock()
         self.book: Book | None = None
         self.load_error: str | None = None
+        # -- watching the market feed -------------------------------------
+        # The feed is the only file that is re-read on its own.  The workbook
+        # and the historical sheet are not: a workbook reload discards every
+        # mark this session has made (nothing writes to the workbook), and a
+        # historical sheet is a record of what happened rather than a market,
+        # so neither has any business changing underneath a screen being read.
+        # The feed does -- it is a publication, it is republished all morning,
+        # and picking it up is the whole point.  Off unless asked for, and the
+        # pricing screen has the switch.
+        self.auto_interval = (float(auto_reload) if auto_reload and auto_reload > 0
+                              else self.AUTO_DEFAULT_INTERVAL)
+        self.auto_enabled = bool(auto_reload and auto_reload > 0)
+        self.workbook_mtime: float | None = None
+        self.history_mtime: float | None = None
+        self.auto_events: list[dict] = []
+        # Bumped once per reload the watcher performs.  The page polls it
+        # rather than the numbers: one integer says "what you are looking at
+        # was built from an older file".
+        self.auto_seq = 0
+        # Whether this session has marked anything the workbook does not
+        # hold.  A reload throws those away (that is what a reload is), which
+        # is the reason the workbook is not watched at all; it is still
+        # reported, so the screen can say the marks are only in memory.
+        self.dirty = False
+        # A changed file whose write time has not settled yet: read on the
+        # pass after the one that first saw it move.  See ``auto_check``.
+        self._auto_pending: dict[str, float] = {}
+        self._watcher: threading.Thread | None = None
+        self._watch_stop = threading.Event()
         # The historical workbook is optional and is held separately from the
         # book: it is a different file with a different life, and a failure to
         # read it must not stop the marks loading.
@@ -86,12 +124,24 @@ class BookService:
         # again: a bad rule in it must not stop the marks loading either.
         self.bank_path = bank_path
         self.bank_error: str | None = None
+        # The session file: the marks this tool made, kept beside the workbook
+        # rather than in it.  Held only as a default path -- the screens post
+        # the one they are showing.
+        self.session_path = str(session_path) if session_path else None
+        self.session_error: str | None = None
         try:
             self.bank = KnowledgeBank.load(bank_path)
         except KnowledgeError as exc:
             self.bank = KnowledgeBank(path=bank_path)
             self.bank_error = str(exc)
         self.reload()
+        if session_path:
+            # Asked for by name, so a failure is said out loud rather than
+            # leaving the book quietly on the workbook's own marks.
+            try:
+                self.session_load({"path": session_path})
+            except Exception as exc:  # noqa: BLE001 - surfaced in /api/state
+                self.session_error = f"{type(exc).__name__}: {exc}"
         if history_path:
             try:
                 self.load_history({"path": history_path})
@@ -100,19 +150,29 @@ class BookService:
 
     def reload(self) -> dict:
         with self._lock:
+            # Read before the load, not after: a workbook saved *while* it was
+            # being read would otherwise be stamped with the time of the copy
+            # the tool never saw, and the watcher would never pick it up.
+            stamp = self._mtime(self.path)
             try:
                 self.book = Book.from_excel(self.path, self.clock).load_all()
                 if self.feed_path:
                     self.book.feed = MarketFeed.load(self.feed_path)
+                    self.feed_mtime = self._feed_mtime()
                 self.load_error = None
             except Exception as exc:  # noqa: BLE001 - reported to the browser
                 self.load_error = f"{type(exc).__name__}: {exc}"
+            self.workbook_mtime = stamp
+            # Whatever this session had marked is gone with the old book, so
+            # there is nothing left to protect from the next reload.
+            self.dirty = False
             return self.state()
 
     def state(self) -> dict:
         with self._lock:
             if self.book is None:
                 return {"pairs": [], "error": self.load_error, "warnings": [],
+                        "auto": self.auto_state(),
                         "screens": list(screens.enabled())}
             return {
                 # Which tabs this build has.  The page hides the rest, and
@@ -124,14 +184,30 @@ class BookService:
                 "products": list(PRODUCTS),
                 "overhedges": list(TOUCH_MODES),
                 "feed": self.feed_state(),
+                # Watching the data files belongs to no screen: the workbook,
+                # the feed and the historical sheet are read by several.
+                "auto": self.auto_state(),
+                # A data source rather than one screen's: the analysis and
+                # monitor tabs both read it, and either may load it.
+                "history": self.history_state(),
                 "cuts": sorted(CUTS),
                 "analysis": {
                     "targets": [{"key": k, "label": v} for k, v in TARGETS.items()],
                     "annualisations": list(ANNUALISATIONS),
                     "vol_units": list(VOL_UNITS),
-                    "history": self.history_state(),
                     "curve_kinds": [{"key": k, "label": KIND_LABELS[k]} for k in CURVE_KINDS],
                     "curve_fields": [{"key": f, "label": FIELD_LABELS[f]} for f in CURVE_FIELDS],
+                },
+                # The monitor screen shares the curve vocabulary but not the
+                # paste source: a tile is a difference between two curves the
+                # book can rebuild, and a pasted one cannot be rebuilt on the
+                # next refresh.
+                "monitor": {
+                    "kinds": [{"key": k, "label": KIND_LABELS[k]}
+                              for k in CURVE_KINDS if k != "paste"],
+                    "fields": [{"key": f, "label": FIELD_LABELS[f]} for f in CURVE_FIELDS],
+                    "was_kind": DEFAULT_WAS_KIND, "was_date": DEFAULT_WAS_DATE,
+                    "max_tiles": MAX_TILES,
                 },
                 # Managed / pegged pairs.  The page only shows the band card
                 # for a pair that has one, and there is no point offering the
@@ -162,7 +238,12 @@ class BookService:
                         for u in UNDERLYINGS.values()
                     ],
                     "weightings": list(WEIGHTINGS),
+                    # The greek columns and what each is measured in, declared
+                    # once in listed.py so a column cannot reach the screen
+                    # without its unit.
+                    "greeks": [{"key": k, "unit": u} for k, u in GREEK_FIELDS],
                 },
+                "session": {**self.session_state(), "error": self.session_error},
                 "valuation": self.book.clock.now.isoformat(),
                 "source": str(self.path),
                 "warnings": self.book.all_problems(),
@@ -209,7 +290,8 @@ class BookService:
 
     def smile(self, q: dict) -> dict:
         with self._lock:
-            surface = self.book[q["pair"]]
+            pair = q["pair"]
+            surface = self.book[pair]
             method, cut = q.get("method", "SVI"), q.get("cut", "TK")
             sl = surface.slice_at(q["expiry"], method, cut)
             lo = float(min(sl.strikes)) * 0.97
@@ -217,16 +299,32 @@ class BookService:
             ks = np.linspace(lo, hi, 241)
             vols = np.asarray(sl.vol(ks), dtype=float)
             dens = [surface.density(float(k), q["expiry"], method, cut) for k in ks]
+            # The smile itself is always built in moneyness -- that is the
+            # space the surface works in, and no number here moves because a
+            # feed was loaded.  This is only the scale the chart puts on the
+            # axis, so a strike reads as the level a trader would name rather
+            # than as 1.0234 of a forward.
+            level = self.book.market_level(pair, sl.t)
+            warnings = list(sl.warnings)
+            if level["extrapolated"]:
+                warnings.append(
+                    f"the {sl.t:.4f}-year forward for {pair} is extrapolated beyond the "
+                    f"feed's pillars; the strike axis is scaled by it")
             return {
                 "t": sl.t,
                 "atm": sl.atm_vol * 100,
+                # The axis scale, never the model's own space.  ``forward`` is
+                # None when there is no feed and the page stays in moneyness.
+                "spot": level["spot"],
+                "forward": level["forward"],
+                "feed": level["feed"],
                 "curve": [{"k": float(k), "v": float(v) * 100} for k, v in zip(ks, vols)],
                 "density": [{"k": float(k), "d": float(d)} for k, d in zip(ks, dens)],
                 "points": [
                     {"label": r["label"], "k": r["strike"], "v": r["vol"] * 100}
                     for r in surface.smile_table(q["expiry"], method=method, cut=cut)
                 ],
-                "warnings": list(sl.warnings),
+                "warnings": warnings,
                 "fit": None if sl.svi is None else {
                     "rmse_vol_pts": sl.svi.rmse * 100,
                     "max_error_vol_pts": sl.svi.max_abs_vol_error * 100,
@@ -306,15 +404,45 @@ class BookService:
                 rows.append(row)
             return {"pair": q["pair"], "rows": rows, "anchored": surface.anchor_tenors}
 
+    @staticmethod
+    def _mtime(path: str | None) -> float | None:
+        """When a file was last written, or None if it is not there to ask."""
+        if not path:
+            return None
+        try:
+            return Path(path).stat().st_mtime
+        except OSError:
+            return None
+
+    def _feed_mtime(self) -> float | None:
+        """When the feed file on disk was last written, or None if there is none."""
+        return self._mtime(self.feed_path)
+
     def feed_state(self, q: dict | None = None) -> dict:
-        """What the spot/forward feed holds, and its quote for one pair."""
+        """What the spot/forward feed holds, and its quote for one pair.
+
+        ``stale`` says the file on disk has been written since it was read.
+        The server does not act on that by itself -- a feed that reloaded
+        underneath a price somebody was reading would be its own kind of
+        silent change -- it reports it, and the pricing screen offers the
+        refresh.
+        """
         with self._lock:
             feed = self.book.feed
             if feed is None:
-                return {"loaded": False, "pairs": [], "source": "", "problems": []}
+                return {"loaded": False, "pairs": [], "source": "", "problems": [],
+                        "path": self.feed_path or "", "stale": False, "written": ""}
+            on_disk = self._feed_mtime()
             out = {"loaded": True, "source": feed.source, "asof": feed.asof,
                    "problems": feed.problems, "pairs": feed.summary(),
-                   "covered": sorted(feed.pairs)}
+                   "covered": sorted(feed.pairs),
+                   "path": self.feed_path or "",
+                   # When the data in the book was written, taken from the
+                   # file rather than from a clock: it is a fact about the
+                   # feed, and the model's clock may be a valuation in the past.
+                   "written": _stamp(self.feed_mtime),
+                   "stale": bool(on_disk is not None and self.feed_mtime is not None
+                                 and on_disk > self.feed_mtime)}
             if q and q.get("pair") and q.get("t"):
                 try:
                     out["quote"] = feed.quote(q["pair"], float(q["t"]))
@@ -329,10 +457,251 @@ class BookService:
             if not path:
                 self.book.feed = None
                 self.feed_path = None
+                self.feed_mtime = None
                 return self.feed_state()
             self.book.feed = MarketFeed.load(path)
             self.feed_path = path
+            self.feed_mtime = self._feed_mtime()
             return self.feed_state()
+
+    def refresh_feed(self, payload: dict | None = None) -> dict:
+        """Re-read the feed file, and quote it at each pricing leg's expiry.
+
+        Two things at once because they are one action on the screen: pick up
+        the spot and points that have just been published, and say what they
+        are for the options actually on the pad.  The legs come with the
+        request like every other screen's panel, so this stays a pure function
+        of what it is sent plus the book, and ``Fill`` on the pricing grid can
+        write the numbers into the rows a user has typed a stale spot into.
+
+        A leg is reported, never silently skipped: one with no feed for its
+        pair, or an expiry that will not resolve, keeps its place and carries
+        the reason.
+        """
+        payload = payload or {}
+        with self._lock:
+            if self.book is None:
+                raise ValueError(self.load_error or "no workbook is loaded")
+            if not self.feed_path:
+                raise FeedError("there is no feed file to refresh; load one first")
+            # Read into a local first: a feed file that has been half written,
+            # or edited into something unreadable, must not leave the screen
+            # with no market at all.
+            feed = MarketFeed.load(self.feed_path)
+            self.book.feed = feed
+            self.feed_mtime = self._feed_mtime()
+
+            legs = []
+            for i, row in enumerate(payload.get("legs") or [], start=1):
+                out: dict = {"index": i - 1, "pair": str(row.get("pair") or ""),
+                             "spot": None, "points": None, "pip": None, "forward": None,
+                             "extrapolated": False, "error": ""}
+                try:
+                    pair = out["pair"]
+                    if not pair:
+                        raise ValueError("the leg has no currency pair")
+                    expiry = resolve_expiry(self.book, pair, row.get("expiry", ""))
+                    t = self.book.clock.years_to(
+                        datetime.combine(expiry, datetime.min.time()).replace(tzinfo=UTC))
+                    q = feed.quote(pair, t)
+                    out.update({"spot": q["spot"], "points": q["points"], "pip": q["pip"],
+                                "forward": q["forward"], "extrapolated": q["extrapolated"],
+                                "expiry": expiry.isoformat(), "years": t})
+                except (FeedError, ValueError, KeyError) as exc:
+                    out["error"] = str(exc)
+                legs.append(out)
+            return {"ok": True, "legs": legs, "feed": self.feed_state()}
+
+    # -- watching the market feed ------------------------------------------
+    #
+    # Three files are read by this tool and they have three different lives.
+    # The workbook is the book of record and this session's marks are *not* in
+    # it (nothing writes to the workbook), so re-reading it throws a morning's
+    # marking away -- that is what a reload is for, and it is not something to
+    # do to somebody in the background.  The historical sheet is a record of
+    # what happened; it does not move during a session in any way a screen
+    # needs to chase.  The feed is the one that does: it is a publication, it
+    # is republished all morning, and a price quoted off a stale spot is
+    # wrong.  So the feed is what is watched, and only the feed.  Both of the
+    # others stay on their buttons -- ``Reload workbook`` and the history
+    # loader -- where somebody has to mean it.
+    #
+    # Even the feed is off unless asked for, because a number that changes
+    # underneath somebody reading it is its own kind of silent change.  The
+    # pricing screen carries the switch, ``--auto-reload`` sets it at startup,
+    # and every re-read is written down, counted, and shown on the page.
+
+    AUTO_EVENT_LIMIT = 40
+    #: Used when the switch is turned on by hand and no interval was given.
+    AUTO_DEFAULT_INTERVAL = 15.0
+
+    @property
+    def auto_reload(self) -> float:
+        """The poll interval in force, or 0 when the watcher is off."""
+        return self.auto_interval if self.auto_enabled else 0.0
+
+    def _auto_targets(self) -> list[tuple[str, str | None, float | None]]:
+        """What is watched, where it is, and when the loaded copy was written."""
+        return [("feed", self.feed_path, self.feed_mtime)]
+
+    def set_auto(self, payload: dict) -> dict:
+        """Turn the feed watcher on or off, and set how often it looks.
+
+        The switch lives on the pricing screen because that is where a stale
+        spot does damage, but the setting is the server's: one watcher, one
+        interval, whatever a browser happens to have open.
+        """
+        with self._lock:
+            if payload.get("interval") not in (None, ""):
+                interval = float(payload["interval"])
+                if interval <= 0:
+                    raise ValueError(
+                        f"the auto-load interval must be positive, got {interval!r} seconds")
+                self.auto_interval = interval
+            if "enabled" in payload:
+                self.auto_enabled = bool(payload["enabled"])
+            want = self.auto_enabled
+            # A changed interval only reaches the loop through a restart, and
+            # the join below must not be done holding the lock: the watcher
+            # takes it on every pass.
+        self.stop_watching()
+        if want:
+            self.start_watching()
+        with self._lock:
+            return self.auto_state()
+
+    def auto_state(self) -> dict:
+        with self._lock:
+            return {
+                "enabled": self.auto_enabled,
+                "interval": self.auto_interval,
+                # There is nothing to watch without a feed file, and a switch
+                # that can be turned on and then does nothing is worse than
+                # one that is greyed out with the reason.
+                "available": bool(self.feed_path),
+                # One integer the page can poll: it says "what you are looking
+                # at was built from an older file", without the page having to
+                # diff the numbers to find out.
+                "seq": self.auto_seq,
+                "dirty": self.dirty,
+                "watching": [{"what": k, "path": str(pth), "written": _stamp(m)}
+                             for k, pth, m in self._auto_targets() if pth],
+                "events": list(self.auto_events[-12:]),
+            }
+
+    def _auto_record(self, what: str, ok: bool, message: str,
+                     when: float | None = None) -> dict | None:
+        """Write down one thing the watcher did, unless it just said it.
+
+        The same message about the same file, twice running, is the watcher
+        looking at an unchanged situation on every tick -- a feed that is
+        still half written, one with no book to go on.  Saying it once and staying
+        quiet is what keeps the sequence number meaningful: it moves when
+        something actually happened.
+        """
+        last = next((e for e in reversed(self.auto_events) if e["what"] == what), None)
+        if last is not None and last["message"] == message and last["ok"] == ok:
+            return None
+        self.auto_seq += 1
+        ev = {"seq": self.auto_seq, "what": what, "ok": bool(ok), "message": message,
+              "when": _stamp(when) or datetime.now(UTC).replace(microsecond=0).isoformat()}
+        self.auto_events.append(ev)
+        del self.auto_events[:-self.AUTO_EVENT_LIMIT]
+        return ev
+
+    def auto_check(self, *, settle: bool = True) -> list[dict]:
+        """Re-read the feed if it has been written since it was read.
+
+        Returns the events this pass produced, empty when nothing moved.  The
+        watcher thread does nothing else at all, so a test drives this
+        directly and there is no timing to get right in it.
+
+        ``settle`` waits for a changed file's write time to stop moving before
+        reading it -- the same stamp on two passes running.  A feed is written
+        in pieces and half a feed is not a market.  It is done
+        that way, rather than by asking how long ago the file was written,
+        because a file stamped by another machine can be seconds ahead of this
+        one's clock, and a wall-clock settle would then hold it back for as
+        long as the two disagreed.  It costs one tick.  A check somebody asked
+        for by hand does not wait: they know they have saved.
+        """
+        with self._lock:
+            out = []
+            for kind, path, seen in self._auto_targets():
+                if not path or seen is None:
+                    self._auto_pending.pop(kind, None)
+                    continue
+                stamp = self._mtime(path)
+                if stamp is None or stamp <= seen:
+                    self._auto_pending.pop(kind, None)
+                    continue
+                if settle and self._auto_pending.get(kind) != stamp:
+                    self._auto_pending[kind] = stamp
+                    continue
+                self._auto_pending.pop(kind, None)
+                ev = self._auto_apply(kind, path, stamp)
+                if ev is not None:
+                    out.append(ev)
+            return out
+
+    def _auto_apply(self, kind: str, path: str, stamp: float) -> dict | None:
+        """Re-read one changed file, and say what came of it.
+
+        A failure does *not* advance the remembered write time, so a file
+        caught half written is tried again on the next pass; it is the repeat
+        message that is suppressed, never the retry.
+        """
+        if kind == "feed":
+            if self.book is None:
+                # Nothing to put it on.  The workbook is the thing that has to
+                # be fixed, and it has already said why.
+                return self._auto_record("feed", False,
+                                         f"{Path(path).name} changed, but no workbook is "
+                                         f"loaded to put it on", stamp)
+            try:
+                feed = MarketFeed.load(path)
+            except (FeedError, OSError) as exc:
+                return self._auto_record("feed", False,
+                                         f"{Path(path).name} changed and could not be read: "
+                                         f"{exc}", stamp)
+            # Into a local first, then onto the book: a feed half written is
+            # not allowed to leave the screen with no market at all.
+            self.book.feed = feed
+            self.feed_mtime = stamp
+            return self._auto_record("feed", True,
+                                     f"{Path(path).name} changed and was re-read"
+                                     + (f" ({len(feed.problems)} problem(s) in it)"
+                                        if feed.problems else ""), stamp)
+        return self._auto_record(kind, False, f"nothing knows how to reload {kind!r}", stamp)
+
+    def start_watching(self) -> bool:
+        """Start the polling thread.  False when it is off or already running."""
+        with self._lock:
+            if self.auto_reload <= 0 or self._watcher is not None:
+                return False
+            self._watch_stop.clear()
+            self._watcher = threading.Thread(target=self._watch_loop,
+                                             name="volkit-watch", daemon=True)
+            self._watcher.start()
+            return True
+
+    def stop_watching(self) -> None:
+        self._watch_stop.set()
+        with self._lock:
+            thread, self._watcher = self._watcher, None
+        if thread is not None:
+            thread.join(timeout=2.0)
+
+    def _watch_loop(self) -> None:
+        while not self._watch_stop.wait(self.auto_interval):
+            try:
+                self.auto_check()
+            except Exception as exc:  # noqa: BLE001
+                # The watcher has to outlive whatever it trips over, but one
+                # that died quietly would be exactly the silent failure this
+                # project exists to remove: it says so and keeps going.
+                with self._lock:
+                    self._auto_record("watch", False, f"{type(exc).__name__}: {exc}")
 
     def price(self, payload: dict) -> dict:
         """Price a strip of option legs against the current marks."""
@@ -427,24 +796,10 @@ class BookService:
                 spec = self.book.data.pairs[q["pair"]]
                 out["legs"] = list(spec.legs)
                 out["leg_signs"] = list(atm.leg_signs)
-                out["params"] = {
-                    "corr_initial": atm.correlation.initial,
-                    "corr_final": atm.correlation.final,
-                    "corr_decay": atm.correlation.decay,
-                    "short_addon": atm.params.short_addon * 100.0,
-                    "short_decay": atm.params.short_decay,
-                }
-            else:
-                p = atm.params
-                out["params"] = {
-                    "initial_vol": p.initial_vol * 100.0,
-                    "long_term_vol": p.long_term_vol * 100.0,
-                    "mean_reversion": p.mean_reversion,
-                    "short_addon": p.short_addon * 100.0,
-                    "short_decay": p.short_decay,
-                    "rate_vol": p.rate_vol * 100.0,
-                    "rate_corr": p.rate_corr,
-                }
+            # One conversion into the units the panel types in, shared with
+            # the session file, so a saved curve and a displayed one cannot
+            # come to mean different things.
+            out["params"] = session.curve_params(atm)
             return out
 
     def set_curve(self, payload: dict) -> dict:
@@ -472,25 +827,9 @@ class BookService:
             if entry_problems:
                 return {"ok": False, "problems": entry_problems,
                         **self.curve({"pair": payload["pair"]})}
-            if isinstance(atm, CrossAtmCurve):
-                problems = atm.set_correlation(
-                    vals.get("corr_initial", atm.correlation.initial),
-                    vals.get("corr_final", atm.correlation.final),
-                    vals.get("corr_decay", atm.correlation.decay))
-                if not problems:
-                    problems = atm.set_params(
-                        short_addon=vals.get("short_addon", atm.params.short_addon * 100) / 100.0,
-                        short_decay=vals.get("short_decay", atm.params.short_decay))
-            else:
-                changes = {}
-                for key in ("initial_vol", "long_term_vol", "short_addon", "rate_vol"):
-                    if key in vals:
-                        changes[key] = vals[key] / 100.0
-                for key in ("mean_reversion", "short_decay", "rate_corr"):
-                    if key in vals:
-                        changes[key] = vals[key]
-                problems = atm.set_params(**changes)
+            problems = session.set_curve_params(atm, vals)
             surface.invalidate()
+            self.dirty = True
             return {"ok": not problems, "problems": problems, **self.curve({"pair": payload["pair"]})}
 
     def set_events(self, payload: dict) -> dict:
@@ -503,7 +842,7 @@ class BookService:
                 if not when:
                     raise ValueError(f"event {i + 1} has no date/time")
                 try:
-                    dt = parse_datetime(str(when).replace("T", " "))
+                    dt = parse_datetime(str(when))
                 except ValueError as exc:
                     raise ValueError(f"event {i + 1}: {exc}") from None
                 try:
@@ -513,6 +852,7 @@ class BookService:
                 entries.append((dt, bump, str(row.get("label") or "")))
             problems = surface.atm.set_events(entries)
             surface.invalidate()
+            self.dirty = True
             return {"ok": True, "problems": problems,
                     "events": self._event_rows(surface.atm)}
 
@@ -556,7 +896,77 @@ class BookService:
             else:
                 raise ValueError(f"unknown overwrite kind {kind!r}")
             surface.invalidate()
+            self.dirty = True
             return {"ok": True}
+
+    # -- the session file -------------------------------------------------
+    def session_state(self, q: dict | None = None) -> dict:
+        """Where the session file is, and whether there is one there.
+
+        The path is *not* server state that the screens have to agree on: the
+        browser sends the one it is showing with every save and load, and this
+        only supplies the default and reports what is on disk.
+        """
+        with self._lock:
+            path = Path((q or {}).get("path") or self.session_path or session.default_path())
+            out = {"path": str(path), "default": str(session.default_path()),
+                   "exists": path.exists(), "saved": "", "note": "", "pairs": [],
+                   "workbook": "", "problems": []}
+            if path.exists():
+                try:
+                    doc = session.load(path)
+                except session.SessionError as exc:
+                    out["problems"].append(str(exc))
+                    return out
+                out["saved"] = str(doc.get("saved") or "")
+                out["note"] = str(doc.get("note") or "")
+                out["workbook"] = str(doc.get("workbook") or "")
+                out["pairs"] = sorted(doc.get("pairs") or {})
+            return out
+
+    def session_save(self, payload: dict) -> dict:
+        """Write the marks this session has made beside the workbook.
+
+        The workbook itself is untouched -- that is a standing decision, not an
+        omission -- so this is how a morning's marking survives a restart.
+        """
+        with self._lock:
+            if self.book is None:
+                raise ValueError(self.load_error or "no workbook is loaded")
+            raw = (payload.get("pairs") or None)
+            pairs = [raw] if isinstance(raw, str) and raw.strip() else raw
+            path = (payload.get("path") or "").strip() or (
+                self.session_path or str(session.default_path()))
+            written = session.save(self.book, path, pairs, note=str(payload.get("note") or ""))
+            self.session_path = written
+            # The marks are on disk now, so a reload no longer loses them --
+            # unless it was one pair of many, which is why the whole book
+            # having been saved is what clears it.
+            if not pairs:
+                self.dirty = False
+            return {"ok": True, "written": written,
+                    "pairs": (pairs if pairs else self.book.pairs),
+                    **self.session_state({"path": written})}
+
+    def session_load(self, payload: dict) -> dict:
+        """Put a saved session back on the loaded book.
+
+        Nothing is raised for a pair that will not take its marks: the report
+        names it, and the rest of the book still gets what was saved for it.
+        """
+        with self._lock:
+            if self.book is None:
+                raise ValueError(self.load_error or "no workbook is loaded")
+            raw = (payload.get("pairs") or None)
+            pairs = [raw] if isinstance(raw, str) and raw.strip() else raw
+            path = (payload.get("path") or "").strip() or (
+                self.session_path or str(session.default_path()))
+            out = session.restore(self.book, path, pairs)
+            self.session_path = str(path)
+            # The book now says something the workbook does not.  It is in a
+            # file, but a reload would still drop it, so the watcher asks.
+            self.dirty = True
+            return {"ok": not out["problems"], **out, **self.session_state({"path": path})}
 
     # -- analysis ---------------------------------------------------------
     def history_state(self) -> dict:
@@ -575,6 +985,10 @@ class BookService:
             if not path:
                 raise ValueError("no historical workbook path was given")
             known = self.book.pairs if self.book is not None else None
+            # Stamped before the read and kept whether it worked or not: a
+            # file that cannot be read is retried when it changes, not on
+            # every pass of the watcher.
+            stamp = self._mtime(path)
             try:
                 self.history = load_history(path, known,
                                             vol_unit=(payload or {}).get("vol_unit") or "auto")
@@ -582,8 +996,11 @@ class BookService:
                 self.history_error = None
             except HistoryError as exc:
                 self.history = None
+                self.history_path = path
                 self.history_error = str(exc)
                 raise
+            finally:
+                self.history_mtime = stamp
             return self.history_state()
 
     def analysis(self, q: dict) -> dict:
@@ -608,12 +1025,19 @@ class BookService:
             lookback = None if lookback_raw in (None, "", "match") else float(lookback_raw)
             annualisation = q.get("annualisation") or "weighted"
             with_noise = str(q.get("noise", "1")).lower() not in ("0", "false", "no")
+            # What "realized" is measured on.  ``auto`` uses the forward to
+            # each tenor wherever the sheet quotes the swap points, because an
+            # implied volatility is a volatility of the forward.
+            realized_basis = q.get("realized_basis") or "auto"
+            with_sabr = str(q.get("sabr", "0")).lower() not in ("0", "false", "no", "")
+            sabr_delta = float(q.get("sabr_delta") or 0.25)
 
             out = {
                 "pair": pair, "cut": cut, "method": method, "target": target,
                 "target_label": TARGETS.get(target, target),
                 "horizon_days": horizon,
                 "lookback_days": lookback, "annualisation": annualisation,
+                "realized_basis": realized_basis, "sabr": with_sabr, "sabr_delta": sabr_delta,
                 "valuation": self.book.clock.now.isoformat(),
                 "tenors": list(self.book.data.tenor_points),
                 "is_cross": bool(self.book.data.pairs[pair].is_cross),
@@ -642,11 +1066,13 @@ class BookService:
 
             out["fair"] = [asdict(r) for r in fair_value_table(
                 self.book, pair, hist, horizon_days=horizon,
-                lookback_days=lookback, method=method, cut=cut, annualisation=annualisation)]
+                lookback_days=lookback, method=method, cut=cut, annualisation=annualisation,
+                realized_basis=realized_basis)]
             if hist is not None:
                 out["realized"] = [asdict(r) for r in realized_table(
                     self.book, pair, hist, lookback_days=lookback, method=method,
-                    cut=cut, annualisation=annualisation)]
+                    cut=cut, annualisation=annualisation, realized_basis=realized_basis,
+                    with_sabr=with_sabr, sabr_delta=sabr_delta)]
 
             if out["is_cross"]:
                 try:
@@ -662,7 +1088,7 @@ class BookService:
     def compare_curves(self, payload: dict) -> dict:
         """Several curves side by side, and the same curve on other dates.
 
-        The panel is the browser's, posted whole, so ``volkit analysis
+        The panel is the browser's, posted whole, so ``volkit monitor
         --compare`` reproduces the screen exactly and this stays a pure
         function of its request plus the book.
         """
@@ -670,6 +1096,17 @@ class BookService:
             if self.book is None:
                 raise ValueError(self.load_error or "no workbook is loaded")
             return curve_panel_from_request(payload).run(self.book, self.history)
+
+    def monitor(self, payload: dict) -> dict:
+        """Every tile on the monitor screen: what has moved, and by how much.
+
+        Posted whole like the other panels, so ``volkit monitor`` reproduces
+        the screen exactly.
+        """
+        with self._lock:
+            if self.book is None:
+                raise ValueError(self.load_error or "no workbook is loaded")
+            return monitor_panel_from_request(payload).run(self.book, self.history)
 
     # -- managed bands ----------------------------------------------------
     def band(self, q: dict) -> dict:
@@ -703,6 +1140,7 @@ class BookService:
                 raise ValueError(f"{pair} is not built in this book")
             surface = self.book[pair]
             warnings = surface.set_band_treatment(BandTreatment.from_request(payload))
+            self.dirty = True
             out = self.band(payload)
             out["warnings"] = list(dict.fromkeys(list(out["warnings"]) + warnings))
             return out
@@ -743,6 +1181,9 @@ class BookService:
             if self.history is not None and panel.pair in self.history:
                 hist = self.history[panel.pair]
             out = panel.run(self.book, bank=self.bank, hist=hist)
+            # Only when it left its marks on the book: a panel that reported
+            # and restored has changed nothing to lose.
+            self.dirty = self.dirty or bool(out.get("applied"))
             out["bank"]["error"] = self.bank_error
             return out
 
@@ -795,12 +1236,39 @@ class BookService:
                 raise ValueError(self.load_error or "no workbook is loaded")
             return panel_from_request(payload).run(self.book)
 
+    def listed_greeks(self, payload: dict) -> dict:
+        """Aggregate the risk of a book of exchange-traded positions.
+
+        The browser posts the positions *and* the panels they are priced
+        against, so this is a pure function of the request plus the book's
+        clock -- the same rule as the fit above, and what lets ``volkit listed
+        --positions`` reproduce the screen.  Every parameter the greeks need
+        comes off the panel the position belongs to; nothing is looked up on
+        the marked surface, because a listed position is risk in the listed
+        contract's own units.
+        """
+        with self._lock:
+            if self.book is None:
+                raise ValueError(self.load_error or "no workbook is loaded")
+            return positions_from_request(payload).run(clock=self.book.clock)
+
     def export_daily(self, q: dict) -> str:
         with self._lock:
             surface = self.book[q["pair"]]
             series = surface.atm.daily_series(float(q.get("horizon", 1.0)), q.get("cut", "NY"))
             field = q.get("field", "cumulative")
             return "".join(f"{k}, {v[field] * 100}\n" for k, v in series.items())
+
+
+def _stamp(mtime: float | None) -> str:
+    """A file's write time as an ISO string, or empty when there is none.
+
+    Taken from the file rather than from a clock: it is a fact about the file,
+    and the model's own clock may be a valuation in the past.
+    """
+    if not mtime:
+        return ""
+    return datetime.fromtimestamp(mtime, UTC).replace(microsecond=0).isoformat()
 
 
 def _finite(obj):
@@ -872,12 +1340,21 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self.service.rrfly(q))
             elif url.path == "/api/feed":
                 self._json(self.service.feed_state(q))
+            elif url.path == "/api/auto":
+                # Belongs to no screen: it is about the files every screen
+                # reads.  ``check`` runs a pass now rather than waiting for
+                # the next tick, which is what the CLI and the tests use.
+                if q.get("check"):
+                    self.service.auto_check(settle=False)
+                self._json(self.service.auto_state())
             elif url.path == "/api/events/suggest":
                 self._json(self.service.suggest_events(q))
             elif url.path == "/api/analysis":
                 self._json(self.service.analysis(q))
             elif url.path == "/api/history":
                 self._json(self.service.history_state())
+            elif url.path == "/api/session":
+                self._json(self.service.session_state(q))
             elif url.path == "/api/band":
                 self._json(self.service.band(q))
             elif url.path == "/api/mm/bank":
@@ -925,8 +1402,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self.service.set_events(payload))
             elif url.path == "/api/feed":
                 self._json(self.service.load_feed(payload))
+            elif url.path == "/api/feed/refresh":
+                self._json(self.service.refresh_feed(payload))
             elif url.path == "/api/listed/fit":
                 self._json(self.service.listed_fit(payload))
+            elif url.path == "/api/listed/greeks":
+                self._json(self.service.listed_greeks(payload))
             elif url.path == "/api/mm/fit":
                 self._json(self.service.mm_fit(payload))
             elif url.path == "/api/mm/learn":
@@ -937,10 +1418,21 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self.service.analysis(payload))
             elif url.path == "/api/history":
                 self._json(self.service.load_history(payload))
-            elif url.path == "/api/analysis/curves":
+            elif url.path == "/api/session/save":
+                self._json(self.service.session_save(payload))
+            elif url.path == "/api/session/load":
+                self._json(self.service.session_load(payload))
+            elif url.path == "/api/monitor/curves":
                 self._json(self.service.compare_curves(payload))
+            elif url.path == "/api/monitor":
+                self._json(self.service.monitor(payload))
             elif url.path == "/api/band":
                 self._json(self.service.set_band(payload))
+            elif url.path == "/api/auto":
+                # Belongs to no screen, like the GET: the feed is read by
+                # several of them.  The switch happens to live on the pricing
+                # tab because that is where a stale spot does damage.
+                self._json(self.service.set_auto(payload))
             else:
                 self._json({"error": f"unknown endpoint {url.path}"}, code=404)
         except Exception as exc:  # noqa: BLE001
@@ -950,9 +1442,11 @@ class Handler(BaseHTTPRequestHandler):
 def serve(path: str, host: str = "127.0.0.1", port: int = 8765,
           clock: Clock | None = None, open_browser: bool = True,
           feed_path: str | None = None, history_path: str | None = None,
-          bank_path: str | None = None) -> None:
+          bank_path: str | None = None, session_path: str | None = None,
+          auto_reload: float = 0.0) -> None:
     """Start the local server (blocking)."""
-    Handler.service = BookService(path, clock, feed_path, history_path, bank_path)
+    Handler.service = BookService(path, clock, feed_path, history_path, bank_path,
+                                  session_path, auto_reload)
     httpd = ThreadingHTTPServer((host, port), Handler)
     url = f"http://{host}:{port}/"
     print(f"volkit serving {path}\n  -> {url}\n  (Ctrl-C to stop)")
@@ -964,6 +1458,12 @@ def serve(path: str, host: str = "127.0.0.1", port: int = 8765,
         print(f"  ! history: {Handler.service.history_error}")
     if Handler.service.bank_error:
         print(f"  ! knowledge bank: {Handler.service.bank_error}")
+    if Handler.service.session_error:
+        print(f"  ! session: {Handler.service.session_error}")
+    if Handler.service.start_watching():
+        watched = ", ".join(w["path"] for w in Handler.service.auto_state()["watching"])
+        print(f"  auto-load the feed every {Handler.service.auto_interval:g}s: "
+              f"{watched or '(no feed file)'}")
     if open_browser:
         threading.Timer(0.6, lambda: webbrowser.open(url)).start()
     try:
@@ -971,4 +1471,5 @@ def serve(path: str, host: str = "127.0.0.1", port: int = 8765,
     except KeyboardInterrupt:
         print("\nstopped")
     finally:
+        Handler.service.stop_watching()
         httpd.server_close()

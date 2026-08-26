@@ -9,18 +9,19 @@ workbook without building anything.
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 from datetime import datetime
 from pathlib import Path
 
-from . import config, screens
+from . import config, screens, session
 from .book import Book
 from .marketdata import ExcelSource, MarketDataError
 from .timeutil import UTC, Clock, parse_datetime, tenor_to_years
 
 #: Every subcommand name, whether or not this build registers it.  Used before
 #: the parser exists, to tell a configuration file's command from its options.
-KNOWN_COMMANDS = frozenset(screens.all_commands()) | {"check", "serve"}
+KNOWN_COMMANDS = frozenset(screens.all_commands()) | {"check", "serve", "session"}
 
 def _default_workbook() -> str:
     """The workbook beside the executable, or the project copy when running from source."""
@@ -122,6 +123,20 @@ def _book(args, pairs=None) -> Book:
     book.load_all(pairs)
     for w in book.all_problems():
         print(f"  ! {w}", file=sys.stderr)
+    # A saved session goes on here rather than in each subcommand, so every
+    # command prices against the same marks the screen would be showing.  It
+    # is applied after load_all so it is layered on the workbook, never
+    # instead of it, and everything it could not put back is printed.
+    if getattr(args, "session", None):
+        from . import session as session_mod
+        out = session_mod.restore(book, args.session)
+        print(f"session {args.session}: marks restored for "
+              f"{', '.join(out['applied']) or 'nothing'}"
+              + (f" (saved {out['saved']})" if out["saved"] else ""), file=sys.stderr)
+        for note in out["notes"]:
+            print(f"  . {note}", file=sys.stderr)
+        for problem in out["problems"]:
+            print(f"  ! {problem}", file=sys.stderr)
     return book
 
 
@@ -191,9 +206,18 @@ def cmd_smile(args) -> int:
     expiry = parse_datetime(args.expiry)
     sl = surface.slice_at(expiry, args.method, args.cut)
     print(f"{args.pair}  expiry {expiry:%Y-%m-%d}  t={sl.t:.5f}y  method={args.method}")
-    print(f"  {'point':<10}{'K/F':>12}{'vol %':>10}")
+    # The same scale the marking screen's chart uses: with a feed the strikes
+    # are printed as levels, without one they stay in K/F and the heading says
+    # so.  The smile is fitted in moneyness either way.
+    level = book.market_level(args.pair, sl.t)
+    scale = level["forward"] if level["feed"] else 1.0
+    print(f"  {'point':<10}{'strike' if level['feed'] else 'K/F':>12}{'vol %':>10}")
     for row in surface.smile_table(expiry, method=args.method, cut=args.cut):
-        print(f"  {row['label']:<10}{row['strike']:>12.6f}{row['vol'] * 100:>10.4f}")
+        print(f"  {row['label']:<10}{row['strike'] * scale:>12.6f}{row['vol'] * 100:>10.4f}")
+    if level["feed"]:
+        print(f"  spot {level['spot']:.6f}  forward {scale:.6f}"
+              + ("  (extrapolated beyond the feed's pillars)"
+                 if level["extrapolated"] else ""))
     if sl.svi is not None:
         flag = "arbitrage-free" if sl.svi.arbitrage_free else "ARBITRAGE PRESENT"
         print(f"  fit: max error {sl.svi.max_abs_vol_error * 100:.2e} vol pts, {flag}")
@@ -302,35 +326,61 @@ def cmd_analysis(args) -> int:
                                   target=args.target, method=args.method, cut=args.cut)
     print(f"\ncarry and roll — {analytics.TARGETS[args.target]}")
     print(f"  {'tenor':<6}{'forward':>10}{'strike':>10}{'level':>9}{'rolled':>9}{'roll':>9}"
-          f"{'term':>9}{'smile':>9}{'per year':>10}{'/atm':>8}")
+          f"{'term':>9}{'smile':>9}{'per year':>10}{'/atm':>8}"
+          f"{'delta':>8}{'fwd/yr':>9}{'carry bp':>10}{'in vols':>9}{'roll+carry':>11}")
     for r in carry:
         if not r.expiry:
             print(f"  {r.tenor:<6}  {r.warnings[0]}")
             continue
         strike = "—" if r.strike != r.strike else f"{r.strike:.5f}"
+        # The carry is a premium in the term currency, so it is divided by the
+        # forward before being called basis points -- 0.019 JPY on a 150
+        # forward is 1.3bp of notional, not 192 of anything. "in vols" is the
+        # same premium over the position's own vega, which is the form that
+        # can be read beside the roll.
         print(f"  {r.tenor:<6}{r.forward:>10.5f}{strike:>10}{pct(r.level)}{pct(r.level_rolled)}"
               f"{sgn(r.roll)}{sgn(r.roll_term)}{sgn(r.roll_smile)}{sgn(r.roll_annual, 2, 10)}"
-              f"{r.ratio_atm:>+8.3f}")
+              f"{r.ratio_atm:>+8.3f}"
+              f"{('—'.rjust(8) if r.delta is None else f'{r.delta:>+8.3f}')}"
+              f"{sgn(r.carry_rate, 2, 9)}"
+              f"{('—'.rjust(10) if r.carry_pnl is None else f'{r.carry_pnl / r.forward * 10000:>+10.3f}')}"
+              f"{sgn(r.carry_vols, 3, 9)}"
+              f"{sgn(None if r.carry_vols is None else r.roll + r.carry_vols, 3, 11)}")
     for note in dict.fromkeys(w for r in carry for w in r.warnings if r.expiry):
         print(f"  ! {note}")
+    print("  delta / fwd-yr / carry: the forward curve's own carry. The strike is fixed, so the "
+          "forward\n  slides out from under it — that is 'smile' in volatility points and "
+          "'carry bp' in basis\n  points of the forward. A book hedged in the outright forward to "
+          "the option's own expiry\n  earns and pays that away exactly; hedged in spot, as a desk "
+          "is, it keeps it.")
 
     fair = analytics.fair_value_table(book, args.pair, hist, horizon_days=args.horizon,
                                       lookback_days=lookback, method=args.method, cut=args.cut,
-                                      annualisation=args.annualisation)
-    print(f"\nfair value — at-the-money implied against realized plus the at-the-money roll")
-    print(f"  {'tenor':<6}{'implied':>9}{'realized':>9}{'window':>8}{'roll':>9}{'x':>7}"
-          f"{'roll val':>9}{'of which fwd':>13}{'fair':>9}{'rich':>9}")
+                                      annualisation=args.annualisation,
+                                      realized_basis=args.realized_basis)
+    print(f"\nfair value — at-the-money implied against realized plus the at-the-money roll and carry")
+    print(f"  {'tenor':<6}{'implied':>9}{'realized':>9}{'on':>9}{'window':>8}{'roll':>9}{'x':>7}"
+          f"{'roll val':>9}{'of which fwd':>13}{'fwd/yr':>9}{'carry val':>10}{'fair':>9}{'rich':>9}")
     for r in fair:
-        print(f"  {r.tenor:<6}{pct(r.implied)}{pct(r.realized)}"
+        print(f"  {r.tenor:<6}{pct(r.implied)}{pct(r.realized)}{r.realized_basis:>9}"
               f"{(r.realized_window_days or 0):>8.0f}{sgn(r.roll)}{r.roll_multiplier:>7.1f}"
-              f"{sgn(r.roll_value)}{sgn(r.forward_value, 3, 13)}{pct(r.fair)}{sgn(r.richness)}")
+              f"{sgn(r.roll_value)}{sgn(r.forward_value, 3, 13)}{sgn(r.carry_rate, 2, 9)}"
+              f"{sgn(r.carry_value, 4, 10)}{pct(r.fair)}{sgn(r.richness)}")
+    print("  'on' is what the realized number was measured on. An implied volatility is a "
+          "volatility of\n  the forward, so where the sheet quotes swap points the forward is "
+          "used and their moves count.\n  'carry val' is the forward curve's price-side carry as "
+          "a break-even volatility; the at-the-money\n  is a delta-neutral straddle, so it is "
+          "second order there and 'of which fwd' carries the first.")
 
     if hist is not None:
         rows = analytics.realized_table(book, args.pair, hist, lookback_days=lookback,
                                         method=args.method, cut=args.cut,
-                                        annualisation=args.annualisation)
+                                        annualisation=args.annualisation,
+                                        realized_basis=args.realized_basis,
+                                        with_sabr=args.sabr, sabr_delta=args.sabr_delta)
         print(f"\nrealized against implied  ({args.annualisation} annualisation)")
-        print(f"  {'tenor':<6}{'window':>7}{'obs':>5}{'realized':>9}{'implied':>9}{'premium':>9}"
+        print(f"  {'tenor':<6}{'window':>7}{'obs':>5}{'realized':>9}{'on':>9}{'on spot':>9}"
+              f"{'pts vol':>9}{'implied':>9}{'premium':>9}"
               f"{'r.skew':>9}{'->tenor':>9}{'i.skew':>9}{'r.kurt':>9}{'->tenor':>9}{'i.kurt':>9}")
         for r in rows:
             if r.observations == 0:
@@ -338,9 +388,42 @@ def cmd_analysis(args) -> int:
                 continue
             f = lambda v: "—" if v is None or v != v else f"{v:+9.3f}"
             print(f"  {r.tenor:<6}{r.window_days:>7.0f}{r.observations:>5d}{pct(r.realized)}"
+                  f"{r.realized_basis:>9}{pct(r.realized_spot)}{pct(r.points_vol)}"
                   f"{pct(r.implied)}{sgn(r.premium)}{f(r.realized_skew)}{f(r.realized_skew_scaled)}"
                   f"{f(r.implied_skew)}{f(r.realized_kurtosis)}{f(r.realized_kurtosis_scaled)}"
                   f"{f(r.implied_kurtosis)}")
+        print("  'on' is the return series: a quoted volatility is a volatility of the forward, so "
+              "where the\n  sheet quotes swap points their moves are realized volatility too. "
+              "'pts vol' is that part alone;\n  'on spot' is the same window measured without it.")
+
+        if args.sabr:
+            # The risk reversal and the butterfly cannot be held up against a
+            # realized moment -- a quoted spread is not a moment.  What they
+            # share with history is SABR's two parameters, so both sides are
+            # said in those.
+            tag = f"{int(round(args.sabr_delta * 100))}"
+            print(f"\nwings as SABR shape — {tag} delta, marked smile against measured history")
+            print(f"  {'tenor':<6}{'rr':>9}{'fly':>9}{'i.rho':>9}{'r.rho':>9}{'±se':>7}"
+                  f"{'diff':>9}{'i.nu':>9}{'r.nu':>9}{'±se':>7}{'diff':>9}"
+                  f"{'i.nu*sqrt(t)':>13}{'measured on':>13}{'fit err':>9}")
+            for r in rows:
+                if r.implied_rho is None and r.realized_rho is None:
+                    print(f"  {r.tenor:<6}  {'; '.join(r.warnings[:1]) or 'unavailable'}")
+                    continue
+                g = lambda v, w=9, d=3: "—".rjust(w) if v is None or v != v else f"{v:>+{w}.{d}f}"
+                nu_scaled = None if r.implied_nu is None else r.implied_nu * math.sqrt(r.t)
+                print(f"  {r.tenor:<6}{sgn(r.marked_rr)}{sgn(r.marked_fly)}"
+                      f"{g(r.implied_rho)}{g(r.realized_rho)}{g(r.realized_rho_se, 7)}"
+                      f"{g(r.rho_difference)}{g(r.implied_nu)}{g(r.realized_nu)}"
+                      f"{g(r.realized_nu_se, 7)}{g(r.nu_difference)}{g(nu_scaled, 13)}"
+                      f"{(r.dynamics_source or '—'):>13}"
+                      f"{('—'.rjust(9) if r.implied_shape_error is None else f'{r.implied_shape_error * 100:>9.4f}')}")
+            print("  rho is the spot/volatility correlation a risk reversal is paid for, nu the vol "
+                  "of vol a\n  butterfly is paid for. SABR has no mean reversion, so nu rises at "
+                  "short tenors on both sides;\n  nu*sqrt(t) is the scale-free number that "
+                  "actually sets the shape. 'fit err' is how far the\n  marked smile is from any "
+                  "SABR smile at all, in volatility points — a large one means these\n  two "
+                  "parameters do not describe it and the comparison is loose.")
 
     if book.data.pairs[args.pair].is_cross:
         tri = analytics.triangle_table(book, args.pair, method=args.method, cut=args.cut,
@@ -349,14 +432,27 @@ def cmd_analysis(args) -> int:
         print(f"\ntriangle — {args.pair} against {legs[0]} and {legs[1]} "
               f"(coefficients {tri[0].coefficients if tri else '?'})")
         keys = ["atm", "rr25", "fly25", "rr10", "fly10"]
-        print(f"  {'tenor':<6}{'rho':>7}{'implied rho':>12}" +
+        # The vega split is per unit of at-the-money vega on the cross, so it
+        # is a ratio and not a volatility: printed plain, not as a percentage.
+        def ratio(v, w=9):
+            return "—".rjust(w) if v is None or v != v else f"{v:>{w}.3f}"
+
+        print(f"  {'tenor':<6}{'rho':>7}{'implied rho':>12}"
+              f"{'vega ' + legs[0]:>15}{'vega ' + legs[1]:>15}{'per rho':>9}" +
               "".join(f"{k + ' mk':>11}{k + ' tri':>11}{'diff':>9}" for k in keys))
         for r in tri:
             line = (f"  {r.tenor:<6}{r.rho:>+7.3f}"
-                    f"{(r.implied_correlation if r.implied_correlation is not None else float('nan')):>+12.3f}")
+                    f"{(r.implied_correlation if r.implied_correlation is not None else float('nan')):>+12.3f}"
+                    f"{ratio(r.leg_vega[0], 15)}{ratio(r.leg_vega[1], 15)}"
+                    f"{sgn(r.rho_vega, 3, 9)}")
             for k in keys:
                 line += f"{pct(r.marked.get(k), 3, 11)}{pct(r.triangle.get(k), 3, 11)}{sgn(r.difference.get(k), 3, 9)}"
             print(line)
+        print(f"  vega columns: one unit of {args.pair} at-the-money vega is that many units in "
+              f"each leg -- the two hedges. Weighted by each leg's own volatility they account "
+              f"for the whole of {args.pair}'s exactly; they do not add to one and are not "
+              f"meant to. The correlation carries its own risk, worth 'per rho' volatility "
+              f"points of {args.pair} for a whole unit of it, and no leg vega hedges it")
         if tri:
             print(f"  variance triangle ATM {pct(tri[0].variance_triangle_atm)} at {tri[0].tenor}; "
                   f"the distribution triangle sits {sgn(tri[0].smile_convexity)} above it, which is "
@@ -370,8 +466,87 @@ def cmd_analysis(args) -> int:
                 print(f"  ! {r.tenor}: {w}")
 
     if args.compare:
+        # The panel moved to the Monitor screen, and its command moved with
+        # it: a build that has the monitor tab but not this one must still be
+        # able to run a comparison.  argparse would say "unrecognised
+        # argument", which is a worse answer than the address.
+        raise ValueError(
+            "the curve comparison moved to the Monitor screen. Run "
+            f"'volkit monitor {args.pair} "
+            + " ".join(f"--compare {c}" for c in args.compare)
+            + f" --field {args.field}' instead")
+    return 0
+
+
+def cmd_monitor(args) -> int:
+    """What has moved: one small panel per pair, and the curve comparison.
+
+    The web screen's Monitor tab and this command share
+    ``monitor.panel_from_request`` and ``curves.ComparePanel``, so a screen
+    set up in the browser and the same screen run from a shell script produce
+    identical numbers.
+    """
+    from . import monitor as monitor_mod
+    from .history import load_history
+
+    specs = list(args.watch)
+    if not specs:
+        if not args.pair:
+            raise ValueError("nothing to watch: give a pair, or --watch PAIR[:was[:now]]")
+        specs = [args.pair]
+    tiles = [monitor_mod.parse_spec(x) for x in specs]
+
+    pairs = sorted({t.pair for t in tiles}
+                   | ({args.pair} if args.pair else set())
+                   | {c.pair for c in
+                      (curves_spec(args) if args.compare else [])})
+    book = _book(args, pairs)
+
+    history = None
+    if args.history:
+        history = load_history(args.history, book.pairs, vol_unit=args.vol_unit)
+        for p in list(history.problems) + list(history.skipped_sheets):
+            print(f"  . {p}", file=sys.stderr)
+
+    panel = monitor_mod.MonitorPanel(tiles=tuple(tiles), cut=args.cut, method=args.method,
+                                     field=args.field)
+    r = panel.run(book, history)
+    from .curves import CURVE_FIELDS, FIELD_LABELS
+    keys = list(CURVE_FIELDS)
+    print(f"monitor — valuation {book.clock.now:%Y-%m-%d %H:%M}Z, cut {args.cut}, "
+          f"{args.method}; changes in volatility points")
+    for tile in r["tiles"]:
+        print(f"\n{tile['label']}")
+        if not tile["ok"]:
+            print(f"  UNAVAILABLE: {tile['message']}")
+            continue
+        print(f"  was: {tile['was']['source'] or tile['was']['kind_label']}")
+        print(f"  now: {tile['now']['source'] or tile['now']['kind_label']}")
+        print(f"  {'tenor':<7}" + "".join(f"{k:>11}" for k in keys)
+              + f"   {FIELD_LABELS[args.field]} was -> now")
+        for row in tile["rows"]:
+            line = f"  {row['tenor']:<7}"
+            for k in keys:
+                v = row["change"][k]
+                line += "—".rjust(11) if v is None else f"{v * 100:>+11.4f}"
+            was, now = row["was"][args.field], row["now"][args.field]
+            line += ("   " + ("—" if was is None else f"{was * 100:.4f}") + " -> "
+                     + ("—" if now is None else f"{now * 100:.4f}"))
+            print(line)
+        for note in tile["notes"]:
+            print(f"  . {note}")
+        for w in tile["warnings"][:4]:
+            print(f"  ! {w}")
+
+    if args.compare:
         _print_comparison(args, book, history)
     return 0
+
+
+def curves_spec(args):
+    """The ``--compare`` arguments as curve requests, with the pair filled in."""
+    from . import curves as curves_mod
+    return [curves_mod.parse_spec(spec, args.pair or "") for spec in args.compare]
 
 
 def _print_comparison(args, book, history) -> None:
@@ -383,7 +558,7 @@ def _print_comparison(args, book, history) -> None:
     from . import curves as curves_mod
 
     panel = curves_mod.ComparePanel(
-        curves=tuple(curves_mod.parse_spec(spec, args.pair) for spec in args.compare),
+        curves=tuple(curves_spec(args)),
         cut=args.cut, method=args.method, field=args.field, base=0)
     r = panel.run(book, history)
 
@@ -431,8 +606,10 @@ def cmd_listed(args) -> int:
         "invert": args.invert if args.invert is not None else None,
         "scale": args.scale, "expiry": args.expiry, "forward": args.forward,
         "text": text, "vol_unit": args.vol_unit, "beta": args.beta,
+        "alpha": args.alpha, "rho": args.rho, "volvol": args.nu,
         "weighting": args.weighting, "cut": args.cut, "method": args.method,
         "strike_column": args.strike_column, "vol_column": args.vol_column,
+        "contract_size": args.contract_size,
     }
     panel = listed_mod.panel_from_request(payload)
     book = None
@@ -445,8 +622,14 @@ def cmd_listed(args) -> int:
           + (f"  ->  {u['pair']}{' (inverted)' if u['invert'] else ''}" if u["pair"] else ""))
     print(f"  expiry {r['expiry'][:16].replace('T', ' ')}Z   t={r['years']:.5f}y "
           f"({r['days']:.2f} days)   forward {r['forward']:g}   {r['n_quotes']} quotes")
-    print(f"  SABR   alpha={f['alpha']:.6f}  rho={f['rho']:+.4f}  "
-          f"nu={f['volvol']:.4f} (nu*sqrt(t)={f['log_volvol']:.4f})  beta={f['beta']:g}")
+    # A given parameter is marked where it is printed, not only in the
+    # warnings: read off the line on its own it is indistinguishable from one
+    # the market implied.
+    pinned = set(f.get("fixed") or ())
+    tag = lambda k: "*" if k in pinned else " "
+    print(f"  SABR   alpha={f['alpha']:.6f}{tag('alpha')} rho={f['rho']:+.4f}{tag('rho')} "
+          f"nu={f['volvol']:.4f}{tag('volvol')}(nu*sqrt(t)={f['log_volvol']:.4f})  "
+          f"beta={f['beta']:g}" + ("   * = given, not fitted" if pinned else ""))
     print(f"  fit    vol at forward {f['atm_vol']:.4f}%   weighted RMSE {f['rmse']:.4f} vol pts   "
           f"worst {f['max_error']:+.4f} at {f['max_error_strike']:g}   [{f['message']}]")
 
@@ -479,7 +662,56 @@ def cmd_listed(args) -> int:
         print(f"  . {n}")
     for w in r["warnings"]:
         print(f"  ! {w}")
+
+    if args.positions:
+        # The same call the screen makes, with this one panel as the whole
+        # screen: a position naming another contract is told so rather than
+        # being priced against the only curve to hand.
+        g = listed_mod.positions_from_request({
+            "text": (sys.stdin.read() if args.positions == "-"
+                     else Path(args.positions).read_text()),
+            "panels": [payload], "vol_bump": args.vol_bump, "theta_days": args.theta_days,
+        }).run(clock=_clock(args))
+        _print_listed_positions(g)
+        return 1 if (r["warnings"] or g["warnings"]) else 0
     return 1 if r["warnings"] else 0
+
+
+def _print_listed_positions(g: dict) -> None:
+    """The positions table and the aggregate, in the screen's own order."""
+    print(f"\n  positions   vega, vanna and volga per {g['vol_bump']:g} vol point(s); "
+          f"theta over {g['theta_days']:g} day(s); money in the contract's premium currency")
+    head = (f"  {'#':>3} {'panel':<12}{'strike':>12}{'c/p':>5}{'qty':>9}{'vol %':>9}"
+            f"{'premium':>13}{'delta fut':>11}{'vega':>12}{'theta':>11}{'gamma 1%':>11}")
+    print(head)
+    for kind in ("bs", "smile"):
+        print(f"  -- {'Black-Scholes' if kind == 'bs' else 'smile (revalued on the fit)'}")
+        for row in g["positions"]:
+            if row["bs"]["vega"] is None:
+                print(f"  {row['line']:>3} {row['panel'][:12]:<12}"
+                      f"{'':>12}{'':>5}{row['quantity']:>9g}   ! {row['error']}")
+                continue
+            k = row[kind]
+            print(f"  {row['line']:>3} {row['panel'][:12]:<12}{row['strike']:>12g}"
+                  f"{('C' if row['type'] == 'call' else 'P'):>5}{row['quantity']:>9g}"
+                  f"{row['vol']:>9.4f}{row['premium']:>13,.0f}{k['delta_futures']:>11,.2f}"
+                  f"{k['vega']:>12,.0f}{k['theta']:>11,.0f}{k['gamma_1pct']:>11,.0f}")
+        for grp in g["groups"]:
+            k = grp[kind]
+            print(f"      {'= ' + grp['panel'][:10]:<12}{'':>12}{'':>5}{'':>9}{'':>9}"
+                  f"{grp['premium']:>13,.0f}{k['delta_futures']:>11,.2f}"
+                  f"{k['vega']:>12,.0f}{k['theta']:>11,.0f}{k['gamma_1pct']:>11,.0f}")
+        t = g["totals"][kind]
+        print(f"      {'= all':<12}{'':>12}{'':>5}{'':>9}{'':>9}{g['totals']['premium']:>13,.0f}"
+              f"{'--':>11}{t['vega']:>12,.0f}{t['theta']:>11,.0f}{t['gamma_1pct']:>11,.0f}")
+    print("      futures-equivalent delta is per contract and is not totalled: a future of "
+          "one contract is not a future of another")
+    for x in g["skipped"]:
+        print(f"  ! line {x['line']} skipped ({x['why']}): {x['text']}")
+    for n in g["notes"]:
+        print(f"  . {n}")
+    for w in g["warnings"]:
+        print(f"  ! {w}")
 
 
 def cmd_mm(args) -> int:
@@ -538,6 +770,16 @@ def cmd_mm(args) -> int:
         return 0
 
     book = _book(args, [args.pair])
+    if args.feed:
+        # The screen has a feed loaded, so this must be able to have one too:
+        # a quote written against an absolute strike needs the outright forward
+        # to become a moneyness, and without it every strike row on the sheet
+        # comes back unavailable.
+        from .feed import MarketFeed
+        try:
+            book.feed = MarketFeed.load(args.feed)
+        except Exception as exc:  # noqa: BLE001 - the delta quotes still price
+            print(f"  ! forward feed: {exc}", file=sys.stderr)
     hist = None
     if args.history:
         from .history import load_history
@@ -584,7 +826,14 @@ def cmd_mm(args) -> int:
     print(f"\n  {sheet['n_quotes']} quote(s), {sheet['inside']} with our mid inside their market, "
           f"{sheet['priced']} with a width")
     panel_cap = float(args.skew_cap)
-    print(f"  {'quote':<26}{'their bid':>10}{'their ask':>10}{'model':>9}{'skew':>9}"
+    # The time column only appears when the paste was timed; a column of dashes
+    # on a run nobody timestamped is noise in a table that is already wide.
+    timed = any(row.get("timestamp") for row in sheet["rows"]) or bool(sheet.get("superseded"))
+    stamp_w = max([5] + [len(row.get("timestamp") or "") for row in sheet["rows"]]) + 2
+    head = f"  {'quote':<26}"
+    if timed:
+        head += f"{'time':>{stamp_w}}"
+    print(head + f"{'their bid':>10}{'their ask':>10}{'model':>9}{'skew':>9}"
           f"{'our bid':>9}{'our ask':>10}{'width':>8}  verdict")
 
     def cell(value, width=10, dp=4, signed=False):
@@ -598,7 +847,8 @@ def cmd_mm(args) -> int:
         # further than a quote is allowed to be moved.
         if row["skew_capped"]:
             capped += 1
-        print(f"  {row['describe']:<26}{cell(row['market_bid'])}{cell(row['market_ask'])}"
+        stamp = f"{(row.get('timestamp') or '-'):>{stamp_w}}" if timed else ""
+        print(f"  {row['describe']:<26}{stamp}{cell(row['market_bid'])}{cell(row['market_ask'])}"
               f"{cell(row['model_after'], 9)}{cell(row['skew_total'], 8, 3, True)}"
               f"{'*' if row['skew_capped'] else ' '}"
               f"{cell(row['our_bid'], 9)}{cell(row['our_ask'])}{cell(row['width'], 8, 3)}"
@@ -618,6 +868,13 @@ def cmd_mm(args) -> int:
         print(f"  . {n_}")
     for row in sheet["skipped"]:
         print(f"  ! line {row['line']} skipped ({row['why']}): {row['text'][:60]}")
+    for row in sheet.get("superseded") or []:
+        # Not an error and not skipped: read, understood, and replaced by a
+        # later quote of the same thing.  Printed so a run whose update was
+        # mis-typed shows the quote that went missing rather than hiding it.
+        print(f"  . line {row['line']} superseded by line {row['replaced_by']}: "
+              f"{row['describe']} {row['bid']:.4f}/{row['ask']:.4f}"
+              + (f" at {row['timestamp']}" if row["timestamp"] else ""))
     for x in r["warnings"]:
         print(f"  ! {x}")
     return 1 if r["warnings"] else 0
@@ -675,12 +932,72 @@ def cmd_events(args) -> int:
     return 0
 
 
+def cmd_session(args) -> int:
+    """Save the marks on a book to a file, put a saved file back, or read one.
+
+    The workbook is never written to -- that is a standing decision, not an
+    omission -- so this is the file a morning's marking survives in.  It is the
+    same file the Save button on the marking and market-maker screens writes,
+    through the same functions.
+    """
+    from . import session as session_mod
+
+    path = args.path or str(session_mod.default_path())
+    if args.show:
+        doc = session_mod.load(path)
+        print(f"{path}")
+        print(f"  written  {doc.get('saved') or 'unknown'}"
+              + (f" against {doc.get('workbook')}" if doc.get("workbook") else ""))
+        if doc.get("valuation"):
+            print(f"  valuation {doc['valuation']}")
+        if doc.get("note"):
+            print(f"  note     {doc['note']}")
+        print(f"  units    {doc.get('units') or 'unstated'}")
+        for name, block in sorted((doc.get("pairs") or {}).items()):
+            bits = []
+            if block.get("atm_overwrites"):
+                bits.append(f"{len(block['atm_overwrites'])} ATM overwrite(s)")
+            if block.get("smile_overwrites"):
+                bits.append(f"{sum(len(v) for v in block['smile_overwrites'].values())} "
+                            "smile overwrite(s)")
+            if block.get("param_shifts"):
+                bits.append(f"{len(block['param_shifts'])} wing shift(s)")
+            if block.get("events"):
+                bits.append(f"{len(block['events'])} event(s)")
+            if block.get("anchor_tenors"):
+                bits.append("anchored")
+            if block.get("band"):
+                bits.append(f"band {block['band'].get('mode')}")
+            print(f"  {name:<9}{', '.join(bits) or 'curve only'}")
+        return 0
+
+    # --save writes what is on the book now; the book itself may already have
+    # a session on it, because --session is honoured by every command.
+    book = _book(args, [args.pair] if args.pair else None)
+    if args.load:
+        out = session_mod.restore(book, path, [args.pair] if args.pair else None)
+        print(f"{path}: restored {', '.join(out['applied']) or 'nothing'}")
+        for note in out["notes"]:
+            print(f"  . {note}")
+        for problem in out["problems"]:
+            print(f"  ! {problem}")
+        return 1 if out["problems"] else 0
+    written = session_mod.save(book, path, [args.pair] if args.pair else None, note=args.note)
+    doc_pairs = [args.pair] if args.pair else book.pairs
+    print(f"saved {len(doc_pairs)} pair(s) to {written}")
+    print("  the workbook is unchanged; start with --session "
+          f"{written} to price against these marks")
+    return 0
+
+
 def cmd_serve(args) -> int:
     from .webapp import serve
     serve(args.workbook, host=args.host, port=args.port,
           clock=_clock(args), open_browser=not args.no_browser, feed_path=args.feed,
           history_path=getattr(args, "history", None),
-          bank_path=getattr(args, "knowledge", None))
+          bank_path=getattr(args, "knowledge", None),
+          session_path=getattr(args, "session", None),
+          auto_reload=getattr(args, "auto_reload", 0.0) or 0.0)
     return 0
 
 
@@ -703,6 +1020,10 @@ def build_parser() -> argparse.ArgumentParser:
                         "executable is read when volkit is started with no arguments at all)")
     p.add_argument("--no-config", action="store_true",
                    help="ignore the startup settings file")
+    p.add_argument("--session", metavar="PATH",
+                   help="saved marks to put on the book before anything is priced "
+                        f"({session.SESSION_FILENAME} beside the workbook is the usual name). "
+                        "The workbook itself is never written to")
 
     # The same options are attached to every subcommand as well, so they work
     # in either position.  People naturally type
@@ -715,6 +1036,7 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("--asof", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
     common.add_argument("--enable-tab", action="append", default=argparse.SUPPRESS,
                         help=argparse.SUPPRESS)
+    common.add_argument("--session", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
 
     # Everything a marker may move about a managed band.  Percentages, because
     # that is how they are read on the screen; BandTreatment.from_request does
@@ -762,6 +1084,19 @@ def build_parser() -> argparse.ArgumentParser:
     s = add_command("check", parents=[common], help="validate the workbook without building anything")
     s.set_defaults(func=cmd_check)
 
+    s = add_command("session", parents=[common],
+                    help="save the marks on the book to a file, or put a saved file back")
+    s.add_argument("path", nargs="?",
+                   help=f"the session file (default: {session.SESSION_FILENAME} beside the "
+                        "workbook)")
+    s.add_argument("--load", action="store_true",
+                   help="put the file's marks on the book instead of writing it")
+    s.add_argument("--show", action="store_true",
+                   help="print what a file holds without loading a workbook")
+    s.add_argument("--pair", help="one pair only (default: every pair in the book)")
+    s.add_argument("--note", default="", help="a line recorded in the file")
+    s.set_defaults(func=cmd_session)
+
     s = add_command("serve", parents=[common], help="run the local web interface")
     s.add_argument("--host", default="127.0.0.1")
     s.add_argument("--port", type=int, default=8765)
@@ -771,6 +1106,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--history", default=_default_history(),
                    help="historical workbook for the analysis screen")
     s.add_argument("--knowledge", help="knowledge bank JSON (default: beside the workbook)")
+    s.add_argument("--auto-reload", type=float, nargs="?", const=5.0, default=0.0,
+                   metavar="SECONDS",
+                   help="watch the market feed and re-read it when it is written (default: "
+                        "off; bare flag = every 5s). Only the feed: the workbook and the "
+                        "historical sheet stay on their buttons, because reloading the "
+                        "workbook discards this session's marks. The pricing screen has the "
+                        "same switch")
     s.set_defaults(func=cmd_serve)
 
     s = add_command("mm", parents=[common],
@@ -800,6 +1142,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--fallback-spread", type=float,
                    help="width in vol points for quotes no bank rule matches")
     s.add_argument("--knowledge", help="knowledge bank JSON (default: beside the workbook)")
+    s.add_argument("--feed", default=_default_feed(),
+                   help="spot / forward feed CSV. Needed for a quote written against an "
+                        "absolute strike, which has to become a moneyness before the surface "
+                        "can be read at it")
     s.add_argument("--history", default=_default_history(),
                    help="historical workbook, for the fair-value lean")
     s.add_argument("--vol-unit", default="auto", choices=["auto", "percent", "decimal"])
@@ -867,19 +1213,52 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--target", default="atm", choices=sorted(_targets()),
                    help="which point on the smile to roll")
     s.add_argument("--annualisation", default="weighted", choices=["weighted", "calendar", "count"])
+    s.add_argument("--realized-basis", default="auto", choices=["auto", "spot", "forward"],
+                   help="measure realized volatility on the forward to each tenor (the "
+                        "like-for-like comparison, and the default where the sheet quotes "
+                        "swap points) or on spot alone")
+    s.add_argument("--sabr", action="store_true",
+                   help="also read the risk reversal and the butterfly as a spot/volatility "
+                        "correlation and a vol of vol, against the same two measured from history")
+    s.add_argument("--sabr-delta", type=float, default=0.25,
+                   help="which wings to read the SABR shape off (default 0.25)")
     s.add_argument("--vol-unit", default="auto", choices=["auto", "percent", "decimal"])
     s.add_argument("--cut", default="NY")
     s.add_argument("--method", default="SVI")
     s.add_argument("--no-noise", action="store_true",
                    help="skip the triangle's reconstruction diagnostic (faster)")
+    # Kept on this command, and refused with an address rather than dropped:
+    # the panel moved to the Monitor screen and argparse's "unrecognised
+    # argument" would not say where it went.
     s.add_argument("--compare", action="append", default=[], metavar="SOURCE",
-                   help="add a curve to the comparison table; repeatable. "
-                        "'surface', 'marks', 'history', 'history:2024-01-15', "
-                        "'history:-30d', 'history:-30d:EURUSD'. The first is the "
-                        "one the others are differenced against")
+                   help="moved to 'volkit monitor --compare'; kept here so the old command "
+                        "line says where the curve comparison went")
     s.add_argument("--field", default="atm", choices=list(_curve_fields()),
-                   help="which quoted number the comparison table shows")
+                   help="which quoted number a moved --compare would have shown")
     s.set_defaults(func=cmd_analysis)
+
+    s = add_command("monitor", parents=[common],
+                    help="what has moved: small panels per pair, and the curve comparison")
+    s.add_argument("pair", nargs="?",
+                   help="the default pair for --watch and --compare")
+    s.add_argument("--watch", action="append", default=[], metavar="SPEC",
+                   help="one tile: PAIR[:was[:now]], where each end is a source with an "
+                        "optional date -- EURUSD, USDJPY:history@-1m, "
+                        "EURJPY:history@-1w:history@latest. Repeatable; the default is the "
+                        "pair's fitted surface against its historical row a week ago")
+    s.add_argument("--compare", action="append", default=[], metavar="SOURCE",
+                   help="also print the curve comparison: surface, marks, history, "
+                        "history:-30d, history:2024-01-15:EURUSD. Repeatable; the first is "
+                        "the base everything else is differenced against")
+    s.add_argument("--field", default="atm", choices=list(_curve_fields()),
+                   help="which of the five numbers the levels column shows, and what the "
+                        "comparison is differenced on")
+    s.add_argument("--history", default=_default_history(),
+                   help="historical workbook: one sheet per pair, one row per date")
+    s.add_argument("--vol-unit", default="auto", choices=["auto", "percent", "decimal"])
+    s.add_argument("--cut", default="NY")
+    s.add_argument("--method", default="SVI")
+    s.set_defaults(func=cmd_monitor)
 
     s = add_command("listed", parents=[common],
                        help="fit SABR to an exchange-traded strike/vol table")
@@ -892,6 +1271,12 @@ def build_parser() -> argparse.ArgumentParser:
                    default=None, help="override whether listed strikes are the reciprocal of the pair")
     s.add_argument("--scale", type=float, help="multiply quoted strikes before mapping, e.g. 1e-6")
     s.add_argument("--beta", type=float, default=1.0, help="SABR beta (default 1, lognormal)")
+    # The three the fit moves.  Giving one holds it there and fits the rest
+    # around it; give all three and nothing is fitted, the quotes are simply
+    # priced against the curve.
+    s.add_argument("--alpha", type=float, help="hold SABR alpha at this value instead of fitting it")
+    s.add_argument("--rho", type=float, help="hold SABR rho at this value instead of fitting it")
+    s.add_argument("--nu", type=float, help="hold SABR nu (volvol) at this value instead of fitting it")
     s.add_argument("--weighting", default="vega", choices=["vega", "equal", "table"])
     s.add_argument("--vol-unit", default="auto", choices=["auto", "percent", "decimal"])
     s.add_argument("--strike-column", type=int, help="1-based, overrides header detection")
@@ -899,6 +1284,18 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--cut", default="NY")
     s.add_argument("--method", default="SVI")
     s.add_argument("--no-compare", action="store_true", help="fit only; do not load the book")
+    s.add_argument("--positions", metavar="PATH",
+                   help="a position table to price against this panel and aggregate: "
+                        "'contract, expiry, strike, C/P, contracts', or just "
+                        "'strike, C/P, contracts' since there is one panel here. Greeks are "
+                        "reported both Black-Scholes and on the fitted smile")
+    s.add_argument("--contract-size", type=float,
+                   help="units of the base currency one option covers (default: the "
+                        "contract's own, e.g. 125000 for 6E). Only the position greeks use it")
+    s.add_argument("--vol-bump", type=float, default=1.0, metavar="POINTS",
+                   help="vega, vanna and volga are per this many volatility points (default 1)")
+    s.add_argument("--theta-days", type=float, default=1.0, metavar="DAYS",
+                   help="theta is the decay over this many days (default 1)")
     s.set_defaults(func=cmd_listed)
 
     s = add_command("smile", parents=[common, band_opts],
@@ -921,7 +1318,7 @@ def _excluded_request(argv: list[str]) -> str | None:
     positional token is inspected -- the options that may precede it are the
     two global ones, and everything after it belongs to the subcommand.
     """
-    takes_value = {"-w", "--workbook", "--asof", "--enable-tab", "--config"}
+    takes_value = {"-w", "--workbook", "--asof", "--enable-tab", "--config", "--session"}
     skip = False
     for tok in argv:
         if skip:

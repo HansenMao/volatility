@@ -27,7 +27,7 @@ against the host platform.  That catches a missing hidden import, a resource
 that never made it into the bundle or a broken launcher long before anyone
 walks over to a Windows machine.
 
-A build can also be made without some of the five screens.  ``--exclude-tab``
+A build can also be made without some of the screens.  ``--exclude-tab``
 and ``--only-tabs`` write the chosen set into the bundle, where
 ``volkit/screens.py`` reads it: the tab does not appear, its routes are
 refused by name and its subcommands are not registered.  What this does *not*

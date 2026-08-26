@@ -52,11 +52,53 @@ source):
 
 If the tool cannot find the workbook, pass it: `volkit.exe -w C:\path\to\vol_marks.xlsx`
 
+**None of these files is held open.** Each one is copied into memory and
+closed before it is read, so a workbook loaded here can still be edited and
+saved in Excel. (An earlier build kept the reader alive after the load, and
+Windows then refused to let Excel save the very sheet the tool had read.)
+
+**Picking up a new feed on its own.** Tick **auto-load** on the pricing
+toolbar and the tool re-reads the feed file whenever it is written. The same
+switch can be set at startup:
+
+```
+volkit.exe serve --auto-reload          # look every 5 seconds
+volkit.exe serve --auto-reload 30       # or every 30
+```
+
+or put `auto-reload = 30` in `volkit.cfg` for a double-click. It is **off**
+unless you ask for it.
+
+**Only the feed.** The workbook and the historical sheet are deliberately not
+watched. Reloading the workbook throws away every mark you have made this
+session — that is what a reload is for — so it stays on **Reload workbook**,
+where you have to mean it. The historical sheet is a record of what happened,
+not a market. The feed is the one that is republished all morning, and a price
+quoted off a stale spot is simply wrong.
+
+When auto-load is on, a pill beside **Reload workbook** says so, and
+everything it does is written in a line under the header — nothing reloads
+silently. The feed is read only once its write time has stopped moving, so one
+caught half saved is picked up on the next look rather than read in pieces.
+**Check the feed now** in that line does not wait: if you pressed it, you know
+you have saved.
+
+One thing it will not do on its own: if you have marked anything on the
+**Vol marking** or **Market maker** tabs, a changed workbook is *held*. Those
+marks live in memory and a reload throws them away, so it says the workbook
+has changed and waits. Save the session, or press **Reload workbook now** in
+that line to take the new workbook and lose them.
+
 ---
 
 ## 2. The tabs
 
-A build does not always have all five. One can be made without any of them
+They run **Pricing, Vol marking, Monitor, Exchange traded, Analysis, Market
+maker**. Monitor sits second from the left, right behind Vol marking, because
+those two are what a morning starts on: what has moved, and then what to do
+about it.
+
+A build does not always have all six. One can be made without any of them
 (see the packaging notes in `README.md`), and then the tab is simply not
 there: nothing is greyed out, and the command line for that screen is gone
 too. Whatever the build has is what the tab bar shows.
@@ -93,6 +135,35 @@ are remembered between sessions. Prices refresh as you type unless you untick
 | Digital ramp % | width of the call spread replicating a digital, as % of strike |
 | Overhedge / Buffer % | barrier shift: `extend`, `bend_front`, `bend_back` |
 
+**You only see the rows your products use.** A vanilla has no barrier, no
+ramp and no overhedge; a touch has no strike and no Type, because which side
+it is on is decided by where its barrier sits against spot. The model reads
+none of those fields for those products, so the grid does not offer them — a
+box you can fill in that is then ignored is the same silent nothing as a
+price that quietly comes back zero. A row that another column needs stays put
+and shows a dot in the columns that do not, so two legs never look like the
+same instrument. The result rows follow the same rule: **MC std error**
+belongs to a simulated barrier, **Smile delta %** to a vanilla.
+
+Every column is the **same fixed width** whatever is in it, so a long premium
+in one leg cannot widen the leg beside it and shift the whole grid under your
+cursor.
+
+**Keeping spot current.** The feed is read from a file, and the file is
+rewritten during the day. Three controls in the toolbar:
+
+| Control | What it does |
+|---|---|
+| **Refresh spot** | re-reads the feed file and re-prices. Every leg with a blank **Spot** picks up whatever has just been published |
+| **Fill legs** | the same, and then *writes* the spot and the interpolated points into every leg, at that leg's own expiry — this is what a leg with a hand-typed spot that has gone stale needs |
+| **watch file** | checks every fifteen seconds whether the file has been rewritten, and marks the feed pill when it has. It only *tells* you; nothing is re-read |
+| **auto-load** | re-reads the feed for you whenever it changes. Only the feed — the workbook stays on its button, because reloading it discards this session's marks (§1). Greyed out when no feed file is loaded |
+
+Watching only *tells* you; **auto-load** is the opt-in that actually re-reads,
+and **Fill legs** is the only thing that overwrites a number you typed. A leg
+the feed has no pair for, or whose expiry will not resolve, is named in the
+status line and left exactly as it was.
+
 **Outputs** — forward, resolved strike, volatility, price, fair value before
 any buffer, the overhedge cost, delta, smile delta, vega, and notional-scaled
 amounts. Totals are bucketed by currency pair. A leg that fails shows its error
@@ -116,8 +187,18 @@ Two columns.
 
 * **Charts** — smile (with the risk-neutral density), term structure, daily
   vols. The expiry box beside the tabs drives the smile chart.
+
+  When the **feed covers the pair**, the smile chart is drawn in real strikes:
+  the axis, the point table and the density are scaled by that expiry's
+  outright forward, and the spot and forward are printed at the top with a
+  *feed* pill. Without a feed there is nothing honest to scale by, so it stays
+  in `K/F` and the column says `Strike / fwd` instead of `Strike`. The smile
+  is fitted in moneyness either way — this changes the axis, never a
+  volatility.
 * **Smile parameters** — per-tenor `slog25`, `slog10`, `rho25`, `rho10`. Type
-  into a shaded cell and press Enter to overwrite; clear it to revert.
+  into a shaded cell and press Enter to overwrite; clear it to revert. The
+  **anchor** tick box lives here, with the smile it anchors, rather than over
+  the ATM table.
 * **Implied vs quoted** — risk reversals and butterflies read back off the
   fitted smile against the quotes that went in. They differ because the smile
   is fitted per tenor and then given a parameter term structure of its own;
@@ -137,6 +218,12 @@ Two columns.
   to re-solve the heights.
 
 Everything here feeds the pricing tab immediately.
+
+**Reload workbook** throws away every mark you have made and goes back to the
+quotes on disk — but it leaves the **pair, cut, interpolation and chart
+expiry** exactly as you had them. A reload that also moved you back to the
+first pair in the book would be the tool changing something you did not ask it
+to change.
 
 #### Managed and pegged pairs (USDHKD and the like)
 
@@ -168,7 +255,16 @@ the peg-intact distribution has to shift to keep the forward right, and the
 risk reversal the band model gives against the lognormal one.
 
 To actually **price** off it, choose **BAND** as the interpolation, here or on
-the pricing tab. Two things it will refuse to do:
+the pricing tab. **BAND only appears for a pair that has a band** — there is
+nothing for it to price on a free floater, and on a book with no pegged pair
+in it at all the option is not in the list anywhere. If you point a leg that
+was on a pegged pair at a free floater, its interpolation is put back to a
+legal one rather than left showing one thing and sending another.
+
+A **strike** outside the band is flagged too, not only a barrier: the warning
+reads whichever level the payout depends on.
+
+Two things it will refuse to do:
 
 * It will not price a band without a **spot/forward feed** for the pair. A band
   is an absolute range (7.75–7.85) and the surface works in strike over
@@ -204,6 +300,8 @@ the chart and the tables appear on the right.
 | Expiry (UTC) | **with a time of day** — the exchange's own cut, not midnight, or you are fitting at the wrong maturity |
 | Futures price | the forward the curve is fitted around, in the contract's quoted units. It is not taken from the FX feed: a listed future is its own market |
 | Beta | SABR beta, 1 for lognormal. Leave at 1 if you want the comparison to be like for like — the book's smile is lognormal |
+| Contract size | how many units of the base currency one option covers. Blank takes the contract's standard — 125,000 for `6E`, 12,500,000 for `6J`. Only **Positions and risk** below uses it; the fit has no notion of size |
+| Alpha / Rho / Nu (hold) | leave **blank** to fit them. Type a number and that parameter is held there and the others are fitted around it |
 | Weighting | `vega` (default) makes a quarter of a vol point at the money count for more than a quarter of a point in a 5-delta wing, which is what the book actually feels. `equal` treats every strike alike; `table` uses a weight column from your paste |
 | Book cut / Book interp | which marked surface to compare against |
 | Vol unit | leave on `auto` unless the paste is refused as ambiguous |
@@ -225,8 +323,27 @@ in-the-money one has little time value and its implied vol is noise.
   and flies below are those same numbers differenced: a slope comparison at
   **fixed strikes**, not two quotes in two conventions. Labels follow the FX
   pair, so on an inverted contract a "call" there is a put on the future.
-* **The header line** — alpha, rho, nu√t, the weighted RMSE in vol points and
-  the worst single miss with the strike it is at.
+* **The header line** — alpha, rho, nu, nu√t, the weighted RMSE in vol points
+  and the worst single miss with the strike it is at. A parameter you typed
+  rather than fitted is marked **held** where it is shown.
+
+**Holding a parameter.** The three boxes *Alpha*, *Rho* and *Nu* are blank by
+default and the fit decides all three. Type into one and it is held exactly
+there: the sweep never visits another value of it and the remaining
+parameters are fitted around it. That is the difference the residuals then
+report — the best the free parameters can do **at** that value, not the best
+SABR through the quotes.
+
+* **Hold fit** puts the fitted alpha, rho and nu into the boxes, where you can
+  nudge them. What is held is what the boxes show, to the digits they show.
+* **Release** empties all three and fits everything again.
+* Hold all three and nothing is fitted at all. The panel says so rather than
+  reporting a convergence it never attempted: the curve is the one you typed
+  and the table shows what it costs against the quotes. Useful for carrying
+  yesterday's curve onto today's market, or for pricing a strike ladder off a
+  wing you have a view on.
+* The three-strike rule follows the *free* parameters, not SABR: with two
+  parameters held, two quotes are enough.
 
 **Read the warnings.** Three strikes and three parameters is an exact
 interpolation, not a fit; the residuals will be zero whatever the quotes say
@@ -235,9 +352,71 @@ mean only one wing is being fitted. And if the fitted curve implies a negative
 probability density anywhere, the strike range is named — do not price
 anything in it off that curve.
 
+#### Positions and risk
+
+Underneath the panels is a box for what you own. One line is one option:
+
+```
+6E, 2026-09-11 19:00, 1.0900, C, 25
+6E, 2026-09-11 19:00, 1.0600, P, -40
+```
+
+**contract, expiry, strike, C/P, contracts.** Drop the leading columns when
+only one panel can answer the line (`1.0900, C, 25`), or put a header row on
+it and name the columns in any order. `ATM` as the strike is that panel's own
+forward. A quantity is signed — negative is short. Press **Aggregate**;
+**Example** fills the box from the panels you already have.
+
+A comma is a column boundary, so a size written `1,000` in a comma-separated
+paste is two columns and the line is refused rather than read as 1. Use tabs
+or spaces if you write sizes that way.
+
+**Each line is priced against the panel above that it names**, and everything
+the greeks need — the forward, the expiry, the volatility at that strike — is
+that panel's. The one thing a fit never needed is the **contract size**, which
+is why it is a field on the panel rather than here. A line that matches no
+panel, or matches two, keeps its place in the table and says which; nothing is
+guessed, because a position priced against the wrong month's curve looks
+perfectly ordinary.
+
+**Two sets of greeks**, one under the other:
+
+* **Black–Scholes** — the textbook Black-76 sensitivity at the option's own
+  volatility, with that volatility **held fixed** as the future moves. This is
+  the number the exchange's own risk file will agree with.
+* **Smile** — the same position revalued on the fitted curve, so the curve
+  travels with the future, and volatility bumped by lifting the whole curve.
+
+Both read the same volatility at the same strike, so the **premiums are
+identical** and the whole difference between the two blocks is in the
+sensitivities. An option struck at the futures price has the same vega in
+both, by construction.
+
+| Column | What it is |
+|---|---|
+| Δ fut | how many futures the position is equivalent to. Sell this many to be flat |
+| Δ 1% $ | money the position makes on a +1% move in the future |
+| Γ fut | how much *Δ fut* changes per 1.00 of the future |
+| Γ 1% $ | the curvature over that same 1% move, in money |
+| vega $ | money per **vol bump** — one volatility point unless you change the box |
+| theta $ | money over the **theta window** — one day unless you change the box |
+| vanna $ | how much *Δ 1% $* changes per vol bump |
+| volga $ | how much *vega $* changes per vol bump |
+
+**What adds up.** Money adds across contracts — every CME FX option settles in
+US dollars — so premium, vega, theta and the 1% columns are totalled at the
+bottom. *Δ fut* and *Γ fut* are **not**: a euro future is not a yen future, so
+those are totalled per contract only and the *all* row leaves them blank.
+Premiums and theta are undiscounted forward values, as everywhere else here.
+
+```
+volkit listed 6E --expiry "2026-09-11 19:00" --forward 1.085 \
+    --file quotes.txt --positions book.txt --theta-days 3
+```
+
 ### Analysis
 
-Four questions asked of the whole tenor grid at once, for one pair. Each card
+Five questions asked of the whole tenor grid at once, for one pair. Each card
 fills in on its own, so a missing forward feed empties one and leaves the rest.
 
 Set the **pair**, **cut** and **interpolation** at the top, then:
@@ -248,7 +427,10 @@ Set the **pair**, **cut** and **interpolation** at the top, then:
 | Horizon (days) | how far forward to roll. A tenor shorter than the horizon cannot be rolled and says so — drop to 7 days to see the front |
 | Lookback (days) | the realized window. `match` uses each tenor's own length, which is the only like-for-like comparison there is |
 | Annualise realized | `weighted` divides by the same volatility time the model uses. `calendar` and `count` are the naive alternatives, shown in the table anyway |
+| Realized on | `forward` (the default) measures what the option's own underlying did, swap-point moves included, wherever the sheet quotes them. `spot` measures spot alone |
 | Triangle noise floor | on by default; untick it for a faster cross triangle |
+| Wings as ρ / ν | reads the marked risk reversal and butterfly as a spot/volatility correlation and a vol of vol, against the same two measured from the history. Off by default — it is a fit per tenor |
+| ρ/ν wings | which wings to read that shape off: 25 or 10 delta |
 | Historical workbook | your own file of past spot / forwards / quotes. **Load history** reads it |
 
 **Carry and rolldown.** Each tenor is revalued after the horizon at a **fixed
@@ -260,15 +442,44 @@ that as a fraction of the ATM level, which is the carry-to-vol ratio. Without a
 forward feed for the pair the strike can only be held in moneyness, the smile
 slide is zero by construction, and the row says so.
 
+The forward curve pays twice, and the last five columns are the second time.
+**Smile** above is the curve reaching your *mark*. **Carry** is the curve
+reaching your *price*: the option is worth something at the forward it is
+struck against, and that forward has rolled down its own curve. It is shown in
+basis points of the forward, **in vols** is the same number over the position's
+vega so you can read it beside the roll, **Δ** is the position's delta at the
+fixed strike, and **fwd/yr** is the annualised roll-down of the forward — the
+rate differential the swap points are quoting.
+
+Whether you earn it depends on how you hedge, and this is the number itself,
+not a detail. Hedge in the **outright forward to the option's own expiry** and
+the hedge rolls down exactly as the option does: you earn the carry and pay it
+away, net nothing. Hedge in **spot**, as a desk does, and nothing rolls on the
+hedge side — you keep it. So read **carry** as what a spot-hedged book earns,
+and equally as the cost of not hedging in the forward.
+
+The at-the-money row shows **Δ = 0** and almost no carry. That is right, not
+missing: the at-the-money is a delta-neutral straddle, so the forward moving
+under it earns only the gamma over the move. A 25 delta call shows a quarter of
+the forward's roll-down. A risk reversal shows its carry in basis points and
+leaves **in vols** blank, because it has almost no net vega to divide by.
+Without a feed every carry figure is blank rather than zero.
+
 **Fair value.** What the implied would have to be to break even: buy the ATM
 option, hold it for the horizon, delta hedge. You earn the realized volatility
 through gamma and you take the roll on the mark. So
 
-> **fair = realized + roll × multiplier**, and **rich = implied − fair**
+> **fair = realized + roll value + carry value**, and **rich = implied − fair**
 
 Positive **rich** means the market is charging more than realized volatility and
 the carry together justify. **of which fwd** is the part of the roll value the
-forward curve caused rather than the term structure. The multiplier turns a
+forward curve caused rather than the term structure — the curve reaching your
+mark. **Carry value** is the curve reaching your price, as the volatility it
+takes to pay for it; the at-the-money is a delta-neutral straddle, so it is
+small there and **of which fwd** carries the curve's real contribution. It is
+computed anyway rather than left out, because a zero you can see was measured
+is worth more than one you cannot. **On** says whether the realized number was
+measured on the forward or on spot. The multiplier turns a
 horizon-sized roll into a whole-life one; at long tenors and short horizons it
 gets large, and the row warns you when it passes 20 because it multiplies any
 interpolation error by the same factor.
@@ -278,6 +489,14 @@ interpolation error by the same factor.
 * **Real %** on volatility time, **Cal %** on calendar days, **252 %** on a
   business-day count. They are not the same number and the first is the one
   that compares with implied.
+* **On** is what the return series was: the *forward* to that tenor wherever
+  the sheet quotes swap points, spot where it does not. A quoted volatility is
+  the volatility of the forward you are struck against, so the swap points
+  moving is realized volatility too — **Pts %** is that part alone and
+  **Spot %** is the same window without it. The points *decaying* by a day of
+  carry is not counted: that is a known slide, not a risk. On most of G10 the
+  difference is a few hundredths of a point; on a high-carry or managed pair it
+  is not.
 * **Prem** is implied less realized — the volatility risk premium.
 * **Skew d** and **Kurt d** are of the daily returns, **→T** is the same figure
   projected onto that tenor, and **Implied** is what the marked smile's own
@@ -285,6 +504,35 @@ interpolation error by the same factor.
 * **±se** is the standard error. A skew inside one standard error of zero is
   not a skew, and the panel says so in the messages.
 * **ATM %ile** is where today's mark sits in its own history over the window.
+
+**Wings as SABR shape.** The card above compares *moments*, and the risk
+reversal and the butterfly cannot be compared that way: a quoted spread is not
+a moment, and a realized third moment is not a risk reversal. What both sides
+do share is the two numbers a SABR smile is built from — **ρ**, the
+spot/volatility correlation a risk reversal is paid for, and **ν**, the vol of
+vol a butterfly is paid for. Tick *wings as ρ / ν* and the card fills in:
+
+* **ρ marked / ν marked** — the pair a SABR smile would need to show your
+  quoted ATM, risk reversal and butterfly at that delta. Your surface is not
+  SABR, so **fit err** says how far it is from any SABR smile at all, in
+  volatility points. A large one means these two numbers describe your smile
+  only loosely and the comparison is correspondingly loose.
+* **ρ measured / ν measured** — the same two out of your history. ρ is the
+  correlation of daily spot returns with daily moves in the quoted
+  at-the-money; ν is how big those moves were, annualised on the same
+  volatility time as everything else here. **±se** is the standard error, and a
+  ρ inside one of them is not a ρ. **Measured on** says `quoted` when it used
+  your at-the-money column and `rolling` when the sheet had none and it fell
+  back to a rolling realized volatility — an average moves less than what it
+  averages, so that ν is a floor.
+* **diff** is marked less measured: what you are charging for the wing against
+  what the market delivered.
+
+SABR has no mean reversion and real volatility does, so **ν rises at short
+tenors on both sides** — do not read the term structure of ν as a signal, and
+do not average it across tenors. **ν√t** is the scale-free number that actually
+sets the shape of the smile at that expiry, and it is the one that compares
+across the curve.
 
 **Cross triangle.** Only for crosses. Every quantity is shown as the cross's own
 **mark**, what the two legs imply (**tri**), and the difference. The
@@ -300,9 +548,67 @@ anything into a difference smaller than that. The line underneath also names the
 gap between the two at-the-money triangles — that is the convexity of the legs'
 own smiles, which the variance triangle leaves out, not a marking error.
 
-**Curve comparison.** Any number of volatility curves side by side, with every
-one differenced against whichever is marked **base**. Press **+ Curve** and
-pick where each comes from:
+**Vega split** is the one column here that is exact. It differentiates the
+variance triangle rather than integrating anything, and reads *how much of each
+leg one unit of at-the-money vega on the cross behaves like* — the two hedges.
+Long 1 vega of AUDJPY at a split of `0.62 / 0.51` is long about 0.62 of AUDUSD
+vega and 0.51 of USDJPY vega, and that is what to trade against it.
+
+They are **not shares and do not add up to one**, and nothing is missing when
+they do not: weighted by each leg's own volatility they account for the whole of
+the cross's exactly. What the two legs cannot hedge is the correlation, and that
+is the **per ρ** column — how many volatility points of the cross a *whole* unit
+of correlation is worth, so a hundredth of it for a move of 0.01. If that number
+is large, the cross's mark is a correlation view whatever you do in the legs.
+
+The historical workbook is **one sheet per pair, one row per date**. Column
+headers are read for meaning rather than by position, so `ATM 1M`, `1m atm vol`,
+`RR25 3M`, `3M 25d rr` and `1M 10d fly` all land in the right place. Forward
+**points** and forward **outrights** are both accepted; points are turned into
+outrights using the pair's own pip divisor. Anything that cannot be understood is
+listed under the status line rather than dropped. `files/history_sample.xlsx` is
+a synthetic example of the layout — it is never loaded for you.
+
+### Monitor
+
+The tab to leave open: **what has moved**. Each small panel is one pair and two
+points in time — the five quoted numbers as they are now, as they were then, and
+the change between them, tenor by tenor. **+ Panel** adds one, **Copy** on a
+panel duplicates it, and they are all remembered between sessions.
+
+Each panel has two ends, **Was** and **Now**, and either can be:
+
+| Source | What it is |
+|---|---|
+| *fitted surface* | the curve as the book has it now, at the cut and interpolation at the top of the tab |
+| *workbook quotes* | what the sheet says — against the surface, this is the fit residual |
+| *historical workbook* | one dated row of the history file |
+
+The default is the surface against the historical row a week ago. Load the
+history file first (the box at the top right) or the dated end has nothing to
+read. A date takes `latest`, a date like `2024-01-15`, or an offset back from
+the last row — `-1w`, `-30d`, `-3m`. Weekends and holidays have no rows, so it
+uses the last row **on or before** the one you asked for and each end says which
+day it landed on.
+
+**Highlight** picks which of the five gets the *was* and *now* levels printed
+beside the changes. The changes themselves are always all five, so a panel set
+to at-the-money still shows you a wing that has moved.
+
+Three things worth knowing:
+
+* If both ends land on the **same row** — which is what happens when the history
+  file has not been updated — the panel says so. Every change is then zero by
+  construction, and a column of zeros otherwise reads as a quiet market.
+* If one end cannot be built at all, the panel still shows what it could read
+  and carries the reason it has no change. It does not go blank.
+* A tenor one end does not quote is a **blank** change, not a missing row.
+
+#### Curve comparison
+
+Underneath the panels, on the same tab. Any number of volatility curves side by
+side, with every one differenced against whichever is marked **base**. Press
+**+ Curve** and pick where each comes from:
 
 | Source | What it is |
 |---|---|
@@ -336,14 +642,6 @@ a curve that could not be built at all stays in the list with the reason
 against it. One thing to watch: a historical sheet's butterfly column is
 whatever that desk quoted, while the book's is a market strangle. The panel
 reminds you; it cannot check it for you.
-
-The historical workbook is **one sheet per pair, one row per date**. Column
-headers are read for meaning rather than by position, so `ATM 1M`, `1m atm vol`,
-`RR25 3M`, `3M 25d rr` and `1M 10d fly` all land in the right place. Forward
-**points** and forward **outrights** are both accepted; points are turned into
-outrights using the pair's own pip divisor. Anything that cannot be understood is
-listed under the status line rather than dropped. `files/history_sample.xlsx` is
-a synthetic example of the layout — it is never loaded for you.
 
 ### Market maker
 
@@ -382,6 +680,50 @@ nothing is dropped quietly, and nothing ambiguous is guessed:
 * an unqualified **`fly`** means whichever butterfly the selector at the top
   says. The default is the **market strangle**, which is what the workbook
   marks. Write `strangle` or `smile fly` to pin it on the line itself.
+
+**Or paste it as columns**, which is how a run out of a chat window or a
+spreadsheet usually arrives — `expiry, strike, bid/offer`, with a timestamp in
+front if you have one:
+
+```
+09:15, 1M, ATM,    8.20/8.60
+09:15, 3M, 1.0900, 8.10/8.50
+09:20, 2M, 25d,    8.00/8.40
+09:41, 1M, ATM,    8.25/8.65
+```
+
+The middle column takes the same things the pricing tab's **Strike** box takes:
+`ATM`, an absolute strike, or a delta (`25d`, `25dp`, `-25d`). Both shapes can
+be in one paste; the parser does not care which line came first. A column
+header pasted along with the run is recognised as one and passed over.
+
+| Strike column | What it means |
+|---|---|
+| `ATM` | the at-the-money |
+| `1.0900` | the volatility at that strike. No `call` or `put` needed — the volatility at a strike is one number either way — but it needs a **forward feed**, because the surface works in strike over forward |
+| `25d` | the 25 delta **call**. A bare delta names two strikes, one on each wing, so it takes the call and the row says so |
+| `25dp`, `-25d` | the 25 delta put |
+
+One rule to know: **a comma is a column boundary, and a price never straddles
+one**. That is what tells `3M, 7.75, 8.30` (a choice price at the 7.75 strike)
+from `3M 7.75 8.30` (the two-way at-the-money). If you write columns, write the
+commas.
+
+**Timestamps and requotes.** A line may start with `09:15`, `2024-02-28 09:15`
+or `[09:15]`. When two lines quote the *same thing*, **the later timestamp
+wins** — whichever order they were pasted in, so a stale line pasted at the
+bottom of the run cannot become the live market. Without timestamps to compare,
+the later line wins, because that is the only ordering an untimed line carries.
+
+The quote that lost is not thrown away. It is listed under the paste with the
+line that beat it, so a mistyped update shows up as a quote that went missing
+rather than as nothing at all. It also still counts when **Learn widths from
+this paste** measures the market: one tenor quoted twice is one live price and
+two observations of how wide that broker shows it.
+
+A time-only line takes the last date written above it. A run with no date
+anywhere is ordered as a single day and says so — that ordering is wrong across
+midnight, and it would rather tell you than quietly get it backwards.
 
 **Stage 1 — the at-the-money curve** is fitted to a target term structure. Pick
 where the target comes from:
@@ -471,6 +813,44 @@ market actually showed — the median of what was on the screen, bucketed by
 tenor, with the count and the range in its note. Quotes written as a single mid
 have no width and are left out. It only *proposes*: look at them, edit them,
 then **Save bank**.
+
+---
+
+### Saving your marks
+
+Nothing you do on the **Vol marking** or **Market maker** tab is written back to
+`vol_marks.xlsx`. The workbook stays exactly as it was, and **Reload workbook**
+throws away everything you have marked since you started. That is deliberate —
+it is somebody else's spreadsheet — but it is not what you want at five o'clock.
+
+The **Saved marks** card at the bottom of the Vol marking tab writes it all to a
+separate file beside the workbook instead: curve parameters, a cross's
+correlation, the event schedule, ATM and smile overwrites, the market maker's
+wing shifts, the anchor switch and the band treatment.
+
+| Button | What it does |
+|---|---|
+| **Save marks** | writes every pair on the book to the file named above it |
+| **Save this pair** | only the pair the marking tab is showing |
+| **Load marks** | puts a saved file back on the book and redraws everything |
+
+The Market maker tab has **Save marks to file** in its top bar, which writes the
+same file. It only works with **keep the marks** ticked: without it the fit is
+put back before the panel returns, so there would be nothing of it on the book
+to save.
+
+Loading **replaces** rather than adds. Overwrites and events are cleared before
+the saved ones go on, so applying the same file twice cannot double an event. A
+pair in the file that this workbook does not build is reported; a pair the file
+does not mention is left exactly as the workbook has it, and that is reported
+too. If one pair's marks will not go on, the rest still do and the message names
+the one that did not.
+
+To start with a file already on: `volkit.exe --session marks.json`, or an
+`session = marks.json` line in `volkit.cfg` beside the executable.
+
+The file is plain JSON and readable. Volatility numbers in it are in
+**volatility points**, exactly as the screen shows them.
 
 ---
 
@@ -565,6 +945,13 @@ here if the range is genuinely defended.
 **`holiday_overrides.csv`** — `country,date[,remove]`. Lunar-calendar holidays
 (Chinese New Year and similar) must be listed here; they cannot be derived.
 
+**`vol_session.json`** — your saved marks (see *Saving your marks* above).
+Written by the tool, not by hand, though it is readable and can be edited if you
+know what you are doing: volatility numbers in it are in **volatility points**,
+and everything else is the raw number the field on screen carries. It is never
+read unless you ask for it, by pressing **Load marks** or by starting with
+`--session`.
+
 ---
 
 ## 5. Command line
@@ -575,6 +962,7 @@ subcommand.
 ```
 volkit check                              validate the workbook, list every problem
 volkit serve --feed market_feed.csv       run the interface
+volkit serve --auto-reload 30             ... and re-read the market feed when it changes
 volkit tenors USDJPY --cut TK             ATM term structure
 volkit smile  USDJPY 2026-11-23           the smile at one expiry
 volkit vol    USDJPY 2026-11-23 --strike 152 --forward 149.9
@@ -583,10 +971,20 @@ volkit events USDJPY --horizon 1          what auto-load would pull in
 volkit validate USDJPY                    hunt for competing smile calibrations
 volkit listed 6J --expiry "2026-09-11 19:00" --forward 0.0068 --file quotes.txt
                                           fit a listed strike/vol table and compare it
+volkit listed 6E --expiry "2026-09-11 19:00" --forward 1.085 --rho -0.2
+                                          ... with rho held there and the rest fitted around it
 volkit analysis EURJPY --history vol_history.xlsx --horizon 7
+volkit analysis USDJPY --history vol_history.xlsx --sabr
                                           carry and roll, realized vs implied, fair value, triangle
-volkit analysis EURUSD --history vol_history.xlsx --compare surface --compare history:-30d
+volkit monitor EURUSD --history vol_history.xlsx
+                                          what has moved: one panel per pair, as a table
+volkit monitor --watch EURUSD --watch USDJPY:history@-1m --history vol_history.xlsx
+                                          two panels, the second against a month ago
+volkit monitor EURUSD --compare surface --compare history:-30d
                                           the curve comparison panel, as a table
+volkit session marks.json                 save every mark on the book to a file
+volkit session marks.json --load          put a saved file back
+volkit session marks.json --show          print what a saved file holds
 volkit band USDHKD --feed market_feed.csv --hazard 3
                                           the managed-band read-out for a pegged pair
 volkit mm EURUSD --target-source quotes --fallback-spread 0.3 < run.txt
@@ -606,6 +1004,15 @@ of the command line may contain:
 volkit --enable-tab mm ...      turn on a screen this build hides
 volkit --config other.cfg ...   read a named settings file
 volkit --no-config ...          read none
+```
+
+`--session PATH` belongs to no one subcommand either: it puts a saved set of
+marks on the book before anything is priced, so a batch job and the screen
+agree.
+
+```
+volkit --session marks.json vol USDJPY 2026-11-23 --strike 152
+volkit serve --session marks.json
 ```
 
 ---
@@ -640,7 +1047,11 @@ volkit --no-config ...          read none
 | *offers below its own bid* | a truncated offer like `8.2/6`. Write it in full — repairing it means inventing the digits |
 | *still outside their market after the fine tune* | one curve-wide shift cannot satisfy tenors that disagree. Re-mark those tenors on the **Vol marking** tab |
 | *no usable strike/volatility rows* | the parser looked in the wrong columns. Set **K col** and **Vol col** |
-| *three quotes and three parameters* | not an error: the listed fit is an exact interpolation, so its residuals mean nothing |
+| *N quotes and M free parameters* | not an error: the listed fit is an exact interpolation, so its residuals mean nothing |
+| *given, not fitted* | you have typed a value into one of the **hold** boxes on an Exchange-traded panel. The residuals are the best the free parameters can do at that value |
+| *changed and could not be read* | auto-load found a new feed file and it would not parse. The old one is still on the book; fix the file and it is tried again on the next look |
+| *this line matches N panels* | a position line did not say enough. Name the contract and the expiry so it can only mean one panel |
+| *has no contract size* | a positions panel on a `CUSTOM` contract. Its money columns are per one unit of the base currency until you set **Contract size** on the panel |
 | *implies a negative risk-neutral density* | Hagan's formula arbitrages in the wings. Do not price the named strike range off that curve |
 | *the horizon is longer than the tenor* | not an error: a 1W option cannot be rolled 30 days. Shorten the horizon |
 | *no at-the-money column, so the volatility unit could not be determined* | the historical sheet has risk reversals but no ATM. Vol points were assumed; load with a different unit if that is wrong |

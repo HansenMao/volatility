@@ -84,16 +84,28 @@ class Book:
             self.warnings.append(f"managed bands: {found} could not be read ({exc})")
             return {}
 
-    def forward_at(self, pair: str, t: float) -> float | None:
-        """The outright forward from the feed, or None when there is no feed.
+    def market_level(self, pair: str, t: float) -> dict:
+        """Spot and the outright forward at ``t`` years, from the feed.
 
-        None rather than a fallback: the one caller is the band model, and a
-        guessed level would place a hard barrier in the wrong place.
+        ``feed`` is False and the levels are ``None`` when there is nothing to
+        read -- never a fallback level.  The band model would place a hard
+        barrier in the wrong place with a guessed one, and the screens that
+        put a strike axis in absolute terms would be naming levels nobody
+        published.  One function for both, so a strike a chart shows and a
+        band edge the model places can never come from different forwards.
         """
         feed = self.feed
+        out = {"spot": None, "forward": None, "feed": False, "extrapolated": False}
         if feed is None or pair.upper() not in getattr(feed, "pairs", {}):
-            return None
-        return float(feed.quote(pair, t)["forward"])
+            return out
+        quote = feed.quote(pair, t)
+        out.update(spot=float(quote["spot"]), forward=float(quote["forward"]),
+                   feed=True, extrapolated=bool(quote["extrapolated"]))
+        return out
+
+    def forward_at(self, pair: str, t: float) -> float | None:
+        """The outright forward from the feed, or None when there is no feed."""
+        return self.market_level(pair, t)["forward"]
 
     def _attach_band(self, name: str, surface: VolSurface) -> None:
         """Give a surface its band and a way to place it.
@@ -271,9 +283,23 @@ class Book:
         try:
             return self.surfaces[pair]
         except KeyError:
+            pass
+        # Which list to name depends on why it is missing.  ``load_all`` may
+        # have been narrowed to a few pairs -- ``volkit band USDHKD`` narrows
+        # it to one -- and when that one is not in the workbook nothing is
+        # built at all, so "available: []" said the workbook was empty when
+        # what was actually wrong is that it does not carry this pair.  A pair
+        # the workbook has never heard of is told what the workbook holds.
+        known = sorted(self.data.pairs)
+        if pair not in self.data.pairs:
             raise KeyError(
-                f"{pair!r} is not built; available: {sorted(self.surfaces)}"
+                f"{pair!r} is not in {self.data.source or 'the workbook'}; it holds "
+                f"{', '.join(known) if known else 'no pairs'}"
             ) from None
+        raise KeyError(
+            f"{pair!r} is in the workbook but is not built in this book; built: "
+            f"{', '.join(self.pairs) if self.pairs else 'nothing'}"
+        ) from None
 
     def __contains__(self, pair: str) -> bool:
         return pair in self.surfaces

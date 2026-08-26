@@ -2,7 +2,7 @@
 
 Every screen is a self-contained function of the book: a tab in the page, the
 routes behind it, and a command-line equivalent.  A desk does not always want
-all five -- a build handed to somebody who only marks the surface has no
+them all -- a build handed to somebody who only marks the surface has no
 business showing a market-maker tab, and a screen that is present but unwanted
 is a screen that gets clicked by accident.
 
@@ -11,6 +11,12 @@ writes the chosen names into ``volkit/data/screens.txt`` inside the bundle, and
 this module is the one place that reads it.  Everything downstream asks here:
 ``webapp`` refuses the routes of an excluded screen, ``cli`` does not register
 its subcommands, and the page hides its tab.
+
+One route that might look like a screen's is deliberately owned by none.
+``/api/history`` loads the historical workbook, which the Analysis screen and
+the Monitor screen both read; like ``/api/state``, ``/api/reload`` and
+``/api/session``, it is a data source the shell offers rather than one screen's
+own, and a build with either of those tabs has to be able to point at a file.
 
 Two things this deliberately does *not* do:
 
@@ -101,13 +107,18 @@ SCREENS: tuple[Screen, ...] = (
         commands=("tenors", "daily", "events", "validate", "band"),
     ),
     Screen(
+        name="monitor", label="Monitor", panel="p-monitor",
+        routes=("/api/monitor", "/api/monitor/curves"),
+        commands=("monitor",),
+    ),
+    Screen(
         name="listed", label="Exchange traded", panel="p-listed",
-        routes=("/api/listed/fit",),
+        routes=("/api/listed/fit", "/api/listed/greeks"),
         commands=("listed",),
     ),
     Screen(
         name="analysis", label="Analysis", panel="p-analysis",
-        routes=("/api/analysis", "/api/history", "/api/analysis/curves"),
+        routes=("/api/analysis",),
         commands=("analysis",),
     ),
     Screen(

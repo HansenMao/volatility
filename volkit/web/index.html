@@ -46,23 +46,38 @@ th,td{text-align:right;padding:4px 8px;border-bottom:1px solid var(--line);white
 th{color:var(--muted);font-weight:600;font-size:10.5px;text-transform:uppercase;letter-spacing:.5px}
 th:first-child,td:first-child{text-align:left}
 
-/* ---- pricing grid ---- */
+/* ---- pricing grid ----
+   Fixed columns: every option is one column of the same width whatever is in
+   it, so the row headings stay put and a long premium cannot widen the leg
+   beside it.  `table-layout:fixed` takes the widths from the header row, and
+   renderGrid sets the table's own width from the number of legs. */
 .gridwrap{overflow-x:auto;border:1px solid var(--line);border-radius:10px;background:var(--panel)}
-table.grid{width:max-content;min-width:100%;border-collapse:separate;border-spacing:0}
-table.grid th,table.grid td{border-bottom:1px solid var(--line);padding:0;height:31px}
+table.grid{table-layout:fixed;min-width:100%;border-collapse:separate;border-spacing:0}
+table.grid th,table.grid td{border-bottom:1px solid var(--line);padding:0;height:31px;
+  overflow:hidden}
 table.grid td.rh,table.grid th.rh{position:sticky;left:0;z-index:5;background:var(--head);
   padding:0 10px;text-align:left;color:var(--muted);font-size:11px;font-weight:600;
-  border-right:1px solid var(--line);min-width:132px}
+  border-right:1px solid var(--line);width:152px}
 table.grid tr.sec td{background:var(--bg);font-size:10px;text-transform:uppercase;
   letter-spacing:.9px;color:var(--muted);font-weight:700;padding:5px 10px;text-align:left}
-table.grid td.cell{min-width:118px;padding:0}
+table.grid td.cell{padding:0}
+/* A field this leg's product does not use.  Shown as a place rather than
+   removed: the row belongs to another leg that does use it, and a gap that
+   silently vanished would make two legs look like the same instrument. */
+table.grid td.na{text-align:center;color:var(--muted);opacity:.4;font-size:12px}
+/* The one column with no width of its own.  Under `table-layout:fixed` it
+   takes whatever is left over, so the table can still fill the panel with
+   two legs in it without the leg columns stretching to do it. */
+table.grid th.spacer,table.grid td.spacer{background:var(--panel);border-bottom:1px solid var(--line)}
+table.grid th.spacer{background:var(--head)}
 table.grid td.cell input,table.grid td.cell select{border:none;border-radius:0;background:transparent;
   text-align:right;height:30px;padding:0 9px;font-variant-numeric:tabular-nums}
 table.grid td.cell input:focus,table.grid td.cell select:focus{background:var(--field);outline:2px solid var(--accent);outline-offset:-2px}
 table.grid td.o{text-align:right;padding:0 9px;font-variant-numeric:tabular-nums;font-size:12px}
 table.grid td.o.big{font-weight:650;font-size:13px}
 table.grid td.err{color:var(--bad);font-size:11px;text-align:left;padding:0 9px;white-space:normal;line-height:1.25}
-table.grid th.colhead{background:var(--head);padding:0 6px;font-size:11px;color:var(--ink);text-align:center}
+table.grid th.colhead{background:var(--head);padding:0 6px;font-size:11px;color:var(--ink);
+  text-align:center;width:150px}
 .colhead div{display:flex;align-items:center;gap:5px;justify-content:space-between}
 .colhead .x{cursor:pointer;color:var(--muted);font-weight:700;padding:0 3px;border-radius:4px}
 .colhead .x:hover{color:var(--bad);background:var(--bg)}
@@ -102,6 +117,11 @@ table.mark td{padding:2px 6px}
 .out .v{font-size:26px;font-weight:600;font-variant-numeric:tabular-nums;letter-spacing:-.5px}
 .out .d{color:var(--muted);font-size:11.5px;margin-top:3px;min-height:15px}
 .out.err{border-color:var(--bad)} .out.err .v{font-size:13px;font-weight:500;color:var(--bad);letter-spacing:0}
+#autobar{margin:8px 14px 0;padding:9px 12px;border-radius:9px;display:flex;gap:10px;
+  align-items:flex-start;background:var(--panel);border:1px solid var(--line)}
+#autobar #autolist{flex:1;font-size:11.5px;line-height:1.45}
+#autobar .a{color:var(--muted)} #autobar .a b{color:var(--ink);font-weight:600}
+#autobar .a.bad b{color:var(--bad)}
 #warnbox{margin:0 14px 0;padding:10px 12px;border-radius:9px;
   background:color-mix(in srgb,var(--warn) 12%,var(--panel));border:1px solid var(--warn);display:none}
 #warnbox summary{cursor:pointer;font-weight:650}
@@ -167,6 +187,23 @@ table.ev .rm:hover{color:var(--bad)}
 .bandnone{color:var(--muted);font-size:12px;padding:8px 2px}
 
 /* ---- exchange traded options ---- */
+/* ---- monitor ---- */
+.motiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(390px,1fr));gap:12px}
+.motile{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:11px 12px}
+.motile h3{margin:0 0 7px;font-size:12.5px;font-weight:650;display:flex;align-items:center;gap:7px}
+.motile h3 .grow{flex:1}
+.motile h3 button{width:auto;padding:3px 8px;font-size:11px}
+.mohead{display:flex;gap:7px;align-items:flex-end;flex-wrap:wrap;margin-bottom:8px}
+.mohead .f label{margin:0 0 2px;font-size:10px}
+.mohead .f input,.mohead .f select{padding:4px 6px;font-size:11.5px}
+.moends{color:var(--muted);font-size:11px;margin-bottom:6px}
+.moends b{color:var(--ink);font-weight:600}
+.motile table{width:100%;font-size:11.5px}
+.motile th,.motile td{padding:3px 6px}
+.motile td.hi,.motile th.hi{background:var(--head)}
+.motile td.lv{color:var(--muted)}
+.moempty{color:var(--muted);text-align:center;padding:38px 10px;border:1px dashed var(--line);
+  border-radius:10px;grid-column:1/-1}
 .eto{display:flex;flex-direction:column;gap:14px}
 .etohead{display:flex;gap:9px;align-items:flex-end;flex-wrap:wrap}
 .etohead .f label{margin:0 0 3px}
@@ -184,6 +221,11 @@ table.ev .rm:hover{color:var(--bad)}
 .etotables{display:grid;grid-template-columns:1.45fr 1fr;gap:14px;margin-top:12px}
 .etotables table{width:100%}
 .etotables .scroll{max-height:300px}
+.etowide{overflow-x:auto;border:1px solid var(--line);border-radius:8px}
+.etowide table{width:100%;min-width:940px}
+td.wmsg{color:var(--warn)}
+#gpanel .etohead h2{font-size:14px;white-space:nowrap}
+#gpanel #gout{min-height:120px}
 @media (max-width:1080px){.etobody,.etotables{grid-template-columns:1fr}}
 td.pos{color:var(--good)} td.neg{color:var(--bad)}
 tr.sep td{border-top:1px solid var(--line);color:var(--muted);font-size:10.5px;
@@ -232,6 +274,8 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
 .mmtag.out{background:color-mix(in srgb,var(--warn) 18%,transparent);color:var(--warn)}
 .mmtag.thru{background:color-mix(in srgb,var(--bad) 16%,transparent);color:var(--bad)}
 .mmtag.none{background:var(--bg);color:var(--muted)}
+.etoheld{font-style:normal;margin-left:4px;padding:1px 5px;border-radius:20px;font-size:9.5px;
+  font-weight:650;background:color-mix(in srgb,var(--warn) 18%,transparent);color:var(--warn)}
 </style>
 </head>
 <body>
@@ -240,14 +284,22 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
   <div class="nav" id="nav">
     <button data-p="pricing" class="on">Pricing</button>
     <button data-p="marking">Vol marking</button>
+    <button data-p="monitor">Monitor</button>
     <button data-p="listed">Exchange traded</button>
     <button data-p="analysis">Analysis</button>
     <button data-p="mm">Market maker</button>
   </div>
   <button class="ghost" style="width:auto" id="reload">Reload workbook</button>
+  <span class="pill" id="autopill" style="display:none"></span>
   <div class="grow"></div>
   <div class="meta" id="meta"></div>
 </header>
+
+<!-- What the feed watcher has done.  Hidden unless auto-load is on and
+     something has actually happened; a re-read nobody was told about would be
+     exactly the silent change this tool exists to remove. -->
+<div id="autobar" style="display:none"><div id="autolist"></div>
+  <button class="ghost" id="autonow" style="width:auto">Check the feed now</button></div>
 
 <details id="warnbox"><summary id="warnhead"></summary><ul id="warnlist"></ul></details>
 
@@ -266,6 +318,16 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
     <div class="meta" id="feedstatus"></div>
     <input id="feedpath" placeholder="spot / forward feed CSV" style="width:230px">
     <button class="ghost" id="feedload" style="width:auto">Load feed</button>
+    <button class="ghost" id="feedrefresh" style="width:auto">Refresh spot</button>
+    <button class="ghost" id="feedfill" style="width:auto">Fill legs</button>
+    <label style="margin:0;display:flex;align-items:center;gap:6px;width:auto;color:var(--muted)"
+           title="look at the feed file's write time and light the pill when it has moved; nothing is re-read">
+      <input type="checkbox" id="feedwatch" checked style="width:auto"> watch file
+    </label>
+    <label id="feedautowrap" style="margin:0;display:flex;align-items:center;gap:6px;width:auto;color:var(--muted)"
+           title="re-read the feed on its own when it changes. Only the feed: the workbook stays on its button, because reloading it discards this session's marks">
+      <input type="checkbox" id="feedauto" style="width:auto"> auto-load
+    </label>
     <div class="meta" id="pstatus"></div>
   </div>
   <div class="gridwrap"><table class="grid" id="pgrid"></table></div>
@@ -281,6 +343,10 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
     <br><b>Product</b>: <code>vanilla</code>, <code>digital</code> (European, pays at expiry),
     <code>one_touch</code> / <code>no_touch</code> (continuous monitoring; price is a fraction
     of the payout, so <i>Notional</i> is the payout in millions).
+    <b>A row is only shown where the product uses it</b> — no barrier or overhedge on a
+    vanilla, no strike or type on a touch — because the model reads none of those there,
+    and a box that is filled in and then ignored is a silent zero with a cursor in it. A row
+    another column needs keeps its place and shows a dot in the columns that do not.
     <b>Digital ramp %</b> is the call-spread width used to replicate the digital — zero is the
     unhedgeable limit, wider is what you can actually run.
     <b>Overhedge</b> shifts the barrier: <code>extend</code> in parallel for the whole life,
@@ -289,6 +355,13 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
     form, so it is simulated and reports its Monte Carlo standard error.
     Buffers are applied <i>against</i> you: selling gets the conservative shift, buying the
     other way. Leave <b>Spot</b> blank to take spot and interpolated forward points from the feed.
+    <br><b>Refresh spot</b> re-reads the feed file from disk and re-prices, so a leg with a blank
+    <b>Spot</b> picks up whatever has just been published. <b>Fill legs</b> does the same and then
+    <i>writes</i> the spot and the interpolated points into every leg the feed covers, at that
+    leg's own expiry — which is what a leg with a stale hand-typed spot needs. A leg the feed has
+    no pair for, or whose expiry will not resolve, is reported and left exactly as it was.
+    <b>Watch file</b> only looks at when the file was last written and offers the refresh; nothing
+    reloads underneath a price you are reading.
   </div>
 </div>
 
@@ -311,6 +384,8 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
 
       <section class="card">
         <h2>Smile parameters</h2>
+        <label style="display:flex;align-items:center;gap:7px;margin:0 0 9px">
+          <input type="checkbox" id="manchor" style="width:auto"> anchor the smile to quoted tenors</label>
         <div class="scroll"><table class="mark" id="msmile"></table></div>
         <div class="row" style="margin-top:9px"><button class="danger" id="mclearsmile">Clear smile overwrites</button></div>
         <div class="hint">Type into a shaded cell and press Enter to overwrite; clear the
@@ -347,8 +422,6 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
 
       <section class="card">
         <h2>ATM term structure</h2>
-        <label style="display:flex;align-items:center;gap:7px;margin:0 0 9px">
-          <input type="checkbox" id="manchor" style="width:auto"> anchor the smile to quoted tenors</label>
         <div class="scroll"><table class="mark" id="matm"></table></div>
         <div class="row" style="margin-top:9px"><button class="danger" id="mclearatm">Clear ATM overwrites</button></div>
       </section>
@@ -357,6 +430,25 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
         <h2>Managed band <span class="grow"></span>
           <span class="meta" id="bandedges"></span></h2>
         <div id="bandbody"></div>
+      </section>
+
+      <section class="card">
+        <h2>Saved marks <span class="grow"></span>
+          <span class="meta" id="sesswhen"></span></h2>
+        <label>Session file</label>
+        <input id="sesspath" placeholder="vol_session.json beside the workbook">
+        <div class="row" style="margin-top:9px">
+          <button id="sesssave">Save marks</button>
+          <button class="ghost" id="sessload">Load marks</button>
+          <button class="ghost" id="sesssavepair">Save this pair</button>
+        </div>
+        <div class="msg" id="sessmsg"></div>
+        <div class="hint">Everything this session has marked — curve parameters, the correlation
+          term structure, events, ATM and smile overwrites, the market maker's wing shifts, the
+          anchor switch and the band treatment — written to a file <b>beside</b> the workbook.
+          The workbook itself is never written to. Start volkit with
+          <code>--session &lt;file&gt;</code>, or press <b>Load marks</b>, to put them back;
+          <b>Reload workbook</b> still discards everything and returns to the quotes on disk.</div>
       </section>
 
       <section class="card">
@@ -418,6 +510,54 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
     American-style options are not European volatilities; a future is not a forward once rates
     move with the underlying; and the exchange's settlement time is rarely an FX cut.
   </div>
+
+  <!-- Positions and aggregated risk.  Every parameter the greeks need comes
+       off the panel a position belongs to; the only one a fit never needed is
+       the contract size, which is a field on the panels above. -->
+  <section class="card" id="gpanel">
+    <div class="etohead">
+      <h2 style="margin:0 8px 0 0">Positions and risk</h2>
+      <div id="gfields" class="etohead" style="gap:9px"></div>
+      <div class="acts">
+        <button id="gcalc">Aggregate</button>
+        <button class="ghost" id="gsample" title="put an example position table in the box">Example</button>
+        <button class="danger" id="gclear">Clear</button>
+      </div>
+    </div>
+    <div class="etobody">
+      <div><label>Positions — contract, expiry, strike, C/P, contracts</label>
+        <textarea id="gtext" spellcheck="false"
+          placeholder="6E, 2026-09-11 19:00, 1.0900, C, 25&#10;6E, 2026-09-11 19:00, 1.0600, P, -40"></textarea></div>
+      <div id="gout"></div>
+    </div>
+    <div id="gtables"></div>
+    <div id="gmsg"></div>
+    <div class="hint">
+      One line is one option: <b>contract, expiry, strike, C/P, contracts</b>. Drop the
+      leading columns when the screen has only one panel that can answer
+      (<code>strike, C/P, contracts</code>), or put a header row on it and name the columns in
+      any order. A strike of <code>ATM</code> is the panel's own forward. A quantity is signed:
+      negative is short. A comma is a column boundary, so a size written <code>1,000</code> in a
+      comma-separated paste is two columns and the line is refused — use tabs or spaces for that.
+      <br>Each line is priced against the <b>panel above</b> whose contract and expiry it names,
+      and everything the greeks need — the forward, the expiry, the volatility at the strike —
+      is that panel's. The one thing a fit never needed is the <b>contract size</b>, which is a
+      field on each panel and defaults to the contract's standard (125,000 for <code>6E</code>,
+      12,500,000 for <code>6J</code>). A line that matches no panel, or two, keeps its place in
+      the table and says which.
+      <br><b>Black-Scholes</b> is the closed-form Black-76 sensitivity at the option's own
+      volatility with that volatility <i>held fixed</i> as the future moves. <b>Smile</b> is the
+      same position revalued on the fitted SABR curve, so the curve travels with the future and
+      volatility is bumped by lifting the whole curve — normalised to a move measured at the
+      forward. Both read the same volatility at the same strike, so the premiums are identical
+      and the entire difference is in the sensitivities.
+      <br><b>What adds up.</b> Money adds across contracts — every CME FX option settles in US
+      dollars — so premium, vega, theta, the 1% delta and gamma money and volga are totalled.
+      Futures-equivalent delta and gamma are <i>not</i>: a euro future is not a yen future, so
+      those two are totalled per contract only. Premiums and theta are undiscounted forward
+      values, as everywhere else in volkit.
+    </div>
+  </section>
 </div>
 
 <!-- =========================== ANALYSIS =========================== -->
@@ -430,8 +570,14 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
     <div class="f"><label>Horizon (days)</label><input id="anhorizon" value="30" style="width:96px"></div>
     <div class="f"><label>Lookback (days)</label><input id="anlookback" value="match" style="width:104px"></div>
     <div class="f"><label>Annualise realized</label><select id="anann" style="width:104px"></select></div>
+    <div class="f"><label>Realized on</label><select id="anbasis" style="width:96px">
+      <option value="auto">forward</option><option value="spot">spot</option></select></div>
     <label style="margin:0;display:flex;align-items:center;gap:6px;width:auto;color:var(--muted);font-size:11px">
       <input type="checkbox" id="annoise" checked style="width:auto"> triangle noise floor</label>
+    <label style="margin:0;display:flex;align-items:center;gap:6px;width:auto;color:var(--muted);font-size:11px">
+      <input type="checkbox" id="ansabr" style="width:auto"> wings as &rho; / &nu;</label>
+    <div class="f"><label>&rho;/&nu; wings</label><select id="ansabrd" style="width:74px">
+      <option value="0.25">25d</option><option value="0.10">10d</option></select></div>
     <div class="acts">
       <button id="anrun">Run</button>
       <label style="margin:0;display:flex;align-items:center;gap:6px;width:auto;color:var(--muted);font-size:11px">
@@ -451,22 +597,10 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
       <div id="anfair"></div></section>
     <section class="card"><h2>Realized against implied <small id="anrealhead"></small></h2>
       <div id="anreal"></div></section>
+    <section class="card"><h2>Wings as SABR shape <small id="anshapehead"></small></h2>
+      <div id="anshape"></div></section>
     <section class="card"><h2>Cross triangle <small id="antrihead"></small></h2>
       <div id="antri"></div></section>
-    <section class="card"><h2>Curve comparison <small id="cmphead"></small></h2>
-      <div class="toolbar">
-        <button id="cmpadd">+ Curve</button>
-        <button class="ghost" id="cmpdup">Duplicate last</button>
-        <button class="ghost" id="cmprun">Compare</button>
-        <div class="f"><label>Show</label><select id="cmpfield" style="width:150px"></select></div>
-        <label style="margin:0;display:flex;align-items:center;gap:6px;width:auto;color:var(--muted);font-size:11px">
-          <input type="checkbox" id="cmpauto" checked style="width:auto"> auto</label>
-        <button class="danger" id="cmpclear" style="width:auto">Clear all</button>
-        <div class="grow"></div>
-        <div class="meta" id="cmpstatus"></div>
-      </div>
-      <div id="cmplist"></div>
-      <div id="cmpout"></div></section>
   </div>
 
   <div class="hint">
@@ -477,15 +611,35 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
     curve's contribution is separable rather than buried. <b>/atm</b> is the roll per year as a
     fraction of the at-the-money level. Without a forward feed for the pair the strike is held in
     moneyness instead of price, the smile slide is zero by construction, and the row says so.
+    The forward curve pays <i>twice</i>: <b>Smile</b> is it reaching your mark, in volatility
+    points; <b>Carry</b> is it reaching your price — the option is worth
+    <code>V(F,K,σ,τ)</code> and <code>F</code> itself has rolled — in basis points, with
+    <b>In vols</b> the same over the position's vega. Whether you keep it is the hedge: in the
+    outright forward to the option's own expiry the hedge rolls down exactly as the option does and
+    the two cancel; in spot, as a desk hedges, nothing rolls on the hedge side and you keep it. The
+    at-the-money is a delta-neutral straddle, so it shows <b>Δ&nbsp;=&nbsp;0</b> and almost no
+    carry — correct, not missing; a 25 delta call shows a quarter of the forward's roll-down.
+    Without a feed the carry columns are blank rather than zero.
     <br><b>Fair value.</b> Hold the <code>T</code> at-the-money option for the horizon
     <code>h</code> and delta hedge it. The mark slides by <code>roll</code>, worth
     <code>vega(T−h)·roll</code>; the gamma against theta earns roughly <code>h/T</code> of the
-    option's life at <code>σ_realized − σ_implied</code>. Setting the two to cancel gives
-    <code>fair = realized + roll·(T/h)·vega(T−h)/vega(T)</code>, and <b>richness</b> is the implied
-    less that. Positive means the market is charging more than realized volatility and the carry
+    option's life at <code>σ_realized − σ_implied</code>. Setting them to cancel gives
+    <code>fair = realized + (T/h)·[roll·vega(T−h) + carry]/vega(T)</code> — the <b>Roll value</b>
+    and <b>Carry value</b> columns — and <b>richness</b> is the implied
+    less that. <b>of which fwd</b> is the forward curve reaching the mark and is first order;
+    <b>Carry value</b> is it reaching the price, second order for a delta-neutral straddle and
+    computed rather than assumed to be zero. Positive means the market is charging more than realized volatility and the carry
     together justify. The roll here is always the at-the-money roll, whatever the carry table above
     is displaying.
-    <br><b>Realized against implied.</b> Realized volatility is annualised by the same
+    <br><b>Realized against implied.</b> Realized volatility is measured on the <i>forward</i> to
+    each tenor wherever the sheet quotes swap points, and the <b>On</b> column says which it used.
+    A quoted volatility is the volatility of the forward you are struck against, so the swap points
+    <i>moving</i> is realized volatility too (<b>Pts&nbsp;%</b> is that part alone,
+    <b>Spot&nbsp;%</b> the same window without it). The points <i>decaying</i> by a day of carry is
+    a known slide and is not counted — leaving it in would book the carry itself as volatility. A
+    tenor the sheet does not quote has its carry interpolated between the pillars it does, so the
+    term structure does not grow steps at whichever tenors happen to be quoted. Realized volatility
+    is annualised by the same
     <i>volatility time</i> the model integrates variance with — weekends near zero, holidays
     reduced, the intraday profile not flat. Calendar and 252-day annualisations are shown beside it
     because they answer a different question and are typically a tenth lower. Skew and kurtosis need
@@ -493,6 +647,18 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
     the whole return to expiry, so the daily numbers are projected onto each tenor
     (<code>skew/√n</code>, <code>kurtosis/n</code>) before being compared. Both are shown, with
     standard errors — a skew inside one standard error of zero is not a skew.
+    <br><b>Wings as SABR shape.</b> The moments above cannot answer the same question about the
+    risk reversal and the butterfly: a quoted spread is not a moment, and a realized third moment
+    is not a risk reversal. What both sides share is the two numbers a SABR smile is built from —
+    <b>ρ</b>, the spot/volatility correlation a risk reversal is paid for, and <b>ν</b>, the
+    vol of vol a butterfly is paid for. <i>Marked</i> is the pair a SABR smile would need to show
+    your quoted at-the-money, risk reversal and butterfly; your surface is not SABR, so <b>fit
+    err</b> says how far it is from any SABR smile at all. <i>Measured</i> is the same pair out of
+    the history — under SABR with <code>β&nbsp;=&nbsp;1</code> the at-the-money <i>is</i> the
+    state variable, so ρ is the correlation of daily spot returns with daily moves in the
+    quoted at-the-money and ν is those moves annualised on the same volatility time. SABR has no
+    mean reversion and real volatility does, so ν rises at short tenors on both sides and must
+    not be blended across them; <b>ν√t</b> is the scale-free number that sets the shape.
     <br><b>Cross triangle.</b> The at-the-money row has an exact answer and gets one: the variance
     triangle the book itself is built on. The risk reversal and butterfly have no exact answer from
     two marginals and a correlation, so each leg's whole marked density is read off its smile, the
@@ -501,6 +667,76 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
     change of measure between the legs' domestic currencies; the <b>noise floor</b> is the same
     machinery run on each leg alone, where it should reproduce the input exactly. A difference
     smaller than the noise is not a difference.
+    The <b>vega split</b> differentiates the variance triangle instead of integrating it, and is
+    exact: one unit of at-the-money vega on the cross is
+    <code>(&sigma;<sub>a</sub>+x&sigma;<sub>b</sub>)/&sigma;<sub>c</sub></code> units in the first
+    leg and the mirror of it in the second, with <code>x</code> the signed correlation the triangle
+    carries. Those are the two hedges. They are not shares and do not add to one: what is exact
+    is that <i>weighted by each leg's own volatility</i> they account for the whole of the cross's
+    (the triangle is homogeneous of degree one, so Euler's identity holds, and a test pins it).
+    The correlation is degree zero and appears nowhere in that identity, which is why it is
+    reported on its own: the <b>per &rho;</b> column is what a whole unit of correlation is worth
+    in cross volatility points, and no amount of leg vega touches it.
+  </div>
+</div>
+
+<!-- =========================== MONITOR =========================== -->
+<div class="wrap hide" id="p-monitor">
+  <div class="anbar">
+    <div class="f"><label>Pair</label><select id="mopair" style="width:120px"></select></div>
+    <div class="f"><label>Cut</label><select id="mocut" style="width:74px"></select></div>
+    <div class="f"><label>Interp</label><select id="momethod" style="width:94px"></select></div>
+    <div class="f"><label>Highlight</label><select id="mofield" style="width:150px"></select></div>
+    <div class="acts">
+      <button id="moadd">+ Panel</button>
+      <button class="ghost" id="modup">Duplicate last</button>
+      <button class="ghost" id="morun">Refresh</button>
+      <label style="margin:0;display:flex;align-items:center;gap:6px;width:auto;color:var(--muted);font-size:11px">
+        <input type="checkbox" id="moauto" checked style="width:auto"> auto</label>
+      <button class="danger" id="moclear" style="width:auto">Clear all</button>
+    </div>
+    <div class="grow"></div>
+    <div class="f"><label>Historical workbook</label>
+      <input id="mohist" placeholder="vol_history.xlsx — or files/history_sample.xlsx" style="width:260px"></div>
+    <div class="acts"><button class="ghost" id="mohistload">Load history</button></div>
+  </div>
+  <div class="meta" id="mostatus" style="margin-bottom:10px"></div>
+
+  <div class="motiles" id="molist"></div>
+
+  <section class="card" style="margin-top:14px"><h2>Curve comparison <small id="cmphead"></small></h2>
+    <div class="toolbar">
+      <button id="cmpadd">+ Curve</button>
+      <button class="ghost" id="cmpdup">Duplicate last</button>
+      <button class="ghost" id="cmprun">Compare</button>
+      <div class="f"><label>Show</label><select id="cmpfield" style="width:150px"></select></div>
+      <label style="margin:0;display:flex;align-items:center;gap:6px;width:auto;color:var(--muted);font-size:11px">
+        <input type="checkbox" id="cmpauto" checked style="width:auto"> auto</label>
+      <button class="danger" id="cmpclear" style="width:auto">Clear all</button>
+      <div class="grow"></div>
+      <div class="meta" id="cmpstatus"></div>
+    </div>
+    <div id="cmplist"></div>
+    <div id="cmpout"></div></section>
+
+  <div class="hint">
+    <b>Panels.</b> One panel is one pair and two points in time: the five quoted numbers as they
+    stand <i>now</i>, the same five as they stood <i>then</i>, and the change between them, tenor by
+    tenor. Either end is any source the comparison below understands except a paste — the fitted
+    surface, the workbook quotes, or a dated row of the historical workbook — so a panel is
+    &ldquo;the surface against last week's close&rdquo;, &ldquo;the surface against the quotes it
+    was fitted to&rdquo;, or two dated rows against each other, whichever question is being asked.
+    The default is the surface against the historical row a week ago.
+    <br><b>Dates</b> take <code>latest</code>, a date, or an offset back from the last row
+    (<code>-1w</code>, <code>-30d</code>, <code>-3m</code>). The row used is the last one <i>on or
+    before</i> what was asked for — a historical workbook has no weekend rows, and snapping forward
+    would compare Friday against the following Monday — and each end reports the day it landed on.
+    Two dated ends that land on the <i>same</i> row say so, because a column of zeros otherwise
+    reads as a quiet market rather than as a comparison that never happened.
+    <br>An end that cannot be built does not empty the panel: the levels that could be read are
+    still shown and the panel carries the reason it has no change. A tenor one end does not quote
+    is a blank change, not a missing row. <b>Highlight</b> picks which of the five gets the levels
+    column beside the changes; the changes themselves are always all five.
     <br><b>Curve comparison.</b> Any number of curves side by side, differenced against whichever
     one is marked <b>base</b>. A curve is the <i>fitted surface</i> at the cut and interpolation
     chosen above, the <i>workbook quotes</i> that went into it, one dated row of the historical
@@ -539,6 +775,7 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
         <input type="checkbox" id="mmauto" style="width:auto"> auto</label>
       <label style="margin:0;display:flex;align-items:center;gap:6px;width:auto;color:var(--muted);font-size:11px">
         <input type="checkbox" id="mmapply" style="width:auto"> keep the marks</label>
+      <button class="ghost" id="mmsession" style="width:auto">Save marks to file</button>
     </div>
     <div class="grow"></div>
     <div class="meta" id="mmstatus"></div>
@@ -548,7 +785,7 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
     <div class="mmleft">
       <section class="card"><h2>The market <small>paste the run, one quote a line</small></h2>
         <textarea id="mmtext" spellcheck="false" style="height:250px"
-          placeholder="1M ATM 8.20/8.60 in 100mm vega&#10;3M 25d RR 0.35/0.55 eur call over&#10;2M 25d fly 0.20/0.28&#10;6M 1.1000 call 7.90/8.40&#10;1M/3M ATM spread 0.30/0.55"></textarea>
+          placeholder="1M ATM 8.20/8.60 in 100mm vega&#10;3M 25d RR 0.35/0.55 eur call over&#10;2M 25d fly 0.20/0.28&#10;6M 1.1000 call 7.90/8.40&#10;1M/3M ATM spread 0.30/0.55&#10;&#10;or as columns — time, expiry, strike, bid/offer:&#10;09:15, 1M, ATM,  8.20/8.60&#10;09:15, 3M, 1.0900, 8.10/8.50&#10;09:41, 1M, ATM,  8.25/8.65"></textarea>
         <div class="msg" id="mmparse"></div></section>
 
       <section class="card hide" id="mmtargetcard">
@@ -600,6 +837,25 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
     an actual violation. The shift is <i>curve-wide</i> on purpose: a handful of quotes does not
     determine a shape, and a shift that cannot reach a tenor says so in its residual instead of
     bending the surface to one quote.
+    <br><b>The run may be written as columns.</b> As well as broker English, a line can be
+    <code>expiry, strike, bid/offer</code> &mdash; the middle column taking <code>ATM</code>, an
+    absolute strike, or a delta (<code>25d</code>, <code>25dp</code>, <code>-25d</code>), which is
+    the same vocabulary as the pricing screen's Strike box. A bare <code>25d</code> does not say
+    which wing, so it is read as the call and the row says so; write <code>25dp</code> or
+    <code>-25d</code> for the put. An <i>absolute</i> strike needs no side at all &mdash; the
+    volatility there is one number &mdash; but it does need a forward feed, because the surface
+    works in strike over forward. A <b>comma is a column boundary and a price never straddles
+    one</b>: that is what tells <code>3M, 7.75, 8.30</code> (a choice price at the 7.75 strike)
+    from <code>3M 7.75 8.30</code> (the two-way at-the-money it has always been).
+    <br><b>Timestamps, and what wins.</b> A line may start with <code>09:15</code>,
+    <code>2024-02-28 09:15</code> or <code>[09:15]</code>. When two lines quote the <i>same
+    thing</i>, the <b>later timestamp wins</b> whichever order they were pasted in; without
+    timestamps to compare, the later line wins, because that is the only ordering an untimed line
+    carries. The quote that lost is listed under the paste with the line that beat it, never
+    silently dropped. It still counts as evidence when <b>Learn widths</b> measures the market:
+    one tenor quoted twice is one live price and two observations of how wide it is shown. A
+    time-only line takes the last date above it; a run with no date anywhere is ordered as one
+    day, and says so, because that ordering is wrong across midnight.
     <br><b>Conventions the paste decides once.</b> The volatility unit comes from the whole paste's
     at-the-money and outright lines, never line by line &mdash; a small risk reversal read on its
     own looks exactly like a decimal at-the-money. A risk reversal with a direction word
@@ -636,10 +892,47 @@ let STATE={}, PANEL='pricing', TAB='smile', LEGS=[], RESULT=null, MARKS=null;
 /* Which screens this build has.  The server decides -- a build can be made
    without a tab (build_exe.py --exclude-tab) and then its routes are refused,
    so the page must not show it, boot it, or leave it as the open tab. */
-const PANELROOT={pricing:'#p-pricing',marking:'#p-marking',listed:'#p-listed',
-                 analysis:'#p-analysis',mm:'#p-mm'};
+const PANELROOT={pricing:'#p-pricing',marking:'#p-marking',monitor:'#p-monitor',
+                 listed:'#p-listed',analysis:'#p-analysis',mm:'#p-mm'};
 let SCREENS=Object.keys(PANELROOT);
 const has=n=>SCREENS.indexOf(n)>=0;
+
+/* ---- which interpolations a pair may be marked with ----
+   BAND is the pegged-pair regime mixture.  On a free floater there is no
+   band to place, and `VolSurface.band_for_slice` refuses by name -- so the
+   method is not offered where it cannot work rather than offered and then
+   turned away.  The server's refusal stays where it is: this only stops the
+   screen putting a choice in front of somebody that it will not honour. */
+function isBanded(pair){return ((STATE.bands&&STATE.bands.pairs)||[]).indexOf(pair)>=0}
+function anyBanded(){return (((STATE.bands||{}).pairs)||[]).length>0}
+function methodsFor(pair){
+  const all=STATE.methods||['SVI'];
+  // A named pair answers for itself; a screen that spans several (the
+  // monitor's tiles, a listed panel taking its pair from the contract) falls
+  // back to whether this book has a pegged pair at all.
+  return (pair?isBanded(pair):anyBanded())?all:all.filter(m=>m!=='BAND');
+}
+/* Keep a stored choice legal.  A leg or a panel saved on a pegged pair and
+   then pointed at a free floater would otherwise keep BAND in its state while
+   the select showed something else. */
+function methodFor(pair,cur){
+  const ok=methodsFor(pair);
+  return ok.indexOf(cur)>=0?cur:ok[0];
+}
+/* Rebuild a select and keep what was chosen.  boot() runs again on every
+   workbook reload, and a reload that silently moved the marking screen back
+   to the first pair would take a trader off the pair they were marking --
+   the same silent change the feed pill exists to prevent.  ``dflt`` is only
+   the opening choice, for the first boot when nothing is selected yet. */
+function fillSel(id,list,dflt){
+  const el=$(id); if(!el)return;
+  list=list||[];
+  const cur=el.value;
+  const want=list.indexOf(cur)>=0?cur:(list.indexOf(dflt)>=0?dflt:list[0]);
+  el.innerHTML=list.map(x=>'<option'+(x===want?' selected':'')+'>'+esc(x)+'</option>').join('');
+  if(list.length)el.value=want;
+}
+function setMethodSel(id,pair){fillSel(id,methodsFor(pair))}
 
 /* ------------------------------ charts ------------------------------ */
 function chart(el,series,opts={}){
@@ -677,22 +970,29 @@ const PIP={JPY:100};
 function defaultLeg(from){
   if(from)return{...from};
   const d=new Date((STATE.valuationMs||Date.now())+30*864e5);
-  return{label:'',pair:(STATE.pairs||['USDJPY'])[0],product:'vanilla',expiry:'1M',cut:'TK',
-    method:(STATE.methods||['SVI'])[0],type:'C',strike:'ATM',barrier:'',spot:'',points:'0',
+  const pair=(STATE.pairs||['USDJPY'])[0];
+  return{label:'',pair:pair,product:'vanilla',expiry:'1M',cut:'TK',
+    method:methodFor(pair,(STATE.methods||['SVI'])[0]),type:'C',strike:'ATM',barrier:'',spot:'',points:'0',
     notional:'1',side:'buy',pip:'',ramp:'0',overhedge:'none',buffer:'0'};
 }
 function pipFor(leg){
   if(leg.pip)return parseFloat(leg.pip);
   return PIP[(leg.pair||'').slice(3,6).toUpperCase()]||10000;
 }
+/* Which products a row belongs to.  Undefined is every product.  A barrier
+   on a vanilla and a strike on a one-touch are not inputs the model reads --
+   `pricing._price_leg` takes a barrier only for the touch products and a
+   strike only for the others -- and a box that is filled in but ignored is
+   the same silent zero as a field that quietly returns nothing. */
+const VANILLA=['vanilla'], STRIKED=['vanilla','digital'], TOUCH=['one_touch','no_touch'];
 const IN=[
  ['label','Label','text'],['pair','Pair','pair'],['product','Product','product'],
- ['expiry','Expiry','text'],['cut','Cut','cut'],['type','Type','type'],
- ['strike','Strike','text'],['barrier','Barrier','text'],
+ ['expiry','Expiry','text'],['cut','Cut','cut'],['type','Type','type',STRIKED],
+ ['strike','Strike','text',STRIKED],['barrier','Barrier','text',TOUCH],
  ['spot','Spot','text'],['points','Fwd pts','text'],['pip','Pip divisor','text'],
  ['notional','Notional (m)','text'],['side','Side','side'],['method','Interp','method'],
- ['ramp','Digital ramp %','text'],['overhedge','Overhedge','overhedge'],
- ['buffer','Barrier buffer %','text'],
+ ['ramp','Digital ramp %','text',['digital']],['overhedge','Overhedge','overhedge',TOUCH],
+ ['buffer','Barrier buffer %','text',TOUCH],
 ];
 const dash=v=>(v===0||v==null||!isFinite(v))?'—':null;
 const OUT=[
@@ -702,51 +1002,68 @@ const OUT=[
  ['strike','Strike / barrier',v=>num(v,5)],
  ['is_call','Type',v=>v?'Call / up':'Put / down'],
  ['vol','Vol %',v=>num(v,4),'big'],['atm_vol','ATM vol %',v=>num(v,4)],
- ['barrier_used','Barrier after buffer',v=>dash(v)??num(v,5)],
+ ['barrier_used','Barrier after buffer',v=>dash(v)??num(v,5),'',TOUCH],
  ['premium_dom','Price (term / unit)',v=>num(v,6)],
  ['premium_pct_base','Price % (of base / payout)',v=>num(v,4)],
  ['fair_value','Fair value (no buffer)',v=>num(v,6)],
- ['overhedge_cost','Overhedge cost',v=>dash(v)??num(v,6),'sign'],
- ['delta_pct','Delta %',v=>num(v,2)],['smile_delta_pct','Smile delta %',v=>num(v,2)],
+ ['overhedge_cost','Overhedge cost',v=>dash(v)??num(v,6),'sign',['digital','one_touch','no_touch']],
+ ['delta_pct','Delta %',v=>num(v,2)],
+ ['smile_delta_pct','Smile delta %',v=>num(v,2),'',VANILLA],
  ['vega_dom','Vega per vol pt',v=>num(v,6)],
  ['premium_amount','Premium amount',v=>num(v,4),'big sign'],
  ['vega_amount','Vega amount / vol pt',v=>num(v,4),'sign'],
  ['delta_amount','Delta hedge (m base)',v=>num(v,4),'sign'],
- ['pricing_method','Method',v=>esc(v)],
- ['mc_error','MC std error',v=>dash(v)??num(v,6)],
+ ['pricing_method','Method',v=>esc(v),'',['digital','one_touch','no_touch']],
+ ['mc_error','MC std error',v=>dash(v)??num(v,6),'',TOUCH],
 ];
+const prodOf=L=>String((L&&L.product)||'vanilla').trim().toLowerCase();
+const applies=(only,L)=>!only||only.indexOf(prodOf(L))>=0;
+const anyApplies=only=>!only||LEGS.some(L=>applies(only,L));
 function ctl(kind,i,key,val){
   const a=`data-i="${i}" data-k="${key}"`;
   const opts=(list,v)=>list.map(o=>`<option${String(o)===String(v)?' selected':''}>${esc(o)}</option>`).join('');
   if(kind==='pair')  return `<select ${a}>${opts(STATE.pairs||[],val)}</select>`;
   if(kind==='cut')   return `<select ${a}>${opts(STATE.cuts||[],val)}</select>`;
-  if(kind==='method')return `<select ${a}>${opts(STATE.methods||[],val)}</select>`;
+  if(kind==='method')return `<select ${a}>${opts(methodsFor((LEGS[i]||{}).pair),val)}</select>`;
   if(kind==='type')  return `<select ${a}>${opts(['C','P','Auto'],val)}</select>`;
   if(kind==='product')return `<select ${a}>${opts(STATE.products||['vanilla'],val)}</select>`;
   if(kind==='overhedge')return `<select ${a}>${opts(STATE.overhedges||['none'],val)}</select>`;
   if(kind==='side')  return `<select ${a}>${opts(['buy','sell'],val)}</select>`;
   return `<input ${a} value="${esc(val)}">`;
 }
+const RHW=152, COLW=150;
 function renderGrid(){
   const g=$('#pgrid');
-  if(!LEGS.length){g.innerHTML=`<tr><td class="rh">No options</td><td class="o" style="padding:12px">
+  if(!LEGS.length){g.style.width='';g.innerHTML=`<tr><td class="rh">No options</td><td class="o" style="padding:12px">
      Press <b>+ Option</b> to add a column.</td></tr>`; $('#ptotals').innerHTML=''; return;}
+  // Fixed layout takes its columns from the header row, so the table has to
+  // be told how wide it is.
+  g.style.width=(RHW+LEGS.length*COLW)+'px';
+  const span=LEGS.length+2;                       // + the row heading and the spacer
   let h='<thead><tr><th class="rh">Option</th>';
   LEGS.forEach((L,i)=>{h+=`<th class="colhead"><div><span>${esc(L.label||('#'+(i+1)))}</span>
       <span class="x" data-del="${i}" title="remove this option">✕</span></div></th>`;});
-  h+='</tr></thead><tbody>';
-  h+=`<tr class="sec"><td colspan="${LEGS.length+1}">Inputs</td></tr>`;
-  IN.forEach(([k,lab,kind])=>{h+=`<tr><td class="rh">${lab}</td>`;
-    LEGS.forEach((L,i)=>{h+=`<td class="cell">${ctl(kind,i,k,L[k]??'')}</td>`;});h+='</tr>';});
-  h+=`<tr class="sec"><td colspan="${LEGS.length+1}">Results</td></tr>`;
+  h+='<th class="spacer"></th></tr></thead><tbody>';
+  h+=`<tr class="sec"><td colspan="${span}">Inputs</td></tr>`;
+  IN.forEach(([k,lab,kind,only])=>{
+    if(!anyApplies(only))return;
+    h+=`<tr><td class="rh">${lab}</td>`;
+    LEGS.forEach((L,i)=>{h+=applies(only,L)?`<td class="cell">${ctl(kind,i,k,L[k]??'')}</td>`
+      :`<td class="na" title="${esc(prodOf(L))} does not use this">·</td>`;});
+    h+='<td class="spacer"></td></tr>';});
+  h+=`<tr class="sec"><td colspan="${span}">Results</td></tr>`;
   const res=RESULT?RESULT.legs:[];
-  OUT.forEach(([k,lab,fmt,cls])=>{h+=`<tr><td class="rh">${lab}</td>`;
+  OUT.forEach(([k,lab,fmt,cls,only])=>{
+    if(!anyApplies(only))return;
+    h+=`<tr><td class="rh">${lab}</td>`;
     LEGS.forEach((L,i)=>{const r=res[i];
       if(!r){h+=`<td class="o">—</td>`;return}
       if(!r.ok){h+=`<td class="err">${k==='expiry'?esc(r.error):''}</td>`;return}
+      if(!applies(only,L)){h+=`<td class="na" title="${esc(prodOf(L))} does not use this">·</td>`;return}
       const v=r[k]; let c='o '+(cls||'');
       if((cls||'').includes('sign')&&typeof v==='number')c+=v>0?' pos':(v<0?' neg':'');
-      h+=`<td class="${c}">${fmt(v)}</td>`;});h+='</tr>';});
+      h+=`<td class="${c}">${fmt(v)}</td>`;});
+    h+='<td class="spacer"></td></tr>';});
   h+='</tbody>';
   g.innerHTML=h;
   const t=RESULT?RESULT.totals:{};
@@ -774,8 +1091,13 @@ async function priceAll(){
 $('#pgrid').addEventListener('change',e=>{
   const t=e.target; const i=t.dataset.i;
   if(i===undefined)return;
-  LEGS[+i][t.dataset.k]=t.value; saveLegs();
-  if(t.dataset.k==='label'||t.dataset.k==='pair')renderGrid();
+  const L=LEGS[+i];
+  L[t.dataset.k]=t.value;
+  // BAND is only a method on a pegged pair; moving a leg off one must not
+  // leave it holding a method its new pair cannot be marked with.
+  if(t.dataset.k==='pair')L.method=methodFor(L.pair,L.method);
+  saveLegs();
+  if(t.dataset.k==='label'||t.dataset.k==='pair'||t.dataset.k==='product')renderGrid();
   schedulePrice();
 });
 $('#pgrid').addEventListener('click',e=>{
@@ -793,15 +1115,124 @@ function showFeed(f){
   const bad=(f.problems||[]).length;
   el.innerHTML=`<span class="pill ok">feed: ${f.covered.length} pairs</span>`+
     (f.asof?` <span class="meta">asof ${esc(f.asof)}</span>`:'')+
+    (f.stale?' <span class="pill warn">newer data on disk — Refresh</span>':'')+
     (bad?` <span class="pill bad">${bad} problem${bad>1?'s':''}</span>`:'');
-  el.title=(f.problems||[]).join('\n')||f.source;
+  el.title=(f.problems||[]).join('\n')||
+    (f.source+(f.written?('\nread from the file written '+f.written.replace('T',' ')):''));
 }
 $('#feedload').onclick=async()=>{
   const el=$('#feedstatus'); el.innerHTML='<span class="spin"></span> loading…';
   try{ const f=await post('/api/feed',{path:$('#feedpath').value}); showFeed(f);
-       STATE.feed=f; await priceAll(); }
+       STATE.feed=f;
+       /* Loading or clearing a feed is what decides whether there is anything
+          to auto-load at all, so the switch is re-read here rather than left
+          greyed out until the next reload. */
+       try{ STATE.auto=await api('/api/auto'); showAuto(STATE.auto) }catch(e2){}
+       await priceAll(); }
   catch(e){ el.innerHTML=`<span class="pill bad">${esc(e.message)}</span>`; }
 };
+
+/* Re-read the feed file, and optionally write what it says into the legs.
+   Two buttons, one endpoint: picking up new spot and stamping it into a row
+   somebody typed a stale one into are the same action on the file and
+   different actions on the pad, and only the second one touches what the user
+   typed. */
+async function refreshFeed(fill){
+  const el=$('#feedstatus'); el.innerHTML='<span class="spin"></span> re-reading the feed…';
+  try{
+    const r=await post('/api/feed/refresh',
+      {legs:LEGS.map(L=>({pair:L.pair,expiry:L.expiry}))});
+    STATE.feed=r.feed; showFeed(r.feed);
+    const bad=[];
+    if(fill){
+      r.legs.forEach(q=>{
+        const L=LEGS[q.index]; if(!L)return;
+        if(q.error){bad.push('#'+(q.index+1)+' '+(L.label||L.pair)+': '+q.error);return}
+        L.spot=String(q.spot); L.points=String(Math.round(q.points*1e6)/1e6);
+        if(q.extrapolated)bad.push('#'+(q.index+1)+' '+(L.label||L.pair)+
+          ': the expiry is outside the quoted pillars, so the points are held flat');
+      });
+      saveLegs(); renderGrid();
+    }
+    await priceAll();
+    $('#pstatus').innerHTML=bad.length?
+      ('<span style="color:var(--warn)">'+esc(bad.join(' · '))+'</span>'):
+      (fill?'legs filled from the feed':'feed re-read');
+  }catch(e){ el.innerHTML=`<span class="pill bad">${esc(e.message)}</span>`; }
+}
+$('#feedrefresh').onclick=()=>refreshFeed(false);
+$('#feedfill').onclick=()=>refreshFeed(true);
+
+/* Watching is a look at when the file was last written, nothing more.  A feed
+   that reloaded on its own underneath a price being read would be its own
+   kind of silent change, so this only lights the pill and offers the button. */
+setInterval(async()=>{
+  if(PANEL!=='pricing'||!$('#feedwatch').checked)return;
+  if(!STATE.feed||!STATE.feed.loaded)return;
+  try{ const f=await api('/api/feed'); STATE.feed=f; showFeed(f); }catch(e){}
+},15000);
+
+/* ----------------------- auto-loading the feed ------------------------
+   The market feed is the one file that is re-read on its own, and only when
+   this is switched on -- the checkbox on the pricing toolbar, or
+   --auto-reload at startup.  The workbook is deliberately not watched: a
+   reload discards every mark this session has made, so it stays on its
+   button.  The historical sheet is not watched either; it is a record of
+   what happened, not a market.
+
+   The page polls one integer -- the number of things the watcher has done --
+   rather than the numbers themselves, and rebuilds only when the feed really
+   was re-read. */
+let AUTOSEQ=-1, AUTOON=false;
+function showAuto(a){
+  a=a||{};
+  const pill=$('#autopill'), bar=$('#autobar'), box=$('#feedauto');
+  if(box){box.checked=!!a.enabled; box.disabled=!a.available;
+    $('#feedautowrap').style.opacity=a.available?'':'0.45';
+    $('#feedautowrap').title=a.available?
+      ('re-read '+((a.watching||[])[0]||{}).path+' on its own every '+(+a.interval||0)+
+       's when it changes. Only the feed: the workbook stays on its button, because '+
+       'reloading it discards this session\u2019s marks'):
+      'there is no feed file loaded, so there is nothing to auto-load';}
+  if(!a.enabled){pill.style.display='none';bar.style.display='none';return}
+  pill.style.display='';
+  pill.className='pill '+(a.dirty?'warn':'ok');
+  pill.textContent='auto-load feed · '+(+a.interval||0)+'s'+(a.dirty?' · unsaved marks':'');
+  pill.title=(a.watching||[]).map(w=>w.what+': '+w.path+(w.written?' ('+w.written.replace('T',' ')+')':'')).join('\n');
+  const ev=(a.events||[]).slice(-4).reverse();
+  bar.style.display=ev.length?'flex':'none';
+  $('#autolist').innerHTML=ev.map(e=>'<div class="a'+(e.ok?'':' bad')+'">'+
+    esc(String(e.when||'').replace('T',' ').slice(0,16))+' · <b>'+esc(e.what)+'</b> — '+
+    esc(e.message)+'</div>').join('');
+}
+async function autoPoll(){
+  if(!(STATE.auto||{}).enabled){AUTOON=false;return}   /* switched off: stop asking */
+  try{
+    const a=await api('/api/auto');
+    const fresh=(a.events||[]).filter(e=>e.seq>AUTOSEQ);
+    STATE.auto=a;
+    if(a.seq!==AUTOSEQ){
+      const reloaded=fresh.some(e=>e.ok);
+      AUTOSEQ=a.seq;
+      if(reloaded)await boot();          /* boot repaints and calls showAuto */
+      else showAuto(a);
+    }
+  }catch(e){}
+  setTimeout(autoPoll,Math.max(2,+(((STATE.auto||{}).interval)||5))*1000);
+}
+function startAuto(){if(AUTOON||!(STATE.auto||{}).enabled)return;AUTOON=true;autoPoll()}
+$('#feedauto').onchange=async e=>{
+  try{ STATE.auto=await post('/api/auto',{enabled:e.target.checked});
+       AUTOSEQ=STATE.auto.seq; showAuto(STATE.auto); startAuto(); }
+  catch(err){ e.target.checked=!e.target.checked;
+              $('#pstatus').innerHTML='<span class="pill bad">'+esc(err.message)+'</span>'; }
+};
+/* A check somebody pressed does not wait for the write time to settle: they
+   know they have saved. */
+$('#autonow').onclick=async()=>{
+  const a=await api('/api/auto?check=1'); STATE.auto=a;
+  if((a.events||[]).some(e=>e.seq>AUTOSEQ&&e.ok)){AUTOSEQ=a.seq;await boot()}
+  else{AUTOSEQ=a.seq;showAuto(a)}};
 
 /* ============================== MARKING ============================== */
 function mq(){return{pair:$('#mpair').value,cut:$('#mcut').value,method:$('#mmethod').value}}
@@ -841,24 +1272,44 @@ $('#mclearsmile').onclick=async()=>{await post('/api/overwrite',{pair:mq().pair,
 $('#manchor').onchange=async e=>{await post('/api/overwrite',{pair:mq().pair,kind:'anchor',value:e.target.checked});
   await redraw();schedulePrice()};
 
+/* Strike axis.  The smile is fitted in moneyness and stays there; when the
+   feed covers the pair the axis is *scaled* by the outright forward so the
+   chart reads in the levels a trader would name.  No feed means no honest
+   level to scale by, so it stays in K/F and says so.  The density is per
+   unit of whatever the axis is, so it is divided by the same forward. */
+function kScale(d){
+  const F=(d&&typeof d.forward==='number'&&d.forward>0)?d.forward:null;
+  const dp=F==null?6:(F>=50?3:(F>=5?4:5));
+  return {F:F,k:k=>F==null?k:k*F,dens:x=>F==null?x:x/F,dp:dp,
+          label:F==null?'Strike / fwd':'Strike',
+          fmt:v=>(F==null?v.toFixed(4):v.toFixed(dp))};
+}
 async function drawSmile(){
   const p=$('#panes');p.innerHTML='<div class="meta"><span class="spin"></span> fitting smile…</div>';
   const o=mq(),ex=$('#chartexpiry').value;
   const d=await api('/api/smile?'+qs({pair:o.pair,expiry:ex,method:o.method,cut:o.cut}));
+  const K=kScale(d);
   const f=d.fit?`<span class="pill ${d.fit.arbitrage_free?'ok':'bad'}">${d.fit.arbitrage_free?'arbitrage-free':'ARBITRAGE'}</span>
     <span class="meta">fit error ${d.fit.max_error_vol_pts.toExponential(1)} vol pts</span>`:'';
-  p.innerHTML=`<div style="display:flex;gap:10px;align-items:center;margin-bottom:8px">
-      <b>${esc(o.pair)}</b><span class="meta">t = ${d.t.toFixed(4)}y · ATM ${d.atm.toFixed(4)}%</span>${f}</div>
+  const lvl=K.F==null?'<span class="meta">no feed for '+esc(o.pair)+' · strikes in K/F</span>'
+    :`<span class="meta">spot ${num(d.spot,K.dp)} · fwd ${num(d.forward,K.dp)} <span class="pill ok">feed</span></span>`;
+  p.innerHTML=`<div style="display:flex;gap:10px;align-items:center;margin-bottom:8px;flex-wrap:wrap">
+      <b>${esc(o.pair)}</b><span class="meta">t = ${d.t.toFixed(4)}y · ATM ${d.atm.toFixed(4)}%</span>${f}${lvl}</div>
     <div id="c1"></div><div class="legend"><span><i style="background:${C1}"></i>implied vol (%)</span>
       <span><i style="background:${C2}"></i>risk-neutral density</span>
       <span><i style="background:${C3};height:8px;width:8px;border-radius:50%"></i>quoted deltas</span></div>
-    <div class="scroll" style="margin-top:12px"><table style="width:100%"><thead><tr><th>Point</th><th>Strike / fwd</th><th>Vol %</th></tr></thead>
-    <tbody>${d.points.map(r=>`<tr><td>${esc(r.label)}</td><td>${num(r.k,6)}</td><td>${num(r.v,4)}</td></tr>`).join('')}</tbody></table></div>
+    <div class="scroll" style="margin-top:12px"><table style="width:100%"><thead><tr><th>Point</th><th>${K.label}</th><th>Vol %</th></tr></thead>
+    <tbody>${d.points.map(r=>`<tr><td>${esc(r.label)}</td><td>${num(K.k(r.k),K.dp)}</td><td>${num(r.v,4)}</td></tr>`).join('')}</tbody></table></div>
     ${d.warnings.length?`<div class="hint" style="color:var(--warn)">⚠ ${esc(d.warnings.join(' · '))}</div>`:''}`;
-  chart($('#c1'),[{pts:d.curve.map(r=>[r.k,r.v]),color:C1},
-    {pts:d.density.map(r=>[r.k,r.d]),color:C2,axis:'r',w:1.3,dash:1},
-    {pts:d.points.map(r=>[r.k,r.v]),color:C3,type:'dot',labels:d.points.map(r=>r.label.replace(' put','p').replace(' call','c'))}],
-    {ldp:3,rdp:1,xfmt:v=>v.toFixed(4)});
+  // A density is per unit of the axis, so dividing it by the forward makes it
+  // small; the right axis needs enough places to still show it.
+  const dens=d.density.map(r=>[K.k(r.k),K.dens(r.d)]);
+  const dmax=Math.max.apply(null,dens.map(p=>Math.abs(p[1])).concat([0]));
+  const rdp=dmax>=10?1:(dmax>=1?2:(dmax>=0.1?3:4));
+  chart($('#c1'),[{pts:d.curve.map(r=>[K.k(r.k),r.v]),color:C1},
+    {pts:dens,color:C2,axis:'r',w:1.3,dash:1},
+    {pts:d.points.map(r=>[K.k(r.k),r.v]),color:C3,type:'dot',labels:d.points.map(r=>r.label.replace(' put','p').replace(' call','c'))}],
+    {ldp:3,rdp:rdp,xfmt:K.fmt});
 }
 async function drawTerm(){
   const p=$('#panes');p.innerHTML='<div class="meta"><span class="spin"></span> building…</div>';
@@ -999,13 +1450,18 @@ function savePanels(){try{localStorage.setItem('volkit.listed',JSON.stringify(PA
 function loadPanels(){
   try{const r=localStorage.getItem('volkit.listed');if(r)PANELS=JSON.parse(r)}catch(e){PANELS=[]}
   if(!Array.isArray(PANELS))PANELS=[];
-  PANELS.forEach(p=>{p.id='p'+(PSEQ++)});
+  // A panel saved against a pegged pair keeps BAND in its state; the select
+  // would not offer it and the panel would post a method the screen never
+  // showed.  The browser owns this state and posts it whole, so it is the
+  // browser that has to keep it legal.
+  PANELS.forEach(p=>{p.id='p'+(PSEQ++); p.method=methodFor(p.pair,p.method)});
 }
 function defaultPanel(from){
   const d=new Date((STATE.valuationMs||Date.now())+90*864e5);
   const base={label:'',underlying:'6E',pair:'',invert:'',scale:'',
-    expiry:d.toISOString().slice(0,16),forward:'',beta:'1',weighting:'vega',
-    cut:'NY',method:(STATE.methods||['SVI'])[0],vol_unit:'auto',
+    expiry:d.toISOString().slice(0,16),forward:'',beta:'1',
+    alpha:'',rho:'',volvol:'',weighting:'vega',contract_size:'',
+    cut:'NY',method:methodsFor(null)[0],vol_unit:'auto',
     strike_column:'',vol_column:'',text:''};
   const p=Object.assign(base,from||{});
   p.id='p'+(PSEQ++);
@@ -1015,6 +1471,9 @@ function defaultPanel(from){
    are chosen from the magnitude rather than fixed. */
 function kdp(x){x=Math.abs(x)||1;return Math.min(8,Math.max(2,5-Math.floor(Math.log10(x))))}
 const sgn=(v,d)=>(v==null||!isFinite(v))?'—':(v>=0?'+':'')+v.toFixed(d);
+/* A parameter that was typed reads exactly like one the market implied
+   unless it is marked where it is shown. */
+function heldtag(f,k){return ((f.fixed||[]).indexOf(k)>=0)?' <i class="etoheld">held</i>':''}
 const cls=v=>(v==null||!isFinite(v))?'':(v>0?' class="pos"':(v<0?' class="neg"':''));
 
 const EF=[
@@ -1026,6 +1485,16 @@ const EF=[
  ['expiry','Expiry (UTC)','datetime',180],
  ['forward','Futures price','text',108],
  ['beta','Beta','text',58],
+ /* Blank means the fit decides; a number holds that parameter there and the
+    others are fitted around it.  Same rule as every other blank box on the
+    panel -- an empty field is not a zero. */
+ ['alpha','Alpha (hold)','text',86],
+ ['rho','Rho (hold)','text',74],
+ ['volvol','Nu (hold)','text',74],
+ /* A fit needs no notion of size; the positions panel below does, and this
+    is the panel that knows which contract it is.  Blank takes the contract's
+    standard size -- 125,000 for 6E, 12,500,000 for 6J. */
+ ['contract_size','Contract size','text',104],
  ['weighting','Weighting','weighting',92],
  ['cut','Book cut','cut',74],
  ['method','Book interp','method',94],
@@ -1054,7 +1523,7 @@ function efield(pan,i,f){
   }else if(kind==='cut'){
     el='<select '+a+'>'+optlist((STATE.cuts||['NY']).map(x=>[x,x]),cur)+'</select>';
   }else if(kind==='method'){
-    el='<select '+a+'>'+optlist((STATE.methods||['SVI']).map(x=>[x,x]),cur)+'</select>';
+    el='<select '+a+'>'+optlist(methodsFor(pan.pair).map(x=>[x,x]),cur)+'</select>';
   }else if(kind==='volunit'){
     el='<select '+a+'>'+optlist([['auto','auto'],['percent','percent'],['decimal','decimal']],cur)+'</select>';
   }else if(kind==='datetime'){
@@ -1069,6 +1538,10 @@ function panelShell(pan,i){
     '<div class="etohead">'+EF.map(f=>efield(pan,i,f)).join('')+
       '<div class="acts">'+
         '<button data-fit="'+i+'">Fit</button>'+
+        '<button class="ghost" data-hold="'+i+'" title="put the fitted alpha, rho and nu in the '+
+          'boxes above, where they can be edited">Hold fit</button>'+
+        '<button class="ghost" data-free="'+i+'" title="empty the three boxes and fit '+
+          'everything again">Release</button>'+
         '<button class="ghost" data-copy="'+i+'">Duplicate</button>'+
         '<button class="danger" data-del="'+i+'">Remove</button>'+
       '</div></div>'+
@@ -1110,8 +1583,9 @@ function paintPanel(i){
       (c?'<span>marked ATM <b>'+num(c.book_atm,4)+'%</b></span>':'')+
       '<span>weighted RMSE <b>'+num(f.rmse,4)+'</b> vol pts</span>'+
       '<span>worst <b>'+sgn(f.max_error,4)+'</b> at '+num(f.max_error_strike,dp)+'</span>'+
-      '<span>alpha <b>'+num(f.alpha,6)+'</b></span>'+
-      '<span>rho <b>'+sgn(f.rho,4)+'</b></span>'+
+      '<span>alpha <b>'+num(f.alpha,6)+'</b>'+heldtag(f,'alpha')+'</span>'+
+      '<span>rho <b>'+sgn(f.rho,4)+'</b>'+heldtag(f,'rho')+'</span>'+
+      '<span>nu <b>'+num(f.volvol,4)+'</b>'+heldtag(f,'volvol')+'</span>'+
       '<span>nu&#8730;t <b>'+num(f.log_volvol,4)+'</b></span>'+
       '<span>beta <b>'+num(f.beta,2)+'</b></span>'+
       '<span>'+d.n_quotes+' quotes, '+f.dof+' d.o.f.</span>'+
@@ -1202,6 +1676,17 @@ $('#etolist').addEventListener('change',e=>{
 $('#etolist').addEventListener('click',e=>{
   const b=e.target.closest('button'); if(!b)return;
   if(b.dataset.fit!=null){fitPanel(+b.dataset.fit);return}
+  if(b.dataset.hold!=null){const i=+b.dataset.hold,st=PRES[PANELS[i].id];
+    if(!st||!st.ok)return;
+    /* Rounded to what the boxes show: the curve that is held has to be the
+       one the numbers on screen describe, not a longer one behind them. */
+    const f=st.data.fit;
+    PANELS[i].alpha=f.alpha.toFixed(6); PANELS[i].rho=f.rho.toFixed(4);
+    PANELS[i].volvol=f.volvol.toFixed(4);
+    savePanels(); renderPanels(); fitPanel(i); return}
+  if(b.dataset.free!=null){const i=+b.dataset.free;
+    PANELS[i].alpha='';PANELS[i].rho='';PANELS[i].volvol='';
+    savePanels(); renderPanels(); fitPanel(i); return}
   if(b.dataset.copy!=null){PANELS.push(defaultPanel(PANELS[+b.dataset.copy]));savePanels();renderPanels();
     fitPanel(PANELS.length-1);return}
   if(b.dataset.del!=null){const g=PANELS.splice(+b.dataset.del,1)[0];delete PRES[g.id];
@@ -1212,6 +1697,133 @@ $('#etodup').onclick=()=>{PANELS.push(defaultPanel(PANELS[PANELS.length-1]));sav
   if(PANELS.length>1)fitPanel(PANELS.length-1)};
 $('#etofitall').onclick=fitAll;
 $('#etoclear').onclick=()=>{PANELS=[];PRES={};savePanels();renderPanels();$('#etostatus').textContent=''};
+
+/* ------------------------ positions and risk -------------------------
+   The positions and the panels they are priced against are both posted
+   whole, so the server keeps no more state here than it does for a fit and
+   `volkit listed --positions` reproduces the screen.  Every parameter a
+   greek needs is a parameter the panel above already had to have. */
+let GRES=null;
+const GF=[
+ ['vol_bump','Vol bump (pts)',60],
+ ['theta_days','Theta (days)',60],
+];
+function saveG(){try{localStorage.setItem('volkit.positions',JSON.stringify(gq()))}catch(e){}}
+function loadG(){
+  let v=null; try{v=JSON.parse(localStorage.getItem('volkit.positions')||'null')}catch(e){}
+  v=v||{};
+  $('#gtext').value=v.text||'';
+  $('#gfields').innerHTML=GF.map(f=>'<div class="f"><label>'+esc(f[1])+'</label>'+
+    '<input id="g_'+f[0]+'" value="'+esc(v[f[0]]==null?'1':v[f[0]])+
+    '" style="width:'+f[2]+'px;padding:5px 7px;font-size:12px"></div>').join('');
+}
+function gq(){
+  const o={text:$('#gtext').value};
+  GF.forEach(f=>{const el=$('#g_'+f[0]); o[f[0]]=el?el.value:'1'});
+  return o;
+}
+/* Money in the contract's premium currency; a futures equivalent is a count
+   of futures.  Two decimals on a count, none on money. */
+const GCOLS=[
+ ['delta_futures','Δ fut',2],['delta_1pct','Δ 1% $',0],
+ ['gamma_futures','Γ fut',2],['gamma_1pct','Γ 1% $',0],
+ ['vega','vega $',0],['theta','theta $',0],
+ ['vanna_1pct','vanna $',0],['volga','volga $',0],
+];
+function gnum(v,d){return (v==null||!isFinite(v))?'—':
+  (v<0?'-':'')+Math.abs(v).toLocaleString(undefined,{minimumFractionDigits:d,maximumFractionDigits:d})}
+function gcell(o,k,d){const v=o?o[k]:null;
+  return '<td'+cls(v)+'>'+gnum(v,d)+'</td>'}
+
+function paintG(){
+  const out=$('#gout'), tab=$('#gtables'), msg=$('#gmsg');
+  if(!GRES){out.innerHTML='<div class="out"><div class="v">—</div><div class="d">not aggregated yet</div></div>';
+    tab.innerHTML='';msg.innerHTML='';return}
+  if(GRES.busy){out.innerHTML='<div class="out"><div class="v"><span class="spin"></span></div>'+
+    '<div class="d">fitting the panels and aggregating…</div></div>';return}
+  if(!GRES.ok){out.innerHTML='<div class="out err"><div class="v">'+esc(GRES.msg)+'</div></div>';
+    tab.innerHTML='';msg.innerHTML='';return}
+  const d=GRES.data, T=d.totals;
+  const priced=d.positions.filter(r=>r.bs&&r.bs.vega!=null).length;
+  out.innerHTML='<div class="etostat">'+
+    '<span>lines <b>'+d.positions.length+'</b>, priced <b>'+priced+'</b></span>'+
+    '<span>panels used <b>'+d.panels.filter(p=>p.used).length+'</b> of '+d.panels.length+'</span>'+
+    '<span>premium <b>'+gnum(T.premium,0)+'</b></span>'+
+    '<span>vega (BS) <b>'+gnum(T.bs.vega,0)+'</b></span>'+
+    '<span>vega (smile) <b>'+gnum(T.smile.vega,0)+'</b></span>'+
+    '<span>theta (BS) <b>'+gnum(T.bs.theta,0)+'</b></span>'+
+    '<span>per <b>'+num(d.vol_bump,2)+'</b> vol pt, <b>'+num(d.theta_days,2)+'</b> day(s)</span>'+
+    '</div>'+
+    '<div class="etonote">Money is the contract\u2019s premium currency and adds across '+
+    'contracts; a futures equivalent does not and is totalled per contract only.</div>';
+
+  let h='';
+  ['bs','smile'].forEach(which=>{
+    h+='<h2 style="margin:14px 0 8px">'+(which==='bs'?
+      'Black&#8211;Scholes — volatility held fixed as the future moves':
+      'Smile — revalued on the fitted curve, which travels with the future')+'</h2>'+
+      '<div class="etowide"><table><thead><tr><th>#</th><th>Panel</th><th>Strike</th>'+
+      '<th>C/P</th><th>Contracts</th><th>Vol %</th><th>Premium</th>'+
+      GCOLS.map(c=>'<th>'+esc(c[1])+'</th>').join('')+'</tr></thead><tbody>';
+    d.positions.forEach(r=>{
+      if(!r.bs||r.bs.vega==null){
+        h+='<tr><td>'+r.line+'</td><td>'+esc(r.panel||r.underlying||'—')+'</td>'+
+           '<td colspan="'+(5+GCOLS.length)+'" class="neg">'+esc(r.error)+'</td></tr>';
+        return}
+      h+='<tr><td>'+r.line+'</td><td>'+esc(r.panel)+'</td><td>'+num(r.strike,kdp(r.strike))+'</td>'+
+         '<td>'+(r.type==='call'?'C':'P')+'</td><td'+cls(r.quantity)+'>'+gnum(r.quantity,0)+'</td>'+
+         '<td>'+num(r.vol,4)+'</td>'+gcell(r,'premium',0)+
+         GCOLS.map(c=>gcell(r[which],c[0],c[2])).join('')+'</tr>';
+      if(r.error)h+='<tr><td></td><td colspan="'+(6+GCOLS.length)+'" class="wmsg">'+esc(r.error)+'</td></tr>';
+    });
+    d.groups.forEach(g=>{
+      h+='<tr class="sep"><td></td><td>'+esc(g.panel)+'</td><td colspan="3">'+
+         esc(g.underlying)+' · '+esc(String(g.expiry).replace('T',' ').slice(0,16))+'Z · '+
+         g.n+' line(s) · size '+gnum(g.contract_size,0)+'</td>'+
+         '<td>'+num(g.atm_vol,4)+'</td>'+gcell(g,'premium',0)+
+         GCOLS.map(c=>gcell(g[which],c[0],c[2])).join('')+'</tr>';
+    });
+    h+='<tr class="sep"><td></td><td><b>all</b></td><td colspan="4">money only</td>'+
+       gcell(T,'premium',0)+
+       GCOLS.map(c=>((d.additive||[]).indexOf(c[0])<0?
+         '<td title="not added across contracts">—</td>':gcell(T[which],c[0],c[2]))).join('')+
+       '</tr></tbody></table></div>';
+  });
+  tab.innerHTML=h;
+
+  msg.innerHTML=(d.panels.filter(p=>!p.ok).map(p=>'<div class="etowarn">! panel '+esc(p.name)+
+      ': '+esc(p.error)+'</div>').join(''))+
+    (d.skipped||[]).map(x=>'<div class="etowarn">! line '+x.line+' skipped ('+esc(x.why)+'): '+
+      esc(x.text)+'</div>').join('')+
+    (d.warnings||[]).map(w=>'<div class="etowarn">! '+esc(w)+'</div>').join('')+
+    (d.notes||[]).map(n=>'<div class="etonote">· '+esc(n)+'</div>').join('');
+}
+async function aggregate(){
+  const q=gq();
+  if(!(q.text||'').trim()){GRES={ok:false,msg:'paste a position table first'};paintG();return}
+  if(!PANELS.length){GRES={ok:false,msg:'there are no panels to price against; add one above'};
+    paintG();return}
+  GRES={busy:true};paintG();
+  try{
+    GRES={ok:true,data:await post('/api/listed/greeks',
+      Object.assign({panels:PANELS.map(panelPayload)},q))};
+  }catch(e){GRES={ok:false,msg:e.message}}
+  paintG();
+}
+$('#gcalc').onclick=aggregate;
+$('#gtext').addEventListener('input',saveG);
+$('#gfields').addEventListener('input',saveG);
+$('#gclear').onclick=()=>{$('#gtext').value='';GRES=null;saveG();paintG()};
+$('#gsample').onclick=()=>{
+  /* Built from the panels actually on the screen, so pressing it produces
+     something that prices rather than an example of somebody else's book. */
+  const p=PANELS[0];
+  if(!p){$('#gtext').value='6E, 2026-09-11 19:00, 1.0900, C, 25\n'+
+    '6E, 2026-09-11 19:00, 1.0600, P, -40';saveG();return}
+  const f=parseFloat(p.forward)||1, e=(p.expiry||'').replace('T',' ');
+  $('#gtext').value=[[f,'C',25],[f*0.97,'P',-40],[f*1.03,'C',-15]]
+    .map(r=>[p.underlying,e,r[0].toFixed(kdp(f)),r[1],r[2]].join(', ')).join('\n');
+  saveG();};
 
 
 /* ============================== ANALYSIS ============================== */
@@ -1224,6 +1836,8 @@ function anq(){return{
   pair:$('#anpair').value, cut:$('#ancut').value, method:$('#anmethod').value,
   target:$('#antarget').value, horizon_days:$('#anhorizon').value,
   lookback_days:$('#anlookback').value, annualisation:$('#anann').value,
+  realized_basis:$('#anbasis').value, sabr:$('#ansabr').checked?'1':'0',
+  sabr_delta:$('#ansabrd').value,
   noise:$('#annoise').checked?'1':'0'};}
 function saveAn(){try{localStorage.setItem('volkit.analysis',JSON.stringify(anq()))}catch(e){}}
 function loadAn(){
@@ -1232,7 +1846,9 @@ function loadAn(){
   const set=(id,val)=>{const el=$(id); if(el&&val!=null&&val!=='')el.value=val};
   set('#anpair',v.pair); set('#ancut',v.cut); set('#anmethod',v.method); set('#antarget',v.target);
   set('#anhorizon',v.horizon_days); set('#anlookback',v.lookback_days); set('#anann',v.annualisation);
+  set('#anbasis',v.realized_basis); set('#ansabrd',v.sabr_delta);
   if(v.noise!=null)$('#annoise').checked=v.noise!=='0';
+  if(v.sabr!=null)$('#ansabr').checked=v.sabr==='1';
 }
 /* the tenor axis is categorical; the chart takes numbers, so index maps to label */
 function anTenorFmt(list){return v=>{const i=Math.round(v);return (i>=0&&i<list.length)?list[i]:''}}
@@ -1243,6 +1859,15 @@ function tblHtml(head,rows,cls){
 const anPct=(v,d=3)=>(v==null||!isFinite(v))?'—':(v*100).toFixed(d);
 const anSgn=(v,d=3)=>(v==null||!isFinite(v))?'—':((v*100>=0?'+':'')+(v*100).toFixed(d));
 const anRaw=(v,d=3)=>(v==null||!isFinite(v))?'—':((v>=0?'+':'')+v.toFixed(d));
+/* A premium, in basis points of the forward it is a premium on -- so it is divided by that
+   forward first: 0.019 JPY on a 150 forward is 1.3bp of notional, not 192 of anything.
+   The P&L column used to scale by 100 under a 'bp' heading, which is percentage points
+   and only looked right on a pair whose forward is near 1. */
+const anBp=(v,f,d=2)=>(v==null||!isFinite(v)||!f||!isFinite(f))?'—':
+  ((v>=0?'+':'')+(v/f*10000).toFixed(d));
+/* 'grp' marks the start of a column group and cls() colours the sign; a cell wanting
+   both needs one class attribute, not two. */
+const clsg=v=>{const c=cls(v);return c?' class="grp '+c.slice(8,-1)+'"':' class="grp"'};
 
 function renderCarry(d){
   const host=$('#ancarry'), rows=d.carry||[];
@@ -1258,14 +1883,23 @@ function renderCarry(d){
     '<span><i style="background:'+C2+'"></i>roll per year (right)</span></div></div><div>'+
     tblHtml('<th>Tenor</th><th>Forward</th><th>Strike</th><th>Level %</th><th>Rolled %</th>'+
       '<th>Roll</th><th>Term</th><th>Smile</th><th>Per yr</th><th>/atm</th>'+
-      (live[0].pnl==null?'':'<th>P&amp;L (bp)</th>'),
+      '<th class="grp">&Delta;</th><th>Fwd/yr</th><th>Carry (bp fwd)</th><th>In vols</th>'+
+      '<th>Roll+carry</th>'+
+      (live[0].pnl==null?'':'<th class="grp">P&amp;L (bp)</th><th>Total (bp)</th>'),
       live.map(r=>'<tr><td>'+esc(r.tenor)+'</td><td>'+num(r.forward,5)+'</td><td>'+
         (r.strike==null?'—':num(r.strike,5))+'</td><td>'+anPct(r.level)+'</td><td>'+
         anPct(r.level_rolled)+'</td><td'+cls(r.roll)+'>'+anSgn(r.roll)+'</td><td'+cls(r.roll_term)+
         '>'+anSgn(r.roll_term)+'</td><td'+cls(r.roll_smile)+'>'+anSgn(r.roll_smile)+'</td><td'+
         cls(r.roll_annual)+'>'+anSgn(r.roll_annual,2)+'</td><td'+cls(r.ratio_atm)+'>'+
-        anRaw(r.ratio_atm)+'</td>'+(r.pnl==null?'':'<td'+cls(r.pnl)+'>'+anSgn(r.pnl,2)+'</td>')+
-        '</tr>'))+'</div></div>'+
+        anRaw(r.ratio_atm)+'</td>'+
+        '<td class="grp">'+anRaw(r.delta)+'</td><td'+cls(r.carry_rate)+'>'+
+        anSgn(r.carry_rate,2)+'</td><td'+cls(r.carry_pnl)+'>'+anBp(r.carry_pnl,r.forward)+'</td><td'+
+        cls(r.carry_vols)+'>'+anSgn(r.carry_vols)+'</td><td'+
+        cls(r.carry_vols==null?null:r.roll+r.carry_vols)+'>'+
+        anSgn(r.carry_vols==null?null:r.roll+r.carry_vols)+'</td>'+
+        (r.pnl==null?'':'<td'+clsg(r.pnl)+'>'+anBp(r.pnl,r.forward)+'</td><td'+
+          cls(r.total_pnl)+'>'+anBp(r.total_pnl,r.forward)+'</td>')+
+        '</tr>'),'')+'</div></div>'+
     rows.filter(r=>!r.expiry).map(r=>'<div class="etonote">· '+esc(r.warnings[0])+'</div>').join('')+
     [...new Set([].concat.apply([],live.map(r=>r.warnings)))].map(w=>
       '<div class="etowarn">! '+esc(w)+'</div>').join('');
@@ -1285,14 +1919,18 @@ function renderFair(d){
     '<div class="legend"><span><i style="background:'+C1+'"></i>implied ATM</span>'+
     (haveR?'<span><i style="background:'+C2+'"></i>realized</span>'+
       '<span><i style="background:'+C3+'"></i>fair = realized + roll</span>':'')+'</div></div><div>'+
-    tblHtml('<th>Tenor</th><th>Implied %</th><th>Realized %</th><th>Window</th><th>Roll</th>'+
-      '<th>&times;</th><th>Roll value</th><th>of which fwd</th><th>Fair %</th><th>Rich</th>',
+    tblHtml('<th>Tenor</th><th>Implied %</th><th>Realized %</th><th>On</th><th>Window</th>'+
+      '<th>Roll</th><th>&times;</th><th>Roll value</th><th>of which fwd</th>'+
+      '<th class="grp">Fwd/yr</th><th>Carry value</th><th class="grp">Fair %</th><th>Rich</th>',
       rows.map(r=>'<tr><td>'+esc(r.tenor)+'</td><td>'+anPct(r.implied)+'</td><td>'+
-        anPct(r.realized)+'</td><td>'+(r.realized_window_days==null?'—':num(r.realized_window_days,0))+
+        anPct(r.realized)+'</td><td>'+esc(r.realized_basis||'—')+'</td><td>'+
+        (r.realized_window_days==null?'—':num(r.realized_window_days,0))+
         '</td><td'+cls(r.roll)+'>'+anSgn(r.roll)+'</td><td>'+anRaw(r.roll_multiplier,1)+'</td><td'+
         cls(r.roll_value)+'>'+anSgn(r.roll_value)+'</td><td'+cls(r.forward_value)+'>'+
-        anSgn(r.forward_value)+'</td><td>'+anPct(r.fair)+'</td><td'+cls(r.richness)+'>'+
-        anSgn(r.richness)+'</td></tr>'))+'</div></div>'+
+        anSgn(r.forward_value)+'</td><td'+clsg(r.carry_rate)+'>'+anSgn(r.carry_rate,2)+
+        '</td><td'+cls(r.carry_value)+'>'+anSgn(r.carry_value,4)+'</td><td class="grp">'+
+        anPct(r.fair)+'</td><td'+cls(r.richness)+'>'+
+        anSgn(r.richness)+'</td></tr>'),'')+'</div></div>'+
     (haveR?'':'<div class="etonote">· '+esc(d.unavailable.history||'no realized data')+'</div>')+
     [...new Set([].concat.apply([],rows.map(r=>r.warnings)))].map(w=>
       '<div class="etowarn">! '+esc(w)+'</div>').join('');
@@ -1306,8 +1944,10 @@ function renderFair(d){
 
 function renderRealized(d){
   const host=$('#anreal'), rows=d.realized;
+  const bases=rows?[...new Set(rows.filter(r=>r.observations>0).map(r=>r.realized_basis))]:[];
   $('#anrealhead').textContent=rows?('annualised on '+d.annualisation+' time'+
-    (d.lookback_days?' · '+d.lookback_days+'-day window':' · window matched to each tenor')):'';
+    (d.lookback_days?' · '+d.lookback_days+'-day window':' · window matched to each tenor')+
+    (bases.length?' · measured on the '+bases.join(' and '):'')):'';
   if(!rows){host.innerHTML='<div class="annone">'+esc(d.unavailable.history||
     'no historical workbook is loaded')+'</div>';return}
   const live=rows.filter(r=>r.observations>0), names=live.map(r=>r.tenor);
@@ -1315,16 +1955,19 @@ function renderRealized(d){
     '<div class="legend"><span><i style="background:'+C1+'"></i>implied ATM</span>'+
     '<span><i style="background:'+C2+'"></i>realized</span>'+
     '<span><i style="background:'+C3+'"></i>premium (right)</span></div></div><div class="anwide">'+
-    tblHtml('<th>Tenor</th><th>Win</th><th>Obs</th><th>Real %</th><th>Cal %</th><th>252 %</th>'+
+    tblHtml('<th>Tenor</th><th>Win</th><th>Obs</th><th>Real %</th><th>On</th><th>Spot %</th>'+
+      '<th>Pts %</th><th>Cal %</th><th>252 %</th>'+
       '<th>Impl %</th><th>Prem</th><th class="grp">Skew d</th><th>&rarr;T</th><th>&plusmn;se</th>'+
       '<th>Implied</th><th class="grp">Kurt d</th><th>&rarr;T</th><th>&plusmn;se</th><th>Implied</th>'+
       '<th class="grp">ATM %ile</th>',
       rows.map(r=>{
-        if(!r.observations)return '<tr><td>'+esc(r.tenor)+'</td><td colspan="16" style="text-align:left;color:var(--muted)">'+
+        if(!r.observations)return '<tr><td>'+esc(r.tenor)+'</td><td colspan="19" style="text-align:left;color:var(--muted)">'+
           esc(r.warnings[0]||'unavailable')+'</td></tr>';
         const h=r.history&&r.history.atm;
         return '<tr><td>'+esc(r.tenor)+'</td><td>'+num(r.window_days,0)+'</td><td>'+r.observations+
-          '</td><td>'+anPct(r.realized)+'</td><td>'+anPct(r.realized_calendar)+'</td><td>'+
+          '</td><td>'+anPct(r.realized)+'</td><td>'+esc(r.realized_basis||'—')+'</td><td>'+
+          anPct(r.realized_spot)+'</td><td>'+anPct(r.points_vol)+'</td><td>'+
+          anPct(r.realized_calendar)+'</td><td>'+
           anPct(r.realized_count)+'</td><td>'+anPct(r.implied)+'</td><td'+cls(r.premium)+'>'+
           anSgn(r.premium)+'</td><td class="grp">'+anRaw(r.realized_skew)+'</td><td>'+
           anRaw(r.realized_skew_scaled)+'</td><td>'+num(r.skew_se,3)+'</td><td>'+
@@ -1341,6 +1984,65 @@ function renderRealized(d){
   ],{xfmt:anTenorFmt(names),ldp:2,rdp:2});
 }
 
+/* The risk reversal and the butterfly said in SABR's two words.
+
+   The realized table above compares moments, which the wings cannot be: a
+   quoted spread is not a third moment and a realized third moment is not a
+   risk reversal.  What both sides do have is a spot/volatility correlation
+   and a volatility of volatility, so the marked smile is read as the (rho,
+   nu) that would produce it and the history is measured for the same two. */
+function renderShape(d){
+  const host=$('#anshape'), rows=(d.realized||[]).filter(r=>r.implied_rho!=null||r.realized_rho!=null);
+  if(!d.sabr){$('#anshapehead').textContent='';
+    host.innerHTML='<div class="annone">Tick “wings as &rho; / &nu;” above to read the marked '+
+      'risk reversal and butterfly as a spot/volatility correlation and a vol of vol, against '+
+      'the same two measured from the history.</div>';return}
+  $('#anshapehead').textContent=Math.round((d.sabr_delta||0.25)*100)+' delta wings';
+  if(!rows.length){host.innerHTML='<div class="annone">'+esc((d.unavailable&&d.unavailable.history)||
+    'no tenor could be read as a SABR shape')+'</div>';return}
+  const names=rows.map(r=>r.tenor);
+  const loose=rows.filter(r=>r.implied_shape_error!=null&&r.implied_shape_error>1e-4);
+  host.innerHTML='<div class="antop"><div><div class="anchart"></div>'+
+    '<div class="legend"><span><i style="background:'+C1+'"></i>marked &rho;</span>'+
+    '<span><i style="background:'+C2+'"></i>measured &rho;</span>'+
+    '<span><i style="background:'+C3+'"></i>&nu;&radic;t marked (right)</span></div></div>'+
+    '<div class="anwide">'+
+    tblHtml('<th>Tenor</th><th>RR</th><th>Fly</th><th class="grp">&rho; marked</th>'+
+      '<th>&rho; measured</th><th>&plusmn;se</th><th>diff</th>'+
+      '<th class="grp">&nu; marked</th><th>&nu; measured</th><th>&plusmn;se</th><th>diff</th>'+
+      '<th class="grp">&nu;&radic;t</th><th>Measured on</th><th>Fit err</th>',
+      rows.map(r=>'<tr><td>'+esc(r.tenor)+'</td><td'+cls(r.marked_rr)+'>'+anSgn(r.marked_rr)+
+        '</td><td'+cls(r.marked_fly)+'>'+anSgn(r.marked_fly)+'</td>'+
+        '<td class="grp">'+anRaw(r.implied_rho)+'</td><td>'+anRaw(r.realized_rho)+'</td><td>'+
+        num(r.realized_rho_se,3)+'</td><td'+cls(r.rho_difference)+'>'+anRaw(r.rho_difference)+
+        '</td><td class="grp">'+anRaw(r.implied_nu)+'</td><td>'+anRaw(r.realized_nu)+'</td><td>'+
+        num(r.realized_nu_se,3)+'</td><td'+cls(r.nu_difference)+'>'+anRaw(r.nu_difference)+
+        '</td><td class="grp">'+anRaw(r.implied_nu==null?null:r.implied_nu*Math.sqrt(r.t))+
+        '</td><td>'+esc(r.dynamics_source||'—')+'</td><td>'+
+        (r.implied_shape_error==null?'—':num(r.implied_shape_error*100,4))+'</td></tr>'))+
+    '</div></div>'+
+    '<div class="ankey"><span><b>&rho;</b> is the spot/volatility correlation a risk reversal is '+
+    'paid for; <b>&nu;</b> the vol of vol a butterfly is paid for. Marked is the (&rho;, &nu;) a '+
+    'SABR smile would need to show the quoted wings; measured is the same pair taken from the '+
+    'history — the correlation of daily spot returns with daily moves in the quoted '+
+    'at-the-money, and the annualised size of those moves</span>'+
+    '<span>SABR has no mean reversion, so <b>&nu; rises at short tenors</b> on both sides and '+
+    'must not be blended across them. <b>&nu;&radic;t</b> is the scale-free number that actually '+
+    'sets the shape</span>'+
+    '<span><b>Fit err</b> is how far the marked smile is from any SABR smile at all, in '+
+    'volatility points'+(loose.length?' — '+loose.length+' tenor(s) are outside a SABR shape, '+
+    'so the two parameters describe them only loosely':'')+'</span></div>'+
+    [...new Set([].concat.apply([],rows.map(r=>r.warnings)))].slice(0,6).map(w=>
+      '<div class="etowarn">! '+esc(w)+'</div>').join('');
+  const have=r=>r.realized_rho!=null&&isFinite(r.realized_rho);
+  chart(host.querySelector('.anchart'),[
+    {color:C1,pts:rows.filter(r=>r.implied_rho!=null).map(r=>[names.indexOf(r.tenor),r.implied_rho])},
+    {color:C2,pts:rows.filter(have).map(r=>[names.indexOf(r.tenor),r.realized_rho])},
+    {type:'bar',color:C3,axis:'r',pts:rows.filter(r=>r.implied_nu!=null).map(
+      r=>[names.indexOf(r.tenor),r.implied_nu*Math.sqrt(r.t)])},
+  ],{xfmt:anTenorFmt(names),ldp:2,rdp:2});
+}
+
 function renderTriangle(d){
   const host=$('#antri'), rows=d.triangle;
   $('#antrihead').textContent=rows&&rows.length?
@@ -1348,11 +2050,20 @@ function renderTriangle(d){
      ') · correlation '+num(rows[0].rho,3)):'';
   if(!rows||!rows.length){host.innerHTML='<div class="annone">'+esc(d.unavailable.triangle||
     'no triangle available')+'</div>';return}
-  let head='<th>Tenor</th><th>&rho;</th><th>implied &rho;</th>';
+  const LG=d.legs||['leg A','leg B'];
+  let head='<th>Tenor</th><th>&rho;</th><th>implied &rho;</th>'+
+    '<th class="grp">vega split</th><th>per &rho;</th>';
   AKEYS.forEach(k=>{head+='<th class="grp">'+k+' mark</th><th>'+k+' tri</th><th>diff</th>'});
   const body=rows.map(r=>{
+    /* The vega split is a hedge ratio, not a volatility: it is printed plain,
+       and both legs share one column because they are one answer. */
+    const lv=r.leg_vega||[null,null];
+    const split=(lv[0]==null||!isFinite(lv[0])||lv[1]==null||!isFinite(lv[1]))?'—':
+      (lv[0].toFixed(3)+' / '+lv[1].toFixed(3));
     let line='<tr><td>'+esc(r.tenor)+'</td><td>'+anRaw(r.rho)+'</td><td>'+
-      anRaw(r.implied_correlation)+'</td>';
+      anRaw(r.implied_correlation)+'</td>'+
+      '<td class="grp" title="'+esc(LG[0]+' / '+LG[1]+' vega per unit of '+d.pair+' vega')+'">'+
+      split+'</td><td>'+anSgn(r.rho_vega)+'</td>';
     AKEYS.forEach(k=>{
       const dv=r.difference[k], nf=r.noise[k];
       const weak=(dv!=null&&nf!=null&&Math.abs(dv)<=nf);
@@ -1362,7 +2073,13 @@ function renderTriangle(d){
   const noise={}; rows.forEach(r=>AKEYS.forEach(k=>{
     if(r.noise[k]!=null)noise[k]=Math.max(noise[k]||0,Math.abs(r.noise[k]))}));
   host.innerHTML='<div class="anwide">'+tblHtml(head,body)+'</div>'+
-    '<div class="ankey"><span>variance triangle ATM at '+esc(rows[0].tenor)+' <b>'+
+    '<div class="ankey"><span><b>vega split</b> is '+esc(LG[0])+' / '+esc(LG[1])+
+    ' vega per unit of '+esc(d.pair)+' at-the-money vega — the two hedges. They are not '+
+    'shares and do not add to one; weighted by each leg&#39;s own volatility they account '+
+    'for the whole of '+esc(d.pair)+'&#39;s exactly</span>'+
+    '<span><b>per &rho;</b> is what a whole unit of correlation is worth in '+esc(d.pair)+
+    ' volatility points (a hundredth of it for 0.01) — risk no leg vega hedges</span>'+
+    '<span>variance triangle ATM at '+esc(rows[0].tenor)+' <b>'+
     anPct(rows[0].variance_triangle_atm)+'%</b></span>'+
     '<span>the distribution triangle sits <b>'+anSgn(rows[0].smile_convexity)+
     '</b> above it — the convexity of the legs&#39; own smiles, not a marking error</span>'+
@@ -1379,38 +2096,42 @@ async function runAnalysis(){
   $('#anstatus').innerHTML='<span class="spin"></span> computing…';
   try{
     ANA=await post('/api/analysis',anq());
-    renderCarry(ANA); renderFair(ANA); renderRealized(ANA); renderTriangle(ANA);
-    const h=(STATE.analysis&&STATE.analysis.history)||{};
+    renderCarry(ANA); renderFair(ANA); renderRealized(ANA); renderShape(ANA); renderTriangle(ANA);
+    const h=STATE.history||{};
     $('#anstatus').textContent='valuation '+String(ANA.valuation).replace('T',' ').slice(0,16)+'Z'+
       (h.loaded?' · history '+h.source:' · no historical workbook');
   }catch(e){
     $('#anstatus').textContent='';
-    ['#ancarry','#anfair','#anreal','#antri'].forEach(id=>{$(id).innerHTML=''});
+    ['#ancarry','#anfair','#anreal','#anshape','#antri'].forEach(id=>{$(id).innerHTML=''});
     $('#ancarry').innerHTML='<div class="out err"><div class="v">'+esc(e.message)+'</div></div>';
   }
 }
 function scheduleAnalysis(){if($('#anauto').checked){clearTimeout(_ant);_ant=setTimeout(runAnalysis,340)}}
 
-$('#anrun').onclick=()=>{runAnalysis();runCompare()};
-['#anpair','#ancut','#anmethod','#antarget','#anann','#annoise'].forEach(id=>{
+$('#anrun').onclick=runAnalysis;
+$('#anpair').onchange=()=>{setMethodSel('#anmethod',$('#anpair').value);scheduleAnalysis()};
+['#ancut','#anmethod','#antarget','#anann','#annoise','#anbasis','#ansabr','#ansabrd'].forEach(id=>{
   $(id).onchange=scheduleAnalysis});
-/* the comparison reads the same pair, cut and interpolation, so it follows
-   them; the other three belong to the carry and realized sections only. */
-['#anpair','#ancut','#anmethod'].forEach(id=>{
-  const prev=$(id).onchange; $(id).onchange=()=>{prev();scheduleCompare()}});
 ['#anhorizon','#anlookback'].forEach(id=>{$(id).oninput=scheduleAnalysis});
-$('#anload').onclick=async()=>{
-  $('#anstatus').innerHTML='<span class="spin"></span> reading the historical workbook…';
+
+/* The historical workbook is a data source rather than one screen's, so it is
+   loaded from whichever tab wants it and both are told when it arrives.  Its
+   route belongs to no screen for the same reason. */
+async function loadHistory(pathId,statusId){
+  const st=$(statusId);
+  st.innerHTML='<span class="spin"></span> reading the historical workbook…';
   try{
-    const r=await post('/api/history',{path:$('#anhist').value});
-    STATE.analysis.history=r;
-    $('#anstatus').textContent=r.pairs.length+' sheet(s): '+r.pairs.map(x=>x.pair).join(', ')+
+    const r=await post('/api/history',{path:$(pathId).value});
+    STATE.history=r;
+    const other=(pathId==='#anhist')?'#mohist':'#anhist';
+    if($(other))$(other).value=$(pathId).value;
+    st.textContent=r.pairs.length+' sheet(s): '+r.pairs.map(x=>x.pair).join(', ')+
       (r.problems.length?' · '+r.problems.length+' note(s): '+r.problems.slice(0,2).join('; '):'');
-    renderCmp();          /* the dated sources it offers have just changed */
-    await runAnalysis();
-    await runCompare();
-  }catch(e){$('#anstatus').innerHTML='<span style="color:var(--bad)">'+esc(e.message)+'</span>'}
-};
+    if(has('monitor')){renderCmp(); renderTiles(); await runMonitor(); await runCompare()}
+    if(has('analysis'))await runAnalysis();
+  }catch(e){st.innerHTML='<span style="color:var(--bad)">'+esc(e.message)+'</span>'}
+}
+$('#anload').onclick=()=>loadHistory('#anhist','#anstatus');
 
 /* ============================= MANAGED BAND =============================
    Pegged pairs only.  The band itself is policy and comes from bands.csv;
@@ -1430,7 +2151,7 @@ const BFIELDS=[
  ['blend','Band weight %'],
  ['delta','Wing delta'],
 ];
-function bandPaired(){return ((STATE.bands&&STATE.bands.pairs)||[]).indexOf($('#mpair').value)>=0}
+function bandPaired(){return isBanded($('#mpair').value)}
 function bandPayload(){
   const out={pair:$('#mpair').value,cut:$('#mcut').value,mode:$('#bandmode').value,
              solve_hazard:$('#bandsolve').checked};
@@ -1507,9 +2228,10 @@ function renderBand(){
 }
 
 /* ========================== CURVE COMPARISON ==========================
-   Several curves side by side, and the same curve on other dates.  Same
+   Several curves side by side, and the same curve on other dates.  Lives on
+   the Monitor screen and reads its pair, cut and interpolation.  Same
    discipline as the listed and market-maker panels: the browser owns the
-   list and posts it whole, so `volkit analysis --compare` reproduces this
+   list and posts it whole, so `volkit monitor --compare` reproduces this
    screen exactly and the server keeps none of it. */
 let CMP=[], CMPBASE=0, CMPR=null, _cmpt=null;
 const CMPC=[C1,C2,C3,'var(--warn)','var(--bad)','#7a5af5','#0e9aa7','#c2185b'];
@@ -1522,12 +2244,12 @@ const CF=[
  ['on','Include'],
 ];
 function cmpDefault(from){
-  return Object.assign({kind:'surface',pair:$('#anpair').value||'',date:'',label:'',
+  return Object.assign({kind:'surface',pair:$('#mopair').value||'',date:'',label:'',
                         text:'',on:true},from||{});
 }
 function cmpPayload(){return{
   curves:CMP.map(c=>({kind:c.kind,pair:c.pair,date:c.date,label:c.label,text:c.text,on:!!c.on})),
-  cut:$('#ancut').value, method:$('#anmethod').value,
+  cut:$('#mocut').value, method:$('#momethod').value,
   field:$('#cmpfield').value||'atm', base:CMPBASE};}
 function saveCmp(){try{localStorage.setItem('volkit.compare',
   JSON.stringify({curves:CMP,base:CMPBASE,field:$('#cmpfield').value}))}catch(e){}}
@@ -1537,7 +2259,7 @@ function loadCmp(){
     if(v.field)$('#cmpfield').value=v.field}
 }
 function cmpPairs(){
-  const h=((STATE.analysis&&STATE.analysis.history)||{}).pairs||[];
+  const h=(STATE.history||{}).pairs||[];
   return [...new Set((STATE.pairs||[]).concat(h.map(x=>x.pair)))];
 }
 function cmpRow(c,i){
@@ -1578,7 +2300,7 @@ async function runCompare(){
   saveCmp();
   $('#cmpstatus').innerHTML='<span class="spin"></span> building…';
   try{
-    CMPR=await post('/api/analysis/curves',cmpPayload());
+    CMPR=await post('/api/monitor/curves',cmpPayload());
     paintCompare(CMPR);
     $('#cmpstatus').textContent='';
   }catch(e){
@@ -1658,6 +2380,215 @@ $('#cmplist').oninput=e=>{
   const i=e.target.dataset.c, k=e.target.dataset.k;
   if(i==null||!k||e.target.tagName==='SELECT')return;
   CMP[+i][k]=e.target.value; scheduleCompare();
+};
+
+
+
+/* ============================ SAVED MARKS ============================
+   The workbook is never written to, so everything this session has marked
+   lives on the loaded book and dies with a reload.  This is where it is kept:
+   one file beside the workbook, written and read through the same functions
+   `volkit session` uses. */
+function sessPath(){return $('#sesspath').value.trim()}
+function sessShow(r,msg,bad){
+  const el=$('#sessmsg');
+  el.className='msg'+(bad?' bad':' ok');
+  el.textContent=msg;
+  if(r&&r.path){$('#sesspath').value=r.path;
+    $('#sesswhen').textContent=r.saved?('saved '+String(r.saved).replace('T',' ').slice(0,16)):
+      (r.exists?'':'not written yet');}
+}
+async function sessSave(pairOnly){
+  $('#sessmsg').className='msg';
+  $('#sessmsg').innerHTML='<span class="spin"></span> writing…';
+  try{
+    const body={path:sessPath()};
+    if(pairOnly)body.pairs=$('#mpair').value;
+    const r=await post('/api/session/save',body);
+    sessShow(r,(pairOnly?($('#mpair').value+' '):'')+'marks written to '+r.written+
+      ' — the workbook is unchanged');
+  }catch(e){sessShow(null,e.message,true)}
+}
+async function sessLoad(){
+  $('#sessmsg').className='msg';
+  $('#sessmsg').innerHTML='<span class="spin"></span> reading…';
+  try{
+    const r=await post('/api/session/load',{path:sessPath()});
+    const bits=[];
+    if(r.applied&&r.applied.length)bits.push('restored '+r.applied.join(', '));
+    (r.notes||[]).forEach(n=>bits.push(n));
+    (r.problems||[]).forEach(n=>bits.push('! '+n));
+    sessShow(r,bits.join(' · ')||'nothing to restore',!!(r.problems&&r.problems.length));
+    /* the marks moved under every screen, so everything showing is redrawn */
+    await loadCurve(); await loadMarks(); await loadBand(); redraw();
+    if(has('pricing'))await priceAll();
+  }catch(e){sessShow(null,e.message,true)}
+}
+$('#sesssave').onclick=()=>sessSave(false);
+$('#sesssavepair').onclick=()=>sessSave(true);
+$('#sessload').onclick=sessLoad;
+
+/* ============================== MONITOR ==============================
+   Small panels, one per pair, each showing what has moved between two points
+   in time.  Same discipline as every other panel screen: the browser owns
+   the list and posts it whole, so `volkit monitor` reproduces it exactly. */
+let MO=[], MOR=null, _mot=null;
+
+/* Every field here has to be one monitor.tile_from_request reads; a test pins it. */
+const MOF=[
+ ['pair','Pair'],
+ ['was_kind','Was'],
+ ['was_date','Was date'],
+ ['now_kind','Now'],
+ ['now_date','Now date'],
+ ['label','Label'],
+ ['on','Include'],
+];
+function moDefault(from){
+  const d=(STATE.monitor||{});
+  return Object.assign({pair:$('#mopair').value||(STATE.pairs||[''])[0],
+    was_kind:d.was_kind||'history', was_date:d.was_date||'-1w',
+    now_kind:'surface', now_date:'', label:'', on:true},from||{});
+}
+function moPayload(){return{
+  tiles:MO.map(t=>({pair:t.pair,was_kind:t.was_kind,was_date:t.was_date,
+                    now_kind:t.now_kind,now_date:t.now_date,label:t.label,on:!!t.on})),
+  cut:$('#mocut').value, method:$('#momethod').value,
+  field:$('#mofield').value||'atm'};}
+function saveMO(){try{localStorage.setItem('volkit.monitor',
+  JSON.stringify({tiles:MO,field:$('#mofield').value}))}catch(e){}}
+function loadMO(){
+  let v=null; try{v=JSON.parse(localStorage.getItem('volkit.monitor')||'null')}catch(e){}
+  if(v&&Array.isArray(v.tiles)){MO=v.tiles.map(moDefault); if(v.field)$('#mofield').value=v.field}
+}
+function moPairs(){
+  const h=(STATE.history||{}).pairs||[];
+  return [...new Set((STATE.pairs||[]).concat(h.map(x=>x.pair)))];
+}
+function moKinds(){
+  return ((STATE.monitor||{}).kinds)||[{key:'surface',label:'fitted surface'}];
+}
+/* The tile's own controls.  A date box only appears on an end that has one:
+   a date on a source that takes none would be typed, ignored, and then read
+   back as if it had been honoured. */
+function moHead(t,i){
+  const a=k=>'data-t="'+i+'" data-k="'+k+'"';
+  let f='<div class="mohead">'+
+    '<div class="f"><label>Pair</label><select '+a('pair')+' style="width:104px">'+
+      optlist(moPairs().map(x=>[x,x]),t.pair)+'</select></div>'+
+    '<div class="f"><label>Was</label><select '+a('was_kind')+' style="width:130px">'+
+      optlist(moKinds().map(k=>[k.key,k.label]),t.was_kind)+'</select></div>';
+  if(t.was_kind==='history')
+    f+='<div class="f"><label>on</label><input '+a('was_date')+' style="width:110px" '+
+       'placeholder="-1w, 2024-01-15" value="'+esc(t.was_date||'')+'"></div>';
+  f+='<div class="f"><label>Now</label><select '+a('now_kind')+' style="width:130px">'+
+      optlist(moKinds().map(k=>[k.key,k.label]),t.now_kind)+'</select></div>';
+  if(t.now_kind==='history')
+    f+='<div class="f"><label>on</label><input '+a('now_date')+' style="width:110px" '+
+       'placeholder="latest" value="'+esc(t.now_date||'')+'"></div>';
+  return f+'</div>';
+}
+function moTileShell(t,i){
+  return '<div class="motile" data-tile="'+i+'">'+
+    '<h3><span>'+esc(t.label||(t.pair||'—'))+'</span><span class="grow"></span>'+
+      '<label style="margin:0;width:auto;color:var(--muted);font-size:11px">'+
+      '<input type="checkbox" data-t="'+i+'" data-k="on"'+(t.on?' checked':'')+
+      ' style="width:auto"> on</label>'+
+      '<button class="ghost" data-tdup="'+i+'">Copy</button>'+
+      '<button class="danger" data-tdel="'+i+'">Remove</button></h3>'+
+    moHead(t,i)+
+    '<div class="mobody"></div></div>';
+}
+function renderTiles(){
+  const host=$('#molist');
+  host.innerHTML=MO.length?MO.map(moTileShell).join(''):
+    '<div class="moempty">No panels yet — <b>+ Panel</b> adds one. '+
+    'A panel is one pair and two points in time.</div>';
+  if(MOR)paintMonitor(MOR);
+}
+function moCell(v,dp){return (v==null||!isFinite(v))?'—':((v*100>=0?'+':'')+(v*100).toFixed(dp))}
+function paintMonitor(d){
+  const keys=(d.fields||[]).map(f=>f.key), hi=d.field;
+  let n=-1;
+  MO.forEach((t,i)=>{
+    const node=$('#molist').querySelector('[data-tile="'+i+'"]');
+    if(!node)return;
+    const body=node.querySelector('.mobody');
+    if(!t.on){body.innerHTML='<div class="annone">off</div>';return}
+    n+=1;
+    const r=(d.tiles||[])[n];
+    if(!r){body.innerHTML='<div class="annone">not built</div>';return}
+    node.querySelector('h3 span').textContent=r.label;
+    if(!r.ok){body.innerHTML='<div class="etoerr">! '+esc(r.message)+'</div>';return}
+    let head='<th>Tenor</th>';
+    keys.forEach(k=>{head+='<th'+(k===hi?' class="hi"':'')+'>'+
+      (k==='atm'?'atm':k)+'</th>'});
+    head+='<th class="lv">was</th><th class="lv">now</th>';
+    const rows=r.rows.map(row=>{
+      let line='<tr><td'+(row.message?' title="'+esc(row.message)+'"':'')+'>'+esc(row.tenor)+
+        (row.message?' <span style="color:var(--warn)">·</span>':'')+'</td>';
+      keys.forEach(k=>{const v=row.change[k];
+        /* one class attribute, not two: the highlight and the sign share it */
+        const c=(k===hi?['hi']:[]);
+        if(v!=null&&isFinite(v)&&v!==0)c.push(v>0?'pos':'neg');
+        line+='<td'+(c.length?' class="'+c.join(' ')+'"':'')+'>'+moCell(v,3)+'</td>'});
+      const w=row.was[hi], nw=row.now[hi];
+      line+='<td class="lv">'+anPct(w,3)+'</td><td class="lv">'+anPct(nw,3)+'</td>';
+      return line+'</tr>';});
+    body.innerHTML='<div class="moends">was <b>'+esc(r.was.source||r.was.kind_label)+
+      '</b><br>now <b>'+esc(r.now.source||r.now.kind_label)+'</b></div>'+
+      tblHtml(head,rows)+
+      (r.notes||[]).map(x=>'<div class="etonote">· '+esc(x)+'</div>').join('')+
+      (r.warnings||[]).slice(0,3).map(x=>'<div class="etowarn">! '+esc(x)+'</div>').join('');
+  });
+}
+async function runMonitor(){
+  if(!MO.filter(t=>t.on).length){MOR=null;$('#mostatus').textContent='';
+    renderTiles();return}
+  saveMO();
+  $('#mostatus').innerHTML='<span class="spin"></span> reading the curves…';
+  try{
+    MOR=await post('/api/monitor',moPayload());
+    paintMonitor(MOR);
+    const h=STATE.history||{};
+    $('#mostatus').textContent=MOR.tiles.length+' panel(s) · cut '+MOR.cut+' · '+MOR.method+
+      (h.loaded?' · history '+h.source:' · no historical workbook loaded');
+  }catch(e){
+    $('#mostatus').innerHTML='<span style="color:var(--bad)">'+esc(e.message)+'</span>';
+  }
+}
+function scheduleMonitor(){if($('#moauto').checked){clearTimeout(_mot);
+  _mot=setTimeout(runMonitor,420)}}
+$('#moadd').onclick=()=>{MO.push(moDefault());saveMO();renderTiles();runMonitor()};
+$('#modup').onclick=()=>{if(!MO.length)return;
+  MO.push(moDefault(JSON.parse(JSON.stringify(MO[MO.length-1]))));saveMO();renderTiles();runMonitor()};
+$('#moclear').onclick=()=>{MO=[];MOR=null;saveMO();renderTiles();$('#mostatus').textContent=''};
+$('#morun').onclick=()=>{runMonitor();runCompare()};
+$('#mofield').onchange=()=>{saveMO();if(MOR)paintMonitor(MOR);else runMonitor()};
+['#mocut','#momethod'].forEach(id=>{$(id).onchange=()=>{runMonitor();scheduleCompare()}});
+$('#mopair').onchange=()=>{saveMO()};
+$('#mohistload').onclick=()=>loadHistory('#mohist','#mostatus');
+$('#molist').onclick=e=>{
+  const b=e.target.closest('button'); if(!b)return;
+  if(b.dataset.tdel!=null)MO.splice(+b.dataset.tdel,1);
+  else if(b.dataset.tdup!=null)MO.splice(+b.dataset.tdup+1,0,
+    moDefault(JSON.parse(JSON.stringify(MO[+b.dataset.tdup]))));
+  else return;
+  saveMO();renderTiles();runMonitor();
+};
+$('#molist').onchange=e=>{
+  const i=e.target.dataset.t, k=e.target.dataset.k;
+  if(i==null||!k)return;
+  MO[+i][k]=(e.target.type==='checkbox')?e.target.checked:e.target.value;
+  saveMO();
+  /* the row's own fields change with the source, so it is repainted */
+  if(k==='was_kind'||k==='now_kind')renderTiles();
+  runMonitor();
+};
+$('#molist').oninput=e=>{
+  const i=e.target.dataset.t, k=e.target.dataset.k;
+  if(i==null||!k||e.target.tagName==='SELECT')return;
+  MO[+i][k]=e.target.value; scheduleMonitor();
 };
 
 /* ============================ MARKET MAKER ============================ */
@@ -1750,7 +2681,14 @@ function paintMM(){
   const sh=d.sheet||{};
   $('#mmparse').innerHTML=(sh.notes||[]).map(n=>'<div class="etonote">· '+esc(n)+'</div>').join('')+
     (sh.skipped||[]).map(x=>'<div class="etowarn">! line '+x.line+' skipped ('+esc(x.why)+'): '+
-      esc(String(x.text).slice(0,70))+'</div>').join('');
+      esc(String(x.text).slice(0,70))+'</div>').join('')+
+    /* Read, understood, and then replaced by a later quote of the same thing.
+       Shown, not dropped: a line that went missing between the paste and the
+       screen is a silent zero with better manners. */
+    (sh.superseded||[]).map(x=>'<div class="etonote">· line '+x.line+
+      ' superseded by line '+x.replaced_by+': '+esc(x.describe)+' '+
+      num(x.bid,4)+'/'+num(x.ask,4)+(x.timestamp?' at '+esc(x.timestamp):'')+
+      '</div>').join('');
 }
 
 const MMTAG={'inside':'in','below':'out','above':'out'};
@@ -1765,12 +2703,17 @@ function paintSheet(d){
   $('#mmsheethead').textContent=sh.n_quotes+' quote(s) · '+sh.inside+' with our mid inside · '+
     sh.priced+' with a width · fly = '+sh.fly_convention+' · '+sh.vol_unit;
   if(!sh.rows.length){host.innerHTML='<div class="annone">No quote could be read from the paste.</div>';return}
+  /* The time column only appears when the paste was timed. A column of
+     dashes on a run nobody timestamped is noise in a table already this wide. */
+  const timed=sh.rows.some(r=>r.timestamp)||((sh.superseded||[]).length>0);
   let h='<div class="mmwide"><table><thead><tr>'+
-    '<th>Quote</th><th>Size</th><th>Their bid</th><th>Their ask</th><th>Model</th><th>Moved</th>'+
+    '<th>Quote</th>'+(timed?'<th>Time</th>':'')+
+    '<th>Size</th><th>Their bid</th><th>Their ask</th><th>Model</th><th>Moved</th>'+
     '<th>Fair</th><th>Axe</th><th>Bank</th><th>Skew</th>'+
     '<th>Our bid</th><th>Our ask</th><th>Width</th><th>Verdict</th></tr></thead><tbody>';
   sh.rows.forEach(r=>{
     h+='<tr><td>'+esc(r.describe)+(r.label?' <small>'+esc(r.label)+'</small>':'')+'</td>'+
+       (timed?'<td class="mmv">'+esc(r.timestamp||'—')+'</td>':'')+
        '<td class="mmv">'+(r.size==null?'—':num(r.size,0)+'mm')+'</td>'+
        '<td class="mmv">'+num(r.market_bid,4)+'</td><td class="mmv">'+num(r.market_ask,4)+'</td>'+
        '<td class="mmv">'+num(r.model_after,4)+'</td>'+
@@ -1786,7 +2729,7 @@ function paintSheet(d){
     const why=[].concat(r.warnings||[],r.width_source?['width: '+r.width_source]:[],
       r.skew_reason?[r.skew_reason]:[],r.notes||[]);
     const advice=(r.advice||[]).map(x=>'<b>'+esc(x)+'</b>').join(' &nbsp;·&nbsp; ');
-    if(why.length||advice)h+='<tr><td class="mmwhy" colspan="14">'+
+    if(why.length||advice)h+='<tr><td class="mmwhy" colspan="'+(timed?15:14)+'">'+
       (advice?advice+(why.length?' &nbsp;·&nbsp; ':''):'')+why.map(esc).join(' &nbsp;·&nbsp; ')+'</td></tr>';
   });
   h+='</tbody></table></div>';
@@ -1926,11 +2869,29 @@ $('#mmsave').onclick=async()=>{
   }catch(e){$('#mmbankmsg').innerHTML='<span style="color:var(--bad)">'+esc(e.message)+'</span>'}
 };
 
+/* The same file the marking screen writes: a fitted curve and a set of wing
+   shifts are marks like any other, and they are kept in one place rather than
+   in a market-maker-shaped file of their own.  Only reachable once the fit has
+   been kept -- an unapplied fit is put back before the panel returns, so there
+   would be nothing of it on the book to save. */
+$('#mmsession').onclick=async()=>{
+  $('#mmstatus').innerHTML='<span class="spin"></span> writing the marks…';
+  try{
+    if(!$('#mmapply').checked)
+      throw new Error('this panel is not keeping its marks, so there is nothing of the fit '+
+        'on the book to save. Tick "keep the marks", fit again, then save');
+    const r=await post('/api/session/save',{path:$('#sesspath').value.trim()});
+    $('#mmstatus').textContent='marks written to '+r.written+' — the workbook is unchanged';
+    if($('#sesspath'))$('#sesspath').value=r.written;
+  }catch(e){$('#mmstatus').innerHTML='<span style="color:var(--bad)">'+esc(e.message)+'</span>'}
+};
+
 function mmTargetVisible(){
   $('#mmtargetcard').classList.toggle('hide',$('#mmsource').value!=='paste');
 }
 $('#mmrun').onclick=runMM;
-$('#mmpair').onchange=()=>{MM=mmPayload();renderKnobs();saveMM();scheduleMM()};
+$('#mmpair').onchange=()=>{setMethodSel('#mmmethod',$('#mmpair').value);
+  MM=mmPayload();renderKnobs();saveMM();scheduleMM()};
 ['#mmcut','#mmmethod','#mmfly','#mmunit','#mmapply'].forEach(id=>{
   $(id).onchange=()=>{saveMM();scheduleMM()}});
 $('#mmsource').onchange=()=>{mmTargetVisible();saveMM();scheduleMM()};
@@ -1953,8 +2914,10 @@ function showPanel(name){
   Object.keys(PANELROOT).forEach(k=>$(PANELROOT[k]).classList.toggle('hide',k!==PANEL));
   if(PANEL==='marking')redraw();
   else if(PANEL==='listed')PANELS.forEach((p,i)=>paintPanel(i));
-  else if(PANEL==='analysis'){if(!ANA)runAnalysis(); else{renderCarry(ANA);renderFair(ANA);
-    renderRealized(ANA);renderTriangle(ANA)}
+  else if(PANEL==='analysis'){if(!ANA)runAnalysis(); else{renderCarry(ANA);renderFair(ANA);renderShape(ANA);
+    renderRealized(ANA);renderTriangle(ANA)}}
+  else if(PANEL==='monitor'){renderTiles();
+    if(MOR)paintMonitor(MOR); else runMonitor();
     if(CMPR)paintCompare(CMPR); else runCompare();}
   else if(PANEL==='mm'){if(MMR)paintMM(); else renderRules()}
   else if(PANEL==='pricing')renderGrid();
@@ -1962,7 +2925,8 @@ function showPanel(name){
 $('#nav').onclick=e=>{const b=e.target.closest('button');if(!b)return;showPanel(b.dataset.p);};
 $('#tabs').onclick=e=>{const b=e.target.closest('button');if(!b)return;
   [...$('#tabs').children].forEach(x=>x.classList.toggle('on',x===b));TAB=b.dataset.t;redraw();};
-$('#mpair').onchange=async()=>{await loadCurve();await loadMarks();await loadBand();redraw()};
+$('#mpair').onchange=async()=>{setMethodSel('#mmethod',$('#mpair').value);
+  await loadCurve();await loadMarks();await loadBand();redraw()};
 $('#mcut').onchange=async()=>{await loadMarks();await loadBand();redraw()};
 $('#mmethod').onchange=redraw;
 $('#chartexpiry').onchange=redraw;
@@ -1970,64 +2934,87 @@ $('#reload').onclick=async()=>{$('#meta').innerHTML='<span class="spin"></span> 
   await post('/api/reload',{});await boot();};
 window.addEventListener('resize',()=>{clearTimeout(window._rz);window._rz=setTimeout(()=>{
   redraw(); if(PANEL==='listed')PANELS.forEach((p,i)=>paintPanel(i));
-  if(PANEL==='analysis'&&ANA){renderCarry(ANA);renderFair(ANA);renderRealized(ANA);renderTriangle(ANA)}
-  if(PANEL==='analysis'&&CMPR)paintCompare(CMPR);
+  if(PANEL==='analysis'&&ANA){renderCarry(ANA);renderFair(ANA);renderRealized(ANA);renderShape(ANA);renderTriangle(ANA)}
+  if(PANEL==='monitor'&&CMPR)paintCompare(CMPR);
   if(PANEL==='mm'&&MMR)paintMM()},220)});
 
 async function boot(){
   STATE=await api('/api/state');
   STATE.valuationMs=STATE.valuation?new Date(STATE.valuation).getTime():Date.now();
   applyScreens();
-  const opt=(l,sel)=>l.map(x=>`<option${x===sel?' selected':''}>${esc(x)}</option>`).join('');
   if(has('marking')){
-    $('#mpair').innerHTML=opt(STATE.pairs||[]);
-    $('#mcut').innerHTML=opt(STATE.cuts||[],'TK');
-    $('#mmethod').innerHTML=opt(STATE.methods||[]);
+    // Kept, not reset: boot() runs again after every workbook reload.
+    fillSel('#mpair',STATE.pairs||[]);
+    fillSel('#mcut',STATE.cuts||[],'TK');
+    setMethodSel('#mmethod',$('#mpair').value);
   }
   if(has('analysis')){
-    $('#anpair').innerHTML=opt(STATE.pairs||[]);
-    $('#ancut').innerHTML=opt(STATE.cuts||[],'NY');
-    $('#anmethod').innerHTML=opt(STATE.methods||[]);
+    fillSel('#anpair',STATE.pairs||[]);
+    fillSel('#ancut',STATE.cuts||[],'NY');
+    setMethodSel('#anmethod',$('#anpair').value);
     const AN=STATE.analysis||{};
     $('#antarget').innerHTML=(AN.targets||[{key:'atm',label:'at-the-money'}]).map(x=>
       '<option value="'+esc(x.key)+'">'+esc(x.label)+'</option>').join('');
-    $('#anann').innerHTML=opt(AN.annualisations||['weighted']);
-    $('#cmpfield').innerHTML=(AN.curve_fields||[{key:'atm',label:'at-the-money'}]).map(x=>
-      '<option value="'+esc(x.key)+'">'+esc(x.label)+'</option>').join('');
-    if(AN.history&&AN.history.source)$('#anhist').value=AN.history.source;
+    fillSel('#anann',AN.annualisations||['weighted']);
+    if((STATE.history||{}).source)$('#anhist').value=STATE.history.source;
     loadAn();
+  }
+  if(has('monitor')){
+    const MOS=STATE.monitor||{};
+    fillSel('#mopair',STATE.pairs||[]);
+    fillSel('#mocut',STATE.cuts||[],'NY');
+    setMethodSel('#momethod',null);
+    const flds=(MOS.fields||[{key:'atm',label:'at-the-money'}]).map(x=>
+      '<option value="'+esc(x.key)+'">'+esc(x.label)+'</option>').join('');
+    $('#mofield').innerHTML=flds;
+    $('#cmpfield').innerHTML=flds;
+    if((STATE.history||{}).source)$('#mohist').value=STATE.history.source;
+    loadMO(); renderTiles();
     loadCmp(); renderCmp();
   }
   if(has('mm')){
     const MMS=STATE.marketmaker||{};
-    $('#mmpair').innerHTML=opt(STATE.pairs||[]);
-    $('#mmcut').innerHTML=opt(STATE.cuts||[],'NY');
-    $('#mmmethod').innerHTML=opt(STATE.methods||[]);
-    $('#mmsource').innerHTML=opt(MMS.target_sources||['overwrites']);
+    fillSel('#mmpair',STATE.pairs||[]);
+    fillSel('#mmcut',STATE.cuts||[],'NY');
+    setMethodSel('#mmmethod',$('#mmpair').value);
+    fillSel('#mmsource',MMS.target_sources||['overwrites']);
     $('#mmfly').innerHTML=(MMS.fly_conventions||['market']).map(x=>
       '<option value="'+esc(x)+'">'+esc(x==='market'?'market strangle':'smile butterfly')+
       '</option>').join('');
-    $('#mmunit').innerHTML=opt(MMS.vol_units||['auto']);
+    fillSel('#mmunit',MMS.vol_units||['auto']);
     loadMM();
     renderKnobs(); mmTargetVisible(); renderRules();
   }
+  const SS=STATE.session||{};
+  $('#sesspath').value=SS.path||SS.default||'';
+  $('#sesswhen').textContent=SS.saved?('saved '+String(SS.saved).replace('T',' ').slice(0,16)):
+    (SS.exists?'':'not written yet');
+  if(SS.error)$('#sessmsg').textContent=SS.error;
   $('#meta').textContent=`valuation ${STATE.valuation?STATE.valuation.replace('T',' ').slice(0,16)+'Z':''} · ${STATE.source||''}`;
-  if(has('marking'))
+  // Only the opening value.  A reload must not move the chart off the expiry
+  // somebody typed, for the same reason it must not move them off their pair.
+  if(has('marking')&&!$('#chartexpiry').value)
     $('#chartexpiry').value=new Date(STATE.valuationMs+90*864e5).toISOString().slice(0,10);
   const w=(STATE.warnings||[]).slice(); if(STATE.error)w.unshift(STATE.error);
   $('#warnbox').style.display=w.length?'block':'none';
   $('#warnhead').textContent=`${w.length} message${w.length===1?'':'s'} from the workbook`;
   $('#warnlist').innerHTML=w.slice(0,60).map(x=>`<li>${esc(x)}</li>`).join('');
   showFeed(STATE.feed);
+  showAuto(STATE.auto);
+  if(AUTOSEQ<0)AUTOSEQ=(STATE.auto||{}).seq||0;
+  startAuto();
   if(STATE.feed&&STATE.feed.source)$('#feedpath').value=STATE.feed.source;
   if(has('pricing')){
     loadLegs();
     if(!LEGS.length)LEGS=[defaultLeg()];
     LEGS=LEGS.filter(L=>(STATE.pairs||[]).includes(L.pair));
     if(!LEGS.length)LEGS=[defaultLeg()];
+    // Same reason as the listed panels: a leg saved with BAND on a pegged
+    // pair must not keep posting it once the select stops offering it.
+    LEGS.forEach(L=>{L.method=methodFor(L.pair,L.method)});
     renderGrid();
   }
-  if(has('listed')){loadPanels(); renderPanels();}
+  if(has('listed')){loadPanels(); renderPanels(); loadG(); paintG();}
   showPanel(PANEL);
   if(has('marking')){await loadCurve(); await loadMarks(); await loadBand();}
   if(has('pricing'))await priceAll();

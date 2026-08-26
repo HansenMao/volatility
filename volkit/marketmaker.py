@@ -1293,6 +1293,10 @@ class Panel:
                 "strike": q.strike, "is_call": q.is_call, "fly_kind": q.fly_kind,
                 "tenor": _key(q.expiry), "tenor_far": (None if q.expiry_far is None
                                                        else _key(q.expiry_far)),
+                # What was written, not the resolved instant: a run with no
+                # date in it is ordered on a nominal day, and showing that day
+                # back would be a date the paste never contained.
+                "timestamp": q.timestamp_text,
                 "days": days, "size": q.size, "size_basis": q.size_basis,
                 "market_bid": q.bid * 100.0, "market_ask": q.ask * 100.0,
                 "market_mid": q.mid * 100.0, "market_width": q.spread * 100.0,
@@ -1391,6 +1395,13 @@ class Panel:
             "unit_evidence": run_.unit_evidence,
             "notes": list(run_.notes) + list(forward_notes),
             "skipped": [{"line": n, "text": t, "why": w} for n, t, w in run_.skipped],
+            # Read, understood, and then replaced by a later quote of the same
+            # thing.  Reported rather than dropped: a line that disappeared
+            # between the paste and the screen is a silent zero in disguise.
+            "superseded": [{"line": q.line, "text": q.raw, "describe": q.describe(),
+                            "timestamp": q.timestamp_text, "replaced_by": q.replaced_by,
+                            "bid": q.bid * 100.0, "ask": q.ask * 100.0}
+                           for q in run_.superseded],
             "n_quotes": len(rows), "inside": inside, "priced": priced,
             "fly_convention": self.fly_convention,
             "fallback_spread": self.fallback_spread,
@@ -1486,17 +1497,27 @@ def learn_from_panel(payload: dict, clock) -> tuple[list[Rule], list[str], dict]
     panel = panel_from_request(payload)
     run_ = parse_quotes(panel.text, pair=panel.pair, vol_unit=panel.vol_unit,
                         fly_convention=panel.fly_convention)
-    expiries = resolve_expiries(clock, run_.quotes)
+    # Every quote, so a superseded one can still be measured: the expiry it
+    # names has to resolve before its width can be attributed to a tenor.
+    expiries = resolve_expiries(clock, run_.all_quotes)
 
     def days_of(q):
         got = expiries.get(_key(q.expiry_far if q.instrument == "spread" else q.expiry))
         return None if got is None else got[1] * DAYS_IN_YEAR
 
-    rules, notes = suggest_rules(run_.quotes, days_of=days_of)
+    # Width evidence, not fit input: a tenor quoted twice is one live price
+    # and two observations of how wide it is shown.  See ParsedRun.all_quotes.
+    evidence = run_.all_quotes
+    rules, notes = suggest_rules(evidence, days_of=days_of)
+    if run_.superseded:
+        notes.append(
+            f"{len(run_.superseded)} quote(s) were superseded by a later quote of the same "
+            f"thing. They do not go into a fit, but they are still evidence of how wide this "
+            f"market is shown, so they are measured here")
     # Widths are in decimals inside the parser and volatility points in the bank.
     rules = [Rule(**{**vars(r), "value": r.value * 100.0}) for r in rules]
     return rules, notes, {
-        "n_quotes": len(run_.quotes), "vol_unit": run_.vol_unit,
+        "n_quotes": len(evidence), "vol_unit": run_.vol_unit,
         "skipped": [{"line": n, "text": t, "why": w} for n, t, w in run_.skipped],
         "notes": list(run_.notes),
     }

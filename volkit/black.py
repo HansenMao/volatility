@@ -107,6 +107,37 @@ def gamma(F, K, vol, t):
     return np.exp(-0.5 * d1 * d1) / (F * vol * math.sqrt(t) * SQRT_2PI)
 
 
+def theta(F, K, vol, t):
+    """Time decay per year of the *undiscounted* forward value.
+
+    ``-F phi(d1) sigma / (2 sqrt(t))``, the derivative with respect to
+    calendar time, so it is negative for a long option.  There is no discount
+    curve anywhere in volkit (a stated limitation), so this is the decay of
+    the forward premium and carries no interest term; that also makes it the
+    same number for a call and a put, which the put/call parity of a forward
+    value requires.
+    """
+    d1, _ = d1_d2(F, K, vol, t)
+    return -F * np.exp(-0.5 * d1 * d1) * vol / (2.0 * math.sqrt(t) * SQRT_2PI)
+
+
+def vanna(F, K, vol, t):
+    """``d(delta)/d(vol)``, equivalently ``d(vega)/dF``: ``-phi(d1) d2 / sigma``.
+
+    Unadjusted delta only -- the premium-adjusted conventions change delta by
+    a factor of ``K / F`` that has its own volatility sensitivity, and no
+    caller needs that.  Same for a call and a put.
+    """
+    d1, d2 = d1_d2(F, K, vol, t)
+    return -np.exp(-0.5 * d1 * d1) * d2 / (vol * SQRT_2PI)
+
+
+def volga(F, K, vol, t):
+    """``d(vega)/d(vol)``: ``vega * d1 * d2 / sigma``.  Per unit of volatility."""
+    d1, d2 = d1_d2(F, K, vol, t)
+    return vega(F, K, vol, t) * d1 * d2 / vol
+
+
 def delta(F, K, vol, t, is_call: bool, conv: DeltaConvention | bool = False):
     """Forward delta under the requested convention.
 

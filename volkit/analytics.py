@@ -22,10 +22,11 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from . import black, moments
+from . import black, moments, sabr
 from .cross import CrossAtmCurve
 from .numerics import ConvergenceError
-from .history import Realized, SeriesStats, implied_stats, realized
+from .marketdata import open_workbook
+from .history import Realized, SeriesStats, implied_stats, realized, vol_dynamics
 from .surface import VolSurface
 from .timeutil import Clock, parse_datetime, tenor_to_years
 
@@ -40,7 +41,10 @@ class ForwardCurve:
 
     @classmethod
     def from_excel(cls, path: str | Path, sheet: str, column: str = "fwd") -> "ForwardCurve":
-        df = pd.read_excel(pd.ExcelFile(path), sheet, index_col=0)
+        # Through open_workbook, so a forward sheet the user has open in
+        # Excel can still be saved: see marketdata.open_workbook.
+        with open_workbook(path) as xls:
+            df = pd.read_excel(xls, sheet, index_col=0)
         cols = {str(c).strip().lower(): c for c in df.columns}
         if column.lower() not in cols:
             raise ValueError(
@@ -304,6 +308,18 @@ class CarryRow:
     vega: float | None
     pnl: float | None
     forward_carry: float          # forward_rolled - forward, in price terms
+    #: The forward curve's own carry, and what the position earns from it.
+    #: ``carry_rate`` is the annualised proportional roll-down of the forward
+    #: -- the rate differential the swap points are quoting.  ``delta`` is the
+    #: position's ``dV/dF`` at the fixed strike, ``carry_pnl`` the exact
+    #: revaluation of the position at the rolled forward with volatility and
+    #: maturity held, and ``carry_vols`` that P&L divided by the position's own
+    #: vega, which is the form that can be compared with ``roll``.
+    carry_rate: float = float("nan")
+    delta: float | None = None
+    carry_pnl: float | None = None
+    carry_vols: float | None = None
+    total_pnl: float | None = None
     warnings: tuple[str, ...] = ()
 
 
@@ -319,6 +335,32 @@ def carry_table(book, pair: str, *, horizon_days: float = 30.0, target: str = "a
     moneyness, shorter maturity) and the slide across the smile (same
     maturity, forward moved) so the forward curve's contribution is separable
     rather than buried in one number.
+
+    The forward curve pays twice, and the two are reported separately because
+    they are different risks:
+
+    * through the **mark** -- the forward slides out from under a fixed
+      strike, the option's moneyness changes, and the volatility it is marked
+      at changes with it.  That is ``roll_smile``, in volatility points.
+    * through the **price** -- the option is worth
+      ``V(F, K, sigma, tau)`` and ``F`` itself has moved from ``forward`` to
+      ``forward_rolled``.  That is ``carry_pnl``, in premium terms, and it is
+      what a desk means by the carry on an option position.
+
+    The second one depends on how the delta is hedged, and the convention is
+    worth stating because it is the whole of the number.  Hedged in the
+    **outright forward to the option's own expiry**, the hedge rolls down the
+    curve exactly as the option does and the two cancel: ``carry_pnl`` is
+    earned and paid away, and the position has no forward carry.  Hedged in
+    **spot**, which is what an FX options desk actually does, nothing rolls on
+    the hedge side and the position keeps it.  So ``carry_pnl`` is the carry
+    of a spot-hedged book, and the same number is the cost of *not* hedging in
+    the forward.  It is computed by full revaluation rather than as
+    ``delta * (F2 - F1)``, so the gamma over the move is in it; ``delta`` is
+    reported beside it as the first-order reading.
+
+    Without a forward feed there is no curve to roll down, and both are left
+    unavailable rather than reported as zero.
     """
     if target.lower() not in TARGETS:
         raise ValueError(f"unknown target {target!r}; expected one of {sorted(TARGETS)}")
@@ -365,7 +407,8 @@ def carry_table(book, pair: str, *, horizon_days: float = 30.0, target: str = "a
             atm_now = float(surface.atm_vol(expiry, cut))
             level = level_rolled = level_term = 0.0
             strike_abs = float("nan")
-            vega = 0.0
+            vega = gross_vega = 0.0
+            pos_delta = carry_pnl = 0.0
             for weight, delta, is_call in legs:
                 if delta == 0.0:
                     k_ratio = float(black.dns_strike(1.0, atm_now, t, surface.conv))
@@ -377,7 +420,23 @@ def carry_table(book, pair: str, *, horizon_days: float = 30.0, target: str = "a
                 level += weight * v_now
                 level_term += weight * float(surface.vol(k_ratio, expiry2, method, cut))
                 level_rolled += weight * float(surface.vol(k_abs / f2, expiry2, method, cut))
-                vega += weight * float(black.vega(f1, k_abs, v_now, t))
+                leg_vega = float(black.vega(f1, k_abs, v_now, t))
+                vega += weight * leg_vega
+                gross_vega += abs(weight) * leg_vega
+                # A leg quoted at the at-the-money is a *straddle* on this
+                # desk, so its delta is what makes the delta-neutral strike
+                # delta-neutral: zero.  Reading it as the call alone would
+                # hand the at-the-money row half a unit of forward carry that
+                # nobody is running.  Half a straddle is used so its vega is a
+                # single option's and the existing ``vega`` column does not
+                # move.
+                sides = ((0.5, True), (0.5, False)) if delta == 0.0 else ((1.0, is_call),)
+                for share, call in sides:
+                    pos_delta += weight * share * float(
+                        black.delta(f1, k_abs, v_now, t, call))
+                    carry_pnl += weight * share * float(
+                        black.price(f2, k_abs, v_now, t, call)
+                        - black.price(f1, k_abs, v_now, t, call))
                 if len(legs) == 1:
                     strike_abs = k_abs
         except (ValueError, ArithmeticError, ConvergenceError) as exc:
@@ -390,6 +449,26 @@ def carry_table(book, pair: str, *, horizon_days: float = 30.0, target: str = "a
         ratio_target = None
         if abs(level) > 1e-6:
             ratio_target = (roll / h) / level
+
+        # No feed means no curve to roll down.  ``f1`` and ``f2`` are both 1.0
+        # there, so every carry figure would come out an exact zero -- the
+        # silent zero this project exists to remove -- and they are left
+        # unavailable instead, under the warning already on the row.
+        carry_rate = float("nan")
+        carry_vols: float | None = None
+        delta_out: float | None = None
+        carry_out: float | None = None
+        total_pnl: float | None = None
+        if from_feed:
+            carry_rate = (f2 - f1) / (f1 * h)
+            delta_out, carry_out = pos_delta, carry_pnl
+            # A risk reversal has almost no net vega, so dividing its carry by
+            # that vega is a division by nearly nothing; the row says the carry
+            # in premium and declines to translate it.
+            if abs(vega) > 0.05 * gross_vega:
+                carry_vols = carry_pnl / vega
+            if not combo:
+                total_pnl = vega * roll + carry_pnl
         rows.append(CarryRow(
             tenor=tenor, t=t, t_rolled=t2, expiry=expiry.isoformat(),
             forward=f1, forward_rolled=f2, strike=strike_abs,
@@ -399,7 +478,10 @@ def carry_table(book, pair: str, *, horizon_days: float = 30.0, target: str = "a
             ratio_target=ratio_target,
             vega=None if combo else vega,
             pnl=None if combo else vega * roll,
-            forward_carry=f2 - f1, warnings=tuple(warn),
+            forward_carry=f2 - f1,
+            carry_rate=carry_rate, delta=delta_out, carry_pnl=carry_out,
+            carry_vols=carry_vols, total_pnl=total_pnl,
+            warnings=tuple(warn),
         ))
     return rows
 
@@ -419,34 +501,66 @@ class FairValueRow:
     forward_value: float          # the part of roll_value the forward curve caused
     fair: float | None
     richness: float | None
+    #: The forward curve's price-side carry on the position, and the break-even
+    #: volatility it is worth.  ``carry_rate`` is the annualised proportional
+    #: roll-down of the forward, ``carry_pnl`` the straddle's revaluation at
+    #: the rolled forward, and ``carry_value`` that P&L expressed as the
+    #: volatility it takes to pay for it, on the same footing as ``roll_value``.
+    carry_rate: float = float("nan")
+    carry_pnl: float | None = None
+    carry_value: float = 0.0
+    #: What the realized volatility was measured on: ``spot``, or the forward
+    #: to this tenor.  An implied volatility is a volatility of the forward.
+    realized_basis: str = "spot"
+    realized_spot: float | None = None
     warnings: tuple[str, ...] = ()
 
 
 def fair_value_table(book, pair: str, hist=None, *,
                      horizon_days: float = 30.0, lookback_days: float | None = None,
                      method: str | None = None, cut: str = "NY",
-                     annualisation: str = "weighted") -> list[FairValueRow]:
+                     annualisation: str = "weighted",
+                     realized_basis: str = "auto") -> list[FairValueRow]:
     """What the implied volatility would have to be to break even.
 
-    Hold the ``T`` at-the-money option for the horizon ``h`` and delta hedge
-    it.  Two things happen.  The mark slides by ``roll`` volatility points,
-    worth ``vega(T-h) * roll``.  And the gamma against theta earns roughly the
-    fraction ``h/T`` of the option's whole life at the difference between what
-    was realized and what was paid, worth ``(h/T) * vega(T) * (sigma_R -
-    sigma_I)``.  Setting the two to cancel:
+    Hold the ``T`` at-the-money straddle for the horizon ``h`` and delta hedge
+    it in spot.  Three things happen.  The mark slides by ``roll`` volatility
+    points, worth ``vega(T-h) * roll``.  The forward rolls down its own curve
+    under a fixed strike, worth ``carry_pnl`` in premium.  And the gamma
+    against theta earns roughly the fraction ``h/T`` of the option's whole
+    life at the difference between what was realized and what was paid, worth
+    ``(h/T) * vega(T) * (sigma_R - sigma_I)``.  Setting them to cancel:
 
-        sigma_I = sigma_R + roll * (T/h) * vega(T-h) / vega(T)
+        sigma_I = sigma_R + (T/h) * [ roll * vega(T-h) + carry_pnl ] / vega(T)
 
-    The multiplier is computed from the actual vegas rather than the
-    ``sqrt(T)`` proxy, because the strike is not the same distance from the
-    two forwards once the forward curve has any slope in it.  ``richness`` is
-    the implied volatility less that fair level: positive means the market is
-    charging more than the realized volatility and the carry together justify.
+    -- the ``roll_value`` and ``carry_value`` columns.  The multiplier is
+    computed from the actual vegas rather than the ``sqrt(T)`` proxy, because
+    the strike is not the same distance from the two forwards once the forward
+    curve has any slope in it.  ``richness`` is the implied volatility less
+    that fair level: positive means the market is charging more than the
+    realized volatility and the carry together justify.
+
+    The forward curve reaches this break-even twice and the two are separated
+    on purpose.  Through the **mark** it is ``forward_value``, the part of
+    ``roll_value`` the smile slide caused, and it is first order in the shape
+    of the curve.  Through the **price** it is ``carry_value``, and for a
+    *delta-neutral* straddle -- which is what the at-the-money is on this desk
+    -- it is second order: the position starts with no delta, so the forward
+    moving under it earns only the gamma over the move.  It is computed rather
+    than assumed to be zero, because it is not zero for a steep curve or a
+    long horizon, and because a number reported as an exact zero should have
+    been measured.
 
     This is a first-order identity, not a valuation.  It ignores the
     convexity of the gamma P&L in the realized volatility, assumes the
     surface itself does not move, and inherits every assumption in the
     realized number it is handed.
+
+    ``realized_basis`` is passed through to ``history.realized``: on the
+    default ``auto`` the realized volatility is measured on the **forward** to
+    each tenor wherever the historical sheet quotes the swap points, which is
+    the like-for-like comparison -- the implied volatility being broken even
+    against is a volatility of that forward, not of spot.
 
     The roll used here is always the **at-the-money** roll, taken from a
     carry table this function builds itself rather than from whatever target
@@ -476,13 +590,36 @@ def fair_value_table(book, pair: str, hist=None, *,
         vega_then = float(black.vega(row.forward_rolled, k_abs, v2, t - h))
         multiplier = (t / h) * (vega_then / vega_now) if vega_now > 0 else float("nan")
 
+        # The forward slide, at fixed strike, fixed volatility and fixed
+        # maturity, so it is the forward's contribution alone and not a second
+        # helping of the roll.  A straddle rather than one side of it: the
+        # at-the-money is quoted as a straddle and its delta is zero by
+        # construction, which is exactly why this term is small.
+        carry_rate = float("nan")
+        carry_pnl = None
+        carry_value = 0.0
+        if math.isfinite(row.forward_rolled) and row.forward_rolled != row.forward:
+            f1, f2 = row.forward, row.forward_rolled
+            carry_rate = (f2 - f1) / (f1 * h)
+            carry_pnl = sum(
+                float(black.price(f2, k_abs, implied, t, call)
+                      - black.price(f1, k_abs, implied, t, call))
+                for call in (True, False))
+            if vega_now > 0:
+                carry_value = carry_pnl * (t / h) / (2.0 * vega_now)
+
         rv = None
         window = None
+        basis = "spot"
+        rv_spot = None
         if hist is not None:
             window = float(lookback_days) if lookback_days else t * 365.2425
             try:
-                stats = realized(hist, window, annualisation=annualisation)
+                stats = realized(hist, window, annualisation=annualisation,
+                                 basis=realized_basis, basis_tenor=tenor)
                 rv = stats.vol
+                basis = stats.basis
+                rv_spot = stats.vol_spot
                 warn.extend(stats.warnings)
             except Exception as exc:  # noqa: BLE001 - reported per tenor
                 warn.append(f"no realized volatility for a {window:.0f}-day window: {exc}")
@@ -496,12 +633,14 @@ def fair_value_table(book, pair: str, hist=None, *,
             )
         roll_value = row.roll * multiplier
         fwd_value = row.roll_smile * multiplier
-        fair = None if rv is None else rv + roll_value
+        fair = None if rv is None else rv + roll_value + carry_value
         out.append(FairValueRow(
             tenor=tenor, t=t, implied=implied, realized=rv, realized_window_days=window,
             roll=row.roll, roll_multiplier=multiplier, roll_value=roll_value,
             forward_value=fwd_value, fair=fair,
             richness=None if fair is None else implied - fair,
+            carry_rate=carry_rate, carry_pnl=carry_pnl, carry_value=carry_value,
+            realized_basis=basis, realized_spot=rv_spot,
             warnings=tuple(warn),
         ))
     return out
@@ -529,13 +668,43 @@ class RealizedRow:
     implied_skew: float | None            # from the marked smile's own density
     implied_kurtosis: float | None
     implied_vol_of_density: float | None
+    #: What the realized figures were measured on, and the swap points' part
+    #: in it.  An implied volatility is a volatility of the forward, so on the
+    #: forward basis the swap points *moving* is realized volatility too.
+    realized_basis: str = "spot"
+    realized_spot: float = float("nan")
+    points_vol: float | None = None
+    points_correlation: float | None = None
+    carry_rate: float | None = None
+    #: The same wings said in SABR's two words: the spot/volatility
+    #: correlation a risk reversal is paid for, and the volatility of
+    #: volatility a butterfly is paid for.  ``implied_*`` is read off the
+    #: marked smile, ``realized_*`` measured from the history, and the
+    #: difference is the risk reversal and the butterfly compared with what
+    #: actually happened -- which the moments above cannot do, because a
+    #: quoted spread is not a moment.
+    sabr_delta: float | None = None
+    implied_rho: float | None = None
+    implied_nu: float | None = None
+    implied_shape_error: float | None = None
+    marked_rr: float | None = None
+    marked_fly: float | None = None
+    realized_rho: float | None = None
+    realized_nu: float | None = None
+    realized_rho_se: float | None = None
+    realized_nu_se: float | None = None
+    rho_difference: float | None = None
+    nu_difference: float | None = None
+    dynamics_source: str | None = None
     history: dict = field(default_factory=dict)
     warnings: tuple[str, ...] = ()
 
 
 def realized_table(book, pair: str, hist, *, lookback_days: float | None = None,
                    method: str | None = None, cut: str = "NY",
-                   annualisation: str = "weighted", with_moments: bool = True) -> list[RealizedRow]:
+                   annualisation: str = "weighted", with_moments: bool = True,
+                   realized_basis: str = "auto", with_sabr: bool = False,
+                   sabr_delta: float = 0.25) -> list[RealizedRow]:
     """Realized volatility, skew and kurtosis against what the surface implies.
 
     ``lookback_days`` of ``None`` means *match the tenor*, which is the only
@@ -543,12 +712,32 @@ def realized_table(book, pair: str, hist, *, lookback_days: float | None = None,
     forecast of one month, and holding it up against a year of realized data
     compares two different horizons.
 
-    Skew and kurtosis need the same care in the other direction.  The realized
-    numbers are computed from daily returns; the numbers the smile implies are
-    for the whole return to expiry.  Under independence skewness falls as
+    ``realized_basis`` decides what "realized" means.  On the default ``auto``
+    each tenor is measured on the **forward** to that tenor wherever the
+    historical sheet quotes the swap points, and on spot where it does not,
+    saying which it did.  A quoted volatility is a volatility of the forward:
+    the swap points moving is part of what the option delivered, and on a
+    high-carry or managed pair it is a large part.  ``spot`` restores the
+    older reading.
+
+    Skew and kurtosis need care in the other direction.  The realized numbers
+    are computed from daily returns; the numbers the smile implies are for the
+    whole return to expiry.  Under independence skewness falls as
     ``1/sqrt(n)`` and excess kurtosis as ``1/n`` in the number of steps, so
     the daily figures are projected onto each tenor before being compared, and
     both the raw and the projected values are reported.
+
+    ``with_sabr`` answers the same question about the risk reversal and the
+    butterfly, which the moments above cannot: a quoted spread is not a
+    moment, and a realized third moment is not a risk reversal.  What the two
+    do share is the pair of numbers a SABR smile is built from -- the
+    spot/volatility correlation and the volatility of volatility.  So the
+    marked wings are read as the ``(rho, nu)`` that would produce them
+    (``sabr.fit_smile_shape``) and the history is measured for the same two
+    (``history.vol_dynamics``), and the difference between them is the wings
+    against what happened.  Both are approximations of a surface that is not
+    SABR, and the fit reports its own residual so a smile SABR cannot reach
+    says so instead of quietly returning the nearest thing.
     """
     surface = book[pair]
     out: list[RealizedRow] = []
@@ -557,7 +746,8 @@ def realized_table(book, pair: str, hist, *, lookback_days: float | None = None,
         window = float(lookback_days) if lookback_days else t * 365.2425
         warn: list[str] = []
         try:
-            stats = realized(hist, window, annualisation=annualisation)
+            stats = realized(hist, window, annualisation=annualisation,
+                             basis=realized_basis, basis_tenor=tenor)
         except Exception as exc:  # noqa: BLE001 - one bad tenor must not kill the table
             # Emitting the row with a reason beats dropping it: a tenor that
             # quietly vanishes from the table looks like one that was never
@@ -597,6 +787,10 @@ def realized_table(book, pair: str, hist, *, lookback_days: float | None = None,
                 history[name] = {"n": st.n, "last": st.last, "mean": st.mean,
                                  "low": st.low, "high": st.high, "percentile": st.percentile}
 
+        shape = _sabr_shape(surface, expiry, t, implied, sabr_delta, method, cut, warn) \
+            if with_sabr else None
+        dyn = _measured_dynamics(hist, window, tenor, warn) if with_sabr else None
+
         out.append(RealizedRow(
             tenor=tenor, t=t, window_days=window, observations=stats.observations,
             realized=stats.vol, realized_calendar=stats.vol_calendar,
@@ -606,9 +800,61 @@ def realized_table(book, pair: str, hist, *, lookback_days: float | None = None,
             realized_kurtosis_scaled=stats.scaled_excess_kurtosis(t),
             skew_se=stats.skew_se, kurtosis_se=stats.kurtosis_se,
             implied_skew=imp_skew, implied_kurtosis=imp_kurt, implied_vol_of_density=imp_vol,
+            realized_basis=stats.basis, realized_spot=stats.vol_spot,
+            points_vol=stats.points_vol, points_correlation=stats.points_correlation,
+            carry_rate=stats.carry_rate,
+            sabr_delta=sabr_delta if with_sabr else None,
+            implied_rho=(shape[0].rho if shape else None),
+            implied_nu=(shape[0].nu if shape else None),
+            implied_shape_error=(shape[0].max_error if shape else None),
+            marked_rr=(shape[1] if shape else None),
+            marked_fly=(shape[2] if shape else None),
+            realized_rho=(dyn.rho if dyn else None),
+            realized_nu=(dyn.nu if dyn else None),
+            realized_rho_se=(dyn.rho_se if dyn else None),
+            realized_nu_se=(dyn.nu_se if dyn else None),
+            rho_difference=(None if not (shape and dyn) else shape[0].rho - dyn.rho),
+            nu_difference=(None if not (shape and dyn) else shape[0].nu - dyn.nu),
+            dynamics_source=(dyn.source if dyn else None),
             history=history, warnings=tuple(warn) + stats.warnings,
         ))
     return out
+
+
+def _sabr_shape(surface, expiry, t: float, atm: float, delta: float,
+                method, cut: str, warn: list[str]):
+    """The marked wings at ``delta``, and the ``(rho, nu)`` that would show them.
+
+    Returns ``(shape, rr, fly)`` or ``None``, appending the reason to ``warn``.
+    The failure is reported rather than raised: the risk reversal and the
+    butterfly are one column group on a table whose other columns are fine.
+    """
+    tag = f"{int(round(delta * 100))}"
+    try:
+        table = surface.smile_table(expiry, deltas=(delta,), method=method, cut=cut)
+        by = {r["label"]: r["vol"] for r in table}
+        call, put = by.get(f"{tag}d call"), by.get(f"{tag}d put")
+        if call is None or put is None:
+            raise ValueError(f"the marked smile has no {tag} delta wings")
+        rr = float(call) - float(put)
+        fly = 0.5 * (float(call) + float(put)) - float(by["ATM"])
+        shape = sabr.fit_smile_shape(atm, rr, fly, delta, t, surface.conv)
+        warn.extend(shape.warnings)
+        return shape, rr, fly
+    except (ValueError, ArithmeticError, ConvergenceError, KeyError) as exc:
+        warn.append(f"no SABR shape could be read off the marked smile: {exc}")
+        return None
+
+
+def _measured_dynamics(hist, window: float, tenor: str, warn: list[str]):
+    """Realized spot/volatility correlation and vol of vol, or the reason there is none."""
+    try:
+        dyn = vol_dynamics(hist, window, tenor)
+    except Exception as exc:  # noqa: BLE001 - one column group, reported in place
+        warn.append(f"no measured volatility dynamics at {tenor}: {exc}")
+        return None
+    warn.extend(dyn.warnings)
+    return dyn
 
 
 @dataclass(frozen=True)
@@ -627,6 +873,11 @@ class TriangleRow:
     smile_convexity: float                # distribution triangle less variance triangle
     leg_atm: tuple[float, float]
     implied_correlation: float | None
+    #: How a unit of at-the-money vega on the cross lands on the two legs, and
+    #: on the correlation.  ``leg_vega`` is (d sigma_cross / d sigma_a,
+    #: d sigma_cross / d sigma_b) and ``rho_vega`` is d sigma_cross / d rho.
+    leg_vega: tuple[float, float] = (float("nan"), float("nan"))
+    rho_vega: float = float("nan")
     warnings: tuple[str, ...] = ()
 
 
@@ -703,7 +954,7 @@ def triangle_table(book, pair: str, *, method: str | None = None, cut: str = "NY
                 tenor=tenor, t=t, rho=rho, coefficients=(ca, cb),
                 marked={}, triangle={}, difference={}, noise={},
                 variance_triangle_atm=nan, smile_convexity=nan, leg_atm=(nan, nan),
-                implied_correlation=None,
+                implied_correlation=None, leg_vega=(nan, nan), rho_vega=nan,
                 warnings=tuple(warn) + (f"the triangle could not be built: {exc}",)))
             continue
 
@@ -737,14 +988,64 @@ def triangle_table(book, pair: str, *, method: str | None = None, cut: str = "NY
         if va > 0 and vb > 0:
             implied_rho = (cross_atm * cross_atm - va * va - vb * vb) / (2.0 * ca * cb * va * vb)
         var_atm = math.sqrt(max(var, 0.0))
+        dva, dvb, drho = _vega_split(va, vb, rho, ca, cb, var_atm)
         rows.append(TriangleRow(
             tenor=tenor, t=t, rho=rho, coefficients=(ca, cb),
             marked=marked, triangle=triangle, difference=difference, noise=noise,
             variance_triangle_atm=var_atm,
             smile_convexity=triangle.get("atm", float("nan")) - var_atm,
-            leg_atm=(va, vb), implied_correlation=implied_rho, warnings=tuple(warn),
+            leg_atm=(va, vb), implied_correlation=implied_rho,
+            leg_vega=(dva, dvb), rho_vega=drho, warnings=tuple(warn),
         ))
     return rows
+
+
+def _vega_split(va: float, vb: float, rho: float, ca: int, cb: int,
+                cross_vol: float) -> tuple[float, float, float]:
+    """Differentiate the variance triangle: where a cross's vega really sits.
+
+    The triangle the book is built on is
+
+        sigma_c^2 = sigma_a^2 + sigma_b^2 + 2 * ca * cb * rho * sigma_a * sigma_b
+
+    so a move in either leg moves the cross by
+
+        d sigma_c / d sigma_a = (sigma_a + x * sigma_b) / sigma_c,   x = ca*cb*rho
+
+    and symmetrically for the other leg.  Vega on the cross is therefore vega
+    on the legs in those proportions: a position long 1 unit of at-the-money
+    vega in the cross behaves like ``d sigma_c / d sigma_a`` units of it in
+    leg A and ``d sigma_c / d sigma_b`` in leg B, which is what the two legs
+    have to be traded in to hedge it.
+
+    The two shares do **not** add up to one, and reading them as if they were
+    a split of something into parts is the mistake to avoid.  What is exact is
+    Euler's identity: the triangle is homogeneous of degree one in the two leg
+    volatilities, so
+
+        sigma_a * (d sigma_c / d sigma_a) + sigma_b * (d sigma_c / d sigma_b)
+            == sigma_c
+
+    -- weighted by each leg's own volatility, the two account for the whole of
+    the cross's.  A test pins that against the ratios themselves.
+
+    The correlation is homogeneous of degree zero and so appears nowhere in
+    that identity, which is exactly why it is reported separately:
+    ``d sigma_c / d rho = ca * cb * sigma_a * sigma_b / sigma_c``, per unit of
+    correlation.  It is risk that no amount of leg vega hedges.
+
+    Everything here is in decimals, like the rest of the module; the screen
+    and the command line convert once at their edge.
+    """
+    if not (cross_vol > 0.0):
+        # A zero cross volatility has no vega to split, and dividing by it
+        # would hand the screen an infinity dressed up as a hedge ratio.
+        nan = float("nan")
+        return nan, nan, nan
+    x = ca * cb * rho
+    return ((va + x * vb) / cross_vol,
+            (vb + x * va) / cross_vol,
+            ca * cb * va * vb / cross_vol)
 
 
 def _leg_reference(surface, expiry, method, cut, deltas) -> dict[str, float]:

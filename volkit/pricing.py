@@ -216,11 +216,23 @@ def _price_leg(book, leg: OptionLeg) -> LegResult:
         spot=spot, forward=forward, atm_vol=sl.atm_vol * 100.0,
         product=product, feed_used=feed_used, warnings=list(sl.warnings),
     )
-    band_note = surface.band_check(
-        float(leg.barrier) if (leg.barrier and str(leg.barrier).strip()) else None, forward
-    ) if (surface.band is not None and leg.barrier and str(leg.barrier).strip()) else []
-    common["warnings"] = list(common["warnings"]) + band_note
     notional = float(leg.notional) * float(leg.direction)
+
+    def band_note(level: float) -> None:
+        """Flag a level a lognormal smile has no business pricing.
+
+        The level checked is the one the payout actually depends on: the
+        barrier for a touch, the strike for everything else.  An earlier cut
+        only ever looked at ``leg.barrier``, so a vanilla or a digital struck
+        outside a managed band went through unflagged -- the same silence, for
+        a product far more likely to be struck there.  It also read a barrier
+        left on a leg whose product no longer uses one.  The leg's own method
+        goes in, so a leg already priced with ``BAND`` is not told to use it.
+        """
+        if surface.band is None:
+            return
+        common["warnings"] = list(common["warnings"]) + surface.band_check(
+            level, forward, leg.method)
 
     # ---- touch products -------------------------------------------------
     if product in ("one_touch", "no_touch"):
@@ -229,6 +241,7 @@ def _price_leg(book, leg: OptionLeg) -> LegResult:
         barrier = float(leg.barrier)
         if barrier <= 0:
             raise ValueError(f"barrier must be positive, got {barrier!r}")
+        band_note(barrier)
 
         def touch_value(spot_x: float, fwd_x: float, shift: float) -> exotics.TouchResult:
             # The barrier is where the vol is read: that is the level whose
@@ -280,6 +293,8 @@ def _price_leg(book, leg: OptionLeg) -> LegResult:
         ratio, _ = surface.delta_strike(expiry_dt, spec.value, side_is_call, leg.method, leg.cut)
         strike = ratio * forward
         spec = StrikeSpec("delta", spec.value, side_is_call, True, spec.text)
+
+    band_note(strike)
 
     kind = (leg.option_type or "Auto").strip().upper()[:1]
     if kind == "C":

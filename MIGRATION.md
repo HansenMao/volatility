@@ -209,14 +209,61 @@ mispricing:
   American-style options are not European volatilities; a future is not a
   forward once rates move with the underlying; and the exchange settlement
   time is rarely an FX cut. Each is reported rather than absorbed.
+* **A parameter may be given rather than fitted.** Alpha, rho and nu each have
+  a box; blank means the fit decides, which is the default and reproduces the
+  fit exactly as it was before the boxes existed. A number holds that
+  parameter there and the rest are fitted around it, so the residuals are the
+  best the free parameters can do *at* that value — the panel marks every held
+  parameter, because one that was typed is otherwise indistinguishable from
+  one the market implied. Nothing about the marked surface is affected either
+  way.
+* **Positions and aggregated risk.** A position book underneath the panels,
+  also new and also moving nothing: it reads the curve each panel fitted and
+  nothing else, and never touches the marked surface. Two things to know
+  before reading its two columns as a disagreement. **Black-Scholes** is the
+  closed-form Black-76 sensitivity at the option's own volatility with that
+  volatility held fixed as the future moves — that is what a Black-Scholes
+  greek is, and it is what an exchange's own risk file computes. **Smile**
+  revalues the same position on the fitted SABR curve, with the forward
+  bumped inside the parameters so the curve moves with the future. Both read
+  one volatility at one strike, so the premium is the same in both and the
+  entire difference is in the sensitivities. Money is totalled across
+  contracts because every CME FX option settles in US dollars; a
+  futures-equivalent delta is **not** totalled, because a euro future is not a
+  yen future, and the total row is left blank there rather than showing a sum
+  of unlike things.
 
-## 4c. Analysis — new, and moves nothing
+## 4b-ii. The data files are no longer held open, and can be watched
+
+Two changes to how files are read. Neither touches a number.
+
+* **Nothing is held open.** `pd.ExcelFile(path)` keeps the file open for as
+  long as the reader lives, and openpyxl's workbook is full of parent/child
+  cycles, so the handle outlived the call that made it. On Windows that was
+  enough to stop Excel saving the very sheet the tool had just read — a loaded
+  historical workbook could not be saved. Every workbook now goes through
+  `marketdata.open_workbook`, which copies the bytes and hands pandas a
+  buffer, and the feed CSV is read whole and closed the same way. The legacy
+  tool had the same lock, via `xlrd.open_workbook`.
+* **`serve --auto-reload [SECONDS]`**, and the **auto-load** checkbox on the
+  pricing toolbar, re-read the **market feed** when it is written. Only the
+  feed: the workbook is the book of record and this session's marks are not in
+  it, so reloading it is exactly what discards a morning's marking and it
+  stays on its own button; the historical sheet is a record of what happened
+  rather than a market. It is **off** unless asked for, and every re-read it
+  performs is reported on the page. With it off, nothing about the tool's
+  behaviour differs from before.
+
+## 4c. Analysis — new; two of its columns moved when the forward curve went in
 
 The analysis tab is new. The legacy tool had `rv.py`, whose `RV.calc` wrote
 results through chained indexing and so silently produced an empty matrix on
-any current pandas; nothing else in it corresponds. No existing mark changes.
+any current pandas; nothing else in it corresponds. No pricing or marking
+number changes; two numbers *on this screen* did, and both are called out
+below -- fair value, which gained the forward curve's price-side carry, and the
+realized column, which is now measured on the forward rather than on spot.
 
-Three conventions in it are worth knowing before reading a number off it.
+The conventions in it worth knowing before reading a number off it:
 
 * **Realized volatility is annualised on volatility time.** The weighting in
   this model multiplies the *instantaneous* volatility, so variance time is the
@@ -249,6 +296,90 @@ Three conventions in it are worth knowing before reading a number off it.
   each leg's at-the-money volatility, the distribution triangle uses each leg's
   whole density. The gap is the convexity of the legs' smiles, typically a
   fifth of a vol point, and is what the book's own construction leaves out.
+
+* **The forward curve's carry is reported twice, on purpose.** An option is
+  worth `V(F, K, sigma, tau)` and the strike is held fixed across the horizon,
+  so the forward rolling down its own curve reaches the number twice: through
+  the *mark*, because the moneyness changes and the volatility marked at it
+  changes with it (the `smile` column, in volatility points), and through the
+  *price*, because `F` itself has moved (the `carry` column, in premium).
+  Reporting only the first would leave a spot-hedged book's largest
+  deterministic P&L off a screen headed "carry".
+
+  Which of the two you actually earn is the hedging convention, and it is the
+  whole of the number rather than a footnote. Hedged in the **outright forward
+  to the option's own expiry**, the hedge rolls down the curve exactly as the
+  option does and the two cancel exactly. Hedged in **spot**, which is what an
+  FX options desk does, nothing rolls on the hedge side and the position keeps
+  it. The panel takes the spot-hedged reading and says so; the same number is
+  the cost of not hedging in the forward.
+
+  Two details decided once. The carry is a **full revaluation** at the rolled
+  forward, not `delta * (F2 - F1)`, so the gamma over the move is in it and
+  `delta` is shown beside it as the first-order reading. And an at-the-money
+  leg is read as **half a straddle**: the at-the-money is quoted as a straddle
+  on this desk and a straddle at the delta-neutral strike has no delta, so the
+  at-the-money row's carry is only the gamma over the move. Reading that leg as
+  the call alone -- which is how the target legs are marked, because they only
+  ever needed a *strike* -- handed the at-the-money row half a unit of forward
+  carry nobody is running. Half a straddle rather than a whole one so that the
+  vega column is still a single option's and no existing number moved.
+
+  **This moves fair value.** The break-even gained a third term:
+  `fair = realized + (T/h)*[roll*vega(T-h) + carry]/vega(T)`. The at-the-money
+  is a delta-neutral straddle, so the new term is second order in the forward's
+  move and lands around 0.003 volatility points on EURUSD at a 30-day horizon
+  -- visible in the fourth decimal, not in a mark. Set `carry_value` aside (it
+  is reported on its own column) to recover the old figure exactly.
+
+* **Realized volatility is measured on the forward, not on spot.** A quoted
+  volatility is the volatility of the forward the option is struck against.
+  Writing the outright as `F = S exp(c tau)`,
+
+  ```
+  dlog F = dlog S + tau * dc - c * dt
+  ```
+
+  The first two terms are what moved -- spot, and the swap points *moving*.
+  The third is the points *decaying* by one day of carry, which is a known
+  slide and not a risk; leaving it in the sum of squares books the carry itself
+  as volatility, which is exactly backwards for the pairs this matters for. It
+  is removed and reported as a carry rate instead.
+
+  **This moves the realized column**, by a few hundredths of a volatility point
+  on G10 and by considerably more on a high-carry or managed pair. The
+  spot-only figure is reported beside it and `--realized-basis spot` (or
+  *Realized on: spot*) restores the old reading exactly. A tenor the sheet does
+  not quote has its carry **interpolated** between the pillars it does, the way
+  `feed.py` interpolates a live curve; falling back to spot on the misses --
+  which is what a first cut did -- put two different measurements in one column
+  and grew steps in the term structure of realized volatility at whichever
+  tenors the sheet happened to quote.
+
+* **The risk reversal and the butterfly are compared as `(rho, nu)`, not as
+  moments.** A quoted spread is not a moment and a realized third moment is not
+  a risk reversal, so the skew and kurtosis columns cannot answer for the
+  wings. What both sides share is the two parameters a SABR smile is built
+  from. `sabr.fit_smile_shape` reads the marked at-the-money, risk reversal and
+  **smile butterfly** as the `(rho, nu)` that would show them -- the smile
+  butterfly and not the market strangle `sabr.calibrate` matches, because
+  matching a premium condition against a moment compares two different things.
+  `history.vol_dynamics` measures the same two out of the sheet: under SABR
+  with `beta = 1` the at-the-money volatility *is* the state variable, so `rho`
+  is the correlation of daily spot returns with daily log changes in the quoted
+  at-the-money and `nu` is those changes annualised on the same volatility time
+  as everything else here.
+
+  Three caveats travel with it, all reported rather than absorbed. The marked
+  surface is SVI and not SABR, so the fit reports its own residual and a smile
+  SABR cannot reach says so instead of returning the nearest thing in silence.
+  SABR has no mean reversion and real volatility does, so `nu` rises at short
+  tenors on both sides and must not be blended across them -- `nu*sqrt(t)` is
+  the scale-free number that sets the shape. And where the sheet quotes no
+  at-the-money column the dynamics fall back to a rolling realized volatility,
+  whose changes are damped by the averaging, so that `nu` is a floor and is
+  labelled one. The whole section is off unless asked for (`--sabr`) and moves
+  nothing.
 
 * **The curve comparison panel compares what it says it compares.** A curve
   from the workbook carries the *marked* at-the-money term structure and the
@@ -492,6 +623,54 @@ need overrides.
 It runs from the valuation instant to the next cut, so it is usually shorter
 than a day but was annualised over its own span and read as a day vol. Rows now
 carry `hours`, `partial` and `cumulative_defined`.
+
+### F9. The managed-band warning only ever looked at a barrier
+
+`pricing._price_leg` checked a strike against the managed band by reading
+`leg.barrier`. Two things followed from that. A **vanilla or a digital struck
+outside the band went through with no warning at all** — the one product a
+band matters most for was the one product nothing was said about. And a
+barrier left behind on a leg whose product had since been changed to a
+vanilla was checked *instead of* the strike, so the warning, when it came,
+was about a level the price did not depend on.
+
+The check now reads whichever level the payout actually depends on: the
+barrier for a touch, the strike for everything else. It is also given the
+leg's own interpolation, so a leg already priced with `BAND` is not told to
+switch to `BAND`. **No price moves** — `band_check` only ever produced text —
+but a pegged pair will now say more than it used to.
+
+### F10. ISO 8601 was written everywhere and read nowhere
+
+`timeutil.parse_datetime` had a list of tabular formats and no ISO 8601 in it,
+while the tool writes ISO 8601 all over: the valuation stamp in `/api/state`,
+the timestamps in a session file, the value a browser's `datetime-local` field
+carries. Three callers had each patched around it locally, and they had
+patched it *differently* — `listed._normalise_expiry` understood a trailing
+`Z` and an offset, the events route and the session loader understood neither
+— so one string parsed on one screen and failed on the next, and `--asof` on
+the command line refused a timestamp copied off the tool's own header.
+
+Worse than the inconsistency: the one caller that did handle an offset
+**dropped** it and then stamped the result UTC, so `2026-09-11T19:00+09:00`
+was read as 19:00Z. A nine-hour error in a listed expiry, arrived at in
+silence.
+
+ISO 8601 is now a fallback inside `parse_datetime` itself, tried only after
+every existing format has been tried, so nothing a workbook or a paste already
+parses moves. An offset is **converted**, not discarded. The three local
+workarounds are gone.
+
+### F11. `available: []` said the workbook was empty
+
+`Book.__getitem__` reported the pairs it had *built*. `build` and `load_all`
+can be narrowed -- `volkit band USDHKD` narrows them to the one pair asked
+for -- so when that pair is not in the workbook nothing is built at all and
+the message read `'USDHKD' is not built; available: []`, which says the
+workbook is empty when what is actually wrong is that it does not carry this
+pair. A pair the workbook has never heard of is now told what the workbook
+holds; a pair it has, but which this book was not asked to build, is told
+that instead.
 
 ## Verified correct
 

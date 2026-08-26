@@ -463,3 +463,174 @@ def calibrate(
             for d in distinct[1:]),
         warnings=tuple(warnings),
     )
+
+
+@dataclass(frozen=True)
+class SmileShape:
+    """The ``(rho, nu)`` a marked smile behaves like.
+
+    Not a calibration of the book -- the book's smile is SVI or vanna-volga,
+    and this is a *reading* of it: the spot/volatility correlation and
+    volatility of volatility that a SABR smile would need to show the same
+    risk reversal and butterfly at the same at-the-money level.  It exists so
+    that a marked wing and a measured wing can be compared in the same two
+    numbers, which is the only way a realized statistic and a quoted spread
+    can be put beside each other at all.
+
+    ``rho`` is the correlation, ``nu`` the volatility of volatility per year;
+    ``log_volvol`` is the scale-free ``nu * sqrt(t)`` that actually controls
+    the shape at this expiry.
+    """
+
+    rho: float
+    nu: float
+    alpha: float
+    t: float
+    rr_error: float               # fitted minus quoted risk reversal, decimals
+    fly_error: float
+    converged: bool
+    message: str = ""
+    warnings: tuple[str, ...] = ()
+
+    @property
+    def log_volvol(self) -> float:
+        return self.nu * math.sqrt(self.t)
+
+    @property
+    def max_error(self) -> float:
+        return max(abs(self.rr_error), abs(self.fly_error))
+
+
+def fit_smile_shape(
+    atm_volatility: float,
+    risk_reversal: float,
+    butterfly: float,
+    delta: float,
+    t: float,
+    conv: DeltaConvention | bool = False,
+    *,
+    f: float = 1.0,
+    beta: float = 1.0,
+    scan: tuple[int, int] = (17, 13),
+) -> SmileShape:
+    """Read ``(rho, nu)`` off an at-the-money level, a risk reversal and a *smile* butterfly.
+
+    ``calibrate`` above matches the **market** strangle, because that is what
+    a broker quotes and repricing its premium exactly is what a marking tool
+    owes the market.  This one matches the **smile** butterfly
+    ``(sigma_call + sigma_put)/2 - sigma_atm`` at the same delta, because that
+    is the number the analysis screen has: it is read off whatever surface is
+    marked, and it is the number a realized fourth moment is being compared
+    against.  Using the market strangle here would compare a premium
+    condition against a moment.
+
+    Two conditions, two parameters -- ``alpha`` is eliminated by the
+    at-the-money condition as it is everywhere else in this module -- so the
+    whole admissible box is swept before any local polish, for the same reason
+    ``calibrate`` sweeps it: a starting guess can land in a local basin and
+    report success.
+
+    Both residuals are already in volatility units, so they are weighted
+    equally and no scaling is needed.
+    """
+    if atm_volatility <= 0:
+        raise ValueError(f"ATM volatility must be positive, got {atm_volatility!r}")
+    if t <= 0:
+        raise ValueError(f"time to expiry must be positive, got {t!r}")
+    if not 0.0 < delta < 0.5:
+        raise ValueError(f"delta must lie in (0, 0.5), got {delta!r}")
+
+    K_atm = black.dns_strike(f, atm_volatility, t, conv)
+    sqt = math.sqrt(t)
+
+    def wings(rho: float, nu: float) -> tuple[float, float, float]:
+        alpha = alpha_from_atm(atm_volatility, K_atm, rho, nu, t, f, beta)
+        p = SabrParams(alpha, rho, nu, t, beta, f)
+        _, call_vol = smile_strike_and_vol(p, delta, t, True, conv)
+        _, put_vol = smile_strike_and_vol(p, -delta, t, False, conv)
+        return alpha, float(call_vol), float(put_vol)
+
+    def residuals(x: np.ndarray) -> np.ndarray:
+        rho, nu = float(x[0]), float(x[1])
+        try:
+            _, call_vol, put_vol = wings(rho, nu)
+        except (ConvergenceError, ValueError, ArithmeticError):
+            return np.array([1e3, 1e3])
+        return np.array([
+            (call_vol - put_vol) - risk_reversal,
+            (0.5 * (call_vol + put_vol) - atm_volatility) - butterfly,
+        ])
+
+    def sweep_cost(rho: float, nu: float) -> float:
+        """Rank a node without paying for two delta-strike fixed points.
+
+        The wings are read at the strikes the *quoted* smile itself implies,
+        which is enough to order the nodes; the polish below uses the exact
+        residual.
+        """
+        try:
+            roots = alpha_roots_at_forward(atm_volatility, rho, nu, t, f, beta)
+            if not roots:
+                return 1e3
+            p = SabrParams(roots[0], rho, nu, t, beta, f)
+            k_c = black.strike_from_delta(delta, f, atm_volatility + butterfly, t, True, conv)
+            k_p = black.strike_from_delta(-delta, f, atm_volatility + butterfly, t, False, conv)
+            vols = np.asarray(lognormal_vol(np.array([k_p, k_c]), p), dtype=float)
+            if not np.all(np.isfinite(vols)) or np.any(vols <= 0):
+                return 1e3
+            return max(abs(float(vols[1] - vols[0]) - risk_reversal),
+                       abs(float(0.5 * (vols[0] + vols[1])) - atm_volatility - butterfly))
+        except (ConvergenceError, ValueError, ArithmeticError):
+            return 1e3
+
+    n_rho, n_nu = scan
+    nodes = []
+    for r in np.linspace(-0.95, 0.95, n_rho):
+        for sc in np.geomspace(0.05, 3.0, n_nu):
+            nu = float(sc) / sqt
+            nodes.append((float(r), nu, sweep_cost(float(r), nu)))
+    nodes.sort(key=lambda n: n[2])
+
+    lo = np.array([-0.999, 1e-6])
+    hi = np.array([0.999, 50.0 / sqt])
+    best = None
+    for rho0, nu0, _cost in nodes[:6]:
+        try:
+            sol = least_squares(residuals, np.clip(np.array([rho0, nu0]), lo, hi),
+                                bounds=(lo, hi), xtol=1e-13, ftol=1e-13, gtol=1e-13,
+                                max_nfev=200)
+        except Exception:  # noqa: BLE001 - a bad basin must not kill the read
+            continue
+        err = float(np.max(np.abs(sol.fun)))
+        if best is None or err < best[2]:
+            best = (float(sol.x[0]), float(sol.x[1]), err, sol)
+        if err < 1e-9:
+            break
+    if best is None:
+        raise ConvergenceError(
+            f"no SABR shape reproduces atm={atm_volatility:.4%}, rr={risk_reversal:.4%}, "
+            f"fly={butterfly:.4%} at {delta:.0%} delta and t={t:.4f}y"
+        )
+    rho, nu, _err, sol = best
+    fun = residuals(np.array([rho, nu]))
+    rr_err, fly_err = float(fun[0]), float(fun[1])
+    converged = max(abs(rr_err), abs(fly_err)) < 1e-7
+    alpha, _, _ = wings(rho, nu)
+
+    warn: list[str] = []
+    if not converged:
+        warn.append(
+            f"no (rho, nu) reproduces this smile exactly: best residual is rr={rr_err:.2e}, "
+            f"fly={fly_err:.2e} in volatility units. A SABR smile cannot show every "
+            f"combination of a risk reversal and a butterfly, so this is the nearest one"
+        )
+    if abs(rho) > 0.98:
+        warn.append(
+            f"the correlation is pinned at the edge of its range ({rho:+.3f}); the quoted "
+            f"risk reversal is steeper than a SABR smile of this butterfly can produce"
+        )
+    return SmileShape(rho=rho, nu=nu, alpha=alpha, t=t, rr_error=rr_err, fly_error=fly_err,
+                      converged=converged,
+                      message="converged" if converged else
+                              f"residual rr={rr_err:.2e} fly={fly_err:.2e} (vol units)",
+                      warnings=tuple(warn))

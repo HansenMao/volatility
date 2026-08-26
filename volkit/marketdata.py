@@ -15,6 +15,7 @@ issues in the workbook at once.
 
 from __future__ import annotations
 
+import io
 import math
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -109,6 +110,28 @@ class MarketData:
             )
 
 
+def open_workbook(path: str | Path) -> "pd.ExcelFile":
+    """A reader over an .xlsx, with the file itself already closed.
+
+    ``pd.ExcelFile(path)`` keeps the file open for as long as the reader is
+    alive, and openpyxl's workbook is full of parent/child reference cycles,
+    so the handle survives until a garbage collection nobody schedules.  On
+    Windows that is enough to stop Excel saving the very workbook the tool
+    just read: the user is told the file is in use by another program, and the
+    other program is this one.
+
+    Reading the bytes first closes the file before any parsing starts, so a
+    workbook is open for exactly as long as it takes to copy it and never
+    between calls.  Every reader in the project goes through here -- the
+    marks, the historical workbook and the forward curve are three different
+    files with the same lock.
+    """
+    path = Path(path)
+    with path.open("rb") as fh:
+        blob = fh.read()
+    return pd.ExcelFile(io.BytesIO(blob))
+
+
 class ExcelSource:
     """Reader for the ``vol_marks.xlsx`` layout.
 
@@ -127,20 +150,24 @@ class ExcelSource:
     def load(self) -> MarketData:
         data = MarketData(source=str(self.path))
         try:
-            xls = pd.ExcelFile(self.path)
+            xls = open_workbook(self.path)
         except Exception as exc:  # noqa: BLE001
             raise MarketDataError(f"cannot open {self.path}: {exc}") from exc
 
-        sheets = set(xls.sheet_names)
-        for required in ("CONFIG", "PARAMS"):
-            if required not in sheets:
-                raise MarketDataError(
-                    f"{self.path.name} has no {required!r} sheet; found {sorted(sheets)}"
-                )
+        # Closed on the way out however this returns: the reader is over a
+        # copy in memory, but leaving readers alive is how the file handle
+        # crept back last time.
+        with xls:
+            sheets = set(xls.sheet_names)
+            for required in ("CONFIG", "PARAMS"):
+                if required not in sheets:
+                    raise MarketDataError(
+                        f"{self.path.name} has no {required!r} sheet; found {sorted(sheets)}"
+                    )
 
-        self._load_config(xls, data)
-        self._load_params(xls, data)
-        self._load_marks(xls, data, sheets)
+            self._load_config(xls, data)
+            self._load_params(xls, data)
+            self._load_marks(xls, data, sheets)
         return data
 
     # -- CONFIG -----------------------------------------------------------

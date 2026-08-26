@@ -138,6 +138,28 @@ class TestBlack(unittest.TestCase):
         with self.assertRaises(ValueError):
             black.strike_from_delta(1.5, 1.0, 0.1, 0.5, True)
 
+    def test_theta_vanna_and_volga_match_a_finite_difference(self):
+        """Closed forms, pinned against the price they are derivatives of.
+
+        These are what the exchange-traded positions panel reports as the
+        Black-Scholes column, so an algebra slip in one of them would be a
+        plausible-looking risk number with nothing to contradict it.
+        """
+        h = 1e-6
+        for F, K, v, t in ((1.09, 1.12, 0.085, 0.37), (1.09, 1.09, 0.075, 0.04),
+                           (150.0, 141.0, 0.11, 1.4)):
+            for call in (True, False):
+                # theta is the derivative with respect to *calendar* time, so
+                # against t (time to expiry) it comes back with a sign change.
+                fd = -(float(black.price(F, K, v, t + h, call))
+                       - float(black.price(F, K, v, t - h, call))) / (2 * h)
+                self.assertAlmostEqual(float(black.theta(F, K, v, t)) / fd, 1.0, places=6)
+                fd = (float(black.delta(F, K, v + h, t, call))
+                      - float(black.delta(F, K, v - h, t, call))) / (2 * h)
+                self.assertAlmostEqual(float(black.vanna(F, K, v, t)) / fd, 1.0, places=6)
+            fd = (float(black.vega(F, K, v + h, t)) - float(black.vega(F, K, v - h, t))) / (2 * h)
+            self.assertAlmostEqual(float(black.volga(F, K, v, t)) / fd, 1.0, places=6)
+
 
 class TestSabr(unittest.TestCase):
     def test_z_over_x_is_continuous_at_the_money(self):
@@ -515,10 +537,30 @@ class TestBook(unittest.TestCase):
         self.assertTrue(book.data.tenor_points)
 
     def test_unknown_pair_raises_with_a_useful_message(self):
+        """And with the *right* list.
+
+        ``build``/``load_all`` may be narrowed to a few pairs -- ``volkit band
+        USDHKD`` narrows them to one -- so when the asked-for pair is not in
+        the workbook nothing is built and "available: []" read as an empty
+        workbook rather than as a pair the workbook does not carry.  A pair
+        the workbook has never heard of is told what the workbook holds; a
+        pair it has, but which this book was not asked to build, is told that
+        instead.
+        """
         book = Book.from_excel(WORKBOOK, ASOF).build(["USDJPY"])
         with self.assertRaises(KeyError) as ctx:
             book["NOPE"]
-        self.assertIn("available", str(ctx.exception))
+        message = str(ctx.exception)
+        self.assertIn("is not in", message)
+        self.assertIn("USDJPY", message)          # what the workbook does hold
+        self.assertIn("EURUSD", message)
+
+        narrowed = Book.from_excel(WORKBOOK, ASOF).build(["USDJPY"])
+        with self.assertRaises(KeyError) as ctx:
+            narrowed["EURGBP"]
+        message = str(ctx.exception)
+        self.assertIn("is in the workbook but is not built", message)
+        self.assertIn("USDJPY", message)
 
 
 class TestPricing(unittest.TestCase):
@@ -612,6 +654,84 @@ class TestPricing(unittest.TestCase):
         ten = price_strip(self.book, [OptionLeg("USDJPY", "1M", "ATM", "C", spot=150.25, notional=10)])
         self.assertAlmostEqual(ten["legs"][0]["premium_amount"],
                                10 * one["legs"][0]["premium_amount"], places=10)
+
+
+class TestSmileShape(unittest.TestCase):
+    """Reading a marked smile back as a correlation and a vol of vol.
+
+    ``calibrate`` matches the *market* strangle, because that is what a broker
+    quotes.  This one matches the *smile* butterfly, because that is the number
+    the analysis screen has off whatever surface is marked -- matching a
+    premium condition against a moment would be comparing two different things.
+    """
+
+    def test_a_sabr_smile_reads_back_as_the_parameters_it_was_built_from(self):
+        for rho, nu, t in ((-0.35, 0.55, 0.25), (0.20, 0.90, 1.0), (-0.60, 1.40, 0.08)):
+            with self.subTest(rho=rho, nu=nu, t=t):
+                p = sabr.SabrParams(alpha=0.09, rho=rho, volvol=nu, t=t)
+                # The at-the-money here is the *delta-neutral straddle*
+                # volatility, which is how this book quotes it and what the
+                # fit's own at-the-money condition solves alpha against.
+                # ``sabr.atm_vol`` is the at-the-forward one, and feeding that
+                # in instead moves alpha and with it both parameters.
+                # The delta-neutral strike depends on the very volatility it
+                # carries, so it is a fixed point; the fit solves alpha at
+                # ``dns_strike(f, atm)`` and the test has to hand it an ``atm``
+                # consistent with that or the two are a strike apart.
+                atm = sabr.atm_vol(p)
+                for _ in range(40):
+                    nxt = float(sabr.lognormal_vol(
+                        black.dns_strike(p.f, atm, t, False), p))
+                    if abs(nxt - atm) < 1e-15:
+                        atm = nxt
+                        break
+                    atm = nxt
+                _, call = sabr.smile_strike_and_vol(p, 0.25, t, True, False)
+                _, put = sabr.smile_strike_and_vol(p, -0.25, t, False, False)
+                got = sabr.fit_smile_shape(atm, call - put, 0.5 * (call + put) - atm,
+                                           0.25, t, False)
+                self.assertTrue(got.converged, got.message)
+                self.assertAlmostEqual(got.rho, rho, places=5)
+                self.assertAlmostEqual(got.nu, nu, places=5)
+                self.assertLess(got.max_error, 1e-7)
+
+    def test_the_correlation_carries_the_sign_of_the_risk_reversal(self):
+        """This is the whole reason the number is worth reporting: a risk
+        reversal is a price, and rho is what it is a price *of*."""
+        t = 0.5
+        base = sabr.fit_smile_shape(0.10, 0.0, 0.0030, 0.25, t, False)
+        up = sabr.fit_smile_shape(0.10, +0.012, 0.0030, 0.25, t, False)
+        down = sabr.fit_smile_shape(0.10, -0.012, 0.0030, 0.25, t, False)
+        # Not exactly zero, and it should not be: a zero-correlation SABR smile
+        # is symmetric about the *forward*, while the two wings are placed
+        # symmetrically about the delta-neutral strike, which is above it.
+        self.assertAlmostEqual(base.rho, 0.0, delta=0.05)
+        self.assertGreater(up.rho, 0.15)
+        self.assertLess(down.rho, -0.15)
+
+    def test_a_wider_butterfly_is_a_higher_vol_of_vol(self):
+        t = 0.5
+        thin = sabr.fit_smile_shape(0.10, -0.005, 0.0015, 0.25, t, False)
+        fat = sabr.fit_smile_shape(0.10, -0.005, 0.0045, 0.25, t, False)
+        self.assertGreater(fat.nu, thin.nu * 1.4)
+
+    def test_a_smile_no_sabr_can_reach_says_so_rather_than_returning_the_nearest(self):
+        """A steep risk reversal on a flat butterfly is outside the family.
+
+        Returning the nearest parameters in silence would put a number on the
+        screen that does not describe the smile it claims to summarise.
+        """
+        got = sabr.fit_smile_shape(0.10, -0.060, 0.0002, 0.25, 0.5, False)
+        self.assertFalse(got.converged)
+        self.assertGreater(got.max_error, 1e-6)
+        self.assertTrue(got.warnings)
+        self.assertIn("nearest", " ".join(got.warnings))
+
+    def test_the_inputs_are_checked(self):
+        for bad in ((0.0, 0.0, 0.001, 0.25, 0.5), (0.10, 0.0, 0.001, 0.25, 0.0),
+                    (0.10, 0.0, 0.001, 0.0, 0.5), (0.10, 0.0, 0.001, 0.6, 0.5)):
+            with self.assertRaises(ValueError):
+                sabr.fit_smile_shape(*bad, conv=False)
 
 
 class TestSabrRobustness(unittest.TestCase):
@@ -1161,6 +1281,36 @@ class TestBandGuard(unittest.TestCase):
         # Marked as a mixture but priced lognormally: that is worth saying.
         self.assertIn("switch the method to BAND", surface.band_check(7.90, 7.80, "SVI")[0])
 
+    def test_a_leg_is_checked_at_the_level_its_payout_depends_on(self):
+        """A vanilla struck outside a managed band used to go unflagged.
+
+        The check only ever looked at ``leg.barrier``, so the one product a
+        band matters most for -- an option struck out at the edge -- was the
+        one product nothing was said about, while a barrier left behind on a
+        leg that had since been switched to a vanilla was checked instead.
+        The level checked is now the one the payout actually depends on.
+        """
+        from volkit.pricing import OptionLeg, price_leg
+        book = Book.from_excel(WORKBOOK, ASOF).load_all(["EURUSD"])
+        book["EURUSD"].band = Band("EURUSD", 1.05, 1.12, "synthetic, for the test only")
+
+        def warnings(*, method="SVI", **kw):
+            leg = OptionLeg(pair="EURUSD", expiry="2024-05-28", spot=1.0842,
+                            method=method, cut="TK", **kw)
+            out = price_leg(book, leg)
+            self.assertTrue(out.ok, out.error)
+            return [w for w in out.warnings if "managed band" in w]
+
+        self.assertTrue(warnings(strike="1.3000"))          # outside: said
+        self.assertEqual(warnings(strike="1.0900"), [])     # inside: nothing
+        # A barrier left on a leg whose product no longer uses one is not read.
+        self.assertEqual(warnings(strike="1.0900", barrier="1.3000"), [])
+        # The touch products are checked at their barrier, as before.
+        self.assertTrue(warnings(product="one_touch", barrier="1.3000"))
+        # A leg already priced with BAND is not told to switch to it.
+        book["EURUSD"].forward_lookup = lambda t: 1.0859825226390687
+        self.assertEqual(warnings(strike="1.3000", method="BAND"), [])
+
     def test_the_band_edges_can_be_overridden_on_the_screen(self):
         from volkit.banded import BandTreatment
         book = Book.from_excel(WORKBOOK, ASOF).build(["USDJPY"])
@@ -1450,6 +1600,90 @@ class TestListedOptions(unittest.TestCase):
             listed.fit_sabr(ks[:2], vs[:2], p.t, p.f)
         with self.assertRaises(ValueError):
             listed.fit_sabr([1.0, 1.0, 1.0], [0.08, 0.08, 0.08], p.t, p.f)
+
+
+    # -- parameters given rather than fitted ------------------------------
+    def test_a_held_parameter_comes_back_exactly_as_it_was_given(self):
+        """A number somebody typed must not come back rounded.
+
+        Alpha travels through a logarithm inside the optimiser, and
+        exp(log(a)) is not always a again."""
+        p, ks, vs = self._known()
+        fit = listed.fit_sabr(ks, vs, p.t, p.f, fixed={"alpha": 0.0925})
+        self.assertEqual(fit.params.alpha, 0.0925)
+        self.assertEqual(fit.fixed, ("alpha",))
+        self.assertEqual(fit.free, ("rho", "volvol"))
+        self.assertEqual(fit.degrees_of_freedom, len(ks) - 2)
+
+    def test_holding_a_parameter_fits_the_others_around_it(self):
+        p, ks, vs = self._known()
+        free = listed.fit_sabr(ks, vs, p.t, p.f)
+        held = listed.fit_sabr(ks, vs, p.t, p.f, fixed={"rho": -0.10})
+        self.assertEqual(held.params.rho, -0.10)
+        # The other two moved to make the best of it, and the fit is worse
+        # than the free one -- which is the whole point of reporting it.
+        self.assertNotAlmostEqual(held.params.alpha, free.params.alpha, places=4)
+        self.assertGreater(held.rmse, free.rmse)
+        self.assertTrue(any("given, not fitted" in w for w in held.warnings))
+
+    def test_holding_all_three_fits_nothing_and_says_so(self):
+        """Priced against the curve you typed: a legitimate thing to ask for,
+        and it must not report a convergence it never attempted."""
+        p, ks, vs = self._known()
+        fit = listed.fit_sabr(ks, vs, p.t, p.f,
+                              fixed={"alpha": p.alpha, "rho": p.rho, "volvol": p.volvol})
+        self.assertEqual((fit.params.alpha, fit.params.rho, fit.params.volvol),
+                         (p.alpha, p.rho, p.volvol))
+        self.assertEqual(fit.free, ())
+        self.assertEqual(fit.degrees_of_freedom, len(ks))
+        self.assertIn("no fit", fit.message)
+        self.assertLess(fit.rmse, 1e-12)          # these quotes came off that curve
+        self.assertTrue(any("nothing was fitted at all" in w for w in fit.warnings))
+
+    def test_a_blank_override_is_not_a_zero(self):
+        """The screen sends an empty box for every parameter it is not
+        holding; reading that as a number would mark a curve nobody asked
+        for."""
+        p, ks, vs = self._known()
+        free = listed.fit_sabr(ks, vs, p.t, p.f)
+        blank = listed.fit_sabr(ks, vs, p.t, p.f,
+                                fixed={"alpha": None, "rho": "", "volvol": None})
+        self.assertEqual(blank.fixed, ())
+        self.assertAlmostEqual(blank.params.rho, free.params.rho, places=9)
+
+    def test_a_held_parameter_that_is_not_a_parameter_is_refused(self):
+        p, ks, vs = self._known()
+        for bad in ({"rho": 1.4}, {"alpha": -0.01}, {"volvol": 0.0}, {"beta": 0.5}):
+            with self.assertRaises(ValueError):
+                listed.fit_sabr(ks, vs, p.t, p.f, fixed=bad)
+
+    def test_holding_two_leaves_two_quotes_enough(self):
+        """The three-quote rule is about free parameters, not about SABR."""
+        p, ks, vs = self._known()
+        fit = listed.fit_sabr(ks[:2], vs[:2], p.t, p.f,
+                              fixed={"rho": p.rho, "volvol": p.volvol})
+        self.assertAlmostEqual(fit.params.alpha, p.alpha, places=6)
+        with self.assertRaises(ValueError):
+            listed.fit_sabr(ks[:1], vs[:1], p.t, p.f, fixed={"rho": p.rho})
+
+    def test_the_panel_carries_the_overrides_and_reports_them(self):
+        """What the browser sends is what the fit holds, and the answer says
+        which numbers were typed -- one that was is otherwise indistinguishable
+        from one the market implied."""
+        panel = listed.panel_from_request({
+            "underlying": "CUSTOM", "expiry": "2024-06-14 19:00", "forward": 1.085,
+            "text": "1.00 9.10\n1.05 8.40\n1.085 8.20\n1.12 8.35\n1.16 8.90\n",
+            "rho": "-0.20", "alpha": "", "volvol": None,
+        })
+        self.assertEqual((panel.rho, panel.alpha, panel.volvol), (-0.20, None, None))
+        out = panel.run(None, clock=ASOF)
+        self.assertEqual(out["fit"]["rho"], -0.20)
+        self.assertEqual(out["fit"]["fixed"], ["rho"])
+        self.assertEqual(out["fit"]["free"], ["alpha", "volvol"])
+        with self.assertRaises(ValueError):
+            listed.panel_from_request({"underlying": "CUSTOM", "forward": 1.0,
+                                       "expiry": "2024-06-14", "text": "1.0 8.0",
+                                       "rho": "steep"})
 
     def test_vega_weighting_favours_the_money(self):
         p, ks, vs = self._known()
@@ -1839,6 +2073,134 @@ class TestHistory(unittest.TestCase):
         self.assertAlmostEqual(r.scaled_excess_kurtosis(t), r.excess_kurtosis / n, places=12)
         self.assertLess(abs(r.scaled_skew(t)), abs(r.skew))
 
+    # -- the swap points are part of what was realized --------------------
+
+    def _synthetic(self, pair="EURUSD", n=400, vol=0.10, carry=0.05, points_vol=0.0, seed=7):
+        """A sheet with a known spot walk and a known carry curve.
+
+        ``carry`` is the annualised continuous carry the forward is built at;
+        ``points_vol`` is how much that carry itself wobbles day to day.  With
+        ``points_vol`` zero the forward's only extra motion is the *decay* of
+        the points, which is a known slide and not a risk.
+        """
+        rng = np.random.default_rng(seed)
+        dt = 1.0 / 252.0
+        dates = [date(2022, 1, 3) + timedelta(days=int(i)) for i in range(n)]
+        steps = rng.normal(0.0, vol * math.sqrt(dt), n - 1)
+        spot = 1.10 * np.exp(np.concatenate(([0.0], np.cumsum(steps))))
+        c = carry + (rng.normal(0.0, points_vol, n) if points_vol else 0.0)
+        h = history.PairHistory(pair=pair, dates=dates, spot=spot)
+        for tenor, tau in (("1M", 1.0 / 12.0), ("3M", 0.25), ("1Y", 1.0)):
+            h.forwards[tenor] = spot * np.exp(c * tau)
+        return h
+
+    def test_a_pure_carry_decay_is_not_counted_as_volatility(self):
+        """The points *decaying* by one day of carry is a known slide.
+
+        Leaving it in the sum of squares books the carry itself as
+        volatility, which is exactly backwards for the pairs the forward basis
+        exists for -- so a forward built on a perfectly constant 5% carry must
+        realize what spot realized, to the last digit.
+        """
+        h = self._synthetic(carry=0.05, points_vol=0.0)
+        r = history.realized(h, 365, basis="forward", basis_tenor="1Y")
+        self.assertEqual(r.basis, "forward")
+        self.assertAlmostEqual(r.vol, r.vol_spot, places=12)
+        self.assertAlmostEqual(r.carry_rate, 0.05, places=9)
+        self.assertLess(r.points_vol, 1e-12)
+
+    def test_the_swap_points_moving_is_realized_volatility(self):
+        """A forward whose carry wobbles realizes more than spot did.
+
+        The tenor multiplies it: a one-year forward carries a whole year of
+        the carry's move, a one-month forward a twelfth of it.
+        """
+        h = self._synthetic(carry=0.05, points_vol=0.01)
+        spot_only = history.realized(h, 365, basis="spot", basis_tenor="1Y")
+        year = history.realized(h, 365, basis="forward", basis_tenor="1Y")
+        month = history.realized(h, 365, basis="forward", basis_tenor="1M")
+        self.assertGreater(year.vol, spot_only.vol)
+        self.assertGreater(year.points_vol, month.points_vol * 5.0)
+        # Independent by construction, so the variances add.
+        self.assertAlmostEqual(year.vol ** 2,
+                               year.vol_spot ** 2 + year.points_vol ** 2,
+                               delta=0.05 * year.vol ** 2)
+
+    def test_a_tenor_the_sheet_does_not_quote_is_interpolated_not_dropped(self):
+        """Falling back to spot on the misses put two different measurements
+        in one column, so the term structure of realized volatility grew steps
+        at whichever tenors the sheet happened to quote."""
+        h = self._synthetic(carry=0.05, points_vol=0.01)
+        self.assertNotIn("6M", h.forwards)
+        r = history.realized(h, 365, basis="auto", basis_tenor="6M")
+        self.assertEqual(r.basis, "forward")
+        self.assertTrue(any("interpolated" in w for w in r.warnings))
+        three, one = (history.realized(h, 365, basis="forward", basis_tenor=t).points_vol
+                      for t in ("3M", "1Y"))
+        self.assertGreater(r.points_vol, three)
+        self.assertLess(r.points_vol, one)
+
+    def test_a_sheet_with_no_points_at_all_falls_back_and_says_so(self):
+        h = self._synthetic()
+        h.forwards.clear()
+        r = history.realized(h, 365, basis="auto", basis_tenor="3M")
+        self.assertEqual(r.basis, "spot")
+        self.assertTrue(any("realized on spot" in w for w in r.warnings))
+        with self.assertRaises(history.HistoryError):
+            history.realized(h, 365, basis="forward", basis_tenor="3M")
+
+    # -- what the volatility itself did -----------------------------------
+
+    def test_vol_dynamics_recovers_the_correlation_and_vol_of_vol_it_was_built_with(self):
+        """rho and nu are the two numbers a SABR smile is made of, and under
+        beta = 1 they are directly measurable off the quoted at-the-money."""
+        rng = np.random.default_rng(11)
+        n, dt = 1500, 1.0 / 252.0
+        rho, nu = -0.55, 0.60
+        z1 = rng.normal(size=n - 1)
+        z2 = rho * z1 + math.sqrt(1.0 - rho * rho) * rng.normal(size=n - 1)
+        spot = 1.10 * np.exp(np.concatenate(([0.0], np.cumsum(0.10 * math.sqrt(dt) * z1))))
+        vol = 0.10 * np.exp(np.concatenate(([0.0], np.cumsum(nu * math.sqrt(dt) * z2))))
+        h = history.PairHistory(
+            pair="EURUSD",
+            dates=[date(2020, 1, 1) + timedelta(days=int(i)) for i in range(n)],
+            spot=spot, atm={"3M": vol})
+        d = history.vol_dynamics(h, 5000, "3M")
+        self.assertEqual(d.source, "quoted")
+        self.assertAlmostEqual(d.rho, rho, delta=3.0 * d.rho_se)
+        # nu is per unit of *volatility time*, not per 252 business days, for
+        # the same reason the realized volatility is: it has to be comparable
+        # with the nu a marked smile implies.  The series above was built on a
+        # flat 1/252 step, so recovering it means converting onto the model's
+        # own clock first -- a calendar year holds about 0.78 years of it.
+        per_step = d.vol_time / d.observations
+        self.assertAlmostEqual(d.nu, nu * math.sqrt(dt / per_step), delta=0.08 * d.nu)
+        self.assertLess(per_step, dt)
+
+    def test_vol_dynamics_falls_back_to_a_rolling_volatility_and_warns(self):
+        """A rolling average moves less than the thing it averages, so the
+        fallback is a floor and has to say so."""
+        rng = np.random.default_rng(3)
+        n = 400
+        spot = 1.10 * np.exp(np.cumsum(rng.normal(0.0, 0.006, n)))
+        h = history.PairHistory(
+            pair="EURUSD",
+            dates=[date(2021, 1, 1) + timedelta(days=int(i)) for i in range(n)],
+            spot=spot)
+        d = history.vol_dynamics(h, 5000, "3M")
+        self.assertEqual(d.source, "rolling")
+        self.assertTrue(any("floor" in w for w in d.warnings))
+
+    def test_a_tenor_the_sheet_does_not_quote_uses_the_nearest_one_by_name(self):
+        """Interpolating a volatility column would be interpolating something
+        whose *changes* are the measurement; the nearest real column is used."""
+        h = self._synthetic()
+        h.atm["3M"] = np.full(len(h.dates), 0.10) * np.exp(
+            np.linspace(0.0, 0.3, len(h.dates)))
+        d = history.vol_dynamics(h, 5000, "2M")
+        self.assertEqual(d.tenor, "3M")
+        self.assertTrue(any("3M column instead" in w for w in d.warnings))
+
     def test_a_percentile_locates_todays_mark_in_its_own_history(self):
         h = history.load_history(HISTORY, ["EURUSD"])
         series = h["EURUSD"].series("atm", "3M")
@@ -1911,13 +2273,17 @@ class TestAnalysis(unittest.TestCase):
             self.assertAlmostEqual(r.roll, carry_atm[r.tenor].roll, places=15)
             self.assertNotAlmostEqual(r.roll, carry_rr[r.tenor].roll, places=6)
 
-    def test_richness_is_implied_less_realized_less_the_roll_value(self):
+    def test_richness_is_implied_less_realized_less_the_roll_and_the_carry(self):
+        """The break-even gained a third term when the forward curve's
+        price-side carry was added; ``carry_value`` is it."""
         rows = analytics.fair_value_table(self.book, "EURUSD", self.history["EURUSD"],
                                           horizon_days=30, cut="NY")
         priced = [r for r in rows if r.fair is not None]
         self.assertTrue(priced)
         for r in priced:
-            self.assertAlmostEqual(r.richness, r.implied - r.realized - r.roll_value, places=15)
+            self.assertAlmostEqual(r.richness,
+                                   r.implied - r.realized - r.roll_value - r.carry_value,
+                                   places=15)
             self.assertAlmostEqual(r.roll_value, r.roll * r.roll_multiplier, places=15)
 
     def test_a_tenor_with_too_little_history_keeps_its_row(self):
@@ -1998,6 +2364,116 @@ class TestAnalysis(unittest.TestCase):
             analytics.triangle_table(self.book, "EURUSD", cut="NY")
         self.assertIn("not a cross", str(cm.exception))
 
+    # -- the forward curve's own carry -----------------------------------
+
+    def test_the_at_the_money_row_carries_no_delta(self):
+        """The at-the-money is a straddle, and a straddle at the delta-neutral
+        strike has no delta.
+
+        Reading that leg as the call alone -- which is how ``_target_legs``
+        marks it, because it only ever needed a *strike* -- handed the
+        at-the-money row half a unit of forward carry that nobody is running.
+        """
+        rows = [r for r in analytics.carry_table(self.book, "EURUSD", horizon_days=30,
+                                                 target="atm", cut="NY") if r.expiry]
+        self.assertTrue(rows)
+        for r in rows:
+            self.assertAlmostEqual(r.delta, 0.0, places=9, msg=r.tenor)
+            # ... so its carry is only the gamma over the forward's move.
+            self.assertLess(abs(r.carry_pnl), 1e-5, r.tenor)
+
+    def test_a_directional_target_earns_the_forwards_roll_down(self):
+        """A 25 delta call is long the forward, and the forward rolls down."""
+        rows = [r for r in analytics.carry_table(self.book, "EURUSD", horizon_days=30,
+                                                 target="25dc", cut="NY") if r.expiry]
+        self.assertTrue(rows)
+        for r in rows:
+            self.assertAlmostEqual(r.delta, 0.25, delta=0.02, msg=r.tenor)
+            # Full revaluation, so it is delta times the move plus the gamma
+            # over it -- close to the linear reading but not equal to it.
+            linear = r.delta * (r.forward_rolled - r.forward)
+            self.assertAlmostEqual(r.carry_pnl, linear, delta=0.05 * abs(linear), msg=r.tenor)
+            self.assertAlmostEqual(r.carry_vols, r.carry_pnl / r.vega, places=12, msg=r.tenor)
+            self.assertAlmostEqual(r.total_pnl, r.pnl + r.carry_pnl, places=15, msg=r.tenor)
+            # The rate the swap points are quoting, not a price difference.
+            self.assertAlmostEqual(
+                r.carry_rate,
+                (r.forward_rolled - r.forward) / (r.forward * (30.0 / 365.2425)), places=12)
+
+    def test_without_a_feed_the_carry_is_unavailable_not_zero(self):
+        """f1 and f2 are both 1.0 without a feed, so every carry figure would
+        come out an exact zero -- a silent zero dressed as a measurement."""
+        rows = [r for r in analytics.carry_table(self.book, "EURJPY", horizon_days=30,
+                                                 target="25dc", cut="NY") if r.expiry]
+        self.assertTrue(rows)
+        for r in rows:
+            self.assertIsNone(r.carry_pnl, r.tenor)
+            self.assertIsNone(r.delta, r.tenor)
+            self.assertIsNone(r.total_pnl, r.tenor)
+            self.assertTrue(math.isnan(r.carry_rate), r.tenor)
+
+    def test_a_risk_reversal_declines_to_state_its_carry_in_vols(self):
+        """A risk reversal has almost no net vega, so dividing its premium
+        carry by that vega is a division by nearly nothing."""
+        rows = [r for r in analytics.carry_table(self.book, "EURUSD", horizon_days=30,
+                                                 target="rr25", cut="NY") if r.expiry]
+        self.assertTrue(rows)
+        for r in rows:
+            self.assertIsNotNone(r.carry_pnl, r.tenor)
+            self.assertIsNone(r.carry_vols, r.tenor)
+            self.assertIsNone(r.total_pnl, r.tenor)      # a combination has no single P&L
+
+    def test_fair_value_is_realized_plus_the_roll_and_the_carry(self):
+        rows = analytics.fair_value_table(self.book, "EURUSD", self.history["EURUSD"],
+                                          horizon_days=30, cut="NY")
+        priced = [r for r in rows if r.fair is not None]
+        self.assertTrue(priced)
+        for r in priced:
+            self.assertAlmostEqual(r.fair, r.realized + r.roll_value + r.carry_value, places=15)
+            self.assertAlmostEqual(r.richness, r.implied - r.fair, places=15)
+            # The straddle is delta neutral, so the price-side carry is second
+            # order; the first-order forward effect is in the smile slide.
+            self.assertLess(abs(r.carry_value), 0.001, r.tenor)
+
+    # -- what "realized" is measured on ----------------------------------
+
+    def test_realized_defaults_to_the_forward_and_says_so(self):
+        rows = analytics.realized_table(self.book, "EURUSD", self.history["EURUSD"])
+        live = [r for r in rows if r.observations]
+        self.assertTrue(live)
+        for r in live:
+            self.assertEqual(r.realized_basis, "forward", r.tenor)
+            self.assertIsNotNone(r.points_vol, r.tenor)
+            # The spot-only figure is kept beside it rather than replaced.
+            self.assertTrue(math.isfinite(r.realized_spot), r.tenor)
+        spot = [r for r in analytics.realized_table(self.book, "EURUSD",
+                                                    self.history["EURUSD"],
+                                                    realized_basis="spot") if r.observations]
+        self.assertTrue(all(r.realized_basis == "spot" for r in spot))
+        self.assertAlmostEqual(spot[-1].realized, live[-1].realized_spot, places=12)
+
+    # -- the wings as a SABR shape ----------------------------------------
+
+    def test_the_marked_wings_read_back_as_a_correlation_and_a_vol_of_vol(self):
+        rows = analytics.realized_table(self.book, "USDJPY", self.history["USDJPY"],
+                                        with_sabr=True)
+        live = [r for r in rows if r.implied_rho is not None]
+        self.assertTrue(live)
+        for r in live:
+            # USDJPY's risk reversal is marked for the downside, so the
+            # correlation that produces it is negative.
+            self.assertLess(r.marked_rr, 0.0, r.tenor)
+            self.assertLess(r.implied_rho, 0.0, r.tenor)
+            self.assertGreater(r.implied_nu, 0.0, r.tenor)
+            self.assertLess(r.implied_shape_error, 1e-6, r.tenor)
+            if r.realized_rho is not None:
+                self.assertAlmostEqual(r.rho_difference, r.implied_rho - r.realized_rho, places=15)
+                self.assertAlmostEqual(r.nu_difference, r.implied_nu - r.realized_nu, places=15)
+
+    def test_the_sabr_shape_is_off_unless_it_is_asked_for(self):
+        rows = analytics.realized_table(self.book, "USDJPY", self.history["USDJPY"])
+        self.assertTrue(all(r.implied_rho is None and r.realized_rho is None for r in rows))
+
 
 class TestAnalysisApi(unittest.TestCase):
     def test_the_payload_carries_no_number_a_browser_cannot_parse(self):
@@ -2025,6 +2501,91 @@ class TestAnalysisApi(unittest.TestCase):
         self.assertIsNone(payload["realized"])
         self.assertIn("history", payload["unavailable"])
         self.assertIn("triangle", payload["unavailable"])
+
+
+class TestTimestampReading(unittest.TestCase):
+    """One place reads a timestamp, and it reads what the tool writes.
+
+    The listed panel, the events route and the session loader had each
+    patched ISO 8601 into shape for themselves, and had done it differently:
+    only one of them understood a trailing Z or an offset, so a string that
+    parsed on one screen failed on the next.  Worse, that one *dropped* the
+    offset and then stamped the result UTC, which reads 19:00+09:00 as 19:00Z.
+    """
+
+    def test_iso_8601_is_read_the_way_the_tool_writes_it(self):
+        from volkit.timeutil import UTC, parse_datetime
+        want = datetime(2024, 2, 28, 12, 0, tzinfo=UTC)
+        for text in ("2024-02-28 12:00", "2024-02-28T12:00", "2024-02-28T12:00:00",
+                     "2024-02-28T12:00:00Z", "2024-02-28T12:00:00+00:00"):
+            with self.subTest(text):
+                self.assertEqual(parse_datetime(text), want)
+        # The tabular formats are tried first and are untouched.
+        self.assertEqual(parse_datetime("2/28/2024 12:00"), want)
+        self.assertEqual(parse_datetime("28-Feb-24"),
+                         datetime(2024, 2, 28, tzinfo=UTC))
+        # And what it prints, it reads.
+        self.assertEqual(parse_datetime(want.isoformat()), want)
+
+    def test_an_offset_is_converted_and_not_thrown_away(self):
+        from volkit.timeutil import UTC, parse_datetime
+        self.assertEqual(parse_datetime("2026-09-11T19:00+09:00"),
+                         datetime(2026, 9, 11, 10, 0, tzinfo=UTC))
+
+    def test_nonsense_still_says_so(self):
+        from volkit.timeutil import parse_datetime
+        with self.assertRaises(ValueError) as caught:
+            parse_datetime("next tuesday")
+        self.assertIn("next tuesday", str(caught.exception))
+
+    def test_the_listed_panel_takes_its_expiry_straight_from_the_browser(self):
+        from volkit.listed import _normalise_expiry
+        self.assertEqual(_normalise_expiry(" 2026-09-11T19:00Z "), "2026-09-11T19:00Z")
+        with self.assertRaises(ValueError):
+            _normalise_expiry("   ")
+
+
+class TestSmileStrikeScale(unittest.TestCase):
+    """The strike axis reads in levels when the feed can supply one.
+
+    The smile is fitted in moneyness whatever happens -- that is the space the
+    surface works in -- so this is a *scale* on the way out and never a change
+    to a number.  Without a feed there is no honest level to name and it stays
+    in K/F rather than inventing one.
+    """
+
+    def test_the_smile_carries_the_feed_level_and_no_vol_moves(self):
+        from volkit.webapp import BookService
+        with_feed = BookService(str(WORKBOOK), ASOF, feed_path=str(FEED))
+        without = BookService(str(WORKBOOK), ASOF)
+        q = {"pair": "EURUSD", "expiry": "2024-05-28", "method": "SVI", "cut": "TK"}
+        a, b = with_feed.smile(dict(q)), without.smile(dict(q))
+
+        self.assertTrue(a["feed"])
+        self.assertGreater(a["forward"], 0.0)
+        self.assertGreater(a["spot"], 0.0)
+        self.assertFalse(b["feed"])
+        self.assertIsNone(b["forward"])
+        self.assertIsNone(b["spot"])
+
+        # The strikes come back in moneyness either way: the page multiplies.
+        self.assertEqual([r["k"] for r in a["curve"]], [r["k"] for r in b["curve"]])
+        self.assertEqual([r["v"] for r in a["curve"]], [r["v"] for r in b["curve"]])
+        self.assertEqual(a["atm"], b["atm"])
+
+    def test_the_level_is_the_one_the_band_model_would_place_against(self):
+        """One lookup for both, so a strike a chart names and a band edge the
+        model places can never come from different forwards."""
+        from volkit.webapp import BookService
+        service = BookService(str(WORKBOOK), ASOF, feed_path=str(FEED))
+        payload = service.smile({"pair": "USDJPY", "expiry": "2024-05-28",
+                                 "method": "SVI", "cut": "TK"})
+        level = service.book.market_level("USDJPY", payload["t"])
+        self.assertEqual(payload["forward"], level["forward"])
+        self.assertEqual(payload["forward"], service.book.forward_at("USDJPY", payload["t"]))
+        # A pair the feed does not cover says so rather than guessing a level.
+        self.assertFalse(service.book.market_level("XXXYYY", 0.25)["feed"])
+        self.assertIsNone(service.book.forward_at("XXXYYY", 0.25))
 
 
 class TestCurveComparison(unittest.TestCase):
@@ -2292,8 +2853,62 @@ class TestWebAssets(unittest.TestCase):
         self.assertEqual(scan.bad, [])
         self.assertEqual(scan.stack, [])
         roots = [scan.depth[p] for p in ("p-pricing", "p-marking", "p-listed", "p-analysis",
-                                         "p-mm")]
+                                         "p-mm", "p-monitor")]
         self.assertEqual(len(set(roots)), 1, "the panel roots are not siblings")
+
+    def test_the_nav_shows_the_tabs_in_the_order_screens_declares_them(self):
+        """`screens.SCREENS` is the one declaration of what a build has.
+
+        The page hides a tab the build left out by name, so the two lists have
+        to agree; and the order is the desk's, not the file's -- Monitor sits
+        behind Vol marking because that is the pair of screens a morning
+        starts on.  Two orders that drifted apart would put a build's tabs in
+        one order and a trimmed build's in another.
+        """
+        import re as _re
+        from volkit import screens
+        html = (Path(__file__).resolve().parents[1] / "volkit" / "web" / "index.html").read_text()
+        nav = html.split('<div class="nav" id="nav">')[1].split("</div>")[0]
+        self.assertEqual(_re.findall(r'data-p="([a-z]+)"', nav), list(screens.ALL))
+        self.assertEqual([s.label for s in screens.SCREENS],
+                         _re.findall(r'data-p="[a-z]+"[^>]*>([^<]+)<', nav))
+        # And the page's own panel map, which decides which tab opens when the
+        # first screen is not in the build.
+        js = html.split("<script>")[1].split("</script>")[0]
+        block = js.split("const PANELROOT={")[1].split("};")[0]
+        self.assertEqual(_re.findall(r"([a-z]+):'#", block), list(screens.ALL))
+        for screen in screens.SCREENS:
+            self.assertIn(f"{screen.name}:'#{screen.panel}'", block.replace("\n", " "))
+
+    def test_the_pricing_grid_only_offers_fields_the_product_uses(self):
+        """A box that is filled in and then ignored is a silent zero.
+
+        The rows are declared with the products they belong to; a product
+        renamed on one side and not the other would hide a field that is
+        needed, or show one that is not, with nothing to say so.
+        """
+        import re as _re
+        from volkit.pricing import PRODUCTS
+        html = (Path(__file__).resolve().parents[1] / "volkit" / "web" / "index.html").read_text()
+        js = html.split("<script>")[1].split("</script>")[0]
+        decl = (js.split("const VANILLA=")[1].split(";")[0]
+                + js.split("const IN=[")[1].split("];")[0]
+                + js.split("const OUT=[")[1].split("];")[0])
+        # Every list whose first entry is a product is a relevance list, and
+        # then all of its entries have to be products.
+        named: set[str] = set()
+        for group in _re.findall(r"\[((?:'[a-z_]+'\s*,?\s*)+)\]", decl):
+            items = _re.findall(r"'([a-z_]+)'", group)
+            if items[0] not in PRODUCTS:
+                continue
+            for name in items:
+                self.assertIn(name, PRODUCTS, f"{name!r} is not one of pricing.PRODUCTS")
+            named.update(items)
+        self.assertTrue(named, "no product relevance lists found in the grid declarations")
+        # Every product owns at least one row, or a relevance list has gone
+        # stale against a product nobody can price.
+        for product in PRODUCTS:
+            self.assertIn(product, named, f"no grid row mentions {product!r}")
 
     def test_every_class_the_script_looks_up_is_one_it_emits(self):
         """The panel shell and the painter that fills it are different functions.
@@ -2321,6 +2936,28 @@ class TestWebAssets(unittest.TestCase):
         handler = src.split("def panel_from_request")[1]
         for f in fields:
             self.assertIn(f'"{f}"', handler, f"the server never reads {f!r}")
+
+    def test_the_positions_panel_fields_are_all_understood_by_the_server(self):
+        """Same guard as the listed fit panel, for the same reason.
+
+        The positions panel posts its own settings alongside the panels; a
+        setting the server never reads would silently do nothing.
+        """
+        import re as _re
+        html = (Path(__file__).resolve().parents[1] / "volkit" / "web" / "index.html").read_text()
+        js = html.split("<script>")[1].split("</script>")[0]
+        block = js.split("const GF=[")[1].split("];")[0]
+        fields = set(_re.findall(r"\['([a-z_]+)'", block))
+        self.assertIn("vol_bump", fields)
+        src = (Path(__file__).resolve().parents[1] / "volkit" / "listed.py").read_text()
+        handler = src.split("def positions_from_request")[1]
+        for f in fields | {"text", "panels"}:
+            self.assertIn(f'"{f}"', handler, f"the server never reads {f!r}")
+        # And every greek column the table paints is one listed.py declares,
+        # so a column cannot reach the screen without a unit beside it.
+        from volkit.listed import GREEK_FIELDS
+        cols = set(_re.findall(r"\['([a-z_0-9]+)'", js.split("const GCOLS=[")[1].split("];")[0]))
+        self.assertEqual(cols, {k for k, _ in GREEK_FIELDS})
 
     def test_the_market_maker_fields_are_all_understood_by_the_server(self):
         """Same guard as the listed panel, for the same reason.
@@ -2359,6 +2996,28 @@ class TestWebAssets(unittest.TestCase):
         for f in fields | {"cut", "method", "field", "base"}:
             self.assertIn(f'"{f}"', handler, f"the server never reads {f!r}")
 
+    def test_the_monitor_panel_fields_are_all_understood_by_the_server(self):
+        """Same guard as the listed, market-maker and comparison panels.
+
+        A field the browser sends and the server ignores is a setting that
+        silently does nothing.
+        """
+        import re as _re
+        html = (Path(__file__).resolve().parents[1] / "volkit" / "web" / "index.html").read_text()
+        js = html.split("<script>")[1].split("</script>")[0]
+        block = js.split("const MOF=[")[1].split("];")[0]
+        fields = set(_re.findall(r"\['([a-z_]+)'", block))
+        self.assertIn("was_kind", fields)
+        self.assertIn("was_date", fields)
+        self.assertIn("now_kind", fields)
+        src = (Path(__file__).resolve().parents[1] / "volkit" / "monitor.py").read_text()
+        handler = src.split("def tile_from_request")[1].split("def panel_from_request")[0]
+        for f in fields:
+            self.assertIn(f'"{f}"', handler, f"the server never reads {f!r}")
+        panel = src.split("def panel_from_request")[1]
+        for f in ("cut", "method", "field", "tiles"):
+            self.assertIn(f'"{f}"', panel, f"the server never reads {f!r}")
+
     def test_the_band_card_fields_are_all_understood_by_the_server(self):
         """The band treatment is marked on the screen and read in one place."""
         import re as _re
@@ -2380,6 +3039,767 @@ class TestWebAssets(unittest.TestCase):
         ids = set(_re.findall(r'id="([^"]+)"', html))
         refs = set(_re.findall(r"\$\('#([a-zA-Z0-9_-]+)'\)", js))
         self.assertEqual(refs - ids - {"c1"}, set())
+
+
+class TestSessionFile(unittest.TestCase):
+    """Saving the marks a session made, and putting them back.
+
+    The workbook is never written to (a standing decision), so a morning's
+    marking only survives in this file.  What is pinned here is that the round
+    trip is exact, that the file is in the units the screen shows, and that a
+    file with a bad number in it still restores everything else and says what
+    it could not.
+    """
+
+    def marked_book(self):
+        book = Book.from_excel(WORKBOOK, ASOF).load_all(["USDJPY", "EURUSD"])
+        surface = book["USDJPY"]
+        surface.atm.overwrite_tenor("1m", 0.0925)
+        surface.overwrite_param("slog25", "3M", 0.61)
+        surface.set_param_shifts({"rho25": 0.05})
+        surface.anchor_tenors = True
+        surface.atm.set_params(long_term_vol=0.081)
+        return book
+
+    def test_a_session_round_trips_onto_a_fresh_book(self):
+        from volkit import session
+        marked = self.marked_book()
+        doc = session.capture(marked)
+        fresh = Book.from_excel(WORKBOOK, ASOF).load_all(["USDJPY", "EURUSD"])
+        expiry = ASOF.datetime_from_years(0.25)
+        self.assertNotAlmostEqual(float(marked["USDJPY"].vol(1.0, expiry)),
+                                  float(fresh["USDJPY"].vol(1.0, expiry)), places=6)
+        out = session.apply_document(fresh, doc)
+        self.assertEqual(out["problems"], [])
+        self.assertIn("USDJPY", out["applied"])
+        self.assertEqual(float(marked["USDJPY"].vol(1.0, expiry)),
+                         float(fresh["USDJPY"].vol(1.0, expiry)))
+        self.assertEqual(fresh["USDJPY"].param_shifts, {"rho25": 0.05})
+        self.assertTrue(fresh["USDJPY"].anchor_tenors)
+
+    def test_the_file_is_in_the_units_the_screen_shows(self):
+        """Volatility points at the edges, decimals in the middle (§4).
+
+        A file written in decimals and read back in points is the bank-width
+        bug again: a 0.28 market read as 28 points.
+        """
+        from volkit import session
+        doc = session.capture(self.marked_book(), ["USDJPY"])
+        block = doc["pairs"]["USDJPY"]
+        self.assertAlmostEqual(block["atm_overwrites"]["1m"], 9.25)
+        self.assertAlmostEqual(block["curve"]["long_term_vol"], 8.1)
+        # A smile parameter is not a volatility and is not scaled.
+        self.assertAlmostEqual(block["smile_overwrites"]["slog25"]["3M"], 0.61)
+
+    def test_the_screen_and_the_file_read_the_curve_the_same_way(self):
+        """One conversion, shared, so the two cannot come to disagree."""
+        from volkit import session
+        from volkit.webapp import BookService
+        service = BookService(str(WORKBOOK), ASOF)
+        shown = service.curve({"pair": "USDJPY"})["params"]
+        self.assertEqual(shown, session.curve_params(service.book["USDJPY"].atm))
+
+    def test_a_bad_value_does_not_take_the_rest_of_the_file_down(self):
+        from volkit import session
+        doc = session.capture(self.marked_book())
+        doc["pairs"]["USDJPY"]["atm_overwrites"]["1m"] = "not a number"
+        doc["pairs"]["ZZZFAKE"] = {"curve": {}}
+        book = Book.from_excel(WORKBOOK, ASOF).load_all(["USDJPY", "EURUSD"])
+        out = session.apply_document(book, doc)
+        self.assertIn("EURUSD", out["applied"])
+        self.assertTrue(any("ZZZFAKE" in x for x in out["problems"]))
+        self.assertTrue(any("not a number" in x for x in out["problems"]))
+        # The rest of USDJPY still went on.
+        self.assertEqual(book["USDJPY"].param_shifts, {"rho25": 0.05})
+
+    def test_events_are_replaced_and_not_merged(self):
+        """A saved schedule is the whole schedule.
+
+        Merging would double every release that appears in both the workbook
+        and the file, which nothing downstream could tell from a real bump.
+        """
+        from volkit import session
+        book = Book.from_excel(WORKBOOK, ASOF).load_all(["EURUSD"])
+        when = ASOF.now + timedelta(days=10)
+        book["EURUSD"].atm.set_events([(when, 0.004, "TEST")])
+        doc = session.capture(book, ["EURUSD"])
+        self.assertEqual(len(doc["pairs"]["EURUSD"]["events"]), 1)
+        fresh = Book.from_excel(WORKBOOK, ASOF).load_all(["EURUSD"])
+        session.apply_document(fresh, doc)
+        self.assertEqual(len(fresh["EURUSD"].atm.events.events), 1)
+        # Applying it twice must not stack the same release up.
+        session.apply_document(fresh, doc)
+        self.assertEqual(len(fresh["EURUSD"].atm.events.events), 1)
+
+    def test_the_file_is_written_atomically_and_read_back(self):
+        import tempfile
+        from volkit import session
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "sub" / "marks.json"
+            written = session.save(self.marked_book(), path, note="morning")
+            self.assertEqual(Path(written), path)
+            doc = session.load(path)
+            self.assertEqual(doc["note"], "morning")
+            self.assertIn("USDJPY", doc["pairs"])
+        with self.assertRaises(session.SessionError):
+            session.load(Path(tmp) / "gone.json")
+
+    def test_a_pair_the_workbook_does_not_build_is_reported_not_skipped(self):
+        from volkit import session
+        doc = {"pairs": {"NOTAPAIR": {"curve": {}}}, "version": 1}
+        book = Book.from_excel(WORKBOOK, ASOF).load_all(["EURUSD"])
+        out = session.apply_document(book, doc)
+        self.assertEqual(out["applied"], [])
+        self.assertTrue(any("NOTAPAIR" in x for x in out["problems"]))
+
+    def test_the_service_saves_and_restores_over_the_api(self):
+        import tempfile
+        from volkit.webapp import BookService
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "marks.json")
+            service = BookService(str(WORKBOOK), ASOF)
+            service.overwrite({"pair": "USDJPY", "kind": "atm", "tenor": "1m", "value": "9.25"})
+            saved = service.session_save({"path": path})
+            self.assertTrue(saved["ok"])
+            service.reload()                       # back to the workbook's own marks
+            self.assertEqual(service.book["USDJPY"].atm.tenor_overwrites, {})
+            out = service.session_load({"path": path})
+            self.assertTrue(out["ok"], out["problems"])
+            self.assertAlmostEqual(service.book["USDJPY"].atm.tenor_overwrites["1m"], 0.0925)
+
+
+class TestMonitorScreen(unittest.TestCase):
+    """Small panels: what has moved between two points in time."""
+
+    def book(self, pairs=("EURUSD",)):
+        return Book.from_excel(WORKBOOK, ASOF).load_all(list(pairs))
+
+    def history(self, book):
+        return history.load_history(HISTORY, book.pairs)
+
+    def test_a_tile_is_the_difference_between_its_two_ends(self):
+        from volkit import monitor
+        book = self.book()
+        hist = self.history(book)
+        panel = monitor.MonitorPanel(tiles=(monitor.Tile(pair="EURUSD"),))
+        r = panel.run(book, hist)
+        tile = r["tiles"][0]
+        self.assertTrue(tile["ok"], tile["message"])
+        row = next(x for x in tile["rows"] if x["tenor"] == "1M")
+        self.assertAlmostEqual(row["change"]["atm"], row["now"]["atm"] - row["was"]["atm"])
+
+    def test_a_broken_end_leaves_the_levels_standing(self):
+        """The failure this project exists to remove is the empty panel.
+
+        A tile whose earlier end has no sheet still shows what it could read
+        and carries the reason it has no change.
+        """
+        from volkit import monitor
+        book = self.book(["EURUSD", "GBPNZD"])
+        panel = monitor.MonitorPanel(tiles=(monitor.Tile(pair="GBPNZD"),))
+        tile = panel.run(book, self.history(book))["tiles"][0]
+        self.assertTrue(tile["ok"])
+        self.assertTrue(any("could not be built" in n for n in tile["notes"]))
+        self.assertTrue(any(r["now"]["atm"] is not None for r in tile["rows"]))
+        self.assertTrue(all(r["change"]["atm"] is None for r in tile["rows"]))
+
+    def test_two_dated_ends_on_the_same_row_say_so(self):
+        """A column of zeros otherwise reads as a quiet market."""
+        from volkit import monitor
+        book = self.book()
+        hist = self.history(book)
+        tile = monitor.Tile(pair="EURUSD", was_kind="history", was_date="latest",
+                            now_kind="history", now_date="latest")
+        got = monitor.run_tile(tile, book, hist)
+        self.assertTrue(any("same row" in n for n in got.notes))
+
+    def test_a_tenor_one_end_does_not_quote_is_blank_not_absent(self):
+        from volkit import monitor
+        book = self.book()
+        tile = monitor.run_tile(monitor.Tile(pair="EURUSD"), book, self.history(book))
+        tenors = [r["tenor"] for r in tile.rows]
+        self.assertEqual(tenors, sorted(tenors, key=tenor_to_years))
+        blank = [r for r in tile.rows if r["was"]["atm"] is None]
+        self.assertTrue(blank, "the sample history quotes fewer tenors than the book")
+        self.assertTrue(all(r["change"]["atm"] is None for r in blank))
+
+    def test_a_date_on_a_source_that_has_none_is_refused(self):
+        """It would be typed, ignored, and read back as if it were honoured."""
+        from volkit import monitor
+        from volkit.curves import CurveError
+        with self.assertRaises(CurveError):
+            monitor.parse_spec("EURUSD:surface@-1w")
+        spec = monitor.parse_spec("EURJPY:history@-1m:history@latest")
+        self.assertEqual((spec.was_kind, spec.was_date), ("history", "-1m"))
+        self.assertEqual((spec.now_kind, spec.now_date), ("history", "latest"))
+
+    def test_a_tile_that_throws_keeps_its_place(self):
+        from volkit import monitor
+        book = self.book()
+        panel = monitor.MonitorPanel(tiles=(monitor.Tile(pair="NOTAPAIR"),
+                                            monitor.Tile(pair="EURUSD", was_kind="marks",
+                                                         was_date="", now_kind="surface")))
+        r = panel.run(book, None)
+        self.assertEqual(len(r["tiles"]), 2)
+        self.assertFalse(r["tiles"][0]["ok"])
+        self.assertTrue(r["tiles"][1]["ok"])
+
+    def test_a_paste_cannot_be_a_tile_end(self):
+        """A tile is rebuilt on every refresh; a paste cannot be."""
+        from volkit import monitor
+        from volkit.curves import CurveError
+        with self.assertRaises(CurveError):
+            monitor.Tile(pair="EURUSD", was_kind="paste")
+
+
+class TestFeedRefresh(unittest.TestCase):
+    """Picking up spot that has just been published."""
+
+    def service(self, feed):
+        from volkit.webapp import BookService
+        return BookService(str(WORKBOOK), ASOF, feed_path=str(feed))
+
+    def test_a_rewritten_feed_reads_as_stale_until_it_is_refreshed(self):
+        import shutil, tempfile, os, time
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "feed.csv"
+            shutil.copy(FEED, path)
+            service = self.service(path)
+            self.assertFalse(service.feed_state()["stale"])
+            text = path.read_text().replace("USDJPY,SPOT,150.25", "USDJPY,SPOT,151.25")
+            self.assertNotEqual(text, path.read_text())
+            path.write_text(text)
+            os.utime(path, (time.time() + 5, time.time() + 5))
+            self.assertTrue(service.feed_state()["stale"])
+            r = service.refresh_feed({"legs": [{"pair": "USDJPY", "expiry": "3M"}]})
+            self.assertFalse(r["feed"]["stale"])
+            self.assertAlmostEqual(r["legs"][0]["spot"], 151.25)
+
+    def test_a_leg_the_feed_cannot_quote_keeps_its_place_with_the_reason(self):
+        service = self.service(FEED)
+        r = service.refresh_feed({"legs": [{"pair": "USDJPY", "expiry": "1M"},
+                                           {"pair": "GBPNZD", "expiry": "1M"},
+                                           {"pair": "USDJPY", "expiry": "not a date"}]})
+        self.assertEqual(len(r["legs"]), 3)
+        self.assertEqual(r["legs"][0]["error"], "")
+        self.assertIn("no feed for", r["legs"][1]["error"])
+        self.assertTrue(r["legs"][2]["error"])
+        self.assertEqual([q["index"] for q in r["legs"]], [0, 1, 2])
+
+    def test_the_points_are_the_ones_the_pricer_would_use(self):
+        """Filling a leg must not put a different market in front of it."""
+        service = self.service(FEED)
+        r = service.refresh_feed({"legs": [{"pair": "USDJPY", "expiry": "3M"}]})
+        q = r["legs"][0]
+        priced = service.price({"legs": [{"pair": "USDJPY", "expiry": "3M", "strike": "ATM",
+                                          "type": "C"}]})
+        self.assertAlmostEqual(priced["legs"][0]["spot"], q["spot"])
+        self.assertAlmostEqual(priced["legs"][0]["forward"], q["forward"], places=9)
+
+    def test_refreshing_without_a_feed_says_so(self):
+        from volkit.webapp import BookService
+        from volkit.feed import FeedError
+        service = BookService(str(WORKBOOK), ASOF)
+        with self.assertRaises(FeedError):
+            service.refresh_feed({"legs": []})
+
+
+class TestWorkbooksAreNotHeldOpen(unittest.TestCase):
+    """This tool reads other people's files; it must not lock them.
+
+    ``pd.ExcelFile(path)`` keeps the file open for as long as the reader is
+    alive, and openpyxl's workbook is full of parent/child cycles, so the
+    handle outlived the call that made it.  On Windows that is enough to stop
+    Excel saving the very sheet the tool had just read: the reported bug was
+    that a loaded historical workbook could no longer be saved.
+    """
+
+    class _Tracked:
+        """Patches ``pd.ExcelFile`` and records every reader that is made."""
+
+        def __enter__(self):
+            import pandas as pd
+            self.pd, self.real, self.made = pd, pd.ExcelFile, []
+            made = self.made
+
+            class Tracking(self.real):
+                def __init__(inner, io, *a, **kw):
+                    inner.volkit_closed = False
+                    made.append(inner)
+                    super().__init__(io, *a, **kw)
+
+                def close(inner):
+                    inner.volkit_closed = True
+                    return super().close()
+
+            pd.ExcelFile = Tracking
+            return self
+
+        def __exit__(self, *exc):
+            self.pd.ExcelFile = self.real
+            return False
+
+    def check(self, made):
+        import io as _io
+        self.assertTrue(made, "nothing was read, so this proves nothing")
+        for reader in made:
+            # Over a copy in memory, never over the path: the file itself is
+            # opened, copied and closed before any parsing starts.
+            self.assertIsInstance(reader.io, _io.BytesIO)
+            self.assertTrue(reader.volkit_closed,
+                            "a reader was left open after the file had been read")
+
+    def test_the_marks_workbook_is_not_left_open(self):
+        with self._Tracked() as t:
+            ExcelSource(WORKBOOK).load()
+        self.check(t.made)
+
+    def test_the_historical_workbook_is_not_left_open(self):
+        sample = Path(__file__).resolve().parents[1] / "files" / "history_sample.xlsx"
+        with self._Tracked() as t:
+            hist = history.load_history(sample)
+        self.assertTrue(hist.pairs)
+        self.check(t.made)
+
+    def test_a_forward_sheet_is_not_left_open(self):
+        sample = Path(__file__).resolve().parents[1] / "files" / "history_sample.xlsx"
+        with self._Tracked() as t:
+            with self.assertRaises(Exception):
+                # Whatever the sheet turns out to be, the reader closes: a
+                # file left open by a failed read is the same lock.
+                analytics.ForwardCurve.from_excel(sample, "NOT_A_SHEET")
+        self.check(t.made)
+
+    def test_a_loaded_workbook_can_still_be_replaced(self):
+        """What the desk actually does: load it here, then save it there."""
+        import shutil, tempfile
+        sample = Path(__file__).resolve().parents[1] / "files" / "history_sample.xlsx"
+        with tempfile.TemporaryDirectory() as tmp:
+            live = Path(tmp) / "vol_history.xlsx"
+            shutil.copy(sample, live)
+            history.load_history(live)
+            spare = Path(tmp) / "next.xlsx"
+            shutil.copy(sample, spare)
+            spare.replace(live)              # Excel's own save is a replace
+            self.assertTrue(history.load_history(live).pairs)
+
+
+class TestAutoReload(unittest.TestCase):
+    """Watching the market feed, which is off unless it is asked for.
+
+    Everything here drives ``auto_check`` directly: the watcher thread does
+    nothing else, so there is no timing in the test.
+    """
+
+    def setUp(self):
+        import shutil, tempfile
+        from volkit.webapp import BookService
+        self.tmp = tempfile.TemporaryDirectory()
+        d = Path(self.tmp.name)
+        self.wb, self.feed = d / "vol_marks.xlsx", d / "feed.csv"
+        shutil.copy(WORKBOOK, self.wb)
+        shutil.copy(Path(__file__).resolve().parents[1] / "files" / "market_feed.csv", self.feed)
+        self.service = BookService(str(self.wb), ASOF, feed_path=str(self.feed),
+                                   auto_reload=1.0)
+        self.assertIsNone(self.service.load_error)
+
+    def tearDown(self):
+        self.service.stop_watching()
+        self.tmp.cleanup()
+
+    def touch(self, path, ahead=5.0):
+        import os, time
+        when = time.time() + ahead
+        os.utime(path, (when, when))
+
+    def settle(self, path, ahead=5.0):
+        """Change a file and give the watcher the two passes it waits for."""
+        self.touch(path, ahead)
+        first = self.service.auto_check()
+        self.assertEqual(first, [], "a file is read once its write time has stopped moving")
+        return self.service.auto_check()
+
+    def test_nothing_happens_while_nothing_changes(self):
+        self.assertEqual(self.service.auto_check(), [])
+        self.assertEqual(self.service.auto_check(), [])
+        self.assertEqual(self.service.auto_state()["seq"], 0)
+
+    def test_a_rewritten_feed_is_re_read(self):
+        text = self.feed.read_text().replace("USDJPY,SPOT,150.25", "USDJPY,SPOT,151.25")
+        self.assertNotEqual(text, self.feed.read_text())
+        self.feed.write_text(text)
+        events = self.settle(self.feed)
+        self.assertEqual([e["what"] for e in events], ["feed"])
+        self.assertTrue(events[0]["ok"])
+        self.assertAlmostEqual(self.service.book.feed.pairs["USDJPY"].spot, 151.25)
+        self.assertFalse(self.service.feed_state()["stale"])
+
+    def test_a_file_still_being_written_is_left_for_the_next_pass(self):
+        """One pass sees the write time move; the pass after reads it."""
+        self.touch(self.feed, 5.0)
+        self.assertEqual(self.service.auto_check(), [])
+        self.touch(self.feed, 9.0)                  # still being written
+        self.assertEqual(self.service.auto_check(), [])
+        self.assertEqual(len(self.service.auto_check()), 1)
+
+    def test_only_the_feed_is_watched(self):
+        """The workbook and the historical sheet are deliberately not.
+
+        Re-reading the workbook discards every mark this session has made
+        (nothing writes to the workbook), and a historical sheet is a record
+        of what happened rather than a market.  Both stay on their buttons;
+        the feed is a publication and is the only file worth chasing.
+        """
+        self.assertEqual([w["what"] for w in self.service.auto_state()["watching"]], ["feed"])
+        pair = self.service.book.pairs[0]
+        self.service.overwrite({"pair": pair, "kind": "atm", "tenor": "1m", "value": 9.5})
+        self.touch(self.wb)
+        self.assertEqual(self.service.auto_check(), [])
+        self.assertEqual(self.service.auto_check(), [])
+        # ... and the mark this session made is exactly where it was put.
+        row = next(r for r in self.service.marks({"pair": pair, "cut": "NY"})["atm"]
+                   if r["tenor"] == "1m")
+        self.assertAlmostEqual(row["overwrite"], 0.095, places=12)
+        self.assertEqual(self.service.auto_state()["seq"], 0)
+
+    def test_a_watcher_that_is_off_is_reported_and_does_nothing(self):
+        from volkit.webapp import BookService
+        quiet = BookService(str(self.wb), ASOF, feed_path=str(self.feed))
+        state = quiet.auto_state()
+        self.assertFalse(state["enabled"])
+        self.assertFalse(quiet.start_watching())
+        self.assertEqual([w["what"] for w in state["watching"]], ["feed"])
+        self.touch(self.feed)
+        # Off means the loop never runs; a check driven by hand still works,
+        # which is what the "check the feed now" button does.
+        self.assertEqual(quiet.auto_check(settle=False)[0]["what"], "feed")
+
+    def test_the_switch_turns_the_watcher_on_and_off(self):
+        """The pricing screen's checkbox, which posts to the same method."""
+        from volkit.webapp import BookService
+        quiet = BookService(str(self.wb), ASOF, feed_path=str(self.feed))
+        self.addCleanup(quiet.stop_watching)
+        self.assertFalse(quiet.auto_state()["enabled"])
+        self.assertTrue(quiet.auto_state()["available"])
+        state = quiet.set_auto({"enabled": True, "interval": 3})
+        self.assertTrue(state["enabled"])
+        self.assertEqual(state["interval"], 3)
+        self.assertIsNotNone(quiet._watcher)
+        # Off again, and the thread really stops rather than the flag alone.
+        state = quiet.set_auto({"enabled": False})
+        self.assertFalse(state["enabled"])
+        self.assertIsNone(quiet._watcher)
+        # The interval it was given survives being switched off and on.
+        self.assertEqual(quiet.set_auto({"enabled": True})["interval"], 3)
+        with self.assertRaises(ValueError):
+            quiet.set_auto({"interval": 0})
+
+    def test_no_feed_file_means_there_is_nothing_to_auto_load(self):
+        """A switch that can be turned on and then does nothing is worse than
+        one that says why it is greyed out."""
+        from volkit.webapp import BookService
+        quiet = BookService(str(self.wb), ASOF)
+        self.assertFalse(quiet.auto_state()["available"])
+        self.assertEqual(quiet.auto_state()["watching"], [])
+
+    def test_the_sequence_number_moves_only_when_something_happened(self):
+        before = self.service.auto_state()["seq"]
+        self.assertEqual(self.service.auto_check(), [])
+        self.assertEqual(self.service.auto_state()["seq"], before)
+        self.settle(self.feed)
+        self.assertGreater(self.service.auto_state()["seq"], before)
+
+
+class TestListedPositions(unittest.TestCase):
+    """Positions on the exchange-traded screen, and the risk they aggregate to.
+
+    Everything the greeks need comes off the panel a position belongs to, so
+    these build one or two panels and price against them exactly as the screen
+    does -- the panels are posted whole and the server keeps none of it.
+    """
+
+    EXPIRY = "2024-06-14 19:00"
+    LATER = "2024-09-13 19:00"
+    CLOCK = Clock(datetime(2024, 5, 28, 12, 0, tzinfo=UTC))
+    TABLE = ("1.0300\t8.90\n1.0600\t8.10\n1.0900\t7.60\n1.1200\t7.80\n1.1500\t8.60\n")
+
+    def panel(self, code="6E", expiry=None, forward=1.09, **kw):
+        return dict({"underlying": code, "expiry": expiry or self.EXPIRY,
+                     "forward": forward, "text": self.TABLE}, **kw)
+
+    def agg(self, text, panels=None, **kw):
+        return listed.positions_from_request(dict(
+            {"text": text, "panels": panels or [self.panel()]}, **kw)).run(clock=self.CLOCK)
+
+    # -- the paste -------------------------------------------------------
+    def test_the_layout_is_decided_once_from_the_whole_table(self):
+        """Reading each row on its own width would move a quantity into a
+        strike the first time somebody left a cell blank."""
+        parsed = listed.parse_positions(
+            "6E, 2024-06-14 19:00, 1.09, C, 25\n"
+            "6E, 2024-06-14 19:00, 1.06, P, -40\n"
+            "6E, 1.12, C, -15\n")
+        self.assertEqual(parsed.layout,
+                         ("contract", "expiry", "strike", "type", "quantity"))
+        self.assertEqual(len(parsed.positions), 2)
+        self.assertEqual([n for n, _, _ in parsed.skipped], [3])
+        self.assertIn("4 columns", parsed.skipped[0][2])
+
+    def test_the_short_layouts_leave_the_panel_to_be_worked_out(self):
+        parsed = listed.parse_positions("1.09 C 25\n1.06 P -40\n")
+        self.assertEqual(parsed.layout, ("strike", "type", "quantity"))
+        self.assertEqual(parsed.positions[0].underlying, "")
+        self.assertEqual(parsed.positions[0].expiry, "")
+        self.assertTrue(parsed.positions[0].is_call)
+        self.assertEqual(parsed.positions[1].quantity, -40.0)
+
+    def test_a_header_row_may_name_the_columns_in_any_order(self):
+        parsed = listed.parse_positions(
+            "Qty\tRight\tStrike\n25\tCall\t1.09\n-40\tPut\t1.06\n")
+        self.assertEqual(parsed.positions[0].strike, 1.09)
+        self.assertEqual(parsed.positions[0].quantity, 25.0)
+        self.assertFalse(parsed.positions[1].is_call)
+        self.assertTrue(any("header row read" in n for n in parsed.notes))
+
+    def test_atm_is_a_strike_and_a_bad_cell_keeps_its_line(self):
+        parsed = listed.parse_positions("ATM C 10\n1.09 X 5\nabc P 3\n1.06 P two\n")
+        self.assertEqual(len(parsed.positions), 1)
+        self.assertIsNone(parsed.positions[0].strike)
+        self.assertEqual([n for n, _, _ in parsed.skipped], [2, 3, 4])
+
+    def test_a_thousands_separator_in_a_comma_paste_is_a_column(self):
+        """A comma is a column boundary here as it is in a broker run, so the
+        line is refused rather than read as a size of 1."""
+        parsed = listed.parse_positions(
+            "6E, 2024-06-14 19:00, 1.09, C, 1,000\n6E, 2024-06-14 19:00, 1.06, P, -40\n")
+        self.assertEqual([n for n, _, _ in parsed.skipped], [1])
+        # ... and with tabs there is no ambiguity and it is a size.
+        parsed = listed.parse_positions("1.09\tC\t1,000\n")
+        self.assertEqual(parsed.positions[0].quantity, 1000.0)
+
+    # -- the greeks ------------------------------------------------------
+    def test_both_columns_price_the_same_option_and_differ_only_in_the_greeks(self):
+        r = self.agg("1.09 C 25\n1.06 P -40\n")
+        for row in r["positions"]:
+            self.assertEqual(row["error"], "")
+            self.assertIsNotNone(row["premium"])
+            # One volatility at one strike, so the premium cannot depend on
+            # which set of sensitivities is being taken around it.
+            self.assertNotEqual(row["bs"]["delta_futures"], row["smile"]["delta_futures"])
+        self.assertAlmostEqual(r["totals"]["bs"]["vega"], r["totals"]["bs"]["vega"])
+
+    def test_at_the_forward_the_smile_vega_is_the_black_scholes_vega(self):
+        """The curve is lifted by a move measured at the forward, so an option
+        struck there sees exactly that move and the two must agree."""
+        r = self.agg("ATM C 10\n")
+        row = r["positions"][0]
+        self.assertAlmostEqual(row["strike"], 1.09, places=12)
+        self.assertAlmostEqual(row["smile"]["vega"] / row["bs"]["vega"], 1.0, places=5)
+
+    def test_a_call_and_a_put_at_one_strike_differ_by_exactly_one_delta(self):
+        """Put/call parity, which the aggregate has to reproduce or a straddle
+        is not a straddle.  Note it is *not* zero at the forward -- the
+        delta-neutral strike is F exp(sigma^2 t / 2), not F -- so pinning it
+        at zero would be pinning a mistake."""
+        r = self.agg("ATM C 10\nATM P 10\n")
+        call, put = r["positions"]
+        g = r["groups"][0]
+        self.assertAlmostEqual(call["bs"]["delta_futures"] / 10.0
+                               - put["bs"]["delta_futures"] / 10.0, 1.0, places=12)
+        self.assertAlmostEqual(g["bs"]["vega"], 2 * call["bs"]["vega"], places=8)
+        # Long options decay: theta is money and is negative on both sides.
+        self.assertLess(g["bs"]["theta"], 0.0)
+        self.assertLess(g["smile"]["theta"], 0.0)
+
+    def test_money_scales_with_the_contract_size_and_a_count_does_not(self):
+        big = self.agg("1.09 C 25\n")["positions"][0]
+        small = self.agg("1.09 C 25\n", [self.panel(contract_size=62_500)])["positions"][0]
+        self.assertEqual(big["contract_size"], 125_000)
+        self.assertAlmostEqual(big["vega"] if False else big["bs"]["vega"],
+                               2 * small["bs"]["vega"], places=6)
+        self.assertAlmostEqual(big["bs"]["delta_futures"],
+                               small["bs"]["delta_futures"], places=12)
+
+    def test_the_vol_bump_and_the_theta_window_scale_what_they_say_they_do(self):
+        one = self.agg("1.09 C 25\n")["positions"][0]
+        two = self.agg("1.09 C 25\n", vol_bump=2, theta_days=3)["positions"][0]
+        self.assertAlmostEqual(two["bs"]["vega"], 2 * one["bs"]["vega"], places=8)
+        self.assertAlmostEqual(two["bs"]["volga"], 4 * one["bs"]["volga"], places=8)
+        self.assertAlmostEqual(two["bs"]["theta"], 3 * one["bs"]["theta"], places=8)
+
+    # -- matching a position to a panel ----------------------------------
+    def test_a_line_that_matches_no_panel_keeps_its_place_with_the_reason(self):
+        r = self.agg("6J, 2024-06-14 19:00, 1.09, C, 25\n6E, 2024-06-14 19:00, 1.06, P, -40\n")
+        self.assertEqual(len(r["positions"]), 2)
+        self.assertIn("6J", r["positions"][0]["error"])
+        self.assertEqual(r["positions"][1]["error"], "")
+        self.assertTrue(any("could not be priced" in w for w in r["warnings"]))
+
+    def test_a_line_that_matches_two_panels_is_refused_rather_than_guessed(self):
+        """A position priced against the wrong month's curve looks perfectly
+        ordinary, which is why this may never be guessed."""
+        panels = [self.panel(), self.panel(expiry=self.LATER, forward=1.10)]
+        r = self.agg("1.09 C 25\n", panels)
+        self.assertIn("matches 2 panels", r["positions"][0]["error"])
+        # Naming the expiry settles it.
+        r = self.agg(f"6E, {self.LATER}, 1.09, C, 25\n", panels)
+        self.assertEqual(r["positions"][0]["error"], "")
+        self.assertEqual(r["positions"][0]["expiry"][:16], "2024-09-13T19:00")
+
+    def test_a_panel_that_will_not_fit_does_not_empty_the_rest(self):
+        panels = [self.panel(label="good"),
+                  dict(self.panel(label="bad", expiry=self.LATER), text="nonsense")]
+        r = self.agg("good, , 1.09, C, 25\nbad, , 1.09, C, 25\n", panels)
+        self.assertEqual(r["positions"][0]["error"], "")
+        self.assertIn("bad", r["positions"][1]["error"])
+        self.assertEqual([p["ok"] for p in r["panels"]], [True, False])
+
+    def test_money_totals_across_contracts_but_a_futures_count_does_not(self):
+        """A euro future is not a yen future.  Summing the two would be a
+        number with no meaning printed where a risk figure goes."""
+        panels = [self.panel(),
+                  self.panel(code="6J", forward=0.00645, scale=1,
+                             expiry=self.EXPIRY)]
+        panels[1]["text"] = ("0.00610\t9.40\n0.00628\t9.00\n0.00645\t8.70\n"
+                             "0.00662\t8.85\n0.00680\t9.30\n")
+        r = self.agg("6E, , 1.09, C, 25\n6J, , 0.00645, C, 10\n", panels)
+        self.assertEqual([p["ok"] for p in r["panels"]], [True, True])
+        self.assertEqual(len(r["groups"]), 2)
+        self.assertNotIn("delta_futures", r["totals"]["bs"])
+        self.assertAlmostEqual(
+            r["totals"]["bs"]["vega"],
+            sum(g["bs"]["vega"] for g in r["groups"]), places=6)
+        self.assertTrue(any("not, because a future" in n for n in r["notes"]))
+
+    def test_a_custom_contract_with_no_size_says_so_rather_than_using_one(self):
+        """The money columns are then per one unit of the base currency, which
+        is a perfectly good number and a terrible one to read as dollars."""
+        r = self.agg("1.09 C 25\n", [self.panel(code="CUSTOM", pair="EURUSD")])
+        self.assertEqual(r["positions"][0]["contract_size"], 1.0)
+        self.assertTrue(any("no contract size" in w for w in r["warnings"]))
+        self.assertTrue(any("per one unit" in w for w in r["warnings"]))
+
+    def test_the_bumps_are_refused_rather_than_silently_ignored(self):
+        for bad in ({"vol_bump": -1}, {"theta_days": -3}):
+            with self.assertRaises(ValueError):
+                self.agg("1.09 C 25\n", **bad)
+
+    def test_structured_rows_refuse_an_unreadable_call_put(self):
+        """A short put booked as a long call is not a rounding error, so the
+        already-read form does not default the side either."""
+        good = listed.positions_from_request({
+            "positions": [{"strike": "ATM", "type": "P", "quantity": -5}],
+            "panels": [self.panel()]}).run(clock=self.CLOCK)
+        self.assertFalse(good["positions"][0]["type"] == "call")
+        self.assertAlmostEqual(good["positions"][0]["strike"], 1.09, places=12)
+        with self.assertRaises(ValueError):
+            listed.positions_from_request({"positions": [{"strike": 1.09, "quantity": 5}]})
+
+    def test_a_theta_window_past_the_expiry_is_blank_with_the_reason(self):
+        """There is no revaluation to take the decay from, and a plausible
+        number in its place would be the silent zero this project removes."""
+        r = self.agg("1.09 C 25\n", theta_days=90)
+        row = r["positions"][0]
+        self.assertIsNone(row["smile"]["theta"])
+        self.assertIn("reaches past this expiry", row["error"])
+        # The Black-Scholes column is closed form and is still reported.
+        self.assertIsNotNone(row["bs"]["theta"])
+
+
+class TestListedClock(unittest.TestCase):
+    def test_a_panel_with_no_pair_takes_the_book_s_clock(self):
+        """The Exchange-traded screen refused to fit a CUSTOM contract.
+
+        The clock was looked for on the mapped surface and nowhere else, so a
+        contract with no pair -- CUSTOM, or one whose pair is not in this
+        workbook -- reported "a clock is required" on a screen holding a
+        perfectly good one.  Only the *comparison* needs a surface.
+        """
+        book = Book.from_excel(WORKBOOK, ASOF).load_all(["USDJPY"])
+        panel = listed.Panel(
+            underlying=listed.resolve_underlying("CUSTOM"),
+            expiry="2024-06-14 19:00", forward=100.0,
+            quotes=tuple(listed.Quote(strike=k, vol=v) for k, v in
+                         ((95.0, 0.11), (100.0, 0.10), (105.0, 0.105))),
+        )
+        out = panel.run(book)
+        self.assertEqual(out["valuation"], ASOF.now.isoformat())
+        self.assertIsNone(out["comparison"])
+        self.assertGreater(out["years"], 0)
+
+
+class TestCrossVegaSplit(unittest.TestCase):
+    """Where a cross's at-the-money vega actually sits."""
+
+    def rows(self):
+        book = Book.from_excel(WORKBOOK, ASOF).load_all(["AUDJPY"])
+        return book, analytics.triangle_table(book, "AUDJPY", cut="NY", with_noise=False,
+                                              tenors=["3m"])
+
+    def test_the_split_is_the_derivative_of_the_variance_triangle(self):
+        book, rows = self.rows()
+        r = rows[0]
+        va, vb = r.leg_atm
+        ca, cb = r.coefficients
+        x = ca * cb * r.rho
+        sigma = r.variance_triangle_atm
+        self.assertAlmostEqual(r.leg_vega[0], (va + x * vb) / sigma)
+        self.assertAlmostEqual(r.leg_vega[1], (vb + x * va) / sigma)
+        self.assertAlmostEqual(r.rho_vega, ca * cb * va * vb / sigma)
+
+    def test_a_bump_in_a_leg_moves_the_cross_by_the_split(self):
+        """The number is a hedge ratio, so it is checked against a real bump."""
+        book, rows = self.rows()
+        r = rows[0]
+        va, vb = r.leg_atm
+        ca, cb = r.coefficients
+        h = 1e-6
+
+        def triangle(a, b):
+            return math.sqrt(a * a + b * b + 2.0 * ca * cb * r.rho * a * b)
+
+        self.assertAlmostEqual((triangle(va + h, vb) - triangle(va - h, vb)) / (2 * h),
+                               r.leg_vega[0], places=6)
+        self.assertAlmostEqual((triangle(va, vb + h) - triangle(va, vb - h)) / (2 * h),
+                               r.leg_vega[1], places=6)
+
+    def test_the_two_hedges_satisfy_euler_rather_than_adding_to_one(self):
+        """The ratios are hedges, not shares.
+
+        Reading them as a split of something into parts is the mistake: they
+        do not add to one.  What is exact is Euler's identity -- the triangle
+        is homogeneous of degree one in the two leg volatilities, so weighting
+        each ratio by its own leg accounts for the whole of the cross's.
+        """
+        from volkit.analytics import _vega_split
+        for va, vb, rho in ((0.10, 0.10, 0.30), (0.07, 0.13, -0.60), (0.09, 0.11, 0.85)):
+            with self.subTest(rho=rho):
+                sigma = math.sqrt(va * va + vb * vb + 2 * rho * va * vb)
+                da, db, drho = _vega_split(va, vb, rho, 1, 1, sigma)
+                self.assertAlmostEqual(va * da + vb * db, sigma)
+                self.assertNotAlmostEqual(da + db, 1.0)
+                # The correlation term is degree zero and is not in the identity.
+                self.assertAlmostEqual(drho, va * vb / sigma)
+
+    def test_the_split_matches_the_triangle_the_book_is_built_on(self):
+        """Euler again, on the book's own marks rather than on made-up ones."""
+        book, rows = self.rows()
+        r = rows[0]
+        va, vb = r.leg_atm
+        self.assertAlmostEqual(va * r.leg_vega[0] + vb * r.leg_vega[1],
+                               r.variance_triangle_atm)
+
+    def test_a_zero_cross_volatility_has_no_hedge_ratio_rather_than_an_infinity(self):
+        from volkit.analytics import _vega_split
+        out = _vega_split(0.1, 0.1, -1.0, 1, 1, 0.0)
+        self.assertTrue(all(v != v for v in out))
+
+    def test_the_row_that_could_not_be_built_carries_no_split_either(self):
+        """A failed row keeps its place; it must not carry a made-up ratio."""
+        book = Book.from_excel(WORKBOOK, ASOF).load_all(["AUDJPY"])
+        rows = analytics.triangle_table(book, "AUDJPY", cut="NY", with_noise=False,
+                                        tenors=["3m"])
+        self.assertTrue(all(v == v for v in rows[0].leg_vega))
 
 
 class TestDeterminism(unittest.TestCase):
@@ -2759,7 +4179,7 @@ class TestPackaging(unittest.TestCase):
         # One flag may carry a list, and an unknown name is an error rather
         # than a screen that quietly stayed in the build.
         self.assertEqual(build_exe.choose_screens(None, ["mm,listed"]),
-                         (("pricing", "marking", "analysis"), ()))
+                         (("pricing", "marking", "monitor", "analysis"), ()))
         with self.assertRaises(screens.ScreenError):
             build_exe.choose_screens(None, ["markign"])
         with self.assertRaises(build_exe.BuildError):
@@ -3033,11 +4453,13 @@ class TestQuoteParsing(unittest.TestCase):
         they used, because a spread quoted the other way round is a sign error
         nothing downstream would catch.
         """
-        run = self.parse("1M atm 8.2/8.6\n1M/3M atm spread 0.30/0.55\n3M-1M atm spread 0.30/0.55")
-        for q in run.quotes[1:]:
+        # Two different spreads, deliberately: '1M/3M' and '3M-1M' are the
+        # same quote written two ways, and one now supersedes the other.
+        run = self.parse("1M atm 8.2/8.6\n1M/3M atm spread 0.30/0.55\n6M-2M atm spread 0.30/0.55")
+        for q, near, far in ((run.quotes[1], "1M", "3M"), (run.quotes[2], "2M", "6M")):
             self.assertEqual(q.instrument, "spread")
-            self.assertEqual(str(q.expiry), "1M")
-            self.assertEqual(str(q.expiry_far), "3M")
+            self.assertEqual(str(q.expiry), near)
+            self.assertEqual(str(q.expiry_far), far)
         self.assertTrue(any("calendar convention" in n for n in run.quotes[1].notes))
         self.assertTrue(any("read literally" in n for n in run.quotes[2].notes))
 
@@ -3061,6 +4483,220 @@ class TestQuoteParsing(unittest.TestCase):
         self.assertEqual(profile, {"1M": 300.0, "3M": -120.0})
         self.assertEqual(skipped[0][0], 3)
         self.assertTrue(any("more than once" in n for n in notes))
+
+
+class TestColumnQuotes(unittest.TestCase):
+    """A run written as ``expiry, strike, bid/offer`` columns.
+
+    The same parser reads it and the broker-English form, because a run that
+    mixes them -- and they do -- must not depend on which line came first.
+    """
+
+    def parse(self, text, **kw):
+        kw.setdefault("pair", "EURUSD")
+        return quotes.parse_quotes(text, **kw)
+
+    def test_the_three_strike_column_spellings_all_read(self):
+        run = self.parse("09:15, 1M, ATM, 8.20/8.60\n"
+                         "09:15, 3M, 1.0900, 8.10/8.50\n"
+                         "09:15, 2M, 25d, 8.00/8.40\n"
+                         "09:15, 6M, 25dp, 7.90/8.30\n")
+        self.assertEqual(len(run.quotes), 4, run.skipped)
+        atm, strike, call, put = run.quotes
+        self.assertEqual(atm.instrument, "atm")
+        self.assertEqual((strike.instrument, strike.strike), ("outright", 1.09))
+        self.assertEqual((call.instrument, call.delta, call.is_call), ("outright", 0.25, True))
+        self.assertEqual((put.instrument, put.delta, put.is_call), ("outright", 0.10 * 2.5, False))
+        self.assertAlmostEqual(atm.bid, 0.0820)
+        self.assertAlmostEqual(strike.ask, 0.0850)
+
+    def test_an_absolute_strike_needs_no_side_and_is_not_called_a_put(self):
+        """The volatility at a strike is one number whichever side quotes it.
+
+        ``is_call`` defaulted to None and ``describe`` read None as a put, so a
+        strike-column quote came back labelled as something it was not.
+        """
+        q = self.parse("3M, 1.0900, 8.10/8.50").quotes[0]
+        self.assertIsNone(q.is_call)
+        self.assertEqual(q.describe(), "3M 1.09")
+        self.assertNotIn("put", q.describe())
+
+    def test_a_bare_delta_takes_the_call_wing_and_says_so(self):
+        """A delta names two strikes, one on each wing, so it has to pick.
+
+        It picks the same one the pricing screen's strike box picks for a bare
+        '25d', and reports it rather than letting the choice be invisible.
+        """
+        q = self.parse("2M, 25d, 8.00/8.40").quotes[0]
+        self.assertTrue(q.is_call)
+        self.assertTrue(any("bare delta" in n for n in q.notes), q.notes)
+
+    def test_a_comma_is_a_column_boundary_and_a_price_never_straddles_one(self):
+        """This is the whole difference between two readings of three numbers.
+
+        ``3M, 7.75, 8.30`` is a choice at the 7.75 strike; ``3M 7.75 8.30``,
+        with no columns, is the two-way at-the-money it has always been. With
+        the commas thrown away, as they used to be, the two are the same line.
+        """
+        columned = self.parse("1M atm 8.2/8.6\n3M, 7.75, 8.30").quotes[1]
+        self.assertEqual(columned.instrument, "outright")
+        self.assertEqual(columned.strike, 7.75)
+        self.assertAlmostEqual(columned.bid, 0.0830)
+        self.assertAlmostEqual(columned.ask, 0.0830)
+
+        plain = self.parse("1M atm 8.2/8.6\n3M 7.75 8.30").quotes[1]
+        self.assertEqual(plain.instrument, "atm")
+        self.assertAlmostEqual(plain.bid, 0.0775)
+        self.assertAlmostEqual(plain.ask, 0.0830)
+
+    def test_a_thousands_separator_is_not_a_column(self):
+        q = self.parse("1M ATM 8.20/8.60 in 1,000mm vega").quotes[0]
+        self.assertEqual(q.instrument, "atm")
+        self.assertEqual(q.size, 1000.0)
+        self.assertAlmostEqual(q.bid, 0.0820)
+
+    def test_two_numbers_before_the_price_column_are_refused(self):
+        run = self.parse("1M atm 8.2/8.6\n3M, 7.75, 7.80, 8.10/8.50")
+        self.assertEqual(len(run.quotes), 1)
+        self.assertIn("strike column holds one strike", run.skipped[0][2])
+
+    def test_a_column_header_is_recognised_rather_than_reported_as_a_bad_line(self):
+        """A run pasted out of a spreadsheet brings its header with it.
+
+        Listing it as a line that could not be read is noise on top of a paste
+        that worked; it is passed over and said so instead. Two header words at
+        least, because one stray word is more likely a quote that failed.
+        """
+        run = self.parse("time, expiry, strike, bid/offer\n09:15, 1M, ATM, 8.20/8.60\n")
+        self.assertEqual(len(run.quotes), 1)
+        self.assertEqual(run.skipped, ())
+        self.assertTrue(any("column header" in n for n in run.notes))
+
+        # One word is not a header, and a line with numbers in it never is.
+        broken = self.parse("1M atm 8.2/8.6\nstrike\n")
+        self.assertEqual(len(broken.skipped), 1)
+
+    def test_broker_english_still_reads_the_way_it_did(self):
+        """The columnar reading must not have moved the old one."""
+        run = self.parse("1M ATM 8.20/8.60 in 100mm vega\n"
+                         "3M 25d RR 0.35/0.55 eur call over\n"
+                         "2M 25d fly 0.20/0.28\n"
+                         "6M 1.1000 call 7.90/8.40\n"
+                         "1M/3M ATM spread 0.30/0.55\n")
+        self.assertEqual([q.instrument for q in run.quotes],
+                         ["atm", "rr", "fly", "outright", "spread"])
+        self.assertAlmostEqual(run.quotes[3].strike, 1.1000)
+        self.assertTrue(run.quotes[3].is_call)
+
+
+class TestQuoteTimestamps(unittest.TestCase):
+    """A run is a conversation: the same thing is quoted again as it moves."""
+
+    def parse(self, text, **kw):
+        kw.setdefault("pair", "EURUSD")
+        return quotes.parse_quotes(text, **kw)
+
+    def test_a_later_timestamp_wins_whatever_order_it_was_pasted_in(self):
+        """The point of reading the timestamp at all.
+
+        Line 3 is the newest quote and line 5 is an older one pasted after it;
+        without timestamps the last line would win and the screen would show a
+        stale market as the live one.
+        """
+        run = self.parse("09:15, 1M, ATM, 8.20/8.60\n"
+                         "09:41, 1M, ATM, 8.25/8.65\n"
+                         "09:05, 1M, ATM, 8.10/8.50\n")
+        self.assertEqual(len(run.quotes), 1)
+        self.assertAlmostEqual(run.quotes[0].bid, 0.0825)
+        self.assertEqual(run.quotes[0].line, 2)
+        self.assertEqual({q.line for q in run.superseded}, {1, 3})
+        self.assertTrue(all(q.replaced_by == 2 for q in run.superseded))
+
+    def test_without_timestamps_the_later_line_wins(self):
+        """The only ordering an untimed line carries is where it was written."""
+        run = self.parse("1M ATM 8.20/8.60\n1M ATM 8.25/8.65\n")
+        self.assertEqual(len(run.quotes), 1)
+        self.assertAlmostEqual(run.quotes[0].bid, 0.0825)
+        self.assertEqual(run.superseded[0].line, 1)
+
+    def test_only_the_same_thing_is_superseded(self):
+        """An update replaces its own quote and nothing else."""
+        run = self.parse("09:15, 1M, ATM, 8.20/8.60\n"
+                         "09:41, 1M, ATM, 8.25/8.65\n"
+                         "09:41, 3M, ATM, 8.40/8.80\n"
+                         "09:41, 1M, 25d, 8.30/8.70\n")
+        self.assertEqual(len(run.quotes), 3)
+        self.assertEqual(len(run.superseded), 1)
+        self.assertEqual({q.describe() for q in run.quotes},
+                         {"1M ATM", "3M ATM", "1M 25d call"})
+
+    def test_a_market_strangle_and_a_smile_fly_are_not_the_same_quote(self):
+        run = self.parse("1M atm 8.2/8.6\n1M 25d strangle 0.20/0.28\n"
+                         "1M 25d smile fly 0.20/0.28\n")
+        self.assertEqual(len(run.quotes), 3)
+        self.assertEqual(run.superseded, ())
+
+    def test_the_survivor_keeps_the_first_position(self):
+        """An updated run reads in the order it was written."""
+        run = self.parse("09:15, 1M, ATM, 8.20/8.60\n"
+                         "09:15, 3M, ATM, 8.40/8.80\n"
+                         "09:41, 1M, ATM, 8.25/8.65\n")
+        self.assertEqual([q.describe() for q in run.quotes], ["1M ATM", "3M ATM"])
+
+    def test_a_time_only_line_takes_the_last_date_above_it(self):
+        run = self.parse("2024-02-28 09:15, 1M, ATM, 8.20/8.60\n"
+                         "09:41, 1M, ATM, 8.25/8.65\n")
+        self.assertEqual(len(run.quotes), 1)
+        self.assertAlmostEqual(run.quotes[0].bid, 0.0825)
+        self.assertEqual(run.quotes[0].timestamp.strftime("%Y-%m-%d %H:%M"), "2024-02-28 09:41")
+        self.assertTrue(any("took the last date above them" in n for n in run.notes))
+
+    def test_an_undated_run_says_it_is_ordered_as_one_day(self):
+        """That ordering is wrong across midnight, so it is stated."""
+        run = self.parse("09:15, 1M, ATM, 8.20/8.60\n23:50, 3M, ATM, 8.40/8.80\n")
+        self.assertTrue(any("one day" in n and "midnight" in n for n in run.notes))
+        # And the nominal day is never shown: the text is what was written.
+        self.assertEqual([q.timestamp_text for q in run.quotes], ["09:15", "23:50"])
+
+    def test_a_date_alone_is_an_expiry_and_a_date_with_a_time_is_a_stamp(self):
+        """Reading one as the other moves a quote to a tenor nobody asked for."""
+        expiry = self.parse("2024-05-28 ATM 8.15/8.55").quotes[0]
+        self.assertEqual(expiry.timestamp_text, "")
+        self.assertEqual(str(expiry.expiry)[:10], "2024-05-28")
+
+        stamped = self.parse("2024-02-28T10:05Z, 1M, ATM, 8.30/8.70").quotes[0]
+        self.assertEqual(str(stamped.expiry), "1M")
+        self.assertEqual(stamped.timestamp.strftime("%Y-%m-%d %H:%M"), "2024-02-28 10:05")
+
+    def test_a_bracketed_time_is_a_time_and_not_a_label(self):
+        run = self.parse("[08:00] 3M ATM 8.00/8.40\n[broker A] 1M ATM 8.20/8.60")
+        self.assertEqual(run.quotes[0].timestamp_text, "08:00")
+        self.assertEqual(run.quotes[0].label, "")
+        self.assertEqual(run.quotes[1].label, "broker a")
+        self.assertEqual(run.quotes[1].timestamp_text, "")
+
+    def test_a_superseded_quote_is_kept_rather_than_dropped(self):
+        """A line read, understood and then silently discarded is the failure
+        this module exists to remove."""
+        run = self.parse("09:15, 1M, ATM, 8.20/8.60\n09:41, 1M, ATM, 8.25/8.65\n")
+        self.assertEqual(len(run.all_quotes), 2)
+        self.assertEqual([q.line for q in run.all_quotes], [1, 2])
+        self.assertTrue(any("replaced by a later quote" in n for n in run.notes))
+
+    def test_the_panel_reports_the_time_and_what_it_replaced(self):
+        from volkit import marketmaker as mm
+        panel = mm.panel_from_request({
+            "pair": "EURUSD", "cut": "NY", "method": "SVI",
+            "text": ("09:15, 1M, ATM, 8.20/8.60\n09:41, 1M, ATM, 8.25/8.65\n"
+                     "09:20, 2M, 25d, 8.00/8.40\n"),
+            "fit_curve": False, "tune_wings": False, "fallback_spread": 0.3,
+        })
+        book = Book.from_excel(WORKBOOK, ASOF).load_all(["EURUSD"])
+        sheet = panel.run(book)["sheet"]
+        self.assertEqual([r["timestamp"] for r in sheet["rows"]], ["09:41", "09:20"])
+        self.assertEqual(len(sheet["superseded"]), 1)
+        self.assertEqual(sheet["superseded"][0]["replaced_by"], 2)
+        self.assertAlmostEqual(sheet["superseded"][0]["bid"], 8.20)
 
 
 class TestKnowledgeBank(unittest.TestCase):
@@ -3143,10 +4779,17 @@ class TestKnowledgeBank(unittest.TestCase):
 
     def test_learning_measures_the_paste_and_ignores_choice_prices(self):
         """A quote written as a single mid has no width; averaging its zero in
-        would quietly tighten the whole ladder."""
+        would quietly tighten the whole ladder.
+
+        The two 1M lines are the same quote twice, so only the later one is
+        live -- but both are evidence of how wide this market is shown, which
+        is why the bank reads ``all_quotes`` and the fit reads ``quotes``.
+        """
         run = quotes.parse_quotes(
             "1M atm 8.20/8.60\n1M atm 8.30/8.70\n2M atm 9.00\n", pair="EURUSD")
-        rules, notes = suggest_rules(run.quotes, days_of=lambda q: 30.0)
+        self.assertEqual(len(run.quotes), 2)
+        self.assertEqual(len(run.superseded), 1)
+        rules, notes = suggest_rules(run.all_quotes, days_of=lambda q: 30.0)
         self.assertEqual(len(rules), 1)
         self.assertAlmostEqual(rules[0].value, 0.0040)
         self.assertIn("median of 2", rules[0].text)

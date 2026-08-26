@@ -124,14 +124,38 @@ _DATETIME_FORMATS = (
 
 
 def parse_datetime(text: str) -> datetime:
-    """Parse a date/datetime string, trying ISO first then the legacy US formats."""
-    text = text.strip()
+    """Parse a date/datetime string: the tabular formats, then ISO 8601.
+
+    The explicit formats are tried first and unchanged, so nothing a workbook
+    or a paste already parses moves.  ISO 8601 is the fallback because it is
+    the form the tool itself *writes* -- the valuation stamp in
+    ``/api/state``, the timestamps in a session file, the value a browser's
+    ``datetime-local`` field carries -- and reading back what you printed
+    should not need a translation step at every call site.
+
+    Three callers had each written that step for themselves, and they had
+    written it differently: the listed panel understood a trailing ``Z`` and
+    an offset, the events route and the session loader understood neither, so
+    one string parsed on one screen and failed on the next.  Worse, dropping
+    an offset and then stamping the result UTC reads ``19:00+09:00`` as
+    19:00Z -- a nine-hour error in an expiry, arrived at silently.  An offset
+    is *converted* here, not discarded.
+
+    A naive string is still UTC, which is what every caller means: these are
+    market timestamps and this package has one time zone inside it.
+    """
+    text = str(text).strip()
     for fmt in _DATETIME_FORMATS:
         try:
             return datetime.strptime(text, fmt).replace(tzinfo=UTC)
         except ValueError:
             continue
-    raise ValueError(f"cannot parse datetime {text!r}; tried {len(_DATETIME_FORMATS)} formats")
+    try:
+        return as_utc(datetime.fromisoformat(text))
+    except ValueError:
+        raise ValueError(
+            f"cannot parse datetime {text!r}; tried {len(_DATETIME_FORMATS)} formats "
+            f"and ISO 8601") from None
 
 
 @dataclass(frozen=True)

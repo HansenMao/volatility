@@ -32,10 +32,12 @@ import numpy as np
 import pandas as pd
 
 from .calendars import CalendarSet, DEFAULT_CALENDARS
+from .marketdata import open_workbook
 from .timeutil import UTC, DAYS_IN_YEAR, TenorError, parse_tenor, tenor_to_years
 from .timeweight import TimeWeighting
 
 ANNUALISATIONS = ("weighted", "calendar", "count")
+RETURN_BASES = ("spot", "forward", "auto")
 BUSINESS_DAYS_PER_YEAR = 252.0
 
 # Header words, after normalisation, and the field they name.
@@ -285,25 +287,30 @@ def load_history(path: str | Path, known_pairs=None, *, vol_unit: str = "auto") 
         raise HistoryError(f"historical workbook not found: {path}")
     known = {p.upper() for p in known_pairs} if known_pairs else None
     try:
-        book = pd.ExcelFile(path)
+        book = open_workbook(path)
     except Exception as exc:  # noqa: BLE001 - reported with the file name
         raise HistoryError(f"could not open {path}: {type(exc).__name__}: {exc}") from None
 
+    # ``with``, because this workbook is the one a user is most likely to have
+    # open in Excel at the same time: it is their own history sheet, and the
+    # tool only reads it.  A reader left alive here is what stopped them
+    # saving it -- see ``marketdata.open_workbook``.
     out = History(source=str(path))
-    for sheet in book.sheet_names:
-        pair = _sheet_to_pair(sheet, known)
-        if pair is None:
-            out.skipped_sheets.append(f"{sheet!r}: the sheet name does not look like a pair")
-            continue
-        try:
-            hist = _read_sheet(book, sheet, pair, vol_unit)
-        except HistoryError as exc:
-            out.skipped_sheets.append(f"{sheet!r}: {exc}")
-            continue
-        if pair in out.pairs:
-            out.problems.append(f"{pair}: more than one sheet maps to it; kept {sheet!r}")
-        out.pairs[pair] = hist
-        out.problems.extend(f"{pair}: {p}" for p in hist.problems)
+    with book:
+        for sheet in book.sheet_names:
+            pair = _sheet_to_pair(sheet, known)
+            if pair is None:
+                out.skipped_sheets.append(f"{sheet!r}: the sheet name does not look like a pair")
+                continue
+            try:
+                hist = _read_sheet(book, sheet, pair, vol_unit)
+            except HistoryError as exc:
+                out.skipped_sheets.append(f"{sheet!r}: {exc}")
+                continue
+            if pair in out.pairs:
+                out.problems.append(f"{pair}: more than one sheet maps to it; kept {sheet!r}")
+            out.pairs[pair] = hist
+            out.problems.extend(f"{pair}: {p}" for p in hist.problems)
     if not out.pairs:
         raise HistoryError(
             f"{path}: no sheet could be read as a pair history. "
@@ -423,6 +430,72 @@ def _vol_divisor(staged, vol_unit: str) -> tuple[float, str]:
 # what actually happened
 # ---------------------------------------------------------------------------
 
+def forward_series(hist: PairHistory, tenor: str) -> tuple[np.ndarray | None, str]:
+    """The outright forward series at ``tenor``, interpolated if it is not quoted.
+
+    A historical sheet holds a handful of pillars and a workbook holds nine
+    tenors, so asking for the exact one usually misses.  Falling back to spot
+    on the misses and to the forward on the hits was the first cut, and it is
+    the worse answer: it puts two different measurements in one column, so the
+    term structure of realized volatility develops steps at whichever tenors
+    the sheet happens to quote.
+
+    So the carry is interpolated instead, the same way ``feed.py`` interpolates
+    a live curve: linearly in time on ``log(F/S)``, which is the swap points as
+    a ratio, held flat beyond the last pillar and scaled to zero below the
+    first.  Returns ``(series, note)``; the note is empty when the tenor was
+    quoted outright and says what was done otherwise.
+    """
+    key = tenor.upper()
+    exact = hist.forwards.get(key)
+    if exact is not None:
+        return exact, ""
+    pillars = [(tenor_to_years(k), v) for k, v in hist.forwards.items()]
+    pillars = [(t, v) for t, v in pillars if t > 0]
+    if not pillars or not hist.spot.size:
+        return None, ""
+    pillars.sort(key=lambda z: z[0])
+    tau = tenor_to_years(key)
+    ts = np.array([t for t, _ in pillars])
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ratios = np.vstack([np.log(np.where(v > 0, v, np.nan) / hist.spot) for _, v in pillars])
+    if tau <= ts[0]:
+        # Swap points vanish at zero time, so the front pillar is scaled down
+        # rather than held flat across the very short end.
+        out = ratios[0] * (tau / ts[0])
+        where = f"scaled down from the {_name_of(hist, ts[0])} pillar"
+    elif tau >= ts[-1]:
+        out = ratios[-1]
+        where = f"held flat from the {_name_of(hist, ts[-1])} pillar"
+    else:
+        j = int(np.searchsorted(ts, tau))
+        w = (tau - ts[j - 1]) / (ts[j] - ts[j - 1])
+        out = (1.0 - w) * ratios[j - 1] + w * ratios[j]
+        where = (f"interpolated between the {_name_of(hist, ts[j - 1])} and "
+                 f"{_name_of(hist, ts[j])} pillars")
+    return hist.spot * np.exp(out), f"the sheet quotes no forward at {key}; the carry was {where}"
+
+
+def _name_of(hist: PairHistory, years: float) -> str:
+    for k in hist.forwards:
+        if abs(tenor_to_years(k) - years) < 1e-12:
+            return k
+    return f"{years:.3f}y"
+
+
+def nearest_quoted_tenor(quoted, tenor: str) -> str | None:
+    """The quoted tenor closest to ``tenor`` in log time, or ``None``.
+
+    Log time rather than years: 1W is as far from 2W as 6M is from 1Y, and a
+    linear distance would answer 2Y for a 1Y request over a 6M one.
+    """
+    keys = [k for k in quoted if tenor_to_years(k) > 0]
+    if not keys:
+        return None
+    target = math.log(tenor_to_years(tenor))
+    return min(keys, key=lambda k: abs(math.log(tenor_to_years(k)) - target))
+
+
 
 def volatility_time(pair: str, start: datetime, end: datetime, *,
                     calendars: CalendarSet | None = None,
@@ -469,6 +542,17 @@ class Realized:
     vol_time: float                  # years of weighted volatility time
     calendar_years: float
     annualisation: str = "weighted"
+    #: Which return series the numbers above were measured on -- ``spot`` or
+    #: ``forward`` -- and, when it is the forward, the tenor whose swap points
+    #: were used and what they contributed.  See ``realized`` for why an
+    #: implied volatility is a volatility of the forward and not of spot.
+    basis: str = "spot"
+    basis_tenor: str | None = None
+    vol_spot: float = float("nan")   # the same window measured on spot alone
+    vol_forward: float | None = None
+    points_vol: float | None = None  # annualised vol of the swap-point term alone
+    points_correlation: float | None = None   # corr(spot return, swap-point term)
+    carry_rate: float | None = None  # mean annualised carry over the window
     warnings: tuple[str, ...] = ()
 
     def scaled_skew(self, t: float) -> float:
@@ -518,18 +602,84 @@ def _shape(r: np.ndarray) -> tuple[float, float]:
 
 def realized(hist: PairHistory, lookback_days: float, *, end: date | None = None,
              annualisation: str = "weighted", calendars: CalendarSet | None = None,
-             min_observations: int = 10) -> Realized:
-    """Realized volatility, skewness and excess kurtosis over a lookback window."""
+             min_observations: int = 10, basis: str = "spot",
+             basis_tenor: str | None = None) -> Realized:
+    """Realized volatility, skewness and excess kurtosis over a lookback window.
+
+    ``basis`` decides *what* was realized, and it matters more than it looks.
+    A quoted volatility is the volatility of the **forward** to the expiry
+    date, not of spot: that is the thing the option is struck against and the
+    thing a delta hedge trades.  For most of G10 the two are within a few
+    hundredths of a volatility point, because the swap points barely move.
+    They are not the same number anywhere the rate differential is large or
+    unstable -- a high-carry pair, a managed pair whose points carry the whole
+    of the market's opinion, or a turn-of-year window -- and measuring spot
+    there understates what the option actually delivered.
+
+    * ``spot``    -- log returns of the spot column.  The previous behaviour,
+      and still the only thing available when the sheet has no points.
+    * ``forward`` -- log returns of the forward to a **fixed** expiry, rebuilt
+      from the constant-maturity quotes the sheet holds.  Writing the outright
+      as ``F = S exp(c tau)`` with ``c`` the annualised carry and ``tau`` the
+      remaining life, the step from one row to the next is
+
+          dlog F = dlog S + tau * dc - c * dt
+
+      The first two terms are what moved: spot, and the swap points *moving*.
+      The third is the points *decaying* by one day of carry, which is a known
+      slide and not a risk -- leaving it in the sum of squares would book the
+      carry itself as volatility, which is exactly backwards for the pairs
+      this basis exists for.  It is removed and reported as ``carry_rate``.
+    * ``auto``    -- ``forward`` when the sheet quotes the tenor, ``spot``
+      otherwise, saying which it used.
+
+    ``basis_tenor`` names the swap-point column to use.  There is no default:
+    the carry term structure is not flat, so a one-week and a one-year forward
+    do not realize the same volatility, and the caller knows which tenor it is
+    comparing against.
+    """
     if annualisation not in ANNUALISATIONS:
         raise ValueError(f"unknown annualisation {annualisation!r}; expected one of {ANNUALISATIONS}")
+    if basis not in RETURN_BASES:
+        raise ValueError(f"unknown basis {basis!r}; expected one of {RETURN_BASES}")
     if not hist.spot.size:
         raise HistoryError(f"{hist.pair}: the sheet has no spot column, so nothing was realized")
     i, j = hist.window(lookback_days, end)
     px = hist.spot[i:j]
     dates = hist.dates[i:j]
-    finite = np.isfinite(px) & (px > 0)
-    px, dates = px[finite], [d for d, ok in zip(dates, finite) if ok]
     warnings: list[str] = []
+
+    # The forward series has to survive the same row filter as spot, so the
+    # mask is built once from both.  Filtering them separately would leave the
+    # two arrays a different length and silently pair up different days.
+    fwd = tau = None
+    tenor = basis_tenor.upper() if basis_tenor else None
+    if basis in ("forward", "auto"):
+        why = None
+        if tenor is None:
+            why = "no tenor was named, so there is no swap-point column to use"
+        else:
+            series, note = forward_series(hist, tenor)
+            if series is None:
+                why = (f"the sheet quotes no forward or swap points at all "
+                       f"(it has {', '.join(hist.tenors) or 'none'})")
+            else:
+                fwd = series[i:j]
+                tau = tenor_to_years(tenor)
+                if note:
+                    warnings.append(note)
+        if why is not None:
+            if basis == "forward":
+                raise HistoryError(f"{hist.pair}: a forward-basis realized volatility needs a "
+                                   f"forward series, but {why}")
+            warnings.append(f"realized on spot rather than the forward: {why}")
+
+    finite = np.isfinite(px) & (px > 0)
+    if fwd is not None:
+        finite &= np.isfinite(fwd) & (fwd > 0)
+    px, dates = px[finite], [d for d, ok in zip(dates, finite) if ok]
+    if fwd is not None:
+        fwd = fwd[finite]
     dropped = int((~finite).sum())
     if dropped:
         warnings.append(f"{dropped} row(s) in the window had no usable spot and were skipped")
@@ -538,13 +688,23 @@ def realized(hist: PairHistory, lookback_days: float, *, end: date | None = None
             f"{hist.pair}: {px.size} usable spot observation(s) in the last "
             f"{lookback_days:g} days; at least {min_observations + 1} are needed"
         )
-    r = np.diff(np.log(px))
+    r_spot = np.diff(np.log(px))
     gaps = np.array([(b - a).days for a, b in zip(dates[:-1], dates[1:])], dtype=float)
     if gaps.size and float(np.max(gaps)) > 10.0:
         warnings.append(
             f"the largest gap between observations is {float(np.max(gaps)):.0f} days; "
             f"the series is not daily throughout the window"
         )
+
+    points_term = points_vol = points_corr = carry_rate = None
+    r = r_spot
+    used_basis = "spot"
+    if fwd is not None:
+        carry = np.log(fwd / px) / tau              # annualised, continuous
+        points_term = tau * np.diff(carry)
+        r = r_spot + points_term
+        carry_rate = float(np.mean(carry))
+        used_basis = "forward"
 
     start_dt = datetime.combine(dates[0], datetime.min.time()).replace(tzinfo=UTC)
     end_dt = datetime.combine(dates[-1], datetime.min.time()).replace(tzinfo=UTC)
@@ -554,16 +714,25 @@ def realized(hist: PairHistory, lookback_days: float, *, end: date | None = None
     # Zero-mean, which is the market convention: over a lookback of months the
     # drift is far smaller than the noise in estimating it, and subtracting a
     # sample mean adds variance to the estimator rather than removing bias.
-    ss = float(np.sum(r * r))
-    def annualise(denominator: float, what: str) -> float:
+    def annualise(series: np.ndarray, denominator: float, what: str) -> float:
         if denominator <= 0:
             raise HistoryError(f"{hist.pair}: {what} over the window is not positive")
-        return math.sqrt(ss / denominator)
+        return math.sqrt(float(np.sum(series * series)) / denominator)
 
-    vol_weighted = annualise(vt, "weighted volatility time")
-    vol_calendar = annualise(cal_years, "calendar time")
+    ss = float(np.sum(r * r))
+    vol_weighted = annualise(r, vt, "weighted volatility time")
+    vol_calendar = annualise(r, cal_years, "calendar time")
     vol_count = math.sqrt(ss / (r.size / BUSINESS_DAYS_PER_YEAR))
     chosen = {"weighted": vol_weighted, "calendar": vol_calendar, "count": vol_count}[annualisation]
+    denominator = {"weighted": vt, "calendar": cal_years,
+                   "count": r.size / BUSINESS_DAYS_PER_YEAR}[annualisation]
+    vol_spot = annualise(r_spot, denominator, "the annualisation window")
+    vol_forward = chosen if points_term is not None else None
+    if points_term is not None:
+        points_vol = annualise(points_term, denominator, "the annualisation window")
+        sd_s, sd_p = float(np.std(r_spot)), float(np.std(points_term))
+        if sd_s > 0 and sd_p > 0:
+            points_corr = float(np.corrcoef(r_spot, points_term)[0, 1])
 
     skew, exkurt = _shape(r)
     n = r.size
@@ -579,6 +748,9 @@ def realized(hist: PairHistory, lookback_days: float, *, end: date | None = None
         vol=chosen, vol_calendar=vol_calendar, vol_count=vol_count,
         skew=skew, excess_kurtosis=exkurt, skew_se=se_skew, kurtosis_se=se_kurt,
         vol_time=vt, calendar_years=cal_years, annualisation=annualisation,
+        basis=used_basis, basis_tenor=(tenor if used_basis == "forward" else None),
+        vol_spot=vol_spot, vol_forward=vol_forward, points_vol=points_vol,
+        points_correlation=points_corr, carry_rate=carry_rate,
         warnings=tuple(warnings),
     )
 
@@ -616,3 +788,147 @@ def implied_stats(hist: PairHistory, lookback_days: float, field_name: str, teno
         return None
     i, j = hist.window(lookback_days, end)
     return SeriesStats.of(series[i:j], current)
+
+
+@dataclass(frozen=True)
+class VolDynamics:
+    """What the volatility itself did: how it moved with spot, and how much.
+
+    These are the two numbers a SABR smile is made of.  ``rho`` is the
+    correlation between the spot return and the move in the volatility -- the
+    thing a risk reversal is paid for -- and ``nu`` is the volatility of that
+    volatility, annualised, which is what a butterfly is paid for.  Measuring
+    them from history is the only way to hold a quoted wing up against
+    something other than another quote.
+    """
+
+    pair: str
+    tenor: str
+    source: str                      # "quoted" | "rolling"
+    observations: int
+    rho: float
+    nu: float
+    rho_se: float
+    nu_se: float
+    vol_mean: float                  # mean level of the volatility series used
+    vol_time: float
+    warnings: tuple[str, ...] = ()
+
+
+def vol_dynamics(hist: PairHistory, lookback_days: float, tenor: str, *,
+                 end: date | None = None, calendars: CalendarSet | None = None,
+                 min_observations: int = 20, rolling_window: int = 21) -> VolDynamics:
+    """Realized spot/volatility correlation and volatility of volatility.
+
+    Under SABR with ``beta = 1`` the at-the-money volatility of any expiry is
+    the state variable ``alpha`` itself, whose dynamics are
+    ``d alpha / alpha = nu dW`` with ``corr(dW, dZ) = rho``.  So the two
+    parameters are directly measurable: regress the log change in the quoted
+    at-the-money volatility on the log change in spot and you have ``rho``;
+    annualise the log change in volatility and you have ``nu``.  That is what
+    this does, on the **quoted** at-the-money series when the sheet has one
+    for the tenor, and on a rolling realized volatility when it does not.
+
+    Both are annualised on the model's own volatility time, like every other
+    realized figure here, so ``nu`` is comparable with the ``nu`` a marked
+    smile implies rather than with a 252-day version of it.
+
+    Two things this is not.  SABR has no mean reversion, so a real volatility
+    process -- which does revert -- shows a ``nu`` that falls with the tenor
+    of the series it is measured on; the number is reported per tenor and must
+    not be blended across them.  And the rolling fallback measures an
+    *average* of past volatility, whose changes are damped by the averaging,
+    so its ``nu`` is a floor rather than an estimate.  It says so.
+    """
+    key = tenor.upper()
+    if not hist.spot.size:
+        raise HistoryError(f"{hist.pair}: the sheet has no spot column, so nothing was realized")
+    i, j = hist.window(lookback_days, end)
+    px = hist.spot[i:j]
+    dates = hist.dates[i:j]
+    warnings: list[str] = []
+
+    quoted = hist.atm.get(key)
+    if quoted is None:
+        # The quoted volatility term structure is not something to interpolate
+        # -- the *changes* of a made-up column are not the changes of anything
+        # -- so the nearest pillar the sheet really quotes is used instead, and
+        # named.
+        near = nearest_quoted_tenor(hist.atm, key)
+        if near is not None:
+            quoted = hist.atm[near]
+            warnings.append(
+                f"the sheet quotes no at-the-money volatility at {key}; the dynamics were "
+                f"measured on its {near} column instead")
+            key = near
+    source = "quoted"
+    if quoted is not None:
+        vol = quoted[i:j]
+        finite = np.isfinite(px) & (px > 0) & np.isfinite(vol) & (vol > 0)
+        px, vol = px[finite], vol[finite]
+        dates = [d for d, ok in zip(dates, finite) if ok]
+    else:
+        source = "rolling"
+        warnings.append(
+            f"the sheet quotes no at-the-money volatility at {key}, so the dynamics were "
+            f"measured on a {rolling_window}-observation rolling realized volatility instead. "
+            f"A rolling average moves less than the thing it averages, so this vol-of-vol is a "
+            f"floor, not an estimate"
+        )
+        finite = np.isfinite(px) & (px > 0)
+        px = px[finite]
+        dates = [d for d, ok in zip(dates, finite) if ok]
+        if px.size < rolling_window + min_observations + 1:
+            raise HistoryError(
+                f"{hist.pair}: {px.size} usable spot observation(s) is not enough for a "
+                f"{rolling_window}-observation rolling volatility plus {min_observations} "
+                f"changes of it"
+            )
+        step = np.diff(np.log(px))
+        # Trailing root mean square over the window, one value per date from
+        # ``rolling_window`` onwards.  Unannualised: only its *log changes*
+        # are used, and any constant scale cancels out of those.
+        sq = np.concatenate(([0.0], np.cumsum(step * step)))
+        rms = np.sqrt((sq[rolling_window:] - sq[:-rolling_window]) / rolling_window)
+        keep = rms > 0
+        vol = rms[keep]
+        # The spot series is realigned to the dates the rolling volatility has.
+        px = px[rolling_window:][keep]
+        dates = dates[rolling_window:]
+        dates = [d for d, ok in zip(dates, keep) if ok]
+
+    if px.size < min_observations + 1:
+        raise HistoryError(
+            f"{hist.pair}: {px.size} paired spot / volatility observation(s) at {key} in the "
+            f"last {lookback_days:g} days; at least {min_observations + 1} are needed"
+        )
+
+    x = np.diff(np.log(px))
+    y = np.diff(np.log(vol))
+    n = x.size
+    start_dt = datetime.combine(dates[0], datetime.min.time()).replace(tzinfo=UTC)
+    end_dt = datetime.combine(dates[-1], datetime.min.time()).replace(tzinfo=UTC)
+    vt = volatility_time(hist.pair, start_dt, end_dt, calendars=calendars)
+    if vt <= 0:
+        raise HistoryError(f"{hist.pair}: weighted volatility time over the window is not positive")
+
+    sd_x, sd_y = float(np.std(x)), float(np.std(y))
+    if sd_x <= 0 or sd_y <= 0:
+        raise HistoryError(f"{hist.pair}: spot or volatility did not move at {key} over the window")
+    rho = float(np.corrcoef(x, y)[0, 1])
+    # Zero-mean, for the same reason the realized volatility is zero-mean: the
+    # drift in a volatility series over a lookback is far smaller than the
+    # noise in estimating it.
+    nu = math.sqrt(float(np.sum(y * y)) / vt)
+    rho_se = (1.0 - rho * rho) / math.sqrt(n) if n > 2 else float("nan")
+    nu_se = nu / math.sqrt(2.0 * n) if n > 0 else float("nan")
+    if math.isfinite(rho_se) and abs(rho) < rho_se:
+        warnings.append(
+            f"the measured spot/volatility correlation of {rho:+.3f} is inside one standard "
+            f"error ({rho_se:.3f}) of zero on {n} observations; it is not distinguishable "
+            f"from noise"
+        )
+    return VolDynamics(pair=hist.pair, tenor=key, source=source, observations=n,
+                       rho=rho, nu=nu, rho_se=rho_se, nu_se=nu_se,
+                       vol_mean=float(np.mean(vol)), vol_time=vt,
+                       warnings=tuple(warnings))

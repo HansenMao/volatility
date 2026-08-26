@@ -97,7 +97,12 @@ class MarketFeed:
         feed = cls(source=str(path))
         spots: dict[str, float] = {}
         pillars: dict[str, list[tuple[str, float]]] = {}
-        for lineno, row in enumerate(csv.reader(path.open()), start=1):
+        # Read whole, and closed: this file is published onto a desk share
+        # and is often open in Excel at the other end.  A reader left alive
+        # holds it there -- the same lock the workbooks had.
+        with path.open(newline="") as fh:
+            rows = list(csv.reader(fh))
+        for lineno, row in enumerate(rows, start=1):
             if not row or row[0].lstrip().startswith("#"):
                 if row and "asof" in row[0].lower():
                     feed.asof = row[0].split(":", 1)[-1].strip()
