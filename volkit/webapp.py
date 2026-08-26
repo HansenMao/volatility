@@ -45,6 +45,8 @@ from .quotes import FLY_CONVENTIONS
 from .quotes import VOL_UNITS as QUOTE_VOL_UNITS
 from .surface import PARAM_NAMES
 from .analytics import TARGETS, carry_table, fair_value_table, realized_table, triangle_table
+from .relvalue import HISTORY_DAYS, SHARED, SIGNALS, WEIGHTS
+from .relvalue import panel_from_request as relvalue_panel_from_request
 from .banded import BAND_MODES, BandTreatment, band_panel
 from .curves import CURVE_FIELDS, CURVE_KINDS, FIELD_LABELS, KIND_LABELS
 from .curves import panel_from_request as curve_panel_from_request
@@ -197,6 +199,14 @@ class BookService:
                     "vol_units": list(VOL_UNITS),
                     "curve_kinds": [{"key": k, "label": KIND_LABELS[k]} for k in CURVE_KINDS],
                     "curve_fields": [{"key": f, "label": FIELD_LABELS[f]} for f in CURVE_FIELDS],
+                    # The relative-value grid's own vocabulary.  The weights
+                    # are a marking judgement rather than a result, so the
+                    # page shows them and can send its own back; declared
+                    # once, in relvalue.py, so the panel cannot offer a
+                    # signal the scorer has never heard of.
+                    "signals": [{"key": k, "label": v, "weight": WEIGHTS[k],
+                                 "shared": k in SHARED} for k, v in SIGNALS],
+                    "history_days": HISTORY_DAYS,
                 },
                 # The monitor screen shares the curve vocabulary but not the
                 # paste source: a tile is a difference between two curves the
@@ -1085,6 +1095,34 @@ class BookService:
                     f"{pair} is not a cross, so there is no triangle to check")
             return out
 
+    def relative_value(self, q: dict) -> dict:
+        """Score the expiry / strike surface of one pair for relative value.
+
+        Its own route rather than another section of ``/api/analysis``,
+        because it is the most expensive thing on the screen -- five passes of
+        the rolldown and, for a cross, the whole distribution triangle -- and
+        the tables above it must not wait for it.  A pure function of the
+        request plus the book, like every other endpoint: the panel is the
+        browser's and is posted whole.
+        """
+        with self._lock:
+            if self.book is None:
+                raise ValueError(self.load_error or "no workbook is loaded")
+            panel = relvalue_panel_from_request(q)
+            if panel.pair not in self.book:
+                raise ValueError(f"{panel.pair} is not built in this book")
+            out = asdict(panel.run(self.book, self.history))
+            if self.history is None:
+                out["unavailable"]["history"] = (
+                    "no historical workbook is loaded, so there is no realized volatility "
+                    "to compare against and no scale to score on")
+            elif panel.pair not in self.history:
+                out["unavailable"]["history"] = (
+                    f"the historical workbook has no sheet for {panel.pair}; it holds "
+                    f"{', '.join(sorted(self.history.pairs))}")
+            out["valuation"] = self.book.clock.now.isoformat()
+            return out
+
     def compare_curves(self, payload: dict) -> dict:
         """Several curves side by side, and the same curve on other dates.
 
@@ -1351,6 +1389,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self.service.suggest_events(q))
             elif url.path == "/api/analysis":
                 self._json(self.service.analysis(q))
+            elif url.path == "/api/relvalue":
+                self._json(self.service.relative_value(q))
             elif url.path == "/api/history":
                 self._json(self.service.history_state())
             elif url.path == "/api/session":
@@ -1416,6 +1456,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self.service.mm_save_bank(payload))
             elif url.path == "/api/analysis":
                 self._json(self.service.analysis(payload))
+            elif url.path == "/api/relvalue":
+                self._json(self.service.relative_value(payload))
             elif url.path == "/api/history":
                 self._json(self.service.load_history(payload))
             elif url.path == "/api/session/save":

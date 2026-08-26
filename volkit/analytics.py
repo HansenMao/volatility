@@ -89,7 +89,8 @@ class RollDown:
 
         ``vega``  -- vol move valued at the average vega of the two points.
         ``vol``   -- the raw vol move.
-        ``delta`` -- forward move valued at the average delta.
+        ``delta`` -- forward move valued at the average **smile** delta, which
+        includes the volatility's own reaction to the forward.
         """
         v_far = float(self.surface.vol(strike / f_far, t_far, self.method))
         v_near = float(self.surface.vol(strike / f_near, t_near, self.method))
@@ -100,9 +101,13 @@ class RollDown:
             vega_near = float(black.vega(f_near, strike, v_near, t_near))
             return 0.5 * (vega_far + vega_near) * (v_near - v_far)
         if measure == "delta":
+            # The smile's own delta, not Black-Scholes': this is a fixed
+            # strike sliding under a moving forward, so the volatility it is
+            # marked at moves too, and a delta that held it still would value
+            # the move short by the skew's contribution.
             is_call = strike >= f_far
-            d_far = float(black.delta(f_far, strike, v_far, t_far, is_call, self.surface.conv))
-            d_near = float(black.delta(f_near, strike, v_near, t_near, is_call, self.surface.conv))
+            d_far = float(self.surface.smile_delta(f_far, strike, t_far, is_call, self.method))
+            d_near = float(self.surface.smile_delta(f_near, strike, t_near, is_call, self.method))
             return 0.5 * (d_far + d_near) * (f_near - f_far)
         raise ValueError(f"unknown measure {measure!r}; expected 'vega', 'vol' or 'delta'")
 
@@ -316,7 +321,22 @@ class CarryRow:
     #: maturity held, and ``carry_vols`` that P&L divided by the position's own
     #: vega, which is the form that can be compared with ``roll``.
     carry_rate: float = float("nan")
+    #: ``delta`` is the Black-Scholes delta: the closed-form sensitivity at
+    #: the option's own volatility with that volatility *held fixed* as the
+    #: forward moves.  ``smile_delta`` is the same position's ``dV/dF`` with
+    #: the smile allowed to react -- the forward slides under a fixed strike,
+    #: the option's moneyness changes and so does the volatility it is marked
+    #: at -- which is what an FX desk actually hedges.  ``skew_delta`` is the
+    #: difference and is exactly ``vega * dsigma/dF``, the skew's own
+    #: contribution.  Both are ``dV/dF`` in the **term** currency, matching
+    #: ``carry_pnl``, which is what makes ``delta * (f2 - f1)`` the carry and
+    #: ``smile_delta * (f2 - f1)`` the whole of what the forward move does.
+    #: They are deliberately *not* the premium-adjusted quoted delta on a pair
+    #: that quotes one: that is a hedge ratio in the other currency, and
+    #: multiplying it by a move in the forward does not give money.
     delta: float | None = None
+    smile_delta: float | None = None
+    skew_delta: float | None = None
     carry_pnl: float | None = None
     carry_vols: float | None = None
     total_pnl: float | None = None
@@ -408,7 +428,8 @@ def carry_table(book, pair: str, *, horizon_days: float = 30.0, target: str = "a
             level = level_rolled = level_term = 0.0
             strike_abs = float("nan")
             vega = gross_vega = 0.0
-            pos_delta = carry_pnl = 0.0
+            pos_delta = pos_smile_delta = carry_pnl = 0.0
+            smile_delta_ok = True
             for weight, delta, is_call in legs:
                 if delta == 0.0:
                     k_ratio = float(black.dns_strike(1.0, atm_now, t, surface.conv))
@@ -434,6 +455,24 @@ def carry_table(book, pair: str, *, horizon_days: float = 30.0, target: str = "a
                 for share, call in sides:
                     pos_delta += weight * share * float(
                         black.delta(f1, k_abs, v_now, t, call))
+                    # The delta the desk runs.  The whole of this table is a
+                    # fixed strike sliding under a moving forward, and the
+                    # volatility that strike is marked at moves with it: the
+                    # Black-Scholes delta holds that volatility still and is
+                    # wrong about the position by the skew.  Same sticky
+                    # moneyness the roll itself uses, so the two agree about
+                    # what the forward does to the mark.
+                    if smile_delta_ok:
+                        try:
+                            pos_smile_delta += weight * share * float(
+                                surface.smile_delta(f1, k_abs, expiry, call, method,
+                                                    cut, conv=False))
+                        except (ValueError, ArithmeticError, ConvergenceError) as exc:
+                            smile_delta_ok = False
+                            warn.append(
+                                f"no smile delta at {tenor}: {exc}. The Black-Scholes delta "
+                                f"is still reported, but it holds the volatility fixed as "
+                                f"the forward moves and is short of the skew's contribution")
                     carry_pnl += weight * share * float(
                         black.price(f2, k_abs, v_now, t, call)
                         - black.price(f1, k_abs, v_now, t, call))
@@ -457,11 +496,16 @@ def carry_table(book, pair: str, *, horizon_days: float = 30.0, target: str = "a
         carry_rate = float("nan")
         carry_vols: float | None = None
         delta_out: float | None = None
+        smile_delta_out: float | None = None
+        skew_delta_out: float | None = None
         carry_out: float | None = None
         total_pnl: float | None = None
         if from_feed:
             carry_rate = (f2 - f1) / (f1 * h)
             delta_out, carry_out = pos_delta, carry_pnl
+            if smile_delta_ok:
+                smile_delta_out = pos_smile_delta
+                skew_delta_out = pos_smile_delta - pos_delta
             # A risk reversal has almost no net vega, so dividing its carry by
             # that vega is a division by nearly nothing; the row says the carry
             # in premium and declines to translate it.
@@ -479,7 +523,8 @@ def carry_table(book, pair: str, *, horizon_days: float = 30.0, target: str = "a
             vega=None if combo else vega,
             pnl=None if combo else vega * roll,
             forward_carry=f2 - f1,
-            carry_rate=carry_rate, delta=delta_out, carry_pnl=carry_out,
+            carry_rate=carry_rate, delta=delta_out, smile_delta=smile_delta_out,
+            skew_delta=skew_delta_out, carry_pnl=carry_out,
             carry_vols=carry_vols, total_pnl=total_pnl,
             warnings=tuple(warn),
         ))

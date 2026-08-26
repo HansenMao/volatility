@@ -165,6 +165,42 @@ table.ev .rm:hover{color:var(--bad)}
 .ankey{display:flex;gap:16px;flex-wrap:wrap;color:var(--muted);font-size:11.5px;margin-top:9px;
   font-variant-numeric:tabular-nums}
 .ankey b{color:var(--ink);font-weight:600}
+/* relative value: a heat grid of tenor by strike, and the cell you clicked.
+   The tint is the score and the text stays readable in both themes, so the
+   colour is a second reading of the number and never the only one. */
+.rvbar{display:flex;gap:9px;align-items:flex-end;flex-wrap:wrap;margin-bottom:10px}
+.rvbar .f label{margin:0 0 3px}
+.rvbar .f input,.rvbar .f select{padding:5px 7px;font-size:12px}
+.rvbar .f input.w{width:58px}
+.rvbar .acts{display:flex;gap:6px;align-items:flex-end}
+.rvbar .acts button{width:auto;padding:6px 13px;font-size:12px}
+.rvtop{display:grid;grid-template-columns:minmax(360px,1fr) minmax(320px,.85fr);gap:16px}
+@media (max-width:1120px){.rvtop{grid-template-columns:1fr}}
+.rvgrid table{width:100%;font-variant-numeric:tabular-nums}
+.rvgrid td.rvcell{cursor:pointer;text-align:right;padding:5px 9px;line-height:1.2}
+.rvgrid td.rvcell b{font-size:13px;font-weight:600;display:block}
+.rvgrid td.rvcell span{font-size:10px;color:var(--muted);display:block}
+.rvgrid td.rvcell.on{outline:2px solid var(--accent);outline-offset:-2px}
+.rvgrid td.rvnone{color:var(--muted);text-align:center;font-size:11px}
+/* the row-wide signal, printed once and set apart from the five cells */
+.rvgrid th.rvshared,.rvgrid td.rvshared{text-align:right;border-right:2px solid var(--line);
+  color:var(--muted);font-size:11px;font-variant-numeric:tabular-nums}
+.rvgrid td.rvcarry i{font-style:normal;font-size:9px;text-transform:uppercase;
+  letter-spacing:.06em;color:var(--warn);border:1px solid var(--warn);border-radius:3px;
+  padding:0 3px;margin-left:4px}
+.rvtag{font-style:normal;font-size:9px;text-transform:uppercase;letter-spacing:.06em;
+  color:var(--muted);border:1px solid var(--line);border-radius:3px;padding:0 3px}
+.rvthin{opacity:.55}
+.rvlegend{display:flex;gap:5px;align-items:center;color:var(--muted);font-size:11px;margin-top:8px;
+  flex-wrap:wrap}
+.rvlegend i{display:inline-block;width:26px;height:11px;border-radius:2px}
+.rvdetail{border:1px solid var(--line);border-radius:8px;padding:11px 12px}
+.rvdetail h3{margin:0 0 8px;font-size:12px;text-transform:uppercase;letter-spacing:.08em;
+  color:var(--muted)}
+.rvdetail table{width:100%}
+.rvdetail td.why{color:var(--muted);font-size:11px;white-space:normal;text-align:left;
+  line-height:1.3}
+.rvbig{font-size:20px;font-weight:600;font-variant-numeric:tabular-nums}
 /* curve comparison: one row per curve, then a chart beside its table */
 .cmprow{display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;padding:7px 0;
   border-top:1px solid var(--line)}
@@ -591,6 +627,24 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
   <div class="meta" id="anstatus" style="margin-bottom:10px"></div>
 
   <div class="ancards">
+    <section class="card"><h2>Relative value <small id="anrvhead"></small></h2>
+      <div class="rvbar">
+        <div class="f"><label>History window (days)</label>
+          <input id="rvhist" value="250" style="width:104px"></div>
+        <label style="margin:0;display:flex;align-items:center;gap:6px;width:auto;
+                      color:var(--muted);font-size:11px">
+          <input type="checkbox" id="rvtri" checked style="width:auto"> cross triangle</label>
+        <div class="f"><label>Weights</label>
+          <div class="row" id="rvweights" style="gap:5px"></div></div>
+        <div class="acts">
+          <button id="rvrun">Score</button>
+          <button class="ghost" id="rvreset">Reset weights</button>
+          <label style="margin:0;display:flex;align-items:center;gap:6px;width:auto;
+                        color:var(--muted);font-size:11px">
+            <input type="checkbox" id="rvauto" checked style="width:auto"> auto</label>
+        </div>
+      </div>
+      <div id="anrv"></div></section>
     <section class="card"><h2>Carry and rolldown <small id="ancarryhead"></small></h2>
       <div id="ancarry"></div></section>
     <section class="card"><h2>Fair value <small>at-the-money implied against realized plus the roll</small></h2>
@@ -604,7 +658,46 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
   </div>
 
   <div class="hint">
-    <b>Carry and rolldown.</b> Every tenor is revalued after the horizon at a <i>fixed absolute
+    <b>Relative value.</b> Every expiry against every strike, with one score per cell.
+    <b>Positive is rich</b> — the mark is above what the comparison says it should be, and that
+    is the side to sell. The big figure is in standard deviations of <i>that cell's own</i>
+    volatility, the small one is the same reading in volatility points, and the tint is a second
+    reading of the number rather than the only one. Click a cell to take it apart. Five signals:
+    <b>level</b> (marked at-the-money less realized), <b>shape</b> (your smile's shape at this
+    strike less the shape the <i>measured</i> &rho; and &nu; imply — the wings against what
+    volatility actually did, not against another quote), <b>carry</b> (minus the roll and the
+    forward carry, as the volatility they are worth: an option that rolls down has to be cheaper
+    to break even, so a mark that did not fall is rich by the difference), <b>history</b> (where
+    this cell sits in its own recent history) and, on a cross, <b>triangle</b> (your mark against
+    what the two legs imply). The first three <i>add</i>: they are the fair-value break-even
+    below moved out from the at-the-money to a strike, so their sum is the volatility-point figure
+    in the cell, and on the ATM column it is exactly the <b>Rich</b> column of the fair-value
+    card. The other two answer a different question and are averaged in as z-scores instead.
+    Everything is standardised by how much that cell's volatility <i>usually moves</i> — half a
+    point is a great deal on a one-year at-the-money and nothing on a one-week wing — measured
+    over the <b>history window</b>, which is deliberately not the realized lookback: the lookback
+    is matched to each tenor, and a month of a smooth one-month series is far too short to say how
+    much anything moves. A missing signal is renormalised away rather than counted as a zero;
+    faded cells were scored on less than half the declared weight. No history means no scale and
+    no score, and the volatility points beside it are still measured — inventing a scale would be
+    inventing the answer.
+    <br>Three things the grid says rather than leaves to be inferred. <b>level</b> is printed
+    <i>once</i>, in its own column beside the tenor: it is one number for the whole expiry and
+    goes into all five cells, so it is one observation and not five agreeing ones. A tenor tagged
+    <b>carry</b> has a forward that has drifted more than 0.8 standard deviations of its own
+    volatility — <code>z = |ln(F/S)|/(&sigma;&radic;T)</code> — and past that line the position
+    is mostly a carry trade in an option's clothes, with the carry signal carrying most of what
+    the row says; hover the tenor for the numbers. Nothing is reweighted for you: the weights are
+    yours, and a score that quietly changed its own recipe row by row would be unreadable. And
+    the cell detail breaks the realized figure apart — what spot did, what the forward did, and
+    <b>fwd/spot</b>, the ratio of the two. That ratio is the only honest answer to "is the carry
+    supporting this volatility"; near one the points moved with spot and it makes no difference
+    which you measure, well above one the points are carrying variance of their own. The
+    <i>level</i> of the carry says nothing about that on its own, which is why it is not the
+    column. A pair whose carry is large against a realized volatility that is <i>also</i> low in
+    absolute terms is flagged once at the top as the shape of a managed float — both conditions,
+    because a big rate differential alone describes USDJPY, and USDJPY is not managed.
+    <br><b>Carry and rolldown.</b> Every tenor is revalued after the horizon at a <i>fixed absolute
     strike</i> — the option you own keeps its strike while both the maturity and the forward move
     under it. The roll splits into the slide along the term structure (same moneyness, shorter
     maturity) and the slide across the smile (same maturity, forward moved), so the forward
@@ -617,8 +710,21 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
     <b>In vols</b> the same over the position's vega. Whether you keep it is the hedge: in the
     outright forward to the option's own expiry the hedge rolls down exactly as the option does and
     the two cancel; in spot, as a desk hedges, nothing rolls on the hedge side and you keep it. The
-    at-the-money is a delta-neutral straddle, so it shows <b>Δ&nbsp;=&nbsp;0</b> and almost no
-    carry — correct, not missing; a 25 delta call shows a quarter of the forward's roll-down.
+    <b>Δ&nbsp;smile</b> is the delta you are actually running: this whole table is a fixed
+    strike sliding under a moving forward, so the volatility that strike is marked at moves with
+    it and <code>dV/dF</code> carries <code>vega&nbsp;&times;&nbsp;d&sigma;/dF</code> along.
+    <b>Δ&nbsp;BS</b> holds that volatility still — which is what a Black-Scholes delta is —
+    and <b>Skew</b> is the difference, the whole of what the smile contributes. On a skewed
+    surface it is large: a 25 delta put can run at 18 delta once the skew is in it. The
+    at-the-money is a delta-neutral straddle in the <i>Black-Scholes</i> column only; its smile
+    delta is not zero, because a straddle is long vega and the volatility moves with the forward
+    — and that, not an error, is why the at-the-money row shows a little carry. Both columns are
+    <code>dV/dF</code> in the term currency, which is what makes
+    <b>&Delta;&nbsp;BS&nbsp;&times;&nbsp;&Delta;F</b> the carry and
+    <b>&Delta;&nbsp;smile&nbsp;&times;&nbsp;&Delta;F</b> the whole of what the forward move does.
+    They are deliberately <i>not</i> the premium-adjusted quoted delta on a pair that quotes one
+    — that is a hedge ratio in the other currency and multiplying it by a move in the forward
+    does not give money — so on USDJPY the 25 delta strike reads a little away from 0.25 here.
     Without a feed the carry columns are blank rather than zero.
     <br><b>Fair value.</b> Hold the <code>T</code> at-the-money option for the horizon
     <code>h</code> and delta hedge it. The mark slides by <code>roll</code>, worth
@@ -2090,6 +2196,331 @@ function renderTriangle(d){
       '<div class="etowarn">! '+esc(w)+'</div>').join('');
 }
 
+/* ========================== RELATIVE VALUE ==========================
+   One grid: every expiry against every strike, scored for richness.  Its own
+   request rather than another section of /api/analysis, because it is the
+   most expensive thing on the screen and the tables above it must not wait
+   for it.  Owned by the browser and posted whole like every other panel here,
+   so `volkit analysis --relative-value` reproduces exactly this.
+
+   Every field this posts is one `relvalue.panel_from_request` reads; a test
+   walks the list below against that function. */
+let RV=null, _rvt=null, RVSEL=null, RVSAVED=null;
+const RVF=[
+ ['pair','Pair'],
+ ['cut','Cut'],
+ ['method','Interp'],
+ ['horizon_days','Horizon'],
+ ['lookback_days','Realized lookback'],
+ ['history_days','History window'],
+ ['annualisation','Annualise realized'],
+ ['realized_basis','Realized on'],
+ ['triangle','Cross triangle'],
+ ['weights','Signal weights'],
+];
+/* Two standard deviations is where a reading stops being a reading, so it is
+   where the tint saturates.  The same number the server calls EXTREME_SCORE
+   and counts in its summary. */
+const RVFULL=2.0;
+
+function rvSignals(){return (STATE.analysis&&STATE.analysis.signals)||[]}
+function rvWeightBoxes(){
+  const host=$('#rvweights'); const sigs=rvSignals();
+  if(!sigs.length){host.innerHTML='';return}
+  const keep={}; sigs.forEach(s=>{const el=$('#rvw-'+s.key); if(el)keep[s.key]=el.value});
+  host.innerHTML=sigs.map(s=>'<label title="'+esc(s.label)+'" style="margin:0;width:auto;'+
+    'display:flex;flex-direction:column;gap:2px;font-size:10px;color:var(--muted)">'+esc(s.key)+
+    '<input class="w" id="rvw-'+s.key+'" value="'+
+    esc(keep[s.key]!=null?keep[s.key]:String(s.weight))+'"></label>').join('');
+  sigs.forEach(s=>{$('#rvw-'+s.key).oninput=scheduleRelValue});
+}
+function rvResetWeights(){
+  rvSignals().forEach(s=>{const el=$('#rvw-'+s.key); if(el)el.value=String(s.weight)});
+  scheduleRelValue();
+}
+function rvWeights(){
+  const out={}; rvSignals().forEach(s=>{const el=$('#rvw-'+s.key); if(el)out[s.key]=el.value});
+  return out;
+}
+function rvPayload(){
+  const a=anq();
+  return {pair:a.pair, cut:a.cut, method:a.method, horizon_days:a.horizon_days,
+          lookback_days:a.lookback_days, annualisation:a.annualisation,
+          realized_basis:a.realized_basis, history_days:$('#rvhist').value,
+          triangle:$('#rvtri').checked?'1':'0', weights:rvWeights()};
+}
+function saveRv(){try{localStorage.setItem('volkit.relvalue',JSON.stringify(
+  {history_days:$('#rvhist').value,triangle:$('#rvtri').checked,auto:$('#rvauto').checked,
+   weights:rvWeights()}))}catch(e){}}
+function loadRv(){
+  let v=null; try{v=JSON.parse(localStorage.getItem('volkit.relvalue')||'null')}catch(e){}
+  if(!v)return;
+  if(v.history_days)$('#rvhist').value=v.history_days;
+  if(v.triangle!=null)$('#rvtri').checked=!!v.triangle;
+  if(v.auto!=null)$('#rvauto').checked=!!v.auto;
+  /* The weights are put back after the boxes exist, which is boot()'s job. */
+  RVSAVED=(v.weights&&typeof v.weights==='object')?v.weights:null;
+}
+function rvApplySaved(){
+  if(!RVSAVED)return;
+  rvSignals().forEach(s=>{const el=$('#rvw-'+s.key);
+    if(el&&RVSAVED[s.key]!=null&&RVSAVED[s.key]!=='')el.value=RVSAVED[s.key]});
+  RVSAVED=null;
+}
+
+/* The tint is a second reading of the number, never the only one: the score
+   is printed in every cell and the colour only says how far it is from zero.
+   Rich is the side to sell, so it takes the warning colour. */
+function rvTint(score){
+  if(score==null||!isFinite(score))return '';
+  const k=Math.min(1,Math.abs(score)/RVFULL)*26;
+  if(k<1)return '';
+  return ';background:color-mix(in srgb,var('+(score>0?'--bad':'--accent')+') '+
+    k.toFixed(0)+'%,transparent)';
+}
+
+function renderRelValue(d){
+  const host=$('#anrv');
+  $('#anrvhead').textContent=d?(d.pair+' · '+d.history_days+'-day history'+
+    (d.is_cross?' · cross of '+d.legs.join(' and '):'')+
+    (d.has_feed?'':' · no forward feed')):'';
+  if(!d){host.innerHTML='';return}
+  const cols=d.columns, rows=d.rows;
+  const scored=rows.filter(r=>r.cells.some(c=>c.score!=null));
+  const names=rows.map(r=>r.tenor);
+
+  /* The grid.  A tenor that could not be built at all keeps its row and
+     carries the reason, so a short table cannot look like a complete one.
+
+     The first column after the tenor is whichever signals are a property of
+     the row rather than of the strike -- `level` is, by construction.  Shown
+     only inside the five cells it would be one number printed five times,
+     which reads on a heat map as five independent confirmations that a whole
+     tenor is rich.  Printed once here, with the cells tied to it, it is one
+     observation that it plainly is. */
+  const shared=(rvSignals().filter(x=>x.shared)[0])||null;
+  const body=rows.map((r,ri)=>{
+    if(!r.cells.length)return '<tr><td>'+esc(r.tenor)+'</td><td colspan="'+(cols.length+1)+
+      '" class="rvnone" style="text-align:left">'+esc(r.message||'nothing to score')+'</td></tr>';
+    const by={}; r.cells.forEach(c=>{by[c.column]=c});
+    const sh=rvSharedValue(r);
+    return '<tr><td'+(r.carry_dominant?' class="rvcarry"':'')+' title="'+esc(rvRegime(r))+'">'+
+      esc(r.tenor)+(r.carry_dominant?' <i>carry</i>':'')+'</td>'+
+      '<td class="rvshared" title="'+esc(shared?
+        (shared.label+' — one number for the whole of '+r.tenor+', the same in all five cells'):
+        '')+'">'+(sh==null?'—':anSgn(sh))+'</td>'+
+      cols.map(col=>{
+      const c=by[col.name];
+      if(!c)return '<td class="rvnone">—</td>';
+      if(c.score==null)return '<td class="rvcell rvnone" data-t="'+ri+'" data-c="'+
+        esc(col.name)+'" title="'+esc(rvWhyNoScore(c))+'">'+
+        (c.richness==null?'—':anSgn(c.richness))+'</td>';
+      const thin=c.confidence<0.5?' rvthin':'';
+      const on=(RVSEL&&RVSEL[0]===r.tenor&&RVSEL[1]===col.name)?' on':'';
+      return '<td class="rvcell'+thin+on+'" data-t="'+ri+'" data-c="'+esc(col.name)+
+        '" style="'+rvTint(c.score).slice(1)+'" title="'+esc(rvTitle(r,c))+'">'+
+        '<b>'+anRaw(c.score,2)+'</b><span>'+
+        (c.richness==null?'—':anSgn(c.richness)+' vols')+'</span></td>';
+    }).join('')+'</tr>';
+  });
+  const grid='<div class="rvgrid">'+tblHtml(
+    '<th>Tenor</th><th class="rvshared" title="'+(shared?esc(shared.label):'')+
+    '">'+(shared?esc(shared.name):'shared')+' (row)</th>'+
+    cols.map(c=>'<th>'+esc(c.label)+'</th>').join(''),body)+'</div>';
+
+  const s=d.summary||{};
+  const legend='<div class="rvlegend"><span>cheap</span>'+
+    [-2,-1,-0.4,0.4,1,2].map(v=>'<i style="'+rvTint(v).slice(1)+
+      ';border:1px solid var(--line)"></i>').join('')+'<span>rich</span>'+
+    '<span style="margin-left:10px">score is in standard deviations of each cell&#39;s own '+
+    'volatility; the small figure is the same reading in volatility points</span>'+
+    '<span class="rvthin">faded = scored on less than half the declared weight</span>'+
+    (shared?'<span>the <b>'+esc(shared.name)+'</b> column is a property of the tenor, not of '+
+      'the strike — it enters all five cells of the row, so it is one observation and not '+
+      'five</span>':'')+
+    (rows.some(r=>r.carry_dominant)?'<span><b>carry</b> marks a tenor whose forward has '+
+      'drifted more than '+RVDOM+' standard deviations of its own volatility: the position '+
+      'is mostly a carry trade in an option&#39;s clothes</span>':'')+'</div>';
+
+  host.innerHTML='<div class="rvtop"><div>'+grid+legend+'</div>'+
+    '<div class="rvdetail" id="rvdetail"></div></div>'+
+    '<div class="anchart" id="rvchart" style="margin-top:12px"></div>'+
+    '<div class="legend">'+cols.map((c,i)=>'<span><i style="background:'+RVC[i]+'"></i>'+
+      esc(c.label)+'</span>').join('')+'</div>'+
+    '<div class="ankey"><span>'+esc(s.headline||'')+'</span>'+
+    (s.mean_score==null?'':'<span>mean <b>'+anRaw(s.mean_score,2)+'</b> sd across the grid</span>')+
+    (s.mean_confidence==null?'':'<span>scored on <b>'+
+      (s.mean_confidence*100).toFixed(0)+'%</b> of the declared weight on average</span>')+
+    '<span><b>'+(s.scored||0)+'</b> of '+(s.cells||0)+' cells scored'+
+    (s.extreme?', '+s.extreme+' beyond two standard deviations':'')+'</span></div>'+
+    rvNotes(d);
+
+  /* One handler on the table rather than one per cell: the grid is rebuilt on
+     every run and forty-five listeners would have to be rebuilt with it. */
+  const table=host.querySelector('.rvgrid');
+  table.onclick=ev=>{
+    const td=ev.target.closest('td.rvcell'); if(!td)return;
+    const row=rows[parseInt(td.getAttribute('data-t'),10)];
+    if(!row)return;
+    RVSEL=[row.tenor,td.getAttribute('data-c')];
+    table.querySelectorAll('td.rvcell').forEach(x=>x.classList.remove('on'));
+    td.classList.add('on');
+    renderRvCell();
+  };
+  if(!RVSEL||!rvFind()){
+    /* The richest cell, because that is the one the screen exists to find.
+       Falling back to the at-the-money by name rather than by position: a
+       column added to relvalue.COLUMNS must not silently select a wing. */
+    const best=s.richest;
+    const mid=cols.filter(c=>c.name==='atm')[0]||cols[0];
+    RVSEL=best?[best.tenor,best.column]:(scored.length?[scored[0].tenor,mid.name]:null);
+  }
+  renderRvCell();
+
+  const series=cols.map((col,i)=>({color:RVC[i],pts:rows.map((r,ri)=>{
+      const c=r.cells.filter(x=>x.column===col.name)[0];
+      return (c&&c.score!=null)?[ri,c.score]:null}).filter(Boolean)}))
+    .filter(x=>x.pts.length);
+  if(series.length)chart($('#rvchart'),series,{xfmt:anTenorFmt(names),ldp:2,r:16,height:230});
+  else $('#rvchart').innerHTML='';
+}
+const RVC=['#7a5af5',C1,'var(--muted)',C2,'var(--warn)'];
+
+function rvFind(){
+  if(!RV||!RVSEL)return null;
+  const r=RV.rows.filter(x=>x.tenor===RVSEL[0])[0]; if(!r)return null;
+  const c=r.cells.filter(x=>x.column===RVSEL[1])[0]; if(!c)return null;
+  return [r,c];
+}
+/* The row's shared signal, read off the cells by its own flag rather than by
+   name: which signal is shared is the server's declaration, not the page's. */
+function rvSharedValue(r){
+  for(let i=0;i<r.cells.length;i++){
+    const hit=r.cells[i].signals.filter(s=>s.shared)[0];
+    if(hit&&hit.value!=null)return hit.value;
+  }
+  return null;
+}
+/* Which regime a tenor is in, in one sentence, for the tenor cell's tooltip. */
+function rvRegime(r){
+  if(r.regime_z==null)return r.tenor+': no feed, so there is no forward to measure a drift on';
+  const yrs=(r.carry_horizon_days==null)?null:(r.carry_horizon_days/365.2425);
+  return r.tenor+': the forward has drifted '+r.regime_z.toFixed(2)+
+    ' standard deviations of a '+(r.atm*100).toFixed(2)+'% mark ('+
+    (r.carry_drift*100).toFixed(2)+'%/yr of carry)'+
+    (yrs==null?'':', and crosses '+RVDOM+' at '+yrs.toFixed(1)+'y')+'. '+
+    (r.carry_dominant?'Carry dominated — the carry signal is most of what this row says.':
+     'Diffusion dominated.');
+}
+const RVDOM=0.8;
+function rvWhyNoScore(c){
+  const why=c.signals.filter(s=>!s.used).map(s=>s.message).filter(Boolean);
+  return c.message||why[0]||'nothing could be scored here';
+}
+function rvTitle(r,c){
+  return r.tenor+' '+c.label+': '+anRaw(c.score,2)+' sd, on '+
+    (c.used.join(', ')||'nothing')+' — '+(c.confidence*100).toFixed(0)+'% of the weight';
+}
+/* The cell you clicked, taken apart.  Every signal is listed whether it was
+   used or not: one that is missing and one that is zero are different
+   answers, and only the reason beside it says which. */
+function renderRvCell(){
+  const host=$('#rvdetail'); if(!host)return;
+  const found=rvFind();
+  if(!found){host.innerHTML='<h3>Cell</h3><div class="annone">Click a cell to take its '+
+    'score apart.</div>';return}
+  const r=found[0], c=found[1];
+  const body=c.signals.map(s=>'<tr><td style="text-align:left">'+esc(s.name)+
+    (s.shared?' <i class="rvtag">row</i>':'')+'</td><td'+
+    cls(s.value)+'>'+anSgn(s.value)+'</td><td'+cls(s.z)+'>'+anRaw(s.z,2)+'</td><td>'+
+    num(s.weight,2)+'</td><td class="why">'+
+    (s.used?'used':'<b>not scored</b> — '+esc(s.message||'unavailable'))+
+    (s.shared?' · the same number in all five strikes of this tenor, so it is one '+
+      'observation and not five':'')+'</td></tr>');
+  host.innerHTML='<h3>'+esc(RV.pair+' '+r.tenor+' '+c.label)+'</h3>'+
+    '<div class="row" style="gap:18px;align-items:baseline;margin-bottom:9px">'+
+    '<div><div class="rvbig'+(cls(c.score)?' '+cls(c.score).slice(8,-1):'')+'">'+
+      anRaw(c.score,2)+'</div><label style="margin:0">score (sd)</label></div>'+
+    '<div><div class="rvbig">'+anSgn(c.richness)+'</div>'+
+      '<label style="margin:0">richness (vol pts)</label></div>'+
+    '<div><div class="rvbig">'+anPct(c.implied)+'</div>'+
+      '<label style="margin:0">marked vol %</label></div>'+
+    '<div><div class="rvbig">'+(c.strike==null?'—':num(c.strike,5))+'</div>'+
+      '<label style="margin:0">'+(RV.has_feed?'strike':'strike / forward')+'</label></div>'+
+    '</div>'+
+    tblHtml('<th style="text-align:left">Signal</th><th>Vol pts</th><th>z</th><th>Weight</th>'+
+      '<th style="text-align:left">In the score</th>',body)+
+    '<div class="ankey"><span>scale <b>'+anPct(c.scale)+'</b> vol points'+
+    (c.scale_source&&c.scale_source!==c.column?
+      ' — measured on the at-the-money, because this wing has none of its own':'')+
+    '</span>'+(c.observations?'<span><b>'+c.observations+'</b> observations':'<span>')+
+    (c.percentile==null?'':', at the <b>'+num(c.percentile,0)+'</b>th percentile of them')+
+    '</span><span>scored on <b>'+(c.confidence*100).toFixed(0)+'%</b> of the declared '+
+    'weight</span></div>'+
+    (r.regime_z==null?'':'<div class="ankey"><span title="the forward\'s own drift in '+
+      'standard deviations of this option\'s diffusion">regime z <b>'+
+      num(r.regime_z,3)+'</b>'+(r.carry_dominant?' — carry dominated':' — diffusion')+
+      '</span><span>carry <b>'+anSgn(r.carry_drift,2)+'</b>%/yr, spot '+num(r.spot,5)+
+      ' &rarr; '+num(r.forward,5)+'</span>'+
+      (r.carry_horizon_days==null?'':'<span>crosses '+RVDOM+' at <b>'+
+        num(r.carry_horizon_days/365.2425,1)+'</b>y</span>')+
+      (r.regime_z_realized==null?'':'<span>against realized, z <b>'+
+        num(r.regime_z_realized,3)+'</b></span>')+'</div>')+
+    (r.realized==null?'':'<div class="ankey"><span>realized <b>'+anPct(r.realized)+
+      '</b>% on the '+esc(r.realized_basis)+' over '+num(r.window_days,0)+' days, '+
+      r.observations+' obs</span>'+
+      /* What the level signal is measured against, taken apart.  The
+         defensible "the carry supports the volatility" number is the ratio of
+         the two realized volatilities -- what the forward did against what
+         spot did -- and never the level of the swap points. */
+      (r.realized_spot==null?'':'<span>spot <b>'+anPct(r.realized_spot)+
+        '</b>%, forward <b>'+anPct(r.realized_forward)+'</b>%</span>')+
+      (r.forward_vol_ratio==null?'':'<span title="realized volatility of the forward over '+
+        'realized volatility of spot. Near one the points moved with spot and the level '+
+        'comparison rests on the same variance either way; well above one the swap points '+
+        'carry variance of their own">fwd/spot <b>'+num(r.forward_vol_ratio,4)+'</b>'+
+        (r.forward_vol_ratio>1.05?' — the swap points are carrying variance of their own':
+          '')+'</span>')+
+      (r.points_vol==null?'':'<span>points vol <b>'+anPct(r.points_vol)+'</b>%'+
+        (r.points_correlation==null?'':', corr with spot <b>'+
+          anRaw(r.points_correlation,3)+'</b>')+'</span>')+
+      (r.realized_carry_rate==null?'':'<span>measured carry <b>'+
+        anSgn(r.realized_carry_rate,2)+'</b>%/yr — a level, and on its own it says '+
+        'nothing about variance</span>')+
+      (r.realized_rho==null?'':'<span>measured &rho; <b>'+anRaw(r.realized_rho,3)+
+        '</b>, &nu; <b>'+anRaw(r.realized_nu,3)+'</b> ('+esc(r.dynamics_source||'')+
+        ')</span>')+'</div>')+
+    (c.message?'<div class="etowarn">! '+esc(c.message)+'</div>':'')+
+    (r.warnings||[]).slice(0,3).map(w=>'<div class="etonote">· '+esc(w)+'</div>').join('');
+}
+function rvNotes(d){
+  const notes=[];
+  for(const k in (d.unavailable||{}))notes.push(d.unavailable[k]);
+  (d.warnings||[]).forEach(w=>notes.push(w));
+  return [...new Set(notes)].slice(0,6).map(w=>'<div class="etonote">· '+esc(w)+'</div>').join('');
+}
+
+async function runRelValue(){
+  if(!has('analysis')||!$('#anpair').value)return;
+  saveRv();
+  $('#anrvhead').textContent='scoring…';
+  try{
+    RV=await post('/api/relvalue',rvPayload());
+    renderRelValue(RV);
+  }catch(e){
+    RV=null; $('#anrvhead').textContent='';
+    $('#anrv').innerHTML='<div class="out err"><div class="v">'+esc(e.message)+'</div></div>';
+  }
+}
+function scheduleRelValue(){
+  if($('#rvauto').checked){clearTimeout(_rvt);_rvt=setTimeout(runRelValue,380)}
+}
+$('#rvrun').onclick=runRelValue;
+$('#rvreset').onclick=rvResetWeights;
+$('#rvtri').onchange=scheduleRelValue;
+$('#rvauto').onchange=saveRv;
+$('#rvhist').oninput=scheduleRelValue;
+
 async function runAnalysis(){
   if(!$('#anpair').value)return;
   saveAn();
@@ -2106,9 +2537,15 @@ async function runAnalysis(){
     $('#ancarry').innerHTML='<div class="out err"><div class="v">'+esc(e.message)+'</div></div>';
   }
 }
-function scheduleAnalysis(){if($('#anauto').checked){clearTimeout(_ant);_ant=setTimeout(runAnalysis,340)}}
+/* The two halves of this screen have their own requests and their own auto
+   switches -- the grid is the expensive one -- but one set of controls, so a
+   change to the pair or the horizon schedules both. */
+function scheduleAnalysis(){
+  if($('#anauto').checked){clearTimeout(_ant);_ant=setTimeout(runAnalysis,340)}
+  scheduleRelValue();
+}
 
-$('#anrun').onclick=runAnalysis;
+$('#anrun').onclick=()=>{runAnalysis(); runRelValue()};
 $('#anpair').onchange=()=>{setMethodSel('#anmethod',$('#anpair').value);scheduleAnalysis()};
 ['#ancut','#anmethod','#antarget','#anann','#annoise','#anbasis','#ansabr','#ansabrd'].forEach(id=>{
   $(id).onchange=scheduleAnalysis});
@@ -2128,7 +2565,7 @@ async function loadHistory(pathId,statusId){
     st.textContent=r.pairs.length+' sheet(s): '+r.pairs.map(x=>x.pair).join(', ')+
       (r.problems.length?' · '+r.problems.length+' note(s): '+r.problems.slice(0,2).join('; '):'');
     if(has('monitor')){renderCmp(); renderTiles(); await runMonitor(); await runCompare()}
-    if(has('analysis'))await runAnalysis();
+    if(has('analysis')){await runAnalysis(); await runRelValue()}
   }catch(e){st.innerHTML='<span style="color:var(--bad)">'+esc(e.message)+'</span>'}
 }
 $('#anload').onclick=()=>loadHistory('#anhist','#anstatus');
@@ -2914,8 +3351,12 @@ function showPanel(name){
   Object.keys(PANELROOT).forEach(k=>$(PANELROOT[k]).classList.toggle('hide',k!==PANEL));
   if(PANEL==='marking')redraw();
   else if(PANEL==='listed')PANELS.forEach((p,i)=>paintPanel(i));
-  else if(PANEL==='analysis'){if(!ANA)runAnalysis(); else{renderCarry(ANA);renderFair(ANA);renderShape(ANA);
-    renderRealized(ANA);renderTriangle(ANA)}}
+  else if(PANEL==='analysis'){
+    if(!ANA)runAnalysis(); else{renderCarry(ANA);renderFair(ANA);renderShape(ANA);
+      renderRealized(ANA);renderTriangle(ANA)}
+    // Repainted rather than left alone: the charts size themselves off the
+    // panel's width and it had none while the tab was hidden.
+    if(!RV)runRelValue(); else renderRelValue(RV);}
   else if(PANEL==='monitor'){renderTiles();
     if(MOR)paintMonitor(MOR); else runMonitor();
     if(CMPR)paintCompare(CMPR); else runCompare();}
@@ -2958,6 +3399,11 @@ async function boot(){
     fillSel('#anann',AN.annualisations||['weighted']);
     if((STATE.history||{}).source)$('#anhist').value=STATE.history.source;
     loadAn();
+    // The weight boxes are declared by the server (relvalue.SIGNALS), so a
+    // signal cannot be offered on the screen that the scorer never heard of.
+    // Rebuilt on every reload, keeping whatever was typed, for the same
+    // reason every select is rebuilt with fillSel.
+    loadRv(); rvWeightBoxes(); rvApplySaved();
   }
   if(has('monitor')){
     const MOS=STATE.monitor||{};

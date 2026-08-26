@@ -509,15 +509,31 @@ class VolSurface:
 
     # -- greeks -----------------------------------------------------------
     def smile_delta(self, spot: float, strike: float, expiry, is_call: bool = True,
-                    method: str | None = None, cut: str = "TK", bump: float = 1e-3) -> float:
-        """Delta including the smile's reaction to spot, by central difference."""
+                    method: str | None = None, cut: str = "TK", bump: float = 1e-3,
+                    *, conv: DeltaConvention | bool | None = None) -> float:
+        """Delta including the smile's reaction to spot, by central difference.
+
+        The smile is a function of ``strike / forward``, so moving the forward
+        under a fixed strike moves the volatility that strike is marked at:
+        this is ``black.delta + vega * dsigma/dF``, and a test pins it against
+        exactly that.
+
+        ``conv`` overrides the surface's own delta convention.  It exists for
+        one caller: ``analytics.carry_table`` values a **term currency** P&L,
+        and the premium-adjusted delta is a hedge ratio in the *other*
+        currency rather than ``dV/dF``, so multiplying it by a move in the
+        forward does not give the money the position made.  That table asks
+        for ``conv=False`` and says so; everything else wants the surface's
+        own convention, which is what a desk quotes and hedges in.
+        """
+        use = self.conv if conv is None else conv
         sl = self.slice_at(expiry, method, cut)
         up, dn = spot * (1.0 + bump), spot * (1.0 - bump)
         pv_up = float(black.price(up, strike, float(sl.vol(strike / up)), sl.t, is_call,
-                                  foreign_premium=bool(self.conv)))
+                                  foreign_premium=bool(use)))
         pv_dn = float(black.price(dn, strike, float(sl.vol(strike / dn)), sl.t, is_call,
-                                  foreign_premium=bool(self.conv)))
-        d_spot = (up - dn) if not bool(self.conv) else (up - dn) / spot
+                                  foreign_premium=bool(use)))
+        d_spot = (up - dn) if not bool(use) else (up - dn) / spot
         return (pv_up - pv_dn) / d_spot
 
     def density(self, strike_ratio: float, expiry, method: str | None = None,

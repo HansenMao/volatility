@@ -55,6 +55,28 @@ def _curve_fields():
     return CURVE_FIELDS
 
 
+def _history_days() -> float:
+    from .relvalue import HISTORY_DAYS
+    return HISTORY_DAYS
+
+
+def _weights(pairs) -> dict[str, float]:
+    """``--weight name=value`` as a dictionary, or the reason it is not one.
+
+    A malformed weight is refused rather than skipped: a run that quietly
+    scored on the defaults while the command line said otherwise would be the
+    same silent disagreement between what is shown and what is used that the
+    panel's own weights are written to avoid.
+    """
+    out: dict[str, float] = {}
+    for item in pairs or []:
+        if "=" not in item:
+            raise ValueError(f"--weight wants SIGNAL=NUMBER, got {item!r}")
+        name, _, value = item.partition("=")
+        out[name.strip()] = value.strip()
+    return out
+
+
 def _default_feed() -> str | None:
     from .paths import find_data_file
     found = find_data_file("market_feed.csv", "files/market_feed.csv")
@@ -327,7 +349,8 @@ def cmd_analysis(args) -> int:
     print(f"\ncarry and roll — {analytics.TARGETS[args.target]}")
     print(f"  {'tenor':<6}{'forward':>10}{'strike':>10}{'level':>9}{'rolled':>9}{'roll':>9}"
           f"{'term':>9}{'smile':>9}{'per year':>10}{'/atm':>8}"
-          f"{'delta':>8}{'fwd/yr':>9}{'carry bp':>10}{'in vols':>9}{'roll+carry':>11}")
+          f"{'delta':>9}{'bs delta':>10}{'skew':>8}"
+          f"{'fwd/yr':>9}{'carry bp':>10}{'in vols':>9}{'roll+carry':>11}")
     for r in carry:
         if not r.expiry:
             print(f"  {r.tenor:<6}  {r.warnings[0]}")
@@ -341,7 +364,11 @@ def cmd_analysis(args) -> int:
         print(f"  {r.tenor:<6}{r.forward:>10.5f}{strike:>10}{pct(r.level)}{pct(r.level_rolled)}"
               f"{sgn(r.roll)}{sgn(r.roll_term)}{sgn(r.roll_smile)}{sgn(r.roll_annual, 2, 10)}"
               f"{r.ratio_atm:>+8.3f}"
-              f"{('—'.rjust(8) if r.delta is None else f'{r.delta:>+8.3f}')}"
+              # The smile delta leads: it is the one the desk hedges with and
+              # the one that values the forward move, skew included.
+              f"{('—'.rjust(9) if r.smile_delta is None else f'{r.smile_delta:>+9.4f}')}"
+              f"{('—'.rjust(10) if r.delta is None else f'{r.delta:>+10.4f}')}"
+              f"{('—'.rjust(8) if r.skew_delta is None else f'{r.skew_delta:>+8.4f}')}"
               f"{sgn(r.carry_rate, 2, 9)}"
               f"{('—'.rjust(10) if r.carry_pnl is None else f'{r.carry_pnl / r.forward * 10000:>+10.3f}')}"
               f"{sgn(r.carry_vols, 3, 9)}"
@@ -353,6 +380,15 @@ def cmd_analysis(args) -> int:
           "'carry bp' in basis\n  points of the forward. A book hedged in the outright forward to "
           "the option's own expiry\n  earns and pays that away exactly; hedged in spot, as a desk "
           "is, it keeps it.")
+    print("  'delta' is the smile delta: the strike is fixed and the forward slides under it, so "
+          "the\n  volatility that strike is marked at moves too, and dV/dF carries "
+          "vega*dsigma/dF with it.\n  'bs delta' holds the volatility still — what a "
+          "Black-Scholes delta is — and 'skew' is the\n  difference, which is the whole of what "
+          "the smile contributes. The at-the-money is a\n  delta-neutral straddle only in the "
+          "Black-Scholes column; on a skewed surface its smile delta\n  is not zero, and that is "
+          "the number you are running. Both are dV/dF in the term currency, so\n  delta x (F2-F1) "
+          "is the carry — not the premium-adjusted quoted delta, which is a hedge\n  ratio in the "
+          "other currency and does not turn a move in the forward into money.")
 
     fair = analytics.fair_value_table(book, args.pair, hist, horizon_days=args.horizon,
                                       lookback_days=lookback, method=args.method, cut=args.cut,
@@ -464,6 +500,141 @@ def cmd_analysis(args) -> int:
         for r in tri:
             for w in r.warnings:
                 print(f"  ! {r.tenor}: {w}")
+
+    if args.relative_value:
+        # The same function the screen calls, so a cell quoted off the grid
+        # can be reproduced here and taken apart signal by signal.
+        from . import relvalue
+
+        # Through the panel the screen posts, not around it, so the two
+        # cannot read one command line's worth of settings differently.
+        grid = relvalue.panel_from_request({
+            "pair": args.pair, "cut": args.cut, "method": args.method,
+            "horizon_days": args.horizon, "lookback_days": args.lookback,
+            "history_days": args.history_days, "annualisation": args.annualisation,
+            "realized_basis": args.realized_basis, "triangle": True,
+            "weights": _weights(args.weight),
+        }).run(book, history)
+        cols = [c["name"] for c in grid.columns]
+        labels = {c["name"]: c["label"] for c in grid.columns}
+        print(f"\nrelative value — {grid.history_days:g}-day history, weights " +
+              " / ".join(f"{k} {v:g}" for k, v in grid.weights.items()))
+
+        def sd(v, w=10):
+            return "—".rjust(w) if v is None or v != v else f"{v:>+{w}.2f}"
+
+        def grid_block(title: str, pick, fmt) -> None:
+            print(f"  {title}")
+            print(f"  {'tenor':<6}" + "".join(f"{labels[c]:>11}" for c in cols))
+            for r in grid.rows:
+                by = {c.column: c for c in r.cells}
+                print(f"  {r.tenor:<6}" +
+                      "".join(fmt(pick(by[c])) if c in by else "—".rjust(11) for c in cols))
+
+        grid_block("score — standard deviations of this cell's own history, + is rich",
+                   lambda c: c.score, lambda v: sd(v, 11))
+        grid_block("richness — volatility points: implied less realized, roll and carry",
+                   lambda c: c.richness, lambda v: sgn(v, 3, 11))
+
+        # Which regime each tenor is in, before the carry signal is read.
+        if any(r.regime_z is not None for r in grid.rows):
+            print("  regime — the forward's drift in standard deviations of the option's own "
+                  "diffusion")
+            print(f"  {'tenor':<6}{'spot':>10}{'forward':>10}{'carry/yr':>10}{'atm':>8}"
+                  f"{'z':>8}{'z realzd':>10}{'c/sigma':>9}{'horizon':>10}  regime")
+            for r in grid.rows:
+                if r.regime_z is None:
+                    continue
+                horizon = ("—".rjust(10) if r.carry_horizon_days is None
+                           else f"{r.carry_horizon_days / 365.2425:>9.1f}y")
+                g = lambda v, w=8, d=3: "—".rjust(w) if v is None else f"{v:>{w}.{d}f}"
+                print(f"  {r.tenor:<6}{r.spot:>10.5f}{r.forward:>10.5f}"
+                      f"{sgn(r.carry_drift, 2, 10)}{pct(r.atm, 3, 8)}{g(r.regime_z)}"
+                      f"{g(r.regime_z_realized, 10)}{g(r.carry_to_vol, 9)}{horizon}  "
+                      + ("carry dominated" if r.carry_dominant else "diffusion"))
+            print(f"  z crosses {relvalue.CARRY_DOMINANT_Z:g} at the 'horizon' beside it "
+                  f"(T = {relvalue.CARRY_HORIZON_FACTOR:g}*sigma^2/c^2), and past it the "
+                  f"position is\n  mostly a carry trade in an option's clothes. The weight is "
+                  "not tapered on the strength of\n  this: the weights are yours, and a score "
+                  "that quietly reweighted itself would be a\n  different statistic on every "
+                  "row with nothing on the screen to say so.")
+            m = grid.managed
+            if m.get("carry_to_vol") is not None:
+                print(f"  pair reading: median carry {m['carry_to_vol']:.2f} of realized "
+                      f"volatility, median realized {m['realized'] * 100:.2f}% — "
+                      + ("the managed-float shape (both conditions hold)" if m["managed"]
+                         else "not the managed-float shape"))
+
+        # What the level signal is measured against, taken apart.  The
+        # defensible "the carry supports the volatility" number is the ratio
+        # of the two realized volatilities, not the level of the swap points,
+        # so the ratio is the column and the points are beside it.
+        if any(r.realized is not None for r in grid.rows):
+            print("  realized — what the level signal is measured against")
+            print(f"  {'tenor':<6}{'window':>8}{'obs':>5}{'on':>9}{'real':>9}{'spot':>9}"
+                  f"{'fwd':>9}{'pts':>9}{'corr':>8}{'carry/yr':>10}{'fwd/spot':>10}")
+            for r in grid.rows:
+                if r.realized is None:
+                    continue
+                ratio = ("—".rjust(10) if r.forward_vol_ratio is None
+                         else f"{r.forward_vol_ratio:>10.4f}")
+                corr = ("—".rjust(8) if r.points_correlation is None
+                        else f"{r.points_correlation:>+8.3f}")
+                print(f"  {r.tenor:<6}{(r.window_days or 0):>8.0f}{r.observations:>5d}"
+                      f"{r.realized_basis:>9}{pct(r.realized)}{pct(r.realized_spot)}"
+                      f"{pct(r.realized_forward)}{pct(r.points_vol)}{corr}"
+                      f"{sgn(r.realized_carry_rate, 2, 10)}{ratio}")
+            print("  fwd/spot is the realized volatility of the forward over the realized "
+                  "volatility of\n  spot. Near one, the points moved with spot and the level "
+                  "comparison rests on the same\n  variance either way; well above one, the "
+                  "swap points are carrying variance of their\n  own and the level signal "
+                  "deserves a second look. The level of 'carry/yr' says nothing\n  about that "
+                  "on its own, which is why the ratio is the column and not the points.")
+
+        names = [n for n, _ in relvalue.SIGNALS]
+        # A shared signal is one number for the whole tenor and is marked, so
+        # a column that repeats five times down the table is read as one
+        # observation and not five agreeing ones.
+        head = {n: (n + "*" if n in relvalue.SHARED else n) for n in names}
+        print("  attribution — volatility points, and the z the score actually used")
+        print(f"  {'tenor':<6}{'point':<9}{'impl':>8}" +
+              "".join(f"{head[n]:>9}{'z':>7}" for n in names) +
+              f"{'score':>8}{'scale':>8}{'conf':>7}  used")
+        for r in grid.rows:
+            for c in r.cells:
+                by = {s.name: s for s in c.signals}
+                line = f"  {r.tenor:<6}{c.label:<9}{pct(c.implied, 3, 8)}"
+                for n in names:
+                    sig = by.get(n)
+                    line += (sgn(None if sig is None else sig.value, 3, 9) +
+                             ("—".rjust(7) if sig is None or sig.z is None or not sig.used
+                              else f"{sig.z:>+7.2f}"))
+                scale = "—".rjust(8) if c.scale is None else f"{c.scale * 100:>8.4f}"
+                print(line + sd(c.score, 8) + scale + f"{c.confidence * 100:>6.0f}%" + "  " +
+                      (",".join(c.used) if c.used else "—") +
+                      ("" if not c.scale_source or c.scale_source == c.column
+                       else f" (scale from {c.scale_source})"))
+        if any(n in relvalue.SHARED for n in names):
+            marked = ", ".join(n for n in names if n in relvalue.SHARED)
+            print(f"  * {marked} is a property of the tenor and not of the strike: the same "
+                  f"number in all five\n  rows of an expiry, so it is one observation and not "
+                  f"five agreeing ones. Its z still\n  differs by cell, because each cell "
+                  f"divides by its own scale.")
+        print(f"  {grid.summary['headline']}")
+        # Every reason a cell is missing a signal, said once.  Repeating it
+        # forty-five times would bury the one that matters.
+        notes = dict.fromkeys(
+            [w for r in grid.rows for w in r.warnings] +
+            [r.message for r in grid.rows if r.message] +
+            [s.message for r in grid.rows for c in r.cells for s in c.signals if s.message] +
+            [c.message for r in grid.rows for c in r.cells if c.message] +
+            list(grid.warnings) + list(grid.unavailable.values()))
+        for note in notes:
+            print(f"  . {note}")
+        print("  the score divides each signal by how much this very cell's volatility "
+              "usually moves,\n  so half a point on a one-year at-the-money and half a point "
+              "on a one-week wing are not\n  the same reading. A cell with no history has no "
+              "scale and no score — the volatility\n  points beside it are still measured.")
 
     if args.compare:
         # The panel moved to the Monitor screen, and its command moved with
@@ -1222,6 +1393,17 @@ def build_parser() -> argparse.ArgumentParser:
                         "correlation and a vol of vol, against the same two measured from history")
     s.add_argument("--sabr-delta", type=float, default=0.25,
                    help="which wings to read the SABR shape off (default 0.25)")
+    s.add_argument("--relative-value", action="store_true",
+                   help="also score every expiry and strike for relative value: implied "
+                        "against realized in level and in shape, the roll and the forward "
+                        "carry, the cross triangle, and each cell's own z-score in history")
+    s.add_argument("--history-days", type=float, default=_history_days(),
+                   help="how far back 'recent history' reaches for the z-scores and for the "
+                        "scale they are measured in. Deliberately not the realized lookback, "
+                        "which is matched to each tenor")
+    s.add_argument("--weight", action="append", default=[], metavar="SIGNAL=W",
+                   help="reweight one relative-value signal, e.g. --weight carry=0.4. "
+                        "Weights are renormalised over whichever signals a cell has")
     s.add_argument("--vol-unit", default="auto", choices=["auto", "percent", "decimal"])
     s.add_argument("--cut", default="NY")
     s.add_argument("--method", default="SVI")

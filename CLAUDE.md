@@ -71,6 +71,9 @@ listed     exchange traded options: paste parsing, least-squares SABR fit,
 moments    risk-neutral distribution from a smile; two combined into a cross
 history    historical spot / forwards / quotes; realized vol, skew, kurtosis
 analytics  carry and roll, fair value, the cross triangle, indication pricing
+relvalue   one score per expiry and strike: implied against realized in level
+           and in shape, the roll and the forward carry, the cross triangle,
+           and each cell's own z-score in its history
 curves     several vol curves side by side, and the same curve on other dates
 monitor    small panels: what has moved between two points in time, per pair
 quotes     a broker run, in English or in columns: outrights, RR, fly, spreads,
@@ -289,6 +292,38 @@ per pair and living on the surface beside `param_shifts`:
   exchange settlement volatilities, for futures-vs-forward convexity, or for
   the exchange settlement time not being an FX cut. All three are reported in
   the panel and in the docs rather than silently absorbed.
+- **The relative-value carry signal stretches the fair-value break-even out
+  into the wings.** The gamma against theta is read as `(h/T) * vega *
+  (sigma_R - sigma_I)`, which is first order at the at-the-money and rougher
+  at a 10 delta strike, where the option's gamma over the horizon is not that
+  share of its whole life. Stated in `relvalue.py`, not corrected for.
+- **The relative-value shape signal inherits SABR's lack of mean reversion.**
+  The comparison smile is built from the *measured* `(rho, nu)`, and a measured
+  `nu` falls away at long tenors because real volatility mean-reverts and SABR
+  does not. A long-dated wing can therefore be scored rich against a
+  comparison smile that is flatter than the market would ever be. The grid
+  warns, the ρ/ν card says the same thing, and neither corrects for it.
+- **The managed-float reading is a heuristic on measured numbers, and it is
+  not the authority on anything.** A hard, defended band is a *policy fact*
+  and is marked in `files/bands.csv` (§6); `relvalue.suppressed_diffusion`
+  only raises a hand on a pair whose carry and realized volatility have the
+  shape. It deliberately takes **two** conditions, because the obvious
+  one-condition version is wrong: read as `|c| / sigma` alone, USDJPY on a
+  five point rate differential and ten volatility points scores 0.53, right
+  beside USDCNH's 0.50, and USDJPY is not managed in any sense. The second
+  condition is a low realized volatility in absolute terms
+  (`MANAGED_VOL_CEILING`), which is the suppressed diffusion itself rather
+  than a consequence of it. A high-carry, high-volatility pair -- USDTRY at 35
+  and 25 -- is outside it on purpose: its diffusion is not suppressed, it is
+  merely expensive. Both thresholds are marking judgements and the
+  measurements behind them are reported whether they trip or not.
+- **The carry weight is not tapered by the regime, on purpose.** `regime_z`
+  says which side of the carry-dominance line a tenor is on, and the row, the
+  carry signal and the CLI all say so, but the weight stays where the desk put
+  it. A score that quietly reweighted itself would be a different statistic on
+  every row with nothing on the screen to say so -- the same rule as §11's
+  knowledge bank, where a width that no rule matches gets no width rather than
+  an invented one.
 - **The RR-sign question from `test.py`** (legacy comment says rho = −0.383 for
   a positive RR) was never settled; `pysabr` is not installed. volkit's own
   convention is verified by round-trip.
@@ -379,9 +414,40 @@ fit panel it names. Posted whole like everything else here, so
 
 ## 9. Analysis (`analytics.py`, `moments.py`, `history.py`)
 
-A fourth UI tab. Four sections, each built and reported independently so one
-missing input does not empty the others.
+A fourth UI tab. Five sections, each built and reported independently so one
+missing input does not empty the others. The first of them, the relative-value
+grid, is the summary of the other four and is described last here because it
+is built out of them.
 
+- **The delta on the carry table is the smile delta**, not Black-Scholes'.
+  The whole table is a fixed strike sliding under a moving forward, so the
+  volatility that strike is marked at moves with it: `dV/dF` carries
+  `vega * dsigma/dF` along, and a delta that held the volatility still is
+  short of the position by the skew. Both are reported -- `smile_delta` leads,
+  `delta` is the Black-Scholes reading beside it, `skew_delta` is the
+  difference -- for the same reason §8's listed panel reports two sets of
+  greeks. On the sample marks a USDJPY 25 delta put runs at **0.168**, not
+  0.239, and the at-the-money straddle is delta neutral in the Black-Scholes
+  column *only*: it is long vega, the volatility moves with the forward, and
+  the skew leaves it several delta. That is also why the at-the-money row
+  shows any carry at all.
+  - **The reconciliation is the test.** `delta * (F2 - F1)` is `carry_pnl` and
+    `smile_delta * (F2 - F1)` is `carry_pnl + vega * roll_smile` -- the whole
+    of what the forward move does -- both to within a percent over a one-day
+    horizon, while the Black-Scholes delta misreads the whole by 20% to 65%.
+  - **Both are `dV/dF` in the term currency, deliberately not the quoted
+    convention.** A premium-adjusted delta is a hedge ratio in the *other*
+    currency; multiplying it by a move in the forward does not give money, and
+    money is what this table reports. `VolSurface.smile_delta` takes a `conv`
+    override for this one caller and nothing else uses it -- the pricing
+    screen's own smile delta stays in the surface's convention, beside a
+    Black-Scholes delta in the same one. So on a premium-adjusted pair the 25
+    delta strike does not read 0.25 in this column, and that is correct.
+  - The decomposition itself did **not** change. The smile's reaction to the
+    forward was always in the P&L, through `vega * roll_smile`; what was wrong
+    was only the delta reported beside it. `carry_pnl`, `roll`, `pnl` and
+    `total_pnl` are untouched, so nothing in fair value or the relative-value
+    grid moves.
 - **Carry and roll** revalues at a **fixed absolute strike** and splits the
   result into the term-structure slide and the smile slide, so the forward
   curve's contribution is separable. Without a feed the strike is held in
@@ -463,6 +529,86 @@ missing input does not empty the others.
 - **The volatility unit of a historical sheet is decided once, from the ATM
   column**, and applied to the RR and fly. Per-column sniffing reads a small
   risk reversal as a decimal and returns it 100x too large.
+- **The relative-value grid** (`relvalue.py`) is the screen's first card and
+  its summary: one score per expiry and strike, positive when the mark is
+  rich. It is **not a new model** -- every signal is one of the comparisons
+  above, read at a strike instead of at the at-the-money -- and it is its own
+  route (`/api/relvalue`) because it is the most expensive thing on the screen
+  and the tables must not wait for it. Owned by the browser and posted whole,
+  like every other panel here; `volkit analysis --relative-value` reproduces
+  it through the same `panel_from_request`.
+  - **Three signals add and two do not.** `level` (marked ATM less realized),
+    `shape` (the marked smile's shape at this strike less the shape a SABR
+    smile built from the *measured* `(rho, nu)` would show) and `carry`
+    (`-(roll_value + carry_value)`, minus because an option that rolls down
+    must be cheaper to break even) sum to exactly `implied(K) - fair(K)`, and
+    at the at-the-money column to `fair_value_table`'s own `richness` -- a
+    test pins it to 1e-12, because two ways of computing one number is how
+    they drift apart. `history` (the cell's own z-score) and `triangle` (a
+    cross against its legs) answer different questions and are kept out of
+    that sum.
+  - **The at-the-money carries no shape by statement**, not by two near-equal
+    numbers cancelling: the at-the-money *is* the level.
+  - **One scale, and it is the cell's own historical standard deviation.**
+    Half a volatility point is a great deal on a one-year at-the-money and
+    nothing on a one-week wing, and only the history knows which. **The scale
+    window is not the realized lookback**: the lookback is matched to each
+    tenor because a one-month implied forecasts one month, but how much a
+    volatility *moves* is a slower measurement (`HISTORY_DAYS`, a year). Run
+    off one window it measured a one-month mark on a month of a smooth series
+    and read an ordinary half point of richness as thirty standard
+    deviations.
+  - **No history means no score**, and the volatility points are still
+    reported. Inventing a scale would be inventing the answer. A wing the
+    sheet does not quote borrows the at-the-money's scale and `scale_source`
+    says so, because a z-score is only as good as its denominator.
+  - **A missing signal is renormalised away, never counted as a zero**, which
+    would drag every score toward the middle. Each cell reports `used` and a
+    `confidence` -- the share of the declared weight the score rests on -- so
+    a cell scored on one signal and a cell scored on four are not read alike.
+  - **A triangle difference inside its own noise floor is shown and not
+    scored**, which is that section's own rule; the wing mapping is
+    `atm + fly + rr/2`, the same arithmetic the marked wing is read with.
+  - **The weights are a marking judgement, not a result.** Declared once in
+    `relvalue.WEIGHTS`, sent to the page in `/api/state` so a box cannot offer
+    a signal the scorer never heard of, and editable on the panel and by
+    `--weight NAME=VALUE`. A weight that is not a signal, or is not a number,
+    is refused rather than ignored.
+  - **The whole realized measurement travels with the row, not one field of
+    it.** `history.realized` already measures the spot leg, the forward leg,
+    the swap-point volatility and its correlation with spot; the grid kept
+    `vol` and threw the rest away, which left a cell scored rich on `level`
+    with no way to say whether the richness was genuine forward variance or a
+    level comparison against a thin estimate. The number that answers it is
+    `forward_vol_ratio` -- realized vol of the forward over realized vol of
+    spot -- and **never the level of the swap points**, which says nothing on
+    its own about whether the forward is more volatile than spot. Near one,
+    the points moved with spot and the level comparison rests on the same
+    variance either way.
+  - **Every row says which regime it is in before the carry signal is read.**
+    `regime_z = |ln(F/S)| / (sigma sqrt(T))` puts the forward's own drift and
+    the option's diffusion in the same units; past `CARRY_DOMINANT_Z` the
+    position is mostly a carry trade in an option's clothes, and the row, the
+    carry signal's own message and the CLI all say so. `carry_horizon_days` is
+    the same statement as a maturity, `T = 0.64 sigma^2 / c^2`, and the 0.64
+    is **derived** as the threshold squared rather than written down twice.
+    The same z against *realized* volatility is the managed-float evidence,
+    read at a one-year reference because whether a pair is managed is a
+    property of the pair and not of a tenor. What it does **not** do is change
+    a weight -- see §7.
+  - **The forward comes from the feed before the carry table.** Reading it off
+    the carry table alone left every tenor shorter than the horizon with no
+    forward, and so no absolute strikes, on a pair the feed was quoting
+    perfectly well. They are the same number where both exist:
+    `analytics._forward_at` asks the same feed.
+  - **A signal that is a property of the tenor is marked as one.** `level` is
+    the same number in all five cells of a row by construction, and shown five
+    times with nothing tying them together, one at-the-money mispricing reads
+    on a heat map as five independent confirmations that a whole tenor is
+    rich. `relvalue.SHARED` declares which signals those are, the grid prints
+    them once in their own column beside the tenor, and the CLI marks the
+    column with a star. The *z* still differs by cell, because each cell
+    divides by its own scale.
 - **The curve comparison panel** (`curves.py`) lives on the Monitor screen
   (§12), not here: it answers "what has changed", which is that screen's
   question. `volkit monitor --compare` reproduces it; `volkit analysis
@@ -495,6 +641,8 @@ python -m volkit serve --auto-reload 30     # re-read the market feed when it ch
 python -m volkit analysis EURJPY --history files/history_sample.xlsx --horizon 7
 python -m volkit analysis USDJPY --history files/history_sample.xlsx --sabr \
     --realized-basis forward          # wings as (rho, nu), realized on the forward
+python -m volkit analysis EURJPY --history files/history_sample.xlsx --horizon 7 \
+    --relative-value --weight carry=0.4   # score the whole expiry / strike grid
 python -m volkit mm EURUSD --target-source quotes --fallback-spread 0.3 < run.txt
 python -m volkit mm EURUSD --learn < run.txt          # propose widths, --save writes them
 python3 files/make_history_sample.py        # regenerate the example history

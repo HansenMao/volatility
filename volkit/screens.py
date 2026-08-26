@@ -118,7 +118,7 @@ SCREENS: tuple[Screen, ...] = (
     ),
     Screen(
         name="analysis", label="Analysis", panel="p-analysis",
-        routes=("/api/analysis",),
+        routes=("/api/analysis", "/api/relvalue"),
         commands=("analysis",),
     ),
     Screen(

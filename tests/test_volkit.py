@@ -2269,6 +2269,141 @@ class TestAnalysis(unittest.TestCase):
         for r in short:
             self.assertTrue(r.warnings and "horizon" in r.warnings[0])
 
+    def test_the_carry_delta_is_the_smile_delta_not_the_black_scholes_one(self):
+        """The bug this was written for.
+
+        The carry table reported a Black-Scholes delta -- the sensitivity with
+        the volatility *held fixed* as the forward moves -- for a table whose
+        entire subject is a fixed strike sliding under a moving forward.  The
+        volatility that strike is marked at moves with it, and on a skewed
+        surface the difference is several delta.
+        """
+        moved = 0
+        for pair in ("EURUSD", "USDJPY"):
+            for target in ("25dc", "25dp", "10dp"):
+                rows = [r for r in analytics.carry_table(
+                    self.book, pair, horizon_days=7, target=target, cut="NY") if r.expiry]
+                self.assertTrue(rows)
+                for r in rows:
+                    self.assertIsNotNone(r.smile_delta, f"{pair} {target} {r.tenor}")
+                    self.assertAlmostEqual(r.skew_delta, r.smile_delta - r.delta, places=15)
+                    if abs(r.skew_delta) > 0.01:
+                        moved += 1
+        self.assertGreater(moved, 20, "the skew moved no delta by a whole point")
+
+    def test_the_smile_delta_is_black_scholes_plus_vega_times_the_skew_slope(self):
+        """``dV/dF = dV/dF|sigma + vega * dsigma/dF``, and nothing else.
+
+        Pinned by finite difference so a change to the smile delta that broke
+        this identity could not pass as a refinement.
+        """
+        for pair in ("EURUSD", "USDJPY"):
+            surface = self.book[pair]
+            rows = [r for r in analytics.carry_table(
+                self.book, pair, horizon_days=7, target="25dp", cut="NY") if r.expiry]
+            for r in rows[:4]:
+                expiry = self.book.clock.datetime_from_years(r.t)
+                f, k = r.forward, r.strike
+                bs = float(black.delta(f, k, r.level, r.t, False))
+                vega = float(black.vega(f, k, r.level, r.t))
+                eps = f * 1e-4
+                slope = (float(surface.vol(k / (f + eps), expiry, "SVI", "NY"))
+                         - float(surface.vol(k / (f - eps), expiry, "SVI", "NY"))) / (2 * eps)
+                self.assertAlmostEqual(r.delta, bs, places=12, msg=f"{pair} {r.tenor}")
+                # Both sides are central differences at different bumps, so
+                # they agree to the second-order term and not beyond it; a
+                # short tenor has the most curvature and the widest gap.
+                self.assertAlmostEqual(r.smile_delta, bs + vega * slope, delta=1e-3,
+                                       msg=f"{pair} {r.tenor}")
+
+    def test_the_smile_delta_values_the_whole_of_what_the_forward_move_does(self):
+        """And the Black-Scholes delta values only half the story.
+
+        The forward reaches the position twice: through the price at a fixed
+        volatility (``carry_pnl``) and through the mark, because the strike's
+        moneyness changed (``vega * roll_smile``).  The smile delta is the
+        first-order coefficient of *both*; the Black-Scholes delta is the
+        coefficient of the first alone.  Measured over a one-day horizon,
+        where the second order terms have not had room to matter.
+        """
+        checked = 0
+        for pair in ("EURUSD", "USDJPY"):
+            for target in ("25dc", "25dp", "10dp"):
+                rows = [r for r in analytics.carry_table(
+                    self.book, pair, horizon_days=1, target=target, cut="NY") if r.expiry]
+                for r in rows:
+                    # A one-day roll is only "small" against a tenor with room
+                    # in it: a week rolled by a day is a sixth of its life and
+                    # the second-order terms are no longer negligible.
+                    move = r.forward_rolled - r.forward
+                    whole = r.vega * r.roll_smile + r.carry_pnl
+                    if r.t < 1.0 / 12.0 or abs(whole) < 1e-9 or abs(move) < 1e-12:
+                        continue
+                    where = f"{pair} {target} {r.tenor}"
+                    self.assertAlmostEqual(r.smile_delta * move / whole, 1.0, delta=0.02,
+                                           msg=where)
+                    self.assertAlmostEqual(r.delta * move / r.carry_pnl, 1.0, delta=0.02,
+                                           msg=where)
+                    # And the point: the Black-Scholes delta is not a reading
+                    # of the whole move at all, by a margin far outside the
+                    # tolerance above.
+                    self.assertGreater(abs(r.delta * move - whole),
+                                       5.0 * abs(r.smile_delta * move - whole), where)
+                    checked += 1
+        self.assertGreater(checked, 20)
+
+    def test_the_at_the_money_straddle_is_delta_neutral_only_in_black_scholes(self):
+        """A straddle is long vega, and on a skewed surface the volatility
+        moves with the forward, so the delta-neutral strike is delta neutral
+        in one column and not in the other.  Reporting the Black-Scholes zero
+        alone said the position had no forward exposure when it had several
+        delta of it."""
+        # EURUSD quotes an unadjusted delta, so its delta-neutral straddle
+        # really is Black-Scholes delta neutral and the whole of the smile
+        # delta is the skew.
+        rows = [r for r in analytics.carry_table(
+            self.book, "EURUSD", horizon_days=7, target="atm", cut="NY") if r.expiry]
+        self.assertTrue(rows)
+        for r in rows:
+            self.assertAlmostEqual(r.delta, 0.0, places=9, msg=r.tenor)
+            self.assertAlmostEqual(r.skew_delta, r.smile_delta, places=12, msg=r.tenor)
+        self.assertGreater(max(abs(r.smile_delta) for r in rows), 0.0)
+
+        # USDJPY quotes a premium-adjusted one, so the delta-neutral strike is
+        # neutral in *that* convention and carries a little unadjusted delta
+        # already.  The skew is still much the larger part of what it runs.
+        rows = [r for r in analytics.carry_table(
+            self.book, "USDJPY", horizon_days=7, target="atm", cut="NY") if r.expiry]
+        self.assertTrue(rows)
+        for r in rows:
+            self.assertLess(abs(r.delta), 0.05, r.tenor)
+        biggest = max(rows, key=lambda r: abs(r.smile_delta))
+        self.assertGreater(abs(biggest.smile_delta), 0.05)
+        self.assertGreater(abs(biggest.skew_delta), 2.0 * abs(biggest.delta))
+
+    def test_the_carry_deltas_are_term_currency_not_the_quoted_convention(self):
+        """A premium-adjusted delta is a hedge ratio in the *other* currency.
+
+        Multiplying it by a move in the forward does not give the money the
+        position made, and money is what this table reports, so both columns
+        are dV/dF and the surface's own convention is deliberately not used.
+        """
+        surface = self.book["USDJPY"]
+        self.assertTrue(bool(surface.conv), "USDJPY should be premium adjusted here")
+        r = [x for x in analytics.carry_table(
+            self.book, "USDJPY", horizon_days=7, target="25dc", cut="NY") if x.expiry][-1]
+        quoted = float(black.delta(r.forward, r.strike, r.level, r.t, True, surface.conv))
+        self.assertAlmostEqual(quoted, 0.25, places=6)          # the strike is a 25 delta one
+        self.assertNotAlmostEqual(r.delta, quoted, places=3)    # and this column is not that
+        self.assertAlmostEqual(
+            r.delta, float(black.delta(r.forward, r.strike, r.level, r.t, True)), places=12)
+        # The override exists for exactly this caller and changes nothing else.
+        expiry = self.book.clock.datetime_from_years(r.t)
+        own = surface.smile_delta(r.forward, r.strike, expiry, True, "SVI", "NY")
+        term = surface.smile_delta(r.forward, r.strike, expiry, True, "SVI", "NY", conv=False)
+        self.assertAlmostEqual(term, r.smile_delta, places=12)
+        self.assertNotAlmostEqual(own, term, places=3)
+
     def test_the_fair_value_roll_is_the_atm_roll_whatever_is_displayed(self):
         """Feeding an at-the-money implied and a risk-reversal roll into one
         break-even mixes two different positions."""
@@ -2511,6 +2646,517 @@ class TestAnalysisApi(unittest.TestCase):
         self.assertIsNone(payload["realized"])
         self.assertIn("history", payload["unavailable"])
         self.assertIn("triangle", payload["unavailable"])
+
+
+class TestRelativeValue(unittest.TestCase):
+    """Scoring the expiry / strike surface.
+
+    The grid is not a new model: every signal is one of the comparisons the
+    Analysis screen already makes, read at a strike instead of at the
+    at-the-money.  What is pinned here is that it stays that way -- the
+    at-the-money column has to reproduce the fair-value table exactly, the
+    three additive signals have to add to the richness, and a signal a cell
+    does not have has to be renormalised away rather than counted as a zero.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from volkit import relvalue
+        cls.relvalue = relvalue
+        cls.book = Book.from_excel(WORKBOOK, ASOF).load_all()
+        cls.book.feed = MarketFeed.load(FEED)
+        cls.history = history.load_history(HISTORY, cls.book.pairs)
+        cls.grid = relvalue.relative_value(cls.book, "EURUSD", cls.history["EURUSD"],
+                                           horizon_days=7, cut="NY")
+
+    def test_the_at_the_money_column_reproduces_the_fair_value_table(self):
+        """Two ways of computing one number is how they drift apart.
+
+        The grid extends ``fair_value_table``'s break-even from the
+        at-the-money to a strike; at the at-the-money itself it has to be the
+        same arithmetic, to the last bit, or the screen is showing a richness
+        in one card and a different richness in the next.
+        """
+        fair = {r.tenor: r for r in analytics.fair_value_table(
+            self.book, "EURUSD", self.history["EURUSD"], horizon_days=7, cut="NY")}
+        checked = 0
+        for row in self.grid.rows:
+            cell = [c for c in row.cells if c.column == "atm"]
+            got = fair.get(row.tenor)
+            if not cell or cell[0].richness is None or got is None or got.richness is None:
+                continue
+            self.assertAlmostEqual(cell[0].richness, got.richness, places=12, msg=row.tenor)
+            checked += 1
+        self.assertGreater(checked, 3, "no tenor was actually compared")
+
+    def test_the_three_additive_signals_add_to_the_richness(self):
+        """``level + shape + carry`` is ``implied(K) - fair(K)`` and nothing else.
+
+        The other two answer different questions -- where the mark sits in its
+        own history, and what the legs of a cross imply -- and adding them in
+        would make the volatility-point column mean nothing.
+        """
+        seen = 0
+        for row in self.grid.rows:
+            for cell in row.cells:
+                by = {s.name: s for s in cell.signals}
+                parts = [by[n].value for n in self.relvalue.ADDITIVE]
+                if any(p is None for p in parts):
+                    self.assertIsNone(cell.richness, f"{row.tenor} {cell.column}")
+                    continue
+                self.assertAlmostEqual(cell.richness, sum(parts), places=15)
+                seen += 1
+        self.assertGreater(seen, 10)
+
+    def test_the_at_the_money_carries_no_shape_by_statement(self):
+        """Zero because the at-the-money *is* the level, not because two
+        near-equal numbers happened to cancel."""
+        for row in self.grid.rows:
+            for cell in row.cells:
+                if cell.column != "atm":
+                    continue
+                shape = [s for s in cell.signals if s.name == "shape"][0]
+                if shape.value is None:
+                    continue
+                self.assertEqual(shape.value, 0.0, row.tenor)
+                self.assertIn("level", shape.message)
+
+    def test_the_score_is_the_weighted_mean_of_the_signals_it_used(self):
+        """And of no others: a missing signal is renormalised away, never
+        counted as a zero, which would drag every score toward the middle."""
+        scored = 0
+        for row in self.grid.rows:
+            for cell in row.cells:
+                if cell.score is None:
+                    continue
+                used = [s for s in cell.signals if s.used]
+                self.assertEqual(sorted(s.name for s in used), sorted(cell.used))
+                total = sum(s.weight for s in used)
+                self.assertAlmostEqual(
+                    cell.score, sum(s.weight * s.z for s in used) / total, places=12)
+                self.assertAlmostEqual(cell.confidence,
+                                       total / sum(self.grid.weights.values()), places=12)
+                scored += 1
+        self.assertGreater(scored, 10)
+
+    def test_every_signal_that_was_used_has_a_z_and_every_other_one_says_why(self):
+        for row in self.grid.rows:
+            for cell in row.cells:
+                for sig in cell.signals:
+                    if sig.used:
+                        self.assertIsNotNone(sig.z, f"{row.tenor} {cell.column} {sig.name}")
+                    else:
+                        self.assertIsNone(sig.z)
+                        self.assertTrue(sig.message or cell.message,
+                                        f"{row.tenor} {cell.column} {sig.name} is silent")
+
+    def test_the_scale_is_measured_over_its_own_window_not_the_realized_lookback(self):
+        """The bug this was written for.
+
+        Scoring divided every signal by the standard deviation of the *same*
+        window the realized volatility was measured over, which is matched to
+        each tenor.  A month of a one-month at-the-money is a handful of
+        observations of a smooth series, and an ordinary half point of
+        richness came out at thirty standard deviations.  How much a
+        volatility moves is a slower measurement and gets its own window.
+        """
+        short = self.relvalue.relative_value(
+            self.book, "EURUSD", self.history["EURUSD"], horizon_days=7, cut="NY",
+            history_days=40)
+        long = self.relvalue.relative_value(
+            self.book, "EURUSD", self.history["EURUSD"], horizon_days=7, cut="NY",
+            history_days=500)
+        pairs = 0
+        for a, b in zip(short.rows, long.rows):
+            for ca, cb in zip(a.cells, b.cells):
+                if ca.scale is None or cb.scale is None:
+                    continue
+                self.assertNotAlmostEqual(ca.scale, cb.scale, places=6)
+                # Same volatility points either way: only the denominator moved.
+                if ca.richness is not None:
+                    self.assertAlmostEqual(ca.richness, cb.richness, places=15)
+                pairs += 1
+        self.assertGreater(pairs, 10)
+        self.assertNotEqual(short.history_days, long.history_days)
+
+    def test_a_wing_the_sheet_does_not_quote_borrows_a_scale_and_says_so(self):
+        """A substituted denominator is still a substitution.
+
+        A z-score is only as meaningful as what it was divided by, so the cell
+        names the series the scale came from rather than quietly using another
+        one.
+        """
+        borrowed = [c for r in self.grid.rows for c in r.cells
+                    if c.scale is not None and c.scale_source not in ("", c.column)]
+        for cell in borrowed:
+            self.assertEqual(cell.scale_source, "atm")
+            self.assertIsNone(cell.history_mean, "a borrowed scale is not a history")
+
+    def test_without_a_history_the_volatility_points_survive_and_the_score_does_not(self):
+        """A score needs a scale and a scale needs history.  Inventing one
+        would be inventing the answer; the carry is still measured."""
+        grid = self.relvalue.relative_value(self.book, "EURUSD", None, horizon_days=7, cut="NY")
+        self.assertIn("history", grid.unavailable)
+        self.assertIsNone(grid.summary["mean_score"])
+        measured = 0
+        for row in grid.rows:
+            for cell in row.cells:
+                self.assertIsNone(cell.score)
+                self.assertIsNone(cell.scale)
+                carry = [s for s in cell.signals if s.name == "carry"][0]
+                if carry.value is not None:
+                    self.assertFalse(carry.used)
+                    self.assertIn("no historical scale", carry.message)
+                    measured += 1
+        self.assertGreater(measured, 10)
+
+    def test_the_row_keeps_the_whole_realized_measurement_not_one_field_of_it(self):
+        """The bug this was written for.
+
+        The grid kept ``stats.vol`` and threw away the decomposition
+        ``history.realized`` had already measured, so a cell scored rich on
+        ``level`` gave no way to say whether the richness was genuine forward
+        variance or a level comparison against a thin estimate.
+        """
+        checked = 0
+        for row in self.grid.rows:
+            if row.realized is None:
+                continue
+            stats = history.realized(self.history["EURUSD"], row.window_days,
+                                     annualisation="weighted", basis="auto",
+                                     basis_tenor=row.tenor)
+            self.assertAlmostEqual(row.realized_spot, stats.vol_spot, places=15)
+            self.assertAlmostEqual(row.realized_forward, stats.vol_forward, places=15)
+            self.assertAlmostEqual(row.points_vol, stats.points_vol, places=15)
+            self.assertAlmostEqual(row.points_correlation, stats.points_correlation, places=15)
+            self.assertAlmostEqual(row.realized_carry_rate, stats.carry_rate, places=15)
+            checked += 1
+        self.assertGreater(checked, 3)
+
+    def test_the_vol_support_number_is_the_ratio_and_not_the_level_of_the_points(self):
+        """A large carry says nothing on its own about whether the forward is
+        more volatile than spot.  What answers that is the ratio of the two
+        realized volatilities, so the ratio is what the row carries."""
+        rows = [r for r in self.grid.rows if r.forward_vol_ratio is not None]
+        self.assertTrue(rows)
+        for row in rows:
+            self.assertAlmostEqual(row.forward_vol_ratio,
+                                   row.realized_forward / row.realized_spot, places=12)
+            # The sample's swap points barely move, so the forward and spot
+            # measurements are the same variance -- which is the reading, and
+            # it is nothing like the -1.8%/yr level of the carry beside it.
+            self.assertAlmostEqual(row.forward_vol_ratio, 1.0, places=2)
+            self.assertLess(row.realized_carry_rate, -0.01)
+
+    def test_no_row_carries_a_non_finite_number_out_of_the_decomposition(self):
+        """``history.realized`` uses nan for 'not measured on this basis' in
+        some fields and None in others; either one reaching JSON would take
+        the whole grid down in the browser."""
+        for row in self.grid.rows:
+            for name in ("realized_spot", "realized_forward", "points_vol",
+                         "points_correlation", "realized_carry_rate", "forward_vol_ratio"):
+                value = getattr(row, name)
+                if value is not None:
+                    self.assertTrue(math.isfinite(value), f"{row.tenor} {name}")
+
+    def test_the_triangle_is_read_at_the_strike_the_cross_is_marked_at(self):
+        """``triangle_table`` compares an at-the-money, a risk reversal and a
+        butterfly; a call at that delta is ``atm + fly + rr/2``, so the same
+        combination of the differences is the difference at its strike."""
+        rows = {r.tenor: r for r in analytics.triangle_table(
+            self.book, "EURJPY", cut="NY")}
+        grid = self.relvalue.relative_value(self.book, "EURJPY", self.history["EURJPY"],
+                                            horizon_days=7, cut="NY")
+        checked = 0
+        for row in grid.rows:
+            tri = rows.get(row.tenor)
+            if tri is None:
+                continue
+            for cell in row.cells:
+                sig = [s for s in cell.signals if s.name == "triangle"][0]
+                if sig.value is None:
+                    continue
+                d = tri.difference
+                if cell.column == "atm":
+                    want = d["atm"]
+                else:
+                    tag = f"{int(round(cell.delta * 100))}"
+                    want = d["atm"] + d[f"fly{tag}"] + (0.5 if cell.is_call else -0.5) * d[f"rr{tag}"]
+                self.assertAlmostEqual(sig.value, want, places=15,
+                                       msg=f"{row.tenor} {cell.column}")
+                checked += 1
+        self.assertGreater(checked, 10)
+
+    def test_a_difference_inside_the_triangle_noise_floor_is_shown_but_not_scored(self):
+        """That section's own rule: a difference smaller than what the
+        machinery gets wrong on the legs alone is not a difference.  Scoring
+        it anyway would put the reconstruction error into the answer."""
+        real = analytics.triangle_table(self.book, "EURJPY", cut="NY")
+        loud = [analytics.TriangleRow(
+            tenor=r.tenor, t=r.t, rho=r.rho, coefficients=r.coefficients, marked=r.marked,
+            triangle=r.triangle, difference=r.difference,
+            noise={k: 10.0 for k in r.difference}, variance_triangle_atm=r.variance_triangle_atm,
+            smile_convexity=r.smile_convexity, leg_atm=r.leg_atm,
+            implied_correlation=r.implied_correlation) for r in real]
+        old = self.relvalue.triangle_table
+        self.relvalue.triangle_table = lambda *a, **k: loud
+        try:
+            grid = self.relvalue.relative_value(self.book, "EURJPY", self.history["EURJPY"],
+                                                horizon_days=7, cut="NY")
+        finally:
+            self.relvalue.triangle_table = old
+        seen = 0
+        for row in grid.rows:
+            for cell in row.cells:
+                sig = [s for s in cell.signals if s.name == "triangle"][0]
+                if sig.value is None:
+                    continue
+                self.assertFalse(sig.used, f"{row.tenor} {cell.column}")
+                self.assertIn("noise floor", sig.message)
+                self.assertNotIn("triangle", cell.used)
+                seen += 1
+        self.assertGreater(seen, 10)
+
+    def test_a_pair_that_is_not_a_cross_has_no_triangle_and_is_not_charged_for_it(self):
+        for row in self.grid.rows:
+            for cell in row.cells:
+                sig = [s for s in cell.signals if s.name == "triangle"][0]
+                self.assertIsNone(sig.value)
+                self.assertIn("not a cross", sig.message)
+        self.assertIn("not a cross", self.grid.unavailable["triangle"])
+
+    def test_a_tenor_that_cannot_be_rolled_keeps_its_row_and_carries_the_reason(self):
+        """Dropping it makes a short grid look like a complete one."""
+        grid = self.relvalue.relative_value(self.book, "EURUSD", self.history["EURUSD"],
+                                            horizon_days=90, cut="NY")
+        self.assertEqual([r.tenor for r in grid.rows], list(self.book.data.tenor_points))
+        blocked = [(r, c) for r in grid.rows for c in r.cells
+                   if [s for s in c.signals if s.name == "carry"][0].value is None]
+        self.assertTrue(blocked)
+        for _, cell in blocked:
+            carry = [s for s in cell.signals if s.name == "carry"][0]
+            self.assertTrue(carry.message)
+
+    def test_the_carry_horizon_and_the_dominance_threshold_are_one_statement(self):
+        """``T = 0.64 * sigma**2 / c**2`` is exactly where ``z`` reaches 0.8.
+
+        The factor is the threshold squared, so it is derived from it rather
+        than written down twice: two constants that could drift apart would
+        put the annotation and the horizon on opposite sides of the line.
+        """
+        rv = self.relvalue
+        self.assertAlmostEqual(rv.CARRY_HORIZON_FACTOR, rv.CARRY_DOMINANT_Z ** 2, places=15)
+        sigma, carry, spot = 0.10, 0.06, 1.25
+        at_a_year = rv._regime(spot, spot * math.exp(carry * 1.0), 1.0, sigma, None)
+        horizon = at_a_year["carry_horizon_days"] / 365.2425
+        at_the_horizon = rv._regime(spot, spot * math.exp(carry * horizon), horizon,
+                                    sigma, None)
+        self.assertAlmostEqual(at_the_horizon["regime_z"], rv.CARRY_DOMINANT_Z, places=12)
+        # The claim is that the horizon is where the two cross, so it is
+        # tested either side of it rather than exactly on it: the boundary
+        # itself lands within a rounding error of the threshold.
+        for scale, dominant in ((1.02, True), (0.98, False)):
+            t = horizon * scale
+            side = rv._regime(spot, spot * math.exp(carry * t), t, sigma, None)
+            self.assertEqual(side["carry_dominant"], dominant, f"at {scale:g} of the horizon")
+        # And the sign of the carry does not decide the regime: a discount and
+        # a premium of the same size are the same distance travelled.
+        mirrored = rv._regime(spot, spot * math.exp(-carry * horizon), horizon, sigma, None)
+        self.assertAlmostEqual(mirrored["regime_z"], at_the_horizon["regime_z"], places=12)
+
+    def test_a_carry_to_volatility_ratio_alone_would_flag_a_free_float(self):
+        """The bug in the obvious version of this test.
+
+        Read as "carry over volatility" alone, USDJPY on a five point rate
+        differential and ten volatility points scores 0.53 -- right beside
+        USDCNH's 0.50 -- and USDJPY is not managed in any sense.  What
+        separates them is the second condition: a managed float's realized
+        volatility is *low in absolute terms*, which is the suppressed
+        diffusion itself rather than a consequence of it.
+        """
+        rv = self.relvalue
+
+        class Row:
+            def __init__(self, ratio, vol):
+                self.carry_to_vol, self.realized = ratio, vol
+
+        def verdict(ratio, vol):
+            return rv.suppressed_diffusion([Row(ratio, vol)] * 3)
+
+        # The ratio alone does not separate these two.
+        self.assertGreater(verdict(0.53, 0.095)["carry_to_vol"],
+                           verdict(0.50, 0.050)["carry_to_vol"])
+        self.assertFalse(verdict(0.53, 0.095)["managed"], "USDJPY is not a managed float")
+        self.assertTrue(verdict(0.50, 0.050)["managed"], "USDCNH has the shape")
+        # A high-carry, high-volatility pair is deliberately outside it: its
+        # diffusion is not suppressed, it is merely expensive.
+        self.assertFalse(verdict(1.40, 0.250)["managed"])
+        # And an ordinary free float fails the first condition instead.
+        self.assertFalse(verdict(0.25, 0.060)["managed"])
+        self.assertFalse(verdict(None, None)["managed"])
+
+    def test_a_carry_dominated_tenor_warns_and_marks_the_signal_it_dominates(self):
+        """Said where the signal is read, not only in the row's warnings."""
+        import tempfile
+        from volkit.feed import MarketFeed
+        rv = self.relvalue
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "steep.csv"
+            path.write_text(
+                "# a deliberately steep curve: EURUSD at a 7%/yr discount\n"
+                "EURUSD,SPOT,1.08000\n"
+                "EURUSD,1M,-60.0\nEURUSD,3M,-180.0\n"
+                "EURUSD,6M,-360.0\nEURUSD,1Y,-720.0\n", encoding="utf-8")
+            old = self.book.feed
+            self.book.feed = MarketFeed.load(path)
+            self.addCleanup(setattr, self.book, "feed", old)
+            grid = rv.relative_value(self.book, "EURUSD", self.history["EURUSD"],
+                                     horizon_days=7, cut="NY")
+        hot = [r for r in grid.rows if r.carry_dominant]
+        self.assertTrue(hot, "a 7%/yr carry against a 6% mark should dominate by one year")
+        for row in hot:
+            self.assertGreaterEqual(row.regime_z, rv.CARRY_DOMINANT_Z)
+            self.assertTrue(any("carry trade" in w for w in row.warnings), row.tenor)
+            for cell in row.cells:
+                carry = [s for s in cell.signals if s.name == "carry"][0]
+                if carry.value is not None:
+                    self.assertIn("carry dominated", carry.message)
+        # The weight is not tapered on the strength of it: the score is still
+        # the weighted mean of what it used, and the weights are the desk's.
+        for row in hot:
+            for cell in row.cells:
+                used = [s for s in cell.signals if s.used]
+                if not used:
+                    continue
+                total = sum(s.weight for s in used)
+                self.assertAlmostEqual(
+                    cell.score, sum(s.weight * s.z for s in used) / total, places=12)
+                for sig in used:
+                    self.assertEqual(sig.weight, grid.weights[sig.name])
+
+    def test_the_forward_comes_from_the_feed_before_the_carry_table(self):
+        """A tenor the horizon cannot roll still has a forward and a regime.
+
+        Reading it off the carry table alone left every tenor shorter than the
+        horizon with no forward, and therefore no absolute strikes, on a pair
+        whose forward the feed was quoting perfectly well.
+        """
+        grid = self.relvalue.relative_value(self.book, "EURUSD", self.history["EURUSD"],
+                                            horizon_days=90, cut="NY")
+        unrollable = [r for r in grid.rows
+                      if all([s for s in c.signals if s.name == "carry"][0].value is None
+                             for c in r.cells) and r.cells]
+        self.assertTrue(unrollable, "no tenor was blocked by a 90-day horizon")
+        for row in unrollable:
+            self.assertIsNotNone(row.forward, row.tenor)
+            self.assertIsNotNone(row.spot, row.tenor)
+            self.assertIsNotNone(row.regime_z, row.tenor)
+            for cell in row.cells:
+                self.assertIsNotNone(cell.strike, f"{row.tenor} {cell.column}")
+
+    def test_a_shared_signal_is_one_number_for_the_row_and_is_marked_as_one(self):
+        """``level`` is a statement about the level, and a level is one number
+        per expiry.  Printed in five cells with nothing to tie them together,
+        one at-the-money mispricing reads as five confirmations."""
+        rv = self.relvalue
+        spread = 0
+        for row in self.grid.rows:
+            if not row.cells:
+                continue
+            for name in rv.SHARED:
+                values = [[s for s in c.signals if s.name == name][0].value
+                          for c in row.cells]
+                self.assertEqual(len(set(values)), 1, f"{row.tenor} {name} is not shared")
+                zs = {[s for s in c.signals if s.name == name][0].z for c in row.cells}
+                if len(zs) > 1:
+                    spread += 1        # one number, but each cell's own scale
+            for cell in row.cells:
+                for sig in cell.signals:
+                    self.assertEqual(sig.shared, sig.name in rv.SHARED, sig.name)
+        self.assertGreater(spread, 2, "a shared value should still take each cell's scale")
+
+    def test_the_state_response_names_the_shared_signal_for_the_page(self):
+        """The page marks it without knowing which signal it happens to be."""
+        from volkit.webapp import BookService
+        from volkit.relvalue import SHARED
+        state = BookService(str(WORKBOOK), ASOF).state()
+        signals = state["analysis"]["signals"]
+        self.assertEqual({s["key"] for s in signals if s["shared"]}, set(SHARED))
+        self.assertTrue(all("weight" in s for s in signals))
+
+    def test_a_weight_that_is_not_a_signal_is_refused_not_ignored(self):
+        with self.assertRaises(self.relvalue.RelativeValueError) as ctx:
+            self.relvalue.resolve_weights({"gut_feel": 1.0})
+        self.assertIn("gut_feel", str(ctx.exception))
+        with self.assertRaises(self.relvalue.RelativeValueError):
+            self.relvalue.resolve_weights({"level": "quite a lot"})
+        with self.assertRaises(self.relvalue.RelativeValueError):
+            self.relvalue.resolve_weights({"level": -1})
+        with self.assertRaises(self.relvalue.RelativeValueError):
+            self.relvalue.resolve_weights({k: 0 for k in self.relvalue.WEIGHTS})
+
+    def test_a_reweighting_moves_the_score_and_nothing_else(self):
+        heavy = self.relvalue.relative_value(
+            self.book, "EURUSD", self.history["EURUSD"], horizon_days=7, cut="NY",
+            weights={"carry": 5.0})
+        moved = 0
+        for a, b in zip(self.grid.rows, heavy.rows):
+            for ca, cb in zip(a.cells, b.cells):
+                self.assertAlmostEqual(ca.implied, cb.implied, places=15)
+                if ca.richness is not None:
+                    self.assertAlmostEqual(ca.richness, cb.richness, places=15)
+                if ca.score is not None and "carry" in ca.used:
+                    if abs(ca.score - cb.score) > 1e-9:
+                        moved += 1
+        self.assertGreater(moved, 5, "reweighting the carry changed no score")
+
+    def test_the_panel_is_the_only_reader_of_the_request(self):
+        panel = self.relvalue.panel_from_request({
+            "pair": "EURUSD", "cut": "NY", "method": "SVI", "horizon_days": "7",
+            "lookback_days": "match", "history_days": "250", "annualisation": "weighted",
+            "realized_basis": "auto", "triangle": "0", "weights": {"carry": "0.4"}})
+        self.assertEqual(panel.pair, "EURUSD")
+        self.assertIsNone(panel.lookback_days)
+        self.assertFalse(panel.with_triangle)
+        self.assertEqual(panel.weights["carry"], 0.4)
+        for bad in ({"pair": ""}, {"pair": "EURUSD", "history_days": "soon"},
+                    {"pair": "EURUSD", "lookback_days": "-3"},
+                    {"pair": "EURUSD", "weights": "level=1"}):
+            with self.assertRaises(self.relvalue.RelativeValueError):
+                self.relvalue.panel_from_request(bad)
+
+    def test_the_command_line_and_the_screen_run_the_same_panel(self):
+        """The CLI builds the panel the browser posts, so a cell quoted off
+        the screen can be reproduced in a batch job."""
+        from volkit.webapp import BookService
+        request = {"pair": "EURUSD", "cut": "NY", "method": "SVI", "horizon_days": "7",
+                   "lookback_days": "match", "history_days": "250", "triangle": "1"}
+        service = BookService(str(WORKBOOK), ASOF, feed_path=str(FEED),
+                              history_path=str(HISTORY))
+        service.load_history({"path": str(HISTORY)})
+        served = service.relative_value(request)
+        direct = self.relvalue.panel_from_request(request).run(service.book, service.history)
+        self.assertEqual(served["summary"]["headline"], direct.summary["headline"])
+        self.assertEqual(served["pair"], "EURUSD")
+
+    def test_the_payload_carries_no_number_a_browser_cannot_parse(self):
+        """Python's json writes NaN and JSON.parse refuses it, so one
+        unscored cell would take the whole grid down in the browser."""
+        import json as _json
+        from volkit.webapp import BookService, _finite
+        service = BookService(str(WORKBOOK), ASOF, feed_path=str(FEED),
+                              history_path=str(HISTORY))
+        service.load_history({"path": str(HISTORY)})
+        text = _json.dumps(_finite(service.relative_value(
+            {"pair": "EURJPY", "cut": "NY", "horizon_days": "7"})), default=str)
+        self.assertNotIn("NaN", text)
+        self.assertNotIn("Infinity", text)
+        self.assertEqual(_json.loads(text)["pair"], "EURJPY")
+
+    def test_the_route_belongs_to_the_analysis_screen(self):
+        from volkit import screens
+        owner = {r: s.name for s in screens.SCREENS for r in s.routes}
+        self.assertEqual(owner["/api/relvalue"], "analysis")
 
 
 class TestTimestampReading(unittest.TestCase):
@@ -3027,6 +3673,31 @@ class TestWebAssets(unittest.TestCase):
         panel = src.split("def panel_from_request")[1]
         for f in ("cut", "method", "field", "tiles"):
             self.assertIn(f'"{f}"', panel, f"the server never reads {f!r}")
+
+    def test_the_relative_value_panel_fields_are_all_understood_by_the_server(self):
+        """Same guard as the listed, market-maker, comparison and monitor panels.
+
+        The relative-value grid is posted whole like the rest of them, and a
+        field the page sends that the scorer never reads would be a setting
+        that appears to do something and does not.
+        """
+        import re as _re
+        html = _source("volkit", "web", "index.html")
+        js = html.split("<script>")[1].split("</script>")[0]
+        block = js.split("const RVF=[")[1].split("];")[0]
+        fields = set(_re.findall(r"\['([a-z_]+)'", block))
+        self.assertIn("history_days", fields)
+        self.assertIn("weights", fields)
+        src = _source("volkit", "relvalue.py")
+        handler = src.split("def panel_from_request")[1]
+        for f in fields:
+            self.assertIn(f'"{f}"', handler, f"the server never reads {f!r}")
+        # And every weight box the panel paints is a signal the scorer
+        # declares: the boxes are built from the server's own list, so a
+        # weight cannot reach the screen that `resolve_weights` would refuse.
+        from volkit.relvalue import SIGNALS, WEIGHTS
+        self.assertEqual([n for n, _ in SIGNALS], list(WEIGHTS))
+        self.assertIn("rvw-", js, "the weight boxes are not built from the server's list")
 
     def test_the_band_card_fields_are_all_understood_by_the_server(self):
         """The band treatment is marked on the screen and read in one place."""
