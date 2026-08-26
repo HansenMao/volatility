@@ -19,6 +19,7 @@ from pathlib import Path
 
 import numpy as np
 
+from . import paths
 from .timeutil import TenorError, parse_tenor, tenor_to_years
 
 # Term-currency pip divisor: JPY-quoted pairs move in 0.01, most others 0.0001.
@@ -100,7 +101,7 @@ class MarketFeed:
         # Read whole, and closed: this file is published onto a desk share
         # and is often open in Excel at the other end.  A reader left alive
         # holds it there -- the same lock the workbooks had.
-        with path.open(newline="") as fh:
+        with paths.open_text(path, newline="") as fh:
             rows = list(csv.reader(fh))
         for lineno, row in enumerate(rows, start=1):
             if not row or row[0].lstrip().startswith("#"):

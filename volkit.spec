@@ -46,7 +46,7 @@ if SCREENS_FILE:
         raise SystemExit(f"volkit.spec: the screens manifest must be named "
                          f"screens.txt, not {manifest.name}")
     datas += [(str(manifest), "volkit/data")]
-    chosen = [ln for ln in manifest.read_text().splitlines()
+    chosen = [ln for ln in manifest.read_text(encoding="utf-8").splitlines()
               if ln.strip() and not ln.startswith("#")]
     print("volkit.spec: building with screens -> " + ", ".join(chosen))
 

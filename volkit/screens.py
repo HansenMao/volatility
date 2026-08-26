@@ -257,7 +257,7 @@ def _selection() -> tuple[tuple[str, ...], tuple[str, ...]]:
     """
     manifest = paths.resource_dir() / MANIFEST
     if manifest.exists():
-        return parse_selection(manifest.read_text(), source=str(manifest))
+        return parse_selection(paths.read_text(manifest), source=str(manifest))
     env = os.environ.get(ENV_VAR)
     if env and env.strip():
         return parse_selection(env, source=f"${ENV_VAR}")
@@ -394,5 +394,5 @@ def write_manifest(directory: str | Path, names: tuple[str, ...] | list[str],
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     target = directory / Path(MANIFEST).name
-    target.write_text(manifest_text(names, hidden_names))
+    paths.write_text(target, manifest_text(names, hidden_names))
     return target

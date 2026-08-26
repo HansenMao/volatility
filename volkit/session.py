@@ -47,7 +47,7 @@ from pathlib import Path
 
 from .banded import BandTreatment
 from .cross import CrossAtmCurve
-from .paths import app_dir
+from .paths import WRITE_ENCODING, app_dir, read_text
 from .surface import PARAM_NAMES
 from .timeutil import parse_datetime
 
@@ -353,8 +353,8 @@ def load(path: str | Path) -> dict:
     if not p.exists():
         raise SessionError(f"no session file at {p}")
     try:
-        raw = json.loads(p.read_text())
-    except (OSError, json.JSONDecodeError) as exc:
+        raw = json.loads(read_text(p))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise SessionError(f"cannot read the session file at {p}: {exc}") from None
     if not isinstance(raw, dict) or "pairs" not in raw:
         raise SessionError(f"{p} is not a volkit session file; expected an object with a "
@@ -368,7 +368,7 @@ def write(doc: dict, path: str | Path | None = None) -> str:
     p.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=str(p.parent), prefix=".vol_session", suffix=".json")
     try:
-        with os.fdopen(fd, "w") as fh:
+        with os.fdopen(fd, "w", encoding=WRITE_ENCODING) as fh:
             json.dump(doc, fh, indent=2)
             fh.write("\n")
         os.replace(tmp, p)

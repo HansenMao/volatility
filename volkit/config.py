@@ -153,8 +153,8 @@ def parse(text: str, *, source: str = "volkit.cfg") -> StartupConfig:
 def load(path: str | Path) -> StartupConfig:
     path = Path(path)
     try:
-        text = path.read_text()
-    except OSError as exc:
+        text = paths.read_text(path)
+    except (OSError, UnicodeDecodeError) as exc:
         raise ConfigError(f"{path} could not be opened: {exc}") from None
     cfg = parse(text, source=str(path))
     cfg.path = path

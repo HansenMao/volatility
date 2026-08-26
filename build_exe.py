@@ -125,7 +125,10 @@ def run(cmd: list[str], *, step: str, env: dict[str, str] | None = None) -> None
 
 
 def capture(cmd: list[str]) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
+    # utf-8 and not the locale's encoding: what is being captured is this
+    # tool's own output, and on Windows cp1252 cannot decode half of it.
+    return subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True,
+                          encoding="utf-8", errors="replace")
 
 
 def heading(n: int, total: int, text: str) -> None:

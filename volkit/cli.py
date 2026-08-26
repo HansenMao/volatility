@@ -14,7 +14,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from . import config, screens, session
+from . import config, paths, screens, session
 from .book import Book
 from .marketdata import ExcelSource, MarketDataError
 from .timeutil import UTC, Clock, parse_datetime, tenor_to_years
@@ -179,7 +179,7 @@ def cmd_daily(args) -> int:
     series = book[args.pair].atm.daily_series(args.horizon, args.cut)
     lines = [f"{k}, {v[args.field] * 100}" for k, v in series.items()]
     if args.out:
-        Path(args.out).write_text("\n".join(lines) + "\n")
+        paths.write_text(args.out, "\n".join(lines) + "\n")
         print(f"wrote {len(lines)} rows to {args.out}")
     else:
         print("\n".join(lines))
@@ -600,7 +600,7 @@ def cmd_listed(args) -> int:
     """
     from . import listed as listed_mod
 
-    text = sys.stdin.read() if args.file in (None, "-") else Path(args.file).read_text()
+    text = sys.stdin.read() if args.file in (None, "-") else paths.read_text(args.file)
     payload = {
         "underlying": args.underlying, "pair": args.pair,
         "invert": args.invert if args.invert is not None else None,
@@ -669,7 +669,7 @@ def cmd_listed(args) -> int:
         # being priced against the only curve to hand.
         g = listed_mod.positions_from_request({
             "text": (sys.stdin.read() if args.positions == "-"
-                     else Path(args.positions).read_text()),
+                     else paths.read_text(args.positions)),
             "panels": [payload], "vol_bump": args.vol_bump, "theta_days": args.theta_days,
         }).run(clock=_clock(args))
         _print_listed_positions(g)
@@ -724,16 +724,16 @@ def cmd_mm(args) -> int:
     from . import marketmaker as mm
     from .knowledge import KnowledgeBank
 
-    text = sys.stdin.read() if args.file in (None, "-") else Path(args.file).read_text()
+    text = sys.stdin.read() if args.file in (None, "-") else paths.read_text(args.file)
     payload = {
         "pair": args.pair, "cut": args.cut, "method": args.method, "text": text,
         "vol_unit": args.vol_unit, "fly_convention": args.fly,
         "target_source": args.target_source,
-        "target_text": (Path(args.target).read_text() if args.target else ""),
+        "target_text": (paths.read_text(args.target) if args.target else ""),
         "fit_curve": not args.no_curve, "free": args.free,
         "tune_wings": not args.no_wings, "smile_free": args.smile_free,
         "mid_pull": args.mid_pull, "max_nfev": args.max_evals,
-        "vega_text": (Path(args.vega).read_text() if args.vega else ""),
+        "vega_text": (paths.read_text(args.vega) if args.vega else ""),
         "vega_scale": args.axe_scale, "fair_weight": args.fair_weight,
         "axe_weight": args.axe_weight, "skew_cap": args.skew_cap,
         "horizon_days": args.horizon, "fallback_spread": args.fallback_spread,
@@ -1349,9 +1349,33 @@ def _requested_screens(argv: list[str]) -> list[str]:
     return out
 
 
+def _utf8_streams() -> None:
+    """Speak UTF-8 on the standard streams, whatever the machine's locale is.
+
+    The tables printed here are full of em dashes and greek letters, and a
+    tile's label carries an arrow.  Interactively Windows writes them through
+    the console's own Unicode call and all is well, but the moment the output
+    is piped or redirected Python falls back to the locale encoding -- cp1252
+    on the desk -- and a single arrow ends the run with a UnicodeEncodeError
+    instead of a table.  A redirected *input* is the same story: a broker run
+    saved out of a chat window is UTF-8, and read as cp1252 the quotes come
+    back as mojibake.  ``errors="replace"`` on the way in, because a byte this
+    tool cannot read is one bad character on one line and is visible there,
+    not a reason to refuse a whole run.
+    """
+    for stream, errors in ((sys.stdin, "replace"), (sys.stdout, "strict"),
+                           (sys.stderr, "strict")):
+        try:
+            stream.reconfigure(encoding="utf-8", errors=errors)
+        except (AttributeError, ValueError, OSError):
+            pass          # not a real stream (a test's StringIO, or a pipe
+                          # somebody has already wrapped); nothing to do.
+
+
 def main(argv=None) -> int:
     from . import preflight
 
+    _utf8_streams()
     raw = list(sys.argv[1:] if argv is None else argv)
     try:
         # The startup file becomes arguments before anything else looks at

@@ -1130,7 +1130,16 @@ and why.
 
 ```bash
 python3 -m unittest discover -s tests -v      # 431 tests, no pytest needed
+PYTHONUTF8=0 LC_ALL=C python3 -m unittest discover -s tests   # as Windows sees it
 ```
 
 `pip install esprima` additionally enables a syntax check on the front-end
 JavaScript; that test skips if it is absent.
+
+The second line runs the same suite in an ASCII locale, which is the only way
+to catch a text-encoding bug from a Mac before the Windows runner does. Python
+reads and writes text in the *locale's* encoding unless told otherwise, and on
+the desk machine that is cp1252: reading `volkit/web/index.html` with it once
+ended the whole Windows build with `'charmap' codec can't decode byte 0x81`.
+Every text file goes through `paths.read_text` / `open_text` / `write_text`
+instead, and a test walks the source for anything that does not.

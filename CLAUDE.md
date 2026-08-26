@@ -83,7 +83,8 @@ screens    which screens a build has, shown or hidden; the one reader of the
            build's manifest, and of --enable-tab
 session    the marks a session made, saved beside the workbook and put back
 config     the startup settings file a double-clicked exe reads
-paths      resource vs user-data paths (source and frozen)
+paths      resource vs user-data paths (source and frozen), and the one
+           text encoding every file is read and written in
 preflight  startup checks (tzdata above all)
 ```
 
@@ -162,6 +163,20 @@ preflight  startup checks (tzdata above all)
   was chosen; the marking screen's pair, cut, interpolation and chart expiry
   survive. The marks are discarded -- that is the point of a reload -- but
   putting a marker on a different pair is a change nobody asked for.
+- **Every text file is UTF-8, said once, in `paths`.** `read_text`,
+  `open_text` and `write_text` are the only spellings; nothing calls
+  `Path.read_text()` or `open()` on text and takes Python's default, which is
+  the *locale* encoding -- cp1252 on the desk machine. Reading
+  `volkit/web/index.html` with that default is what stopped the Windows build,
+  at the test suite, with `'charmap' codec can't decode byte 0x81`, and the
+  same default sat under `volkit.cfg`, the holiday overrides, `bands.csv` and
+  the published feed. Reading strips a byte order mark (`utf-8-sig`, because
+  Notepad and Excel both write one and it is not part of the first key or the
+  first pair name); writing never adds one. The standard streams are
+  reconfigured to UTF-8 at the top of `cli.main` for the same reason: a
+  redirected monitor table carries an arrow, and cp1252 has no room for it.
+  A test walks the source for the default spellings, so this cannot come back
+  one call at a time.
 - **Volatility points at the edges, decimals in the middle.** Everything a
   human types or reads -- a pasted quote, a knowledge-bank width, a curve
   parameter on screen -- is in volatility points; everything inside a model is
@@ -468,6 +483,10 @@ missing input does not empty the others.
 
 ```
 python -m unittest discover -s tests        # 431 tests, ~4.3m
+PYTHONUTF8=0 LC_ALL=C python -m unittest discover -s tests   # as a cp1252 Windows
+                                           # box sees it: an ASCII locale is the
+                                           # only way to catch an encoding bug
+                                           # from a Mac before CI does
 pip install esprima                         # enables the front-end JS syntax test
 python -m volkit check                      # validate the workbook
 python -m volkit serve --feed files/market_feed.csv --history vol_history.xlsx

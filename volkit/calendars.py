@@ -19,6 +19,7 @@ from pathlib import Path
 
 import numpy as np
 
+from . import paths
 from .timeutil import add_tenor, parse_datetime
 
 try:  # optional dependency; the built-in rules below are the fallback
@@ -299,7 +300,7 @@ class CalendarSet:
     def load_overrides_csv(self, path: str | Path) -> int:
         """Load ``country,date[,remove]`` rows.  Blank lines and ``#`` ignored."""
         count = 0
-        for line in Path(path).read_text().splitlines():
+        for line in paths.read_text(path).splitlines():
             line = line.split("#", 1)[0].strip()
             if not line:
                 continue

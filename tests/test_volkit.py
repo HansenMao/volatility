@@ -40,6 +40,16 @@ from volkit.surface import PARAM_NAMES, SmileMark, VolSurface, fit_param_term_st
 from volkit.timeutil import Clock, TenorError, UTC, add_tenor, parse_datetime, tenor_to_years
 from volkit.timeweight import DEFAULT_SESSION_HOURS, TimeWeighting, session_shares
 
+def _source(*parts: str) -> str:
+    """A file of this project, read as UTF-8.
+
+    Never in the locale's encoding: that is cp1252 on the Windows box the
+    build runs on, ``index.html`` is full of em dashes, and the whole suite
+    ended there with "'charmap' codec can't decode byte 0x81".
+    """
+    return Path(__file__).resolve().parents[1].joinpath(*parts).read_text(encoding="utf-8")
+
+
 WORKBOOK = Path(__file__).resolve().parents[1] / "files" / "vol_marks.xlsx"
 ASOF = Clock(datetime(2024, 2, 28, 12, 0, tzinfo=UTC))
 
@@ -2801,7 +2811,7 @@ class TestWebAssets(unittest.TestCase):
         except ImportError:
             self.skipTest("esprima not installed")
         import re as _re
-        html = (Path(__file__).resolve().parents[1] / "volkit" / "web" / "index.html").read_text()
+        html = _source("volkit", "web", "index.html")
         js = html.split("<script>")[1].split("</script>")[0]
         # esprima tops out at ES2017; downlevel the two newer operators used.
         probe = _re.sub(r"\?\.", ".", js.replace("??", " || "))
@@ -2818,7 +2828,7 @@ class TestWebAssets(unittest.TestCase):
         """
         from html.parser import HTMLParser
         import re as _re
-        html = (Path(__file__).resolve().parents[1] / "volkit" / "web" / "index.html").read_text()
+        html = _source("volkit", "web", "index.html")
         body = _re.sub(r"<script>.*?</script>", "", html, flags=_re.S)
         body = _re.sub(r"<style>.*?</style>", "", body, flags=_re.S)
         void = {"meta", "input", "br", "hr", "img", "link", "source", "col",
@@ -2867,7 +2877,7 @@ class TestWebAssets(unittest.TestCase):
         """
         import re as _re
         from volkit import screens
-        html = (Path(__file__).resolve().parents[1] / "volkit" / "web" / "index.html").read_text()
+        html = _source("volkit", "web", "index.html")
         nav = html.split('<div class="nav" id="nav">')[1].split("</div>")[0]
         self.assertEqual(_re.findall(r'data-p="([a-z]+)"', nav), list(screens.ALL))
         self.assertEqual([s.label for s in screens.SCREENS],
@@ -2889,7 +2899,7 @@ class TestWebAssets(unittest.TestCase):
         """
         import re as _re
         from volkit.pricing import PRODUCTS
-        html = (Path(__file__).resolve().parents[1] / "volkit" / "web" / "index.html").read_text()
+        html = _source("volkit", "web", "index.html")
         js = html.split("<script>")[1].split("</script>")[0]
         decl = (js.split("const VANILLA=")[1].split(";")[0]
                 + js.split("const IN=[")[1].split("];")[0]
@@ -2917,7 +2927,7 @@ class TestWebAssets(unittest.TestCase):
         would simply render a panel with no chart and no error.
         """
         import re as _re
-        html = (Path(__file__).resolve().parents[1] / "volkit" / "web" / "index.html").read_text()
+        html = _source("volkit", "web", "index.html")
         js = html.split("<script>")[1].split("</script>")[0]
         for name in set(_re.findall(r"querySelector\('\.([A-Za-z0-9_-]+)'\)", js)):
             self.assertIn(f'class="{name}"', js, f".{name} is looked up but never emitted")
@@ -2927,12 +2937,12 @@ class TestWebAssets(unittest.TestCase):
         silently does nothing, which is the failure mode this project exists
         to remove."""
         import re as _re
-        html = (Path(__file__).resolve().parents[1] / "volkit" / "web" / "index.html").read_text()
+        html = _source("volkit", "web", "index.html")
         js = html.split("<script>")[1].split("</script>")[0]
         block = js.split("const EF=[")[1].split("];")[0]
         fields = set(_re.findall(r"\['([a-z_]+)'", block))
         self.assertIn("forward", fields)
-        src = (Path(__file__).resolve().parents[1] / "volkit" / "listed.py").read_text()
+        src = _source("volkit", "listed.py")
         handler = src.split("def panel_from_request")[1]
         for f in fields:
             self.assertIn(f'"{f}"', handler, f"the server never reads {f!r}")
@@ -2944,12 +2954,12 @@ class TestWebAssets(unittest.TestCase):
         setting the server never reads would silently do nothing.
         """
         import re as _re
-        html = (Path(__file__).resolve().parents[1] / "volkit" / "web" / "index.html").read_text()
+        html = _source("volkit", "web", "index.html")
         js = html.split("<script>")[1].split("</script>")[0]
         block = js.split("const GF=[")[1].split("];")[0]
         fields = set(_re.findall(r"\['([a-z_]+)'", block))
         self.assertIn("vol_bump", fields)
-        src = (Path(__file__).resolve().parents[1] / "volkit" / "listed.py").read_text()
+        src = _source("volkit", "listed.py")
         handler = src.split("def positions_from_request")[1]
         for f in fields | {"text", "panels"}:
             self.assertIn(f'"{f}"', handler, f"the server never reads {f!r}")
@@ -2967,13 +2977,13 @@ class TestWebAssets(unittest.TestCase):
         to remove.
         """
         import re as _re
-        html = (Path(__file__).resolve().parents[1] / "volkit" / "web" / "index.html").read_text()
+        html = _source("volkit", "web", "index.html")
         js = html.split("<script>")[1].split("</script>")[0]
         block = js.split("const MF=[")[1].split("];")[0]
         fields = set(_re.findall(r"\['([a-z_]+)'", block))
         self.assertIn("text", fields)
         self.assertIn("fallback_spread", fields)
-        src = (Path(__file__).resolve().parents[1] / "volkit" / "marketmaker.py").read_text()
+        src = _source("volkit", "marketmaker.py")
         handler = src.split("def panel_from_request")[1]
         for f in fields | {"free", "smile_free", "fit_curve", "tune_wings"}:
             self.assertIn(f'"{f}"', handler, f"the server never reads {f!r}")
@@ -2985,13 +2995,13 @@ class TestWebAssets(unittest.TestCase):
         silently does nothing.
         """
         import re as _re
-        html = (Path(__file__).resolve().parents[1] / "volkit" / "web" / "index.html").read_text()
+        html = _source("volkit", "web", "index.html")
         js = html.split("<script>")[1].split("</script>")[0]
         block = js.split("const CF=[")[1].split("];")[0]
         fields = set(_re.findall(r"\['([a-z_]+)'", block))
         self.assertIn("kind", fields)
         self.assertIn("date", fields)
-        src = (Path(__file__).resolve().parents[1] / "volkit" / "curves.py").read_text()
+        src = _source("volkit", "curves.py")
         handler = src.split("def panel_from_request")[1]
         for f in fields | {"cut", "method", "field", "base"}:
             self.assertIn(f'"{f}"', handler, f"the server never reads {f!r}")
@@ -3003,14 +3013,14 @@ class TestWebAssets(unittest.TestCase):
         silently does nothing.
         """
         import re as _re
-        html = (Path(__file__).resolve().parents[1] / "volkit" / "web" / "index.html").read_text()
+        html = _source("volkit", "web", "index.html")
         js = html.split("<script>")[1].split("</script>")[0]
         block = js.split("const MOF=[")[1].split("];")[0]
         fields = set(_re.findall(r"\['([a-z_]+)'", block))
         self.assertIn("was_kind", fields)
         self.assertIn("was_date", fields)
         self.assertIn("now_kind", fields)
-        src = (Path(__file__).resolve().parents[1] / "volkit" / "monitor.py").read_text()
+        src = _source("volkit", "monitor.py")
         handler = src.split("def tile_from_request")[1].split("def panel_from_request")[0]
         for f in fields:
             self.assertIn(f'"{f}"', handler, f"the server never reads {f!r}")
@@ -3021,20 +3031,20 @@ class TestWebAssets(unittest.TestCase):
     def test_the_band_card_fields_are_all_understood_by_the_server(self):
         """The band treatment is marked on the screen and read in one place."""
         import re as _re
-        html = (Path(__file__).resolve().parents[1] / "volkit" / "web" / "index.html").read_text()
+        html = _source("volkit", "web", "index.html")
         js = html.split("<script>")[1].split("</script>")[0]
         block = js.split("const BFIELDS=[")[1].split("];")[0]
         fields = set(_re.findall(r"\['([a-z_]+)'", block))
         self.assertIn("hazard", fields)
         self.assertIn("blend", fields)
-        src = (Path(__file__).resolve().parents[1] / "volkit" / "banded.py").read_text()
+        src = _source("volkit", "banded.py")
         handler = src.split("def from_request")[1]
         for f in fields | {"mode", "solve_hazard"}:
             self.assertIn(f'"{f}"', handler, f"the server never reads {f!r}")
 
     def test_every_element_id_referenced_by_the_script_exists(self):
         import re as _re
-        html = (Path(__file__).resolve().parents[1] / "volkit" / "web" / "index.html").read_text()
+        html = _source("volkit", "web", "index.html")
         js = html.split("<script>")[1].split("</script>")[0]
         ids = set(_re.findall(r'id="([^"]+)"', html))
         refs = set(_re.findall(r"\$\('#([a-zA-Z0-9_-]+)'\)", js))
@@ -3266,9 +3276,9 @@ class TestFeedRefresh(unittest.TestCase):
             shutil.copy(FEED, path)
             service = self.service(path)
             self.assertFalse(service.feed_state()["stale"])
-            text = path.read_text().replace("USDJPY,SPOT,150.25", "USDJPY,SPOT,151.25")
-            self.assertNotEqual(text, path.read_text())
-            path.write_text(text)
+            text = path.read_text(encoding="utf-8").replace("USDJPY,SPOT,150.25", "USDJPY,SPOT,151.25")
+            self.assertNotEqual(text, path.read_text(encoding="utf-8"))
+            path.write_text(text, encoding="utf-8")
             os.utime(path, (time.time() + 5, time.time() + 5))
             self.assertTrue(service.feed_state()["stale"])
             r = service.refresh_feed({"legs": [{"pair": "USDJPY", "expiry": "3M"}]})
@@ -3324,6 +3334,14 @@ class TestWorkbooksAreNotHeldOpen(unittest.TestCase):
 
             class Tracking(self.real):
                 def __init__(inner, io, *a, **kw):
+                    # What was handed to the reader is kept here rather than
+                    # read back off it afterwards: pandas 3.0 dropped the
+                    # ``ExcelFile.io`` attribute this used to look at, and the
+                    # whole suite failed on the runner with "'Tracking' object
+                    # has no attribute 'io'".  The argument is the subject of
+                    # the test and this is the one place that has it whatever
+                    # pandas does with it next.
+                    inner.volkit_io = io
                     inner.volkit_closed = False
                     made.append(inner)
                     super().__init__(io, *a, **kw)
@@ -3345,7 +3363,7 @@ class TestWorkbooksAreNotHeldOpen(unittest.TestCase):
         for reader in made:
             # Over a copy in memory, never over the path: the file itself is
             # opened, copied and closed before any parsing starts.
-            self.assertIsInstance(reader.io, _io.BytesIO)
+            self.assertIsInstance(reader.volkit_io, _io.BytesIO)
             self.assertTrue(reader.volkit_closed,
                             "a reader was left open after the file had been read")
 
@@ -3382,6 +3400,106 @@ class TestWorkbooksAreNotHeldOpen(unittest.TestCase):
             shutil.copy(sample, spare)
             spare.replace(live)              # Excel's own save is a replace
             self.assertTrue(history.load_history(live).pairs)
+
+
+class TestTextFilesAreUtf8(unittest.TestCase):
+    """Every text file is UTF-8, whatever the machine's locale says.
+
+    Python decodes and encodes text with the *locale* encoding by default,
+    which on the Windows desk this is built for is cp1252.  Reading
+    ``volkit/web/index.html`` with it ended the Windows build at the test
+    suite with ``'charmap' codec can't decode byte 0x81``, and the same
+    default sits under every settings file, holiday override, band row and
+    published feed the tool reads.  ``paths.read_text`` / ``paths.open_text``
+    / ``paths.write_text`` are the one place that says otherwise.
+    """
+
+    ROOT = Path(__file__).resolve().parents[1]
+
+    def sources(self):
+        files = sorted((self.ROOT / "volkit").rglob("*.py"))
+        files += [self.ROOT / "build_exe.py", self.ROOT / "volkit.spec",
+                  Path(__file__).resolve()]
+        # paths.py is where the encoding is named, so it is the one file that
+        # may spell it out; launcher and the spec are build scaffolding.
+        return [f for f in files if f.name != "paths.py"]
+
+    def test_no_text_file_is_read_in_the_locale_encoding(self):
+        import ast
+
+        offenders = []
+        for f in self.sources():
+            tree = ast.parse(f.read_text(encoding="utf-8"), filename=str(f))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                fn = node.func
+                if not isinstance(fn, ast.Attribute):
+                    continue        # a bare read_text() is the helper itself
+                if isinstance(fn.value, ast.Name) and fn.value.id == "paths":
+                    continue        # ...and so is paths.read_text()
+                if isinstance(fn.value, ast.Name) and fn.value.id == "webbrowser":
+                    continue        # webbrowser.open opens a tab, not a file
+                kw = {k.arg for k in node.keywords}
+                bad = None
+                if fn.attr in ("read_text", "write_text") and "encoding" not in kw:
+                    bad = fn.attr
+                elif fn.attr == "open" and "encoding" not in kw and "b" not in "".join(
+                        a.value for a in node.args if isinstance(a, ast.Constant)
+                        and isinstance(a.value, str)):
+                    bad = "open"
+                elif fn.attr == "run" and "text" in kw and "encoding" not in kw:
+                    bad = "subprocess.run(text=True)"
+                if bad:
+                    offenders.append(f"{f.relative_to(self.ROOT)}:{node.lineno}  {bad}")
+        self.assertEqual(offenders, [], "these read or write text in the locale's "
+                         "encoding, which is cp1252 on the desk machine:\n  "
+                         + "\n  ".join(offenders))
+
+    def test_a_file_saved_with_a_byte_order_mark_still_reads(self):
+        """Notepad and Excel both write one, and it is not part of the data.
+
+        Left in place the mark becomes part of the first key of a settings
+        file and of the first pair name of a feed -- a heading nobody typed
+        and nothing matches.
+        """
+        import tempfile
+        from volkit import config, paths
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Path(tmp) / "volkit.cfg"
+            cfg.write_bytes("\ufeffcommand = serve\nport = 8900\n".encode("utf-8"))
+            self.assertEqual(config.load(cfg).argv[0], "serve")
+
+            feed = Path(tmp) / "feed.csv"
+            feed.write_bytes("\ufeffUSDJPY,SPOT,150.25\n".encode("utf-8"))
+            self.assertIn("USDJPY", MarketFeed.load(feed))
+
+            # And what the tool writes carries no mark of its own.
+            out = Path(tmp) / "written.txt"
+            paths.write_text(out, "USDJPY\n")
+            self.assertEqual(out.read_bytes(), b"USDJPY\n")
+
+    def test_a_file_that_is_not_utf8_names_itself(self):
+        """A decoding failure that does not say which file it was is the
+        swallowed error this project exists to remove."""
+        import tempfile
+        from volkit import paths
+
+        with tempfile.TemporaryDirectory() as tmp:
+            bad = Path(tmp) / "cp1252.cfg"
+            bad.write_bytes(b"note = caf\xe9\n")       # latin-1, not UTF-8
+            with self.assertRaises(UnicodeDecodeError) as ctx:
+                paths.read_text(bad)
+            self.assertIn("cp1252.cfg", str(ctx.exception))
+
+    def test_the_page_and_the_calendar_read_as_utf8(self):
+        """The two bundled files that actually carry non-ASCII."""
+        from volkit import paths
+
+        page = paths.read_text(self.ROOT / "volkit" / "web" / "index.html")
+        self.assertIn("\u2014", page)          # an em dash, which is what broke
+        self.assertTrue(page.rstrip().endswith("</html>"))
 
 
 class TestAutoReload(unittest.TestCase):
@@ -3425,9 +3543,9 @@ class TestAutoReload(unittest.TestCase):
         self.assertEqual(self.service.auto_state()["seq"], 0)
 
     def test_a_rewritten_feed_is_re_read(self):
-        text = self.feed.read_text().replace("USDJPY,SPOT,150.25", "USDJPY,SPOT,151.25")
-        self.assertNotEqual(text, self.feed.read_text())
-        self.feed.write_text(text)
+        text = self.feed.read_text(encoding="utf-8").replace("USDJPY,SPOT,150.25", "USDJPY,SPOT,151.25")
+        self.assertNotEqual(text, self.feed.read_text(encoding="utf-8"))
+        self.feed.write_text(text, encoding="utf-8")
         events = self.settle(self.feed)
         self.assertEqual([e["what"] for e in events], ["feed"])
         self.assertTrue(events[0]["ok"])
@@ -4038,7 +4156,7 @@ class TestScreens(unittest.TestCase):
 
     def test_the_page_hides_the_screens_it_was_not_given(self):
         """The tab, the panel and the boot work all key off the same list."""
-        html = (Path(__file__).resolve().parents[1] / "volkit" / "web" / "index.html").read_text()
+        html = _source("volkit", "web", "index.html")
         js = html.split("<script>")[1].split("</script>")[0]
         self.assertIn("STATE.screens", js)
         for name in self.screens.ALL:
@@ -4054,7 +4172,7 @@ class TestScreens(unittest.TestCase):
         painted by the same function, and either could come back as a one-line
         change nobody would notice.
         """
-        html = (Path(__file__).resolve().parents[1] / "volkit" / "web" / "index.html").read_text()
+        html = _source("volkit", "web", "index.html")
         js = html.split("<script>")[1].split("</script>")[0]
         grid = js.split("function renderGrid(")[1].split("\nfunction ")[0]
         head, body = grid.split("<tr class=\"sec\">", 1)
@@ -4085,7 +4203,8 @@ class TestPackageImport(unittest.TestCase):
         probe = ("import volkit.screens, volkit.paths, volkit.config, sys; "
                  "print(sorted(m for m in ('numpy', 'scipy', 'pandas') if m in sys.modules))")
         out = subprocess.run([sys.executable, "-c", probe], cwd=str(self.ROOT),
-                             capture_output=True, text=True)
+                             capture_output=True, text=True,
+                             encoding="utf-8", errors="replace")
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertEqual(out.stdout.strip(), "[]")
 
@@ -4155,7 +4274,7 @@ class TestPackaging(unittest.TestCase):
         putting a file in the wrong one produces an exe that starts and then
         serves an empty page.
         """
-        spec = (self.ROOT / "volkit.spec").read_text()
+        spec = (self.ROOT / "volkit.spec").read_text(encoding="utf-8")
         self.assertIn("volkit/web", spec)
         self.assertIn("volkit/data", spec)
         # tzdata is not optional on Windows: there is no system IANA database.
@@ -4216,7 +4335,7 @@ class TestPackaging(unittest.TestCase):
         self.assertIn("build", build_exe.SCREENS_BUILD_DIR.parts)
         self.assertNotIn("data", build_exe.SCREENS_BUILD_DIR.parts)
         self.assertFalse((self.ROOT / screens.MANIFEST).exists())
-        spec = (self.ROOT / "volkit.spec").read_text()
+        spec = (self.ROOT / "volkit.spec").read_text(encoding="utf-8")
         self.assertIn("VOLKIT_SCREENS_FILE", spec)
         self.assertIn("volkit/data", spec)
         for rel in build_exe.USER_DATA:
@@ -4303,7 +4422,7 @@ class TestStartupConfig(unittest.TestCase):
         from volkit import config
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "volkit.cfg"
-            path.write_text("command = serve\nport = 8900\n")
+            path.write_text("command = serve\nport = 8900\n", encoding="utf-8")
             argv, cfg = config.startup_argv(["--config", str(path)], {"serve", "check"})
             self.assertEqual(argv, ["serve", "--port", "8900"])
             self.assertEqual(cfg.path, path)
@@ -4325,7 +4444,7 @@ class TestStartupConfig(unittest.TestCase):
         from volkit import config
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "volkit.cfg"
-            path.write_text("command = serve\n")
+            path.write_text("command = serve\n", encoding="utf-8")
             with self.assertRaises(config.ConfigError) as ctx:
                 config.startup_argv(["--config", str(path), "check"], {"serve", "check"})
             self.assertIn("serve", str(ctx.exception))
@@ -4342,7 +4461,7 @@ class TestStartupConfig(unittest.TestCase):
         import launcher
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "volkit.cfg"
-            path.write_text("port = 8900\nno-browser = true\n")
+            path.write_text("port = 8900\nno-browser = true\n", encoding="utf-8")
             argv, cfg = launcher.resolve(["--config", str(path)])
             self.assertEqual(argv[0], "serve")
             self.assertEqual(argv, ["serve", "--port", "8900", "--no-browser"])

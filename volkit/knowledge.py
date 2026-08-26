@@ -40,7 +40,7 @@ from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 
-from .paths import app_dir
+from .paths import WRITE_ENCODING, app_dir, read_text
 from .timeutil import tenor_to_years
 
 BANK_FILENAME = "mm_knowledge.json"
@@ -303,8 +303,8 @@ class KnowledgeBank:
             bank.problems.append(f"no knowledge bank at {p}; it will be created on the first save")
             return bank
         try:
-            raw = json.loads(p.read_text())
-        except (OSError, json.JSONDecodeError) as exc:
+            raw = json.loads(read_text(p))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise KnowledgeError(f"cannot read the knowledge bank at {p}: {exc}") from None
         if not isinstance(raw, dict) or "pairs" not in raw:
             raise KnowledgeError(
@@ -345,7 +345,7 @@ class KnowledgeBank:
         p.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=str(p.parent), prefix=".mm_knowledge", suffix=".json")
         try:
-            with os.fdopen(fd, "w") as fh:
+            with os.fdopen(fd, "w", encoding=WRITE_ENCODING) as fh:
                 json.dump(payload, fh, indent=2, sort_keys=False)
                 fh.write("\n")
             os.replace(tmp, p)

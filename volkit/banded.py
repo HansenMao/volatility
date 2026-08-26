@@ -54,7 +54,7 @@ import numpy as np
 from scipy.optimize import least_squares
 from scipy.special import betainc, gammaln, ndtr
 
-from . import black
+from . import black, paths
 from .black import DeltaConvention
 from .numerics import ConvergenceError, solve_scalar
 
@@ -90,7 +90,7 @@ class Band:
 def load_bands(path: str | Path) -> dict[str, Band]:
     """Read ``pair,lower,upper[,note]`` rows.  Bands are policy, so they are data."""
     out: dict[str, Band] = {}
-    for line in Path(path).read_text().splitlines():
+    for line in paths.read_text(path).splitlines():
         line = line.split("#", 1)[0].strip()
         if not line:
             continue

@@ -42,3 +42,46 @@ def find_data_file(*candidates: str) -> Path | None:
             if p.exists():
                 return p
     return None
+
+
+# --------------------------------------------------------------------------
+# Text files
+# --------------------------------------------------------------------------
+# Every text file this tool reads or writes is UTF-8, said once, here.
+#
+# Python's default is the *locale* encoding, which on the desk machine this is
+# built for is cp1252 -- and cp1252 cannot decode a byte of a UTF-8 sequence
+# for a character it has no room for.  That is not a hypothetical: reading
+# ``volkit/web/index.html`` with the default stopped the Windows build dead
+# with ``'charmap' codec can't decode byte 0x81``, and the page is full of the
+# same em dashes and greek letters as everything else here.  A file the tool
+# wrote on one platform must read back on the other.
+#
+# Reading uses ``utf-8-sig`` and writing plain ``utf-8``: Notepad and Excel
+# both put a byte order mark on what they save, and left in place it becomes
+# part of the first key of a settings file or the first pair name of a feed --
+# a header nobody typed and nothing matches.  Stripping one that is there is
+# free; writing one is not, so it is never written.
+READ_ENCODING = "utf-8-sig"
+WRITE_ENCODING = "utf-8"
+
+
+def read_text(path: str | Path) -> str:
+    """Read a whole text file as UTF-8, naming the file if it is not."""
+    data = Path(path).read_bytes()
+    try:
+        return data.decode(READ_ENCODING)
+    except UnicodeDecodeError as exc:
+        raise UnicodeDecodeError(exc.encoding, exc.object, exc.start, exc.end,
+                                 f"{exc.reason} -- {path} is not UTF-8 text") from None
+
+
+def write_text(path: str | Path, text: str) -> None:
+    """Write a whole text file as UTF-8, with no byte order mark."""
+    Path(path).write_text(text, encoding=WRITE_ENCODING)
+
+
+def open_text(path: str | Path, **kw):
+    """Open a text file for reading as UTF-8; for the csv readers, which want
+    a handle rather than a string."""
+    return Path(path).open(encoding=READ_ENCODING, **kw)

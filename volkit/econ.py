@@ -28,6 +28,7 @@ from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from . import paths
 from .timeutil import UTC, parse_datetime
 
 # Where each releasing body publishes from, and at what local time.
@@ -148,7 +149,7 @@ class EconCalendar:
         cal.source = str(path)
         if not path.exists():
             return cal
-        with path.open() as fh:
+        with paths.open_text(path) as fh:
             for row in csv.reader(fh):
                 if not row or row[0].lstrip().startswith("#"):
                     continue
