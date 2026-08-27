@@ -1096,7 +1096,7 @@ python3 -m volkit mm EURUSD --request ask.txt --target-source none \
     --vega position.txt --axe-scale 500 --history vol_history.xlsx   # quote off the marks
 python3 -m volkit mm EURUSD --learn < run.txt        # propose widths; --save writes them
 
-# the desk agent: keep an archive of what the market has shown, and quote from it
+# the quoting agent: keep an archive of what the market has shown, and quote from it
 python3 -m volkit agent fetch  --sdr sdr/ --days 5           # get DTCC's public dissemination
 python3 -m volkit agent fetch  --sdr sdr/ --since 2025-09-01 # ... or backfill the 366 days it keeps
 python3 -m volkit agent trades EURUSD --invert --history vol_history.xlsx
@@ -1107,8 +1107,11 @@ python3 -m volkit agent learn    EURUSD --save              # propose widths fro
 python3 -m volkit agent quote    EURUSD --record <<< '1M ATM in 100mm vega'
 python3 -m volkit agent archive  EURUSD --kind shown        # the prices we made
 python3 -m volkit agent outcome  EURUSD --ref <id> --result traded_ask
+python3 -m volkit agent ask      EURUSD "how wide has the 3M fly been shown, and by whom"
+python3 -m volkit agent ask      EURUSD                     # ... a question a line; it writes nothing
 
-# the same archive behind the card in the Market maker tab
+# the same archive behind the cards in the Market maker tab (the quoting agent, the
+# marking agent, and "Ask the record" -- the question box that writes nothing)
 python3 -m volkit serve --chats chats/ --sdr sdr/ --archive mm_archive.jsonl
 python3 -m volkit mm EURUSD --request ask.txt --archive-width   # the archive on the width ladder
 
@@ -1130,7 +1133,7 @@ interface see the same ones.
 Add `--asof "2024-02-28 12:00"` to price against a fixed valuation time.
 Without it the current UTC time is used, once, at startup.
 
-The desk agent is both a command and a **card inside the Market maker tab**,
+The quoting agent is both a command and a **card inside the Market maker tab**,
 not a screen of its own -- it answers a question about the market pasted on
 that tab, so it is three more routes on `mm` and it leaves with that tab if a
 build excludes it. `serve --chats DIR --sdr DIR` names the folders the card
@@ -1139,7 +1142,7 @@ show against the width the archive says this thing is actually shown at, per
 quoted row, and changes nothing.
 
 There are **two agents**, and on the Market maker tab each is tied to one of
-its two buttons. The desk agent above answers *what do I show*; its link to
+its two buttons. The quoting agent above answers *what do I show*; its link to
 **Quote** is the *widths from the archive* switch, which puts the archive on
 the quote's width ladder between the bank and the typed fallback. The
 **marking agent** (`volkit mark`, and the *Marking agent* card beside the fit)

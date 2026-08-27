@@ -123,15 +123,18 @@ SCREENS: tuple[Screen, ...] = (
     ),
     Screen(
         name="mm", label="Market maker", panel="p-mm",
-        # The desk agent is a card *inside* this screen rather than a screen
+        # The quoting agent is a card *inside* this screen rather than a screen
         # of its own: it answers a question about the market on this tab, and
         # a build without the market-maker tab has nothing for it to answer.
         # The marking agent is the other card: it plans and judges *this*
         # screen's fit, so it belongs here with the fit it is aimed at, and
-        # its command comes with it.  Excluding the tab takes both agents.
+        # its command comes with it.  The third agent, the question box, reads
+        # what the other two keep and lives beside them.  Excluding the tab
+        # takes all three.
         routes=("/api/mm/fit", "/api/mm/quote", "/api/mm/learn", "/api/mm/bank",
                 "/api/mm/agent", "/api/mm/agent/ingest", "/api/mm/agent/file",
-                "/api/mm/agent/fetch", "/api/mm/mark", "/api/mm/mark/record"),
+                "/api/mm/agent/fetch", "/api/mm/mark", "/api/mm/mark/record",
+                "/api/mm/ask"),
         commands=("mm", "agent", "mark"),
     ),
 )

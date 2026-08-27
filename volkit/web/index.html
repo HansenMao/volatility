@@ -276,6 +276,13 @@ td.wmsg{color:var(--warn)}
 td.pos{color:var(--good)} td.neg{color:var(--bad)}
 tr.sep td{border-top:1px solid var(--line);color:var(--muted);font-size:10.5px;
   text-transform:uppercase;letter-spacing:.5px}
+.askchat{display:flex;flex-direction:column;gap:8px;max-height:420px;overflow-y:auto;padding:2px}
+.askq{align-self:flex-end;max-width:85%;background:var(--accent-soft,rgba(80,120,200,.12));border-radius:10px 10px 2px 10px;padding:6px 10px;font-size:12px}
+.aska{align-self:flex-start;max-width:95%;background:var(--panel2,rgba(127,127,127,.08));border-radius:10px 10px 10px 2px;padding:6px 10px;font-size:12px}
+.aska .askprose{margin-bottom:6px}
+.aska .askfact{font-family:var(--mono,ui-monospace,monospace);font-size:11px;font-variant-numeric:tabular-nums;margin-top:2px}
+.aska .asksrc{display:inline-block;min-width:54px;color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.03em}
+.aska .askref{color:var(--warn)}
 .etonote{color:var(--muted);font-size:11px;margin-top:3px}
 .etowarn{color:var(--warn);font-size:11.5px;margin-top:3px}
 .etoerr{color:var(--bad);font-size:11.5px;margin-top:3px}
@@ -975,33 +982,6 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
         <div class="meta" id="mqmarks"></div>
         <div id="mqsheet"></div></section>
 
-      <section class="card"><h2>Desk agent <small id="agenthead"></small></h2>
-        <div class="mmbar" style="margin:0 0 10px">
-          <div class="f"><label>Half-life (d)</label><input id="agenthalf" value="5" style="width:84px"></div>
-          <div class="f"><label>Min evidence</label><input id="agentmin" value="2" style="width:88px"></div>
-          <div class="f"><label>Lookback (d)</label><input id="agentlook" value="90" style="width:84px"></div>
-          <div class="f"><label>Tolerance</label><input id="agenttol" value="0.1" style="width:76px"></div>
-          <div class="f"><label>Broker</label><input id="agentcpty" placeholder="who showed it" style="width:120px"></div>
-          <div class="acts">
-            <button id="agentrun">Suggest</button>
-            <button class="ghost" id="agentscan" style="width:auto">Scan folders</button>
-            <button class="ghost" id="agentfetch" style="width:auto">Fetch from DTCC</button>
-            <div class="f"><label>days back</label><input id="agentdays" value="1" style="width:64px"></div>
-            <button class="ghost" id="agentfile" style="width:auto">File this run</button>
-            <label style="margin:0;display:flex;align-items:center;gap:6px;width:auto;color:var(--muted);font-size:11px">
-              <input type="checkbox" id="agentmodel" checked style="width:auto"> count what a model read</label>
-          </div>
-        </div>
-        <div class="meta" id="agentstatus"></div>
-        <div id="agentrows"></div>
-        <div id="agentwidths"></div>
-        <div class="msg" id="agentmsg"></div>
-        <div class="hint" id="agenthint">The agent proposes and changes nothing. A width it
-          disagrees with stays on the quote sheet until you write a rule for it in the
-          knowledge bank below.</div></section>
-      <section class="card"><h2>The market against the surface <small id="mmsheethead"></small></h2>
-        <div id="mmsheet"></div></section>
-
       <section class="card"><h2>Marking agent <small id="markhead"></small></h2>
         <div class="mmbar" style="margin:0 0 10px">
           <div class="f"><label>Journal lookback (d)</label><input id="marklook" value="365" style="width:104px"></div>
@@ -1032,6 +1012,53 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
           <b>Take the plan onto the fit</b> sets the knob boxes to the agent&rsquo;s plan and runs the
           fit, so you can adjust and press Fit again, then <b>record my fit as the edit</b>. Every
           answer is a line in the journal, and the edited ones are what it learns from.</div></section>
+
+      <section class="card"><h2>The market against the surface <small id="mmsheethead"></small></h2>
+        <div id="mmsheet"></div></section>
+
+      <section class="card"><h2>Quoting agent <small id="agenthead"></small></h2>
+        <div class="mmbar" style="margin:0 0 10px">
+          <div class="f"><label>Half-life (d)</label><input id="agenthalf" value="5" style="width:84px"></div>
+          <div class="f"><label>Min evidence</label><input id="agentmin" value="2" style="width:88px"></div>
+          <div class="f"><label>Lookback (d)</label><input id="agentlook" value="90" style="width:84px"></div>
+          <div class="f"><label>Tolerance</label><input id="agenttol" value="0.1" style="width:76px"></div>
+          <div class="f"><label>Broker</label><input id="agentcpty" placeholder="who showed it" style="width:120px"></div>
+          <div class="acts">
+            <button id="agentrun">Suggest</button>
+            <button class="ghost" id="agentscan" style="width:auto">Scan folders</button>
+            <button class="ghost" id="agentfetch" style="width:auto">Fetch from DTCC</button>
+            <div class="f"><label>days back</label><input id="agentdays" value="1" style="width:64px"></div>
+            <button class="ghost" id="agentfile" style="width:auto">File this run</button>
+            <label style="margin:0;display:flex;align-items:center;gap:6px;width:auto;color:var(--muted);font-size:11px">
+              <input type="checkbox" id="agentmodel" checked style="width:auto"> count what a model read</label>
+          </div>
+        </div>
+        <div class="meta" id="agentstatus"></div>
+        <div id="agentrows"></div>
+        <div id="agentwidths"></div>
+        <div class="msg" id="agentmsg"></div>
+        <div class="hint" id="agenthint">The agent proposes and changes nothing. A width it
+          disagrees with stays on the quote sheet until you write a rule for it in the
+          knowledge bank below.</div></section>
+      <section class="card"><h2>Ask the record <small id="askhead"></small></h2>
+        <div id="askchat" class="askchat"></div>
+        <div class="mmbar" style="margin:10px 0 0">
+          <div class="f" style="flex:1;min-width:240px"><label>Question</label>
+            <input id="asktext" placeholder="how wide has the 3M 25d fly been shown this month, and by whom" style="width:100%"></div>
+          <div class="acts">
+            <button id="askrun">Ask</button>
+            <button class="ghost" id="askclear" style="width:auto">Clear</button>
+            <label style="margin:0;display:flex;align-items:center;gap:6px;width:auto;color:var(--muted);font-size:11px">
+              <input type="checkbox" id="asknarrate" checked style="width:auto"> a paragraph, if a model is running</label>
+          </div>
+        </div>
+        <div class="meta" id="askstatus"></div>
+        <div class="msg" id="askmsg"></div>
+        <div class="hint" id="askhint">The third agent, and the only one that cannot change anything.
+          It reads the archive, the journal, the knowledge bank and the surface, and answers in
+          facts, each tagged with where it came from. It takes the quoting agent&rsquo;s evidence
+          settings above. Ask it to fetch, re-mark, record or quote and it names the button that
+          does that. &ldquo;And the 1M?&rdquo; keeps the topic of the question before.</div></section>
 
       <section class="card"><h2>At-the-money curve <small id="mmcurvehead"></small></h2>
         <div id="mmcurve"></div></section>
@@ -1269,7 +1296,7 @@ function syncMarket(L){
    the same silent zero as a field that quietly returns nothing. */
 const VANILLA=['vanilla'], STRIKED=['vanilla','digital'], TOUCH=['one_touch','no_touch'];
 const IN=[
- ['label','Label','text'],['pair','Pair','pair'],['product','Product','product'],
+ ['pair','Pair','pair'],['product','Product','product'],
  ['expiry','Expiry','text'],['cut','Cut','cut'],['type','Type','type',STRIKED],
  ['strike','Strike','text',STRIKED],['barrier','Barrier','text',TOUCH],
  ['spot','Spot','text'],['swap','Swap (pts)','text'],['forward','Forward','text'],
@@ -3518,7 +3545,7 @@ const MQF=[
  ['fallback_spread','#mmfallback'],['vega_scale','#mmscale'],['fair_weight','#mmfair'],
  ['axe_weight','#mmaxe'],['skew_cap','#mmcap'],['horizon_days','#mmhorizon'],
  ['vega_text','#mmvega'],
- /* the desk agent's rung on the width ladder, on the same evidence settings
+ /* the quoting agent's rung on the width ladder, on the same evidence settings
     as its card, so the two never disagree about what the archive holds */
  ['use_archive_width','#mqarchive'],['archive_half_life','#agenthalf'],
  ['archive_min_effective','#agentmin'],['archive_lookback_days','#agentlook'],
@@ -3951,7 +3978,7 @@ function mmTargetVisible(){
   $('#mmtargetcard').classList.toggle('hide',$('#mmsource').value!=='paste');
 }
 
-/* -- the desk agent ------------------------------------------------------
+/* -- the quoting agent ------------------------------------------------------
    A card inside this tab rather than a tab of its own: it answers a question
    about the market pasted above it, and it answers it without fitting
    anything, so it runs on its own button beside a fit that takes a second.
@@ -4145,7 +4172,7 @@ function markPayload(){
 function markKey(b){return [b.pair,b.text,b.target_source,b.target_text].join('\u0001')}
 /* A proposal is only a proposal about the paste it was computed from; the
    verdict buttons go away when the market box has moved on, for the same
-   reason the desk agent's columns do. */
+   reason the quoting agent's columns do. */
 function markFresh(){return !!(MKR&&MKR.key===markKey(markPayload()))}
 const SRC={rule:'in',learned:'thru',caller:'none'};
 function markTag(src){return '<span class="mmtag '+(SRC[src]||'none')+'">'+esc(src)+'</span>'}
@@ -4206,7 +4233,7 @@ function paintMark(){
         (cr?(sgn(cr.applied-cr.fitted,4)+(cr.capped?' (capped)':'')+' · '+esc(cr.why)):'—')+'</td></tr>'}).join('')+
       '</tbody></table>';
   }else h+='<div class="annone">The fit landed where the surface already is; there is nothing to propose.</div>';
-  /* the desk agent's critique */
+  /* the quoting agent's critique */
   if(c){
     h+='<div class="mmstat" style="margin-top:10px"><span>the quoting agent: <b>'+esc(c.verdict)+'</b></span>'+
       (c.available?'<span><b>'+c.inside_before+' → '+c.inside_after+'</b> of '+(c.findings||[]).length+
@@ -4277,6 +4304,77 @@ async function takeMarkPlan(){
   paintMark();
 }
 $('#markrun').onclick=runMark;
+/* ---- the third agent: a question, answered from the record ----------------
+   The browser owns the transcript and posts it whole; the server keeps no
+   turn, so a question in the shell and the same question here are answered
+   by one function.  The evidence boxes are the quoting agent's own, read here as
+   there, so the card and the widths never disagree about what the archive
+   holds.  Nothing on this card can write anywhere. */
+const AK=[
+ ['pair','#mmpair'],['text','#asktext'],['cut','#mmcut'],['method','#mmmethod'],
+ ['half_life','#agenthalf'],['min_effective','#agentmin'],['lookback_days','#agentlook'],
+ ['include_model_read','#agentmodel'],['narrate','#asknarrate'],
+];
+let ASKT=[];
+function saveAsk(){try{localStorage.setItem('volkit.ask',JSON.stringify(ASKT.slice(-40)))}catch(e){}}
+function loadAsk(){
+  try{const r=localStorage.getItem('volkit.ask');if(r)ASKT=JSON.parse(r)}catch(e){ASKT=[]}
+  if(!Array.isArray(ASKT))ASKT=[];
+}
+function askPayload(){
+  const out={};
+  AK.forEach(f=>{const el=$(f[1]);out[f[0]]=el.type==='checkbox'?el.checked:el.value});
+  out.transcript=ASKT.map(t=>({q:t.q,a:{ok:!!(t.a&&t.a.ok)}}));
+  return out;
+}
+function paintAsk(){
+  const box=$('#askchat');
+  box.innerHTML=ASKT.map(t=>{
+    const a=t.a||{};
+    let body='';
+    if(a.error)body='<div class="askref">! '+esc(a.error)+'</div>';
+    else if(!a.ok)body='<div class="askref">'+esc(a.refused||'not answered')+'</div>';
+    else{
+      if(a.narration)body+='<div class="askprose">'+esc(a.narration)+'</div>';
+      body+=(a.facts||[]).map(f=>'<div class="askfact"><span class="asksrc">'+esc(f.source)+
+        '</span> '+esc(f.text)+'</div>').join('');
+      if(a.narration_why)body+='<div class="etonote">('+esc(a.narration_why)+')</div>';
+    }
+    const q=a.question||{};
+    const notes=[].concat(q.notes||[],a.notes||[]);
+    body+=notes.map(n=>'<div class="etonote">· '+esc(n)+'</div>').join('');
+    if(q.rewritten)body+='<div class="etonote">read by the model as: '+esc(q.rewritten)+'</div>';
+    return '<div class="askq">'+esc(t.q)+'</div><div class="aska">'+
+      (q.describe?'<div class="etonote">'+esc(q.describe)+'</div>':'')+body+'</div>';
+  }).join('');
+  box.scrollTop=box.scrollHeight;
+  $('#askhead').textContent=ASKT.length?(ASKT.length+' turn(s), kept in this browser'):'';
+}
+async function runAsk(){
+  const text=$('#asktext').value.trim();
+  if(!text){$('#askmsg').className='msg warn';$('#askmsg').textContent='ask something';return}
+  $('#askmsg').className='msg';$('#askmsg').textContent='';
+  $('#askstatus').innerHTML='<span class="spin"></span> reading the record…';
+  const body=askPayload();
+  try{
+    const r=await post('/api/mm/ask',body);
+    ASKT.push({q:text,a:r});
+    $('#asktext').value='';
+    $('#askstatus').textContent=(r.model_note||'')+
+      (r.used_model?'':'')+(r.archive_error?' · archive: '+r.archive_error:'')+
+      (r.journal_error?' · journal: '+r.journal_error:'');
+  }catch(e){
+    ASKT.push({q:text,a:{ok:false,error:e.message}});
+    $('#askstatus').textContent='';
+  }
+  saveAsk();paintAsk();
+}
+function clearAsk(){ASKT=[];saveAsk();paintAsk();$('#askstatus').textContent='';}
+$('#askrun').onclick=runAsk;
+$('#askclear').onclick=clearAsk;
+$('#asktext').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();runAsk()}});
+loadAsk();paintAsk();
+
 $('#markaccept').onclick=()=>recordMark('accepted');
 $('#markedited').onclick=()=>recordMark('edited');
 $('#markreject').onclick=()=>recordMark('rejected');
@@ -4298,7 +4396,7 @@ $('#mmpair').onchange=()=>{setMethodSel('#mmmethod',$('#mmpair').value);
 $('#mmapply').onchange=()=>{saveMM();scheduleMM()};
 $('#mqonfit').onchange=()=>{saveMM();scheduleMQ()};
 $('#mqarchive').onchange=()=>{saveMM();scheduleMQ()};
-/* the archive's evidence settings sit on the desk agent's card and are read
+/* the archive's evidence settings sit on the quoting agent's card and are read
    by the quote too, so a change there re-quotes when the archive is on */
 ['#agenthalf','#agentmin','#agentlook'].forEach(id=>{$(id).oninput=()=>{saveMM();
   if($('#mqarchive').checked)scheduleMQ()}});

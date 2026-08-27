@@ -1,4 +1,4 @@
-"""The desk agent: the archive, the dissemination reader, the model leash, and
+"""The quoting agent: the archive, the dissemination reader, the model leash, and
 the price.
 
 Most of these pin a behaviour that was wrong at some point during the build,
@@ -1091,6 +1091,254 @@ class TestPremiumInversion(unittest.TestCase):
         self.assertIn(f"{forward:.6g}", vols[0].why)
         self.assertIn("historical sheet", vols[0].source)
         self.assertTrue(any("midnight UTC" in n for n in notes), notes)
+
+# ==========================================================================
+class _Model:
+    """A local model that answers what the test tells it to."""
+
+    def __init__(self, reply: str):
+        self.reply = reply
+        self.asked: list[tuple[str, str]] = []
+        self.why_not = ""
+        self.config = llm.ModelConfig()
+
+    def available(self, *, recheck=False):
+        return True
+
+    def complete(self, system, user, *, timeout=None):
+        self.asked.append((system, user))
+        return llm.Reply(text=self.reply, ok=True, model="fake")
+
+
+class TestAskGrammar(unittest.TestCase):
+    """The third agent's reading of a question."""
+
+    def setUp(self):
+        from volkit import ask
+        self.ask = ask
+
+    def test_a_question_becomes_a_query(self):
+        q = self.ask.parse_question(
+            "how wide has the 3M 25d fly been shown this month, and by whom", pair="EURUSD")
+        self.assertEqual(q.topics, ["widths"])
+        self.assertEqual((q.pair, q.tenor, q.instrument, q.delta), ("EURUSD", "3M", "fly", 0.25))
+        self.assertEqual(q.lookback_days, 31.0)
+        self.assertTrue(q.who)
+
+    def test_a_delta_is_not_a_tenor(self):
+        # ``25d`` read as a twenty-five day tenor: the first thing the grammar
+        # got wrong.  The delta is read and taken out before the tenor is.
+        q = self.ask.parse_question("where is the 25d rr quoted", pair="EURUSD")
+        self.assertEqual(q.delta, 0.25)
+        self.assertIsNone(q.tenor)
+        q = self.ask.parse_question("where is the 1M 25d rr quoted", pair="EURUSD")
+        self.assertEqual((q.tenor, q.delta), ("1M", 0.25))
+
+    def test_an_english_phrase_is_not_a_pair(self):
+        # ``THE ATM`` is three capitals, a space and three capitals, and read
+        # as a pair every question about the at-the-money was about THEATM.
+        q = self.ask.parse_question("how wide is the atm", pair="USDJPY")
+        self.assertEqual(q.pair, "USDJPY")
+        q = self.ask.parse_question("how wide is the eur/usd atm", pair="USDJPY")
+        self.assertEqual(q.pair, "EURUSD", "a pair in the question beats the default")
+        q = self.ask.parse_question("how wide is the atm in audusd", known_pairs=["AUDUSD"])
+        self.assertEqual(q.pair, "AUDUSD")
+
+    def test_been_shown_is_the_market_and_not_us(self):
+        # "how wide has it been shown" is a widths question; "shown" as a
+        # topic word made it also a question about our own prices.
+        q = self.ask.parse_question("how wide has the 1M been shown", pair="EURUSD")
+        self.assertEqual(q.topics, ["widths"])
+        q = self.ask.parse_question("what did we show in the 1M", pair="EURUSD")
+        self.assertEqual(q.topics, ["shown"])
+
+    def test_a_follow_up_fills_only_its_gaps_and_says_so(self):
+        first = self.ask.parse_question("how wide has the 1M atm been shown this week",
+                                        pair="EURUSD")
+        q = self.ask.parse_question("and the 3M?", previous=first)
+        self.assertEqual(q.topics, ["widths"])
+        self.assertEqual((q.pair, q.tenor, q.instrument), ("EURUSD", "3M", "atm"))
+        self.assertEqual(q.lookback_days, 7.0)
+        self.assertIn("topic", q.inherited)
+        self.assertTrue(any("taken from the question before" in n for n in q.notes))
+        # A question that names its own topic inherits nothing but the pair.
+        q = self.ask.parse_question("what printed last month", previous=first)
+        self.assertEqual(q.topics, ["trades"])
+        self.assertEqual(q.pair, "EURUSD")
+        self.assertIsNone(q.tenor)
+
+    def test_a_window_is_not_a_tenor(self):
+        q = self.ask.parse_question("what printed in the last 30 days", pair="EURUSD")
+        self.assertEqual(q.lookback_days, 30.0)
+        self.assertIsNone(q.tenor)
+        q = self.ask.parse_question("what printed since 2026-08-01", pair="EURUSD")
+        self.assertEqual(q.since, "2026-08-01")
+
+    def test_the_topics_the_grammar_hears_are_the_ones_the_answer_builds(self):
+        self.assertEqual(set(self.ask._TOPIC_WORDS), set(self.ask.TOPICS))
+        self.assertEqual(set(self.ask._TOPIC_HELP), set(self.ask.TOPICS))
+
+
+class TestAskAgent(unittest.TestCase):
+    """Reads everything, writes nothing, and says where each fact came from."""
+
+    def setUp(self):
+        from volkit import ask, remarks
+        self.ask = ask
+        self.arc_path = _tmp("arc.jsonl")
+        self.archive = arch.Archive.load(self.arc_path)
+        for i, ago in enumerate((0, 0.5, 1, 2)):
+            when = MORNING - timedelta(days=ago)
+            ok, why = self.archive.add(arch.Observation(
+                kind="quote", pair="EURUSD", at=arch._iso(when), instrument="atm",
+                tenor="1M", bid=8.20, ask=8.60, counterparty=f"broker{i % 2}"))
+            self.assertTrue(ok, why)
+        self.archive.flush()
+        self.journal_path = _tmp("j.jsonl")
+        self.journal = remarks.Journal.load(self.journal_path)
+
+    def _ask(self, text, **kw):
+        kw.setdefault("journal", self.journal)
+        return self.ask.ask(text, archive=self.archive, pair="EURUSD", asof=MORNING, **kw)
+
+    def test_a_width_question_is_answered_from_the_archive_with_sources(self):
+        out = self._ask("how wide has the 1M atm been shown this week, and by whom")
+        self.assertTrue(out.ok, out.refused)
+        self.assertTrue(all(f.source == "archive" for f in out.facts), out.facts)
+        self.assertTrue(any("shown 0.400 wide" in f.text for f in out.facts), out.fact_lines())
+        self.assertTrue(any("broker0 (2), broker1 (2)" in f.text for f in out.facts),
+                        out.fact_lines())
+        self.assertEqual(out.model_note, "no model")
+
+    def test_a_turn_writes_nothing(self):
+        # The whole reason this is a third agent.  The archive and the journal
+        # are byte-identical after a question about every topic there is.
+        before = (Path(self.arc_path).read_bytes(), Path(self.journal_path).exists())
+        records = len(self.archive.records)
+        for text in ("how wide is the 1M atm", "where is the 1M atm quoted",
+                     "what printed last week", "what became of our prices",
+                     "what did we show", "what do you hold", "who moved the mark",
+                     "what does this desk do", "what is in the bank"):
+            out = self._ask(text)
+            self.assertTrue(out.ok, (text, out.refused))
+            self.assertTrue(out.facts, text)
+        self.assertEqual((Path(self.arc_path).read_bytes(), Path(self.journal_path).exists()),
+                         before)
+        self.assertEqual(len(self.archive.records), records)
+        self.assertEqual(len(self.journal), 0)
+
+    def test_doing_is_handed_off_by_name(self):
+        for text, where in (("fetch the dtcc files for the last 3 days", "volkit agent fetch"),
+                            ("re-mark the 1M atm to 8.4", "marking agent"),
+                            ("record that as shown", "volkit agent shown"),
+                            ("quote me the 1M atm in 100mm", "volkit agent quote")):
+            out = self._ask(text)
+            self.assertFalse(out.ok, text)
+            self.assertIn(where, out.refused)
+            self.assertEqual(out.facts, [])
+
+    def test_a_question_about_nothing_it_knows_is_refused_with_the_list(self):
+        out = self._ask("what is the weather in london")
+        self.assertFalse(out.ok)
+        for topic in self.ask.TOPICS:
+            self.assertIn(topic, out.refused)
+
+    def test_a_pair_is_needed_and_the_archive_summary_is_the_exception(self):
+        out = self.ask.ask("how wide is the 1M", archive=self.archive, asof=MORNING)
+        self.assertFalse(out.ok)
+        self.assertIn("needs a currency pair", out.refused)
+        out = self.ask.ask("what do you hold", archive=self.archive, asof=MORNING)
+        self.assertTrue(out.ok, out.refused)
+        self.assertTrue(any("EURUSD: 4 record(s)" in f.text for f in out.facts), out.fact_lines())
+
+    def test_trades_as_volatilities_need_the_history_and_say_so(self):
+        when = MORNING - timedelta(days=1)
+        ok, why = self.archive.add(arch.Observation(
+            kind="trade", pair="EURUSD", at=arch._iso(when), instrument="outright",
+            tenor="3M", expiry_date="2026-11-19", strike=1.10, is_call=True,
+            premium=12000.0, premium_ccy="USD", notional=1e7, notional_ccy="EUR",
+            source="sdr", external_id="T1", action="NEWT"))
+        self.assertTrue(ok, why)
+        out = self._ask("what printed in the 3M last week and what vol does it imply")
+        self.assertTrue(out.ok, out.refused)
+        self.assertTrue(any("1.1 call" in f.text and "premium 12,000 USD" in f.text
+                            for f in out.facts), out.fact_lines())
+        self.assertTrue(any("historical workbook" in f.text and f.source == "note"
+                            for f in out.facts), out.fact_lines())
+        # A different tenor bucket finds nothing, and does not borrow the 3M.
+        out = self._ask("what printed in the 1Y last week")
+        self.assertTrue(any("nothing printed" in f.text for f in out.facts), out.fact_lines())
+
+    def test_the_surface_is_optional_and_a_failure_to_load_it_is_a_note(self):
+        out = self._ask("where is the surface marked", book=None)
+        self.assertTrue(any("no workbook is loaded" in f.text for f in out.facts))
+
+        def broken():
+            raise RuntimeError("no workbook at /nowhere")
+
+        out = self._ask("where is the surface marked", book=broken)
+        self.assertTrue(any("no workbook at /nowhere" in n for n in out.notes), out.notes)
+
+    def test_the_model_may_rewrite_a_question_but_never_answer_it(self):
+        # A question the grammar cannot read goes to the model to be rewritten
+        # into the grammar's own words, and the grammar then reads *that*.
+        model = _Model("widths 1M ATM this week who")
+        out = self._ask("gimme the picture on the 1M atm, who is showing it", model=model,
+                        narrate=False)
+        self.assertTrue(out.ok, out.refused)
+        self.assertEqual(out.question.topics, ["widths"])
+        self.assertEqual(out.question.rewritten, "widths 1M ATM this week who")
+        self.assertEqual(out.question.text, "gimme the picture on the 1M atm, who is showing it")
+        self.assertTrue(out.used_model)
+        # A rewrite with a number the question did not have is refused whole:
+        # "the front end" is not 1M until a person says so.
+        model = _Model("widths 1M ATM this week")
+        out = self._ask("gimme the picture on the front end", model=model, narrate=False)
+        self.assertFalse(out.ok)
+        self.assertTrue(any("contained 1" in n for n in out.notes), out.notes)
+
+    def test_a_narration_with_an_invented_number_is_dropped_and_the_facts_stay(self):
+        model = _Model("The 1M has been shown 0.400 wide by two brokers, about 5% of the level.")
+        out = self._ask("how wide is the 1M atm", model=model)
+        self.assertTrue(out.ok)
+        self.assertEqual(out.narration, "")
+        self.assertIn("5", out.narration_why)
+        self.assertTrue(out.facts)
+        model = _Model("The 1M ATM has been shown 0.400 wide over 4 observations.")
+        out = self._ask("how wide is the 1M atm", model=model)
+        self.assertTrue(out.narration.startswith("The 1M ATM"))
+        self.assertTrue(out.used_model)
+
+    def test_a_posted_transcript_is_reparsed_and_never_trusted(self):
+        # The browser owns the conversation and posts it whole; the last
+        # question is rebuilt from its *text*, so a transcript cannot carry a
+        # pair or a topic the grammar would not have read.
+        conv = self.ask.Conversation.from_json([
+            {"q": "how wide has the eurusd 1M atm been shown", "a": {"ok": True,
+                                                                      "pair": "USDJPY"}},
+            {"q": "what is the weather", "a": {"ok": False}},
+        ])
+        self.assertEqual(conv.last.pair, "EURUSD")
+        self.assertEqual(conv.last.topics, ["widths"])
+        self.assertEqual(len(conv.turns), 1)
+
+    def test_the_cli_reproduces_the_answer_and_writes_nothing(self):
+        import contextlib
+        from volkit import cli
+        before = Path(self.arc_path).read_bytes()
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(io.StringIO()):
+            code = cli.main(["--asof", MORNING.isoformat(), "agent", "ask", "EURUSD",
+                             "how", "wide", "is", "the", "1M", "atm", "this", "week",
+                             "--archive", self.arc_path, "--journal", self.journal_path,
+                             "--knowledge", _tmp("bank.json"), "--no-llm", "--json"])
+        self.assertEqual(code, 0, buf.getvalue())
+        out = json.loads(buf.getvalue())
+        self.assertTrue(out["ok"])
+        self.assertTrue(any("shown 0.400 wide" in f["text"] for f in out["facts"]), out)
+        self.assertEqual(Path(self.arc_path).read_bytes(), before)
+        self.assertFalse(Path(self.journal_path).exists())
+
 
 if __name__ == "__main__":
     unittest.main()

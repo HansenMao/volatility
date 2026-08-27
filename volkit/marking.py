@@ -841,7 +841,7 @@ class MarkPanel:
         return out
 
     def _critique(self, book, archive, proposal, method, forwards, clock, notes):
-        """The desk agent's score of the proposal, or the reason there is none."""
+        """The quoting agent's score of the proposal, or the reason there is none."""
         from . import consult
         from . import synthesis as syn
         if archive is None:

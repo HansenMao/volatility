@@ -21,7 +21,7 @@ sheet it was written against is kept as `files/vol_marks_legacy_format.xlsx`
 -- same marks, old layout -- and the comparison still runs. volkit reads
 either (§4).
 
-- ~28,000 lines across 47 modules, 707 tests, `unittest` only (no pytest).
+- ~29,000 lines across 48 modules, 728 tests, `unittest` only (no pytest).
   Tests live in `tests/test_volkit.py`, `tests/test_agent.py` (the desk
   agent, §17) and `tests/test_marking.py` (the marking agent, §18).
 - Runtime deps: numpy, scipy, pandas, openpyxl. Plus `tzdata` on Windows.
@@ -110,6 +110,9 @@ marking    the marking agent: how to run the fit, and what this desk does after
            it -- tendencies with counts on them, never a policy
 consult    what the two agents say to each other: a finding, a proposal, and a
            scored critique of what it broke
+ask        the third agent: a question in English about what the tool holds,
+           answered from the record with every fact sourced. Reads everything,
+           writes nothing
 webapp     JSON API + stdlib server;  web/index.html is the whole front end
 cli        every screen has a command-line equivalent
 screens    which screens a build has, shown or hidden; the one reader of the
@@ -862,6 +865,8 @@ python -m volkit mm EURUSD --request ask.txt --target-source none   # the quote,
 python -m volkit mm EURUSD --learn < run.txt          # propose widths, --save writes them
 python -m volkit mm EURUSD --request ask.txt --archive-width   # the archive on the width ladder
 python -m volkit mark propose EURUSD --file run.txt --out p.json   # the marking-agent card's path
+python -m volkit agent ask EURUSD "how wide has the 3M fly been shown this month, and by whom"
+python -m volkit agent ask EURUSD --journal mm_remarks.jsonl   # interactive: a question a line
 python -m volkit serve --journal mm_remarks.jsonl     # where the card's verdicts go
 python3 files/make_history_sample.py        # regenerate the example history
 python3 build_exe.py --host-check           # validate the packaging (Windows exe: on Windows)
@@ -943,7 +948,7 @@ does stage 3. The fit puts a price on nothing and the quote fits nothing.
 - A fit is a morning's decision, taken against a run that has just arrived; a
   quote is answered in seconds, over and over, against whatever was fitted. A
   request does not arrive with a market on it (§17 says the same thing about
-  the desk agent), so tying the two together meant a request could only be
+  the quoting agent), so tying the two together meant a request could only be
   priced by re-running a fit against a market that had nothing to do with it,
   and a market could not be fitted without also producing prices in
   instruments nobody had asked for.
@@ -1254,7 +1259,7 @@ becomes a bare flag or nothing, keys may repeat, `#` comments.
 
 ---
 
-## 17. The desk agent (`archive.py`, `sdr.py`, `llm.py`, `ingest.py`, `synthesis.py`, `agent.py`)
+## 17. The quoting agent (`archive.py`, `sdr.py`, `llm.py`, `ingest.py`, `synthesis.py`, `agent.py`)
 
 The market-maker screen answers "what do I show against *this* market" and
 needs a paste to fit to. A request does not arrive with a market on it, so the
@@ -1512,7 +1517,7 @@ because most of it needs no numeric stack and runs on stdlib plus the package.
 
 ## 18. The marking agent (`remarks.py`, `marking.py`, `consult.py`)
 
-A second agent, and a different problem from §17's. The desk agent answers
+A second agent, and a different problem from §17's. The quoting agent answers
 *what do I show*; this one answers *where should the surface be*, which is the
 question the marking screen's two fitters leave to a person.
 
@@ -1524,7 +1529,7 @@ determine four parameters, whether to touch the wings when only the
 at-the-money was quoted -- and then whether to take what came out. That
 judgement is what this agent makes, and the last part of it is what it learns.
 
-Two ways in, like the desk agent. `volkit mark propose|confer|learn|journal|
+Two ways in, like the quoting agent. `volkit mark propose|confer|learn|journal|
 record` on the command line, and a **card inside the market-maker tab**,
 beside the fit it plans. Both belong to the **mm** screen: the fit this agent
 runs is `marketmaker.fit_atm_curve` and `tune_smile_shifts`, the fit panel's
@@ -1555,15 +1560,15 @@ wired to one of them:
   press Fit again; **Record my fit as the edit** then journals the fit's marks
   beside the proposal, which is the row §18 says is worth the most. The
   verdict buttons vanish when the paste has moved on since the proposal,
-  for the same reason the desk agent's columns do.
-- **The desk agent is on the quote.** Its card compares widths and proposes
+  for the same reason the quoting agent's columns do.
+- **The quoting agent is on the quote.** Its card compares widths and proposes
   nothing, as before; the link is the **widths from the archive** switch on
   the toolbar, which puts the archive on the quote panel's width ladder --
   **bank, then archive, then the typed fallback, then no price**, the same
   ladder and order as `agent.run` -- and every row names the rung. Off by
   default: the archive is evidence about the market, and a desk that has not
   yet convinced itself of it should not find it under its prices. The
-  evidence settings are the desk agent card's own boxes (half-life, minimum
+  evidence settings are the quoting agent card's own boxes (half-life, minimum
   evidence, lookback) read by both, so the card and the quote never disagree
   about what the archive holds. The archive's *level* rides on the row as a
   flag and is applied to nothing (§17's rule). `volkit mm --archive-width`
@@ -1683,3 +1688,71 @@ actually does. The critique reports that numerically rather than hiding it,
 and adjudicating it is the person's job.
 
 Files, beside the workbook: `mm_remarks.jsonl` (the journal).
+
+---
+
+## 19. The third agent: questions (`ask.py`)
+
+The quoting agent answers *what do I show* and hands back a price; the marking
+agent answers *where should the surface be* and hands back a proposal. Each
+has one output shape and a test pinning it. "How wide has the 3M fly been
+shown this month, and by whom" has neither shape, so it is a **third agent**
+rather than a conversation bolted onto one of the first two -- and it is
+built on one rule that decides everything else about it:
+
+- **It writes nothing.** It reads the archive, the journal, the knowledge bank
+  and the surface and answers. It never prices, proposes, files a quote,
+  journals a verdict or touches the book. The other two agents each have one
+  writing route (§17 `file`, §18 `record`); this one has none, so a chat box
+  can never be the way a width or a mark changed. A test asks about every
+  topic and checks the archive and the journal byte-for-byte afterwards.
+- **A question is parsed into a query, and volkit runs the query.**
+  `ask.parse_question` reads the pair, tenor, instrument, delta, window and
+  topic; `ask.TOPICS` is the one declaration of what can be asked (`widths`,
+  `levels`, `trades`, `outcomes`, `shown`, `archive`, `journal`,
+  `tendencies`, `marks`, `rules`), and every fact comes from `synthesis`,
+  `marking.learn`, `curves.surface_curve`, the bank or the archive itself,
+  tagged with its source. The surface is read in decimals and converted
+  **once**, at this edge, to the points the archive beside it is in (§4).
+- **The model may rewrite a question it cannot read; it may never answer
+  one.** A question the grammar does not recognise is sent to the local model
+  to be put into the grammar's own vocabulary, under `llm.invented_numbers`
+  -- "the front end" may not come back as `1M`, because 1 is not in the
+  question -- and the grammar then reads the rewrite. The paragraph at the
+  end is `llm.narrate` over the fact list, refused whole if it holds a number
+  the facts (or the question) do not. Without a model the answer is the fact
+  list and `model_note` says so.
+- **A question it cannot answer is refused with the list of what it can.**
+  "What printed in the 3M" answered with what was *quoted* in the 3M would
+  look exactly like the dissemination file. Asked to do something -- fetch,
+  re-mark, record, quote -- it names the command or button that does it and
+  does not.
+- **A follow-up fills only its gaps, and says which.** "And the 3M?" after a
+  widths question inherits the topic, pair and instrument and lists them in
+  `Question.inherited`. `Conversation.from_json` rebuilds the previous
+  question from its *text*, never from the posted structure, so a transcript
+  cannot carry a pair the grammar would not have read.
+- **The book is lazy.** `ask()` takes a `Book` or a callable; a question about
+  the archive never pays for a workbook it does not read. The CLI caches one
+  load per session, failures included.
+
+Two ways in, like the other agents. `volkit agent ask PAIR "question"` on the
+command line -- without a question it reads a line at a time -- and the **Ask
+the record** card in the market-maker tab, under the marking agent, on
+`/api/mm/ask`. Both belong to `mm`: a build without that tab has no archive
+card to ask about, and excluding it takes all three agents.
+
+- **The browser owns the transcript and posts it whole** (`const AK` in the
+  page, pinned against `ask.panel_from_request`), kept in `localStorage`
+  because it is a per-browser convenience and nothing else. The server keeps
+  no turn; `AskPanel.run` rebuilds the previous question from the transcript's
+  *text* and answers, so a turn on the card and the same turn in a shell are
+  one function.
+- **The evidence settings are the quoting-agent card's own boxes** (half-life,
+  minimum evidence, lookback, whether model-read observations count), read
+  by both, so the chat and the widths beside it never disagree about what
+  the archive holds.
+- **A workbook is optional to the route.** A server whose book failed to load
+  still answers about the archive; a question about the surface says the
+  surface is not there. The model is looked up per request, like the other
+  agent routes, so starting Ollama mid-morning is enough.

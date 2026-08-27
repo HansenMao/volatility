@@ -1320,7 +1320,7 @@ class BookService:
             hist = None
             if self.history is not None and panel.pair in self.history:
                 hist = self.history[panel.pair]
-            # The archive is the desk agent's file and the quote's third rung
+            # The archive is the quoting agent's file and the quote's third rung
             # (§17): read under its own lock, like the agent card reads it.
             with self._archive_lock:
                 out = panel.run(self.book, bank=self.bank, hist=hist, archive=self.archive)
@@ -1379,7 +1379,7 @@ class BookService:
                     "notes": notes, "parse": parse}
 
     def mm_agent(self, payload: dict) -> dict:
-        """The desk-agent card: the pasted run's widths against the archive.
+        """The quoting-agent card: the pasted run's widths against the archive.
 
         Deliberately does no fitting.  A width comparison needs the paste, the
         bank and the archive and no surface at all, so this answers without
@@ -1511,6 +1511,35 @@ class BookService:
         if not model.available():
             return None, f"no model: {model.why_not}"
         return model, f"model: {model.config.describe()}"
+
+    def mm_ask(self, payload: dict) -> dict:
+        """The third agent's card: a question, answered from what is held.
+
+        Reads the archive, the journal, the bank and the surface and writes to
+        none of them -- ``ask.AskPanel`` has no route to a writing call, and
+        this method adds none.  The transcript arrives with the request and
+        goes back with the answer's place in it; the server keeps no turn.
+        A workbook is optional: a question about the archive is answered on
+        a server whose book failed to load, and one about the surface says
+        that the surface is not there.
+        """
+        from .ask import panel_from_request as ask_panel_from_request
+        panel = ask_panel_from_request(payload)
+        model, model_note = self._agent_model()
+        with self._lock:
+            book, bank, hist = self.book, self.bank, self.history
+        clock = book.clock if book is not None else None
+        with self._archive_lock:
+            out = panel.run(book, self.archive, journal=self.journal, bank=bank, hist=hist,
+                            model=model, clock=clock)
+        out["model_note"] = model_note
+        out["archive_error"] = self.archive_error
+        out["journal_error"] = self.journal_error
+        if book is None:
+            out["notes"] = list(out.get("notes") or []) + [
+                f"no workbook is loaded ({self.load_error or 'unknown reason'}); the "
+                f"surface cannot be asked about"]
+        return out
 
     def mm_agent_file(self, payload: dict) -> dict:
         """Put the run on the screen into the archive.
@@ -1756,6 +1785,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self.service.mm_agent_fetch(payload))
             elif url.path == "/api/mm/mark":
                 self._json(self.service.mm_mark(payload))
+            elif url.path == "/api/mm/ask":
+                self._json(self.service.mm_ask(payload))
             elif url.path == "/api/mm/mark/record":
                 self._json(self.service.mm_mark_record(payload))
             elif url.path == "/api/analysis":
@@ -1816,7 +1847,7 @@ def serve(path: str, host: str = "127.0.0.1", port: int = 8765,
         print(f"  ! re-marking journal: {Handler.service.journal_error}")
     watched_folders = Handler.service.agent_chats + Handler.service.agent_sdr
     if watched_folders:
-        print(f"  desk agent watching: {', '.join(watched_folders)}")
+        print(f"  quoting agent watching: {', '.join(watched_folders)}")
     if Handler.service.start_watching():
         watched = ", ".join(w["path"] for w in Handler.service.auto_state()["watching"])
         print(f"  auto-load the feed every {Handler.service.auto_interval:g}s: "

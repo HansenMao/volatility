@@ -1360,7 +1360,7 @@ def _agent_folders(args) -> list[tuple[str, str]]:
 
 
 def cmd_agent(args) -> int:
-    """The desk agent: ingest, synthesize, quote, explain, and keep the record.
+    """The quoting agent: ingest, synthesize, quote, explain, and keep the record.
 
     Every action here goes through the same functions the screen would call,
     which is what keeps a price made in a shell and a price made in a browser
@@ -1486,6 +1486,10 @@ def cmd_agent(args) -> int:
             print(f"  written: {arc.flush()} record(s) to {arc.path}")
             state.save()
         return 1 if result.failed and not result.written else 0
+
+    # ---- a question, answered from the record ---------------------------
+    if action == "ask":
+        return _agent_ask(args, arc, clock, pair)
 
     if not pair:
         print(f"error: '{action}' needs a pair", file=sys.stderr)
@@ -1664,6 +1668,99 @@ def cmd_agent(args) -> int:
             print(f"  {o.id}  {o.describe()}")
     unpriced = [d for d in out.decisions if not d.priced]
     return 1 if unpriced and len(unpriced) == len(out.decisions) else 0
+
+
+def _agent_ask(args, arc, clock, pair: str) -> int:
+    """The third agent: a question in English, answered from what is held.
+
+    Reads everything and writes nothing -- ``ask.ask`` cannot reach a writing
+    route, and the CLI adds none.  The book is loaded lazily, so a question
+    about the archive never pays for a workbook it does not read.
+    """
+    import json as _json
+    from . import ask as ask_mod
+    from . import remarks as remarks_mod
+    from .knowledge import KnowledgeBank
+
+    model, model_note = _agent_model(args)
+    journal = remarks_mod.Journal.load(args.journal)
+    for problem in journal.problems:
+        print(f"  ! {problem}", file=sys.stderr)
+    bank = KnowledgeBank.load(args.knowledge)
+    for problem in bank.problems:
+        print(f"  ! {problem}", file=sys.stderr)
+    hist = None
+    if args.history:
+        from .history import load_history
+        hist = load_history(args.history)
+        for problem in hist.problems[:5]:
+            print(f"  ! {problem}", file=sys.stderr)
+
+    holder: dict = {}
+
+    def book_loader():
+        # Cached: a conversation may ask about the surface several times and
+        # the workbook is read once.  A failure is remembered too, so the
+        # same error is not paid for on every turn.
+        if "book" not in holder:
+            try:
+                book = _book(args, [pair] if pair else None)
+                _apply_band(args, book)
+                holder["book"] = book
+            except Exception as exc:  # noqa: BLE001 - reported on the answer
+                holder["book"] = None
+                holder["why"] = str(exc)
+        if holder.get("book") is None and holder.get("why"):
+            raise RuntimeError(holder["why"])
+        return holder["book"]
+
+    conv = ask_mod.Conversation()
+
+    def one(text: str) -> ask_mod.Answer:
+        out = ask_mod.ask(
+            text, archive=arc, pair=pair, book=book_loader, journal=journal, bank=bank,
+            hist=hist, model=model, asof=clock.now, half_life=args.half_life,
+            min_effective=args.min_evidence, lookback_days=args.lookback,
+            include_model_read=not args.no_model_read, cut=args.cut, method=args.method,
+            discount_rate=args.discount_rate, previous=conv.last,
+            narrate=not args.no_narration)
+        conv.add(out)
+        return out
+
+    question = " ".join(args.question or []).strip()
+    if question:
+        out = one(question)
+        if args.json:
+            print(_json.dumps(out.to_json(), indent=1, sort_keys=True))
+        else:
+            print(model_note)
+            print(out.text())
+        return 0 if out.ok else 1
+
+    # Interactive: one question a line, the turn before filling the gaps in
+    # the next.  Nothing typed here can write anywhere.
+    print(model_note)
+    print(f"ask about {pair or 'a pair'}; a line at a time, 'quit' to stop. Topics: "
+          + ", ".join(ask_mod.TOPICS))
+    while True:
+        try:
+            line = input("> ") if sys.stdin.isatty() else sys.stdin.readline()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+        if not line:
+            break
+        line = line.strip()
+        if not line:
+            continue
+        if line.lower() in ("quit", "exit", "q"):
+            break
+        if not sys.stdin.isatty():
+            print(f"> {line}")
+        out = one(line)
+        print(out.text())
+        print()
+    return 0
 
 
 def cmd_mark(args) -> int:
@@ -1975,10 +2072,10 @@ def build_parser() -> argparse.ArgumentParser:
                         "historical sheet stay on their buttons, because reloading the "
                         "workbook discards this session's marks. The pricing screen has the "
                         "same switch")
-    # The desk agent's card lives inside the market-maker tab, and its folders
+    # The quoting agent's card lives inside the market-maker tab, and its folders
     # are named here rather than typed into the page: a path a browser can
     # post is a path anything that reaches the browser can read.
-    s.add_argument("--archive", help=f"the observation archive the desk-agent card reads "
+    s.add_argument("--archive", help=f"the observation archive the quoting-agent card reads "
                                      f"(default: {archive.ARCHIVE_FILENAME} beside the workbook)")
     s.add_argument("--chats", action="append", default=[], metavar="DIR",
                    help="a folder of broker chats the agent card may scan; repeatable")
@@ -2046,20 +2143,27 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--save", action="store_true", help="with --learn, write them to the bank")
     s.set_defaults(func=cmd_mm)
 
-    # The desk agent.  One command with an action on it rather than a family
+    # The quoting agent.  One command with an action on it rather than a family
     # of commands: every action shares the archive, the bank and the model
     # options, and splitting them would mean repeating that list five times
     # and having it drift four ways.
     s = add_command("agent", parents=[common],
                     help="keep an archive of what the market has shown, and quote from it")
-    s.add_argument("action", choices=("quote", "ingest", "watch", "fetch", "trades",
+    s.add_argument("action", choices=("quote", "ask", "ingest", "watch", "fetch", "trades",
                                       "evidence", "learn", "shown", "outcome", "archive"),
-                   help="quote: make a price. fetch: download DTCC's public dissemination "
-                        "files. ingest/watch: read the folders. trades: what printed, and "
-                        "what volatility it implies. evidence: what the archive says. learn: "
-                        "propose bank rules from it. shown/outcome: record a price and what "
-                        "became of it. archive: what is held")
+                   help="quote: make a price. ask: a question in English about what the "
+                        "tool holds, answered from the record and never applied. fetch: "
+                        "download DTCC's public dissemination files. ingest/watch: read the "
+                        "folders. trades: what printed, and what volatility it implies. "
+                        "evidence: what the archive says. learn: propose bank rules from it. "
+                        "shown/outcome: record a price and what became of it. archive: what "
+                        "is held")
     s.add_argument("pair", nargs="?", help="the currency pair")
+    s.add_argument("question", nargs="*",
+                   help="with 'ask', the question. Without one, questions are read a line "
+                        "at a time until EOF or 'quit'")
+    s.add_argument("--journal", help=f"with 'ask', the re-marking journal "
+                                     f"(default: {remarks.JOURNAL_FILENAME} beside the workbook)")
     s.add_argument("--file", default="-",
                    help="what to price, one instrument a line (default: stdin)")
     s.add_argument("--archive", help=f"the observation archive "

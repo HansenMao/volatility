@@ -435,6 +435,29 @@ class TestConsult(unittest.TestCase):
                             for n in conference.notes), conference.notes)
 
 
+class TestAskReadsTheSurfaceInPoints(unittest.TestCase):
+    """The third agent against a real surface: points at the edge, and no marks moved."""
+
+    def test_a_surface_fact_is_in_volatility_points_and_the_book_is_untouched(self):
+        # ``curves`` is decimals throughout, and the first cut of the agent
+        # printed "ATM 0.057" beside an archived "8.400".  One conversion, at
+        # the agent's edge, and a test that the surface it read is the surface
+        # it left.
+        from volkit import archive as arch
+        from volkit import ask
+        book = _Book.get()
+        before = session.capture_pair(book, "EURUSD")
+        out = ask.ask("where is the surface marked in 1M", archive=arch.Archive.load(_tmp("a.jsonl")),
+                      pair="EURUSD", book=book, asof=ASOF.now)
+        self.assertTrue(out.ok, out.refused)
+        line = next(f for f in out.facts if f.text.startswith("EURUSD 1m:") or f.text.startswith("EURUSD 1M:"))
+        self.assertEqual(line.source, "surface")
+        atm = float(line.text.split("ATM ")[1].split(",")[0])
+        self.assertGreater(atm, 1.0, line.text)
+        self.assertLess(atm, 100.0, line.text)
+        self.assertEqual(session.capture_pair(book, "EURUSD"), before)
+
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -573,7 +596,7 @@ class TestCard(unittest.TestCase):
 
 
 class TestQuoteArchiveRung(unittest.TestCase):
-    """The desk agent on the quote's width ladder: bank, archive, fallback."""
+    """The quoting agent on the quote's width ladder: bank, archive, fallback."""
 
     def setUp(self):
         from volkit import archive as arch

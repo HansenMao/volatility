@@ -1,4 +1,4 @@
-"""The desk agent: read everything, work it out, make a price, show your working.
+"""The quoting agent: read everything, work it out, make a price, show your working.
 
 The market-maker screen answers "what do I show against *this* market" -- it
 needs a paste to fit to.  A request does not come with a market attached.  It
@@ -815,7 +815,7 @@ VERDICTS = ("agrees", "tight", "wide", "no rule", "thin", "not read")
 
 @dataclass
 class SuggestPanel:
-    """One run of the desk-agent card: the paste, against the archive."""
+    """One run of the quoting-agent card: the paste, against the archive."""
 
     pair: str
     text: str = ""
@@ -832,7 +832,7 @@ class SuggestPanel:
         from .quotes import parse_quotes
         pair = self.pair.upper()
         if book is None:
-            raise AgentError("the desk agent needs a loaded book for its valuation time")
+            raise AgentError("the quoting agent needs a loaded book for its valuation time")
         clock = book.clock
         out: dict = {
             "pair": pair, "valuation": clock.now.isoformat(timespec="seconds"),
@@ -1016,7 +1016,7 @@ def _tenor_of(expiry) -> str:
 
 
 def panel_from_request(payload: dict) -> SuggestPanel:
-    """The desk-agent card as the browser posts it.
+    """The quoting-agent card as the browser posts it.
 
     Same shape as ``marketmaker.panel_from_request`` and for the same reason:
     the browser owns the panel and posts it whole, so a card set up on the
@@ -1041,7 +1041,7 @@ def panel_from_request(payload: dict) -> SuggestPanel:
 
     pair = str(payload.get("pair") or "").strip().upper()
     if not pair:
-        raise AgentError("the desk agent needs a pair")
+        raise AgentError("the quoting agent needs a pair")
     return SuggestPanel(
         pair=pair, text=str(payload.get("text") or ""),
         fly_convention=str(payload.get("fly_convention") or "market"),

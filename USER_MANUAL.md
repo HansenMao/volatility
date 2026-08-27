@@ -1267,6 +1267,8 @@ volkit agent learn EURUSD --save          turn that into knowledge-bank widths
 volkit agent quote EURUSD --record        make a two-way and keep a record of it
 volkit agent outcome EURUSD --ref ID --result traded_ask
                                           say what happened to a price you showed
+volkit agent ask EURUSD "how wide has the 3M fly been shown this month"
+                                          ask the record a question; no question means one a line
                                           the curve comparison panel, as a table
 volkit session marks.json                 save every mark on the book to a file
 volkit session marks.json --load          put a saved file back
@@ -1308,7 +1310,7 @@ volkit serve --session marks.json
 
 ---
 
-## 5a. The desk agent
+## 5a. The quoting agent
 
 The agent is in two places: a **card inside the Market maker tab**, and a
 command. The card answers one question about the market you have pasted --
@@ -1573,7 +1575,7 @@ been computed from what happened afterwards.
 
 ## 5b. The marking agent
 
-A second agent, answering a different question. The desk agent asks *what do I
+A second agent, answering a different question. The quoting agent asks *what do I
 show*; this one asks *where should the surface be*.
 
 It does **not** replace the fit on the marking tab. That fit is fine. What it
@@ -1629,7 +1631,7 @@ Two switches. **Agent chooses the knobs** lets it pick which parameters to
 free, from what the targets can determine, what the quotes actually reach,
 and what the journal says you never touch; untick it and it runs with the
 boxes ticked under *What the fit may move*, and says the choice was yours.
-**Score against the archive** asks the desk agent to judge the proposal at
+**Score against the archive** asks the quoting agent to judge the proposal at
 every archived market -- what it fixed and what it broke -- before you see it.
 
 Then you answer it, and the answer is what it learns from:
@@ -1697,10 +1699,10 @@ and the numbers are all there so you can decide whether you agree.
 volkit mark confer EURUSD --archive mm_archive.jsonl
 ```
 
-The desk agent's flag — *the mark is 0.45 below where this has been quoted* —
+The quoting agent's flag — *the mark is 0.45 below where this has been quoted* —
 is evidence the marking agent can use, and this is where it gets handed over.
-The desk agent turns the archive into targets; the marking agent proposes; the
-desk agent then scores the proposal at **every** archived point, including the
+The quoting agent turns the archive into targets; the marking agent proposes; the
+quoting agent then scores the proposal at **every** archived point, including the
 tenors the fit was not aimed at, and reports what it fixed and **what it
 broke**:
 
@@ -1718,6 +1720,51 @@ tenor, and past that it is fitting the archive's noise with extra steps.
 It scores *inside the two-way the market actually showed*, not distance to the
 middle of it — so it cannot make itself look good by walking your surface onto
 the average of every market it has ever seen.
+
+## 5c. Asking questions
+
+```
+volkit agent ask EURUSD "how wide has the 3M 25d fly been shown this month, and by whom"
+volkit agent ask EURUSD "where is the 1M atm quoted against the mark"
+volkit agent ask EURUSD "what printed in the 3M last week and what vol does it imply" --history vol_history.xlsx
+volkit agent ask EURUSD "what became of the prices we showed"
+volkit agent ask EURUSD "who moved the mark this month" --journal mm_remarks.jsonl
+volkit agent ask EURUSD "what does this desk do after a fit"
+volkit agent ask EURUSD                    # interactive: a question a line, 'quit' to stop
+```
+
+A third agent, and the only one that **cannot change anything**. It reads
+the archive, the re-marking journal, the knowledge bank and the surface, and
+answers in facts, each tagged with where it came from:
+
+```
+asked: EURUSD 3M 25d FLY about widths over 31 days naming sources
+  [archive] EURUSD 25d FLY out to three months: shown 0.080 wide (0.070 to 0.090), 9 observation(s) from 3 source(s), newest today
+  [archive] EURUSD two-ways came from: brokerA (5), brokerB (3), brokerC (1)
+```
+
+It understands a pair, a tenor (`3M`, `1Y`), an instrument (`atm`, `rr`,
+`fly`, `strangle`), a delta (`25d`), a window (`today`, `this week`, `last
+30 days`, `since 2026-08-01`), *who* for the sources, and *vol* when you want
+printed trades as the volatility they imply. Ask "and the 1M?" next and it
+keeps the topic and the pair from the question before, and says it did.
+
+What it will not do is act. Ask it to fetch, re-mark, record or quote and it
+names the command or the button that does that. Ask it something it does not
+recognise and it lists what it can answer rather than guessing.
+
+The same agent is the **Ask the record** card in the Market maker tab, under
+the marking agent: type a question, press Ask or Enter, and the answer lands
+in the conversation above the box with each fact tagged by its source. The
+conversation is kept in your browser and cleared with **Clear**; the
+evidence settings it uses are the quoting agent card's own boxes. Nothing typed
+there can write anywhere.
+
+With a local model configured (§5a), a question the grammar cannot read is
+rewritten into its vocabulary first -- but never with a number the question
+did not contain -- and the answer gets a short paragraph written *from* the
+facts, dropped whole if it contains a figure they do not. Without one you get
+the fact list, and the first line says which it was.
 
 ## 6. Troubleshooting
 

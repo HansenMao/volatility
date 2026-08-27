@@ -4378,6 +4378,61 @@ class TestWebAssets(unittest.TestCase):
         filer = _source("volkit", "webapp.py").split("def mm_agent_file")[1]
         self.assertIn('"counterparty"', filer)
 
+    def test_the_ask_card_fields_are_all_understood_by_the_server(self):
+        """The third agent's card posts its own list, pinned against its own reader."""
+        import re as _re
+        html = _source("volkit", "web", "index.html")
+        js = html.split("<script>")[1].split("</script>")[0]
+        block = js.split("const AK=[")[1].split("];")[0]
+        fields = set(_re.findall(r"\['([a-z_]+)'", block))
+        self.assertIn("text", fields)
+        self.assertIn("half_life", fields)
+        handler = _source("volkit", "ask.py").split("def panel_from_request")[1]
+        for f in fields | {"transcript"}:
+            self.assertIn(f'"{f}"', handler, f"the server never reads {f!r}")
+        # The card belongs to the market-maker screen with the other two agents.
+        from volkit import screens
+        self.assertIn("/api/mm/ask", screens.BY_NAME["mm"].routes)
+
+    def test_the_ask_route_answers_without_the_paste_and_writes_nothing(self):
+        """A question is answered off the archive alone, and the files are untouched."""
+        import tempfile
+        from pathlib import Path as _P
+        from volkit import archive as _arch
+        from volkit.webapp import BookService
+        folder = _P(tempfile.mkdtemp())
+        arc = _arch.Archive.load(folder / "arc.jsonl")
+        for i in range(3):
+            arc.add(_arch.Observation(kind="quote", pair="EURUSD", at=ASOF.now.isoformat(),
+                                      instrument="atm", tenor="1M", bid=8.2, ask=8.6,
+                                      counterparty=f"b{i}"))
+        arc.flush()
+        before = (folder / "arc.jsonl").read_bytes()
+        service = BookService(str(WORKBOOK), ASOF, archive_path=str(folder / "arc.jsonl"),
+                              journal_path=str(folder / "j.jsonl"))
+        out = service.mm_ask({"pair": "EURUSD", "text": "how wide is the 1M atm this week",
+                              "half_life": "5", "min_effective": "2", "lookback_days": "90",
+                              "include_model_read": True, "narrate": False, "transcript": []})
+        self.assertTrue(out["ok"], out)
+        self.assertTrue(any("0.400 wide" in f["text"] for f in out["facts"]), out["facts"])
+        self.assertIn("model_note", out)
+        # A follow-up posted with the transcript keeps the topic and the pair.
+        again = service.mm_ask({"pair": "EURUSD", "text": "and the 3M?", "narrate": False,
+                                "transcript": [{"q": "how wide is the 1M atm this week",
+                                                "a": {"ok": True}}]})
+        self.assertEqual(again["question"]["topics"], ["widths"])
+        self.assertEqual(again["question"]["tenor"], "3M")
+        self.assertEqual(again["turns"], 1)
+        # The surface is read in points beside the archive's points.
+        marked = service.mm_ask({"pair": "EURUSD", "text": "where is the surface marked in 1M",
+                                 "narrate": False, "transcript": []})
+        line = next(f for f in marked["facts"] if "ATM " in f["text"] and f["source"] == "surface")
+        self.assertGreater(float(line["text"].split("ATM ")[1].split(",")[0]), 1.0, line)
+        self.assertEqual((folder / "arc.jsonl").read_bytes(), before)
+        self.assertFalse((folder / "j.jsonl").exists())
+        with self.assertRaises(Exception):
+            service.mm_ask({"pair": "EURUSD", "text": "   "})
+
     def test_the_agent_card_never_names_a_folder_the_browser_chose(self):
         """A path a page can post is a path anything reaching the page can read.
 
@@ -5732,7 +5787,7 @@ class TestScreens(unittest.TestCase):
         msg = self.screens.route_refusal("/api/mm/fit")
         self.assertIsNotNone(msg)
         self.assertIn("Market maker", msg)
-        # Both agents live on this tab and leave with it: the desk agent's
+        # Both agents live on this tab and leave with it: the quoting agent's
         # card and the marking agent's, routes and command alike.
         self.assertIsNotNone(self.screens.route_refusal("/api/mm/mark"))
         self.assertIsNotNone(self.screens.route_refusal("/api/mm/mark/record"))

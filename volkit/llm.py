@@ -373,7 +373,8 @@ number -- no differences, no percentages, no averages, no rounding.
 """
 
 
-def narrate(model: LocalModel, facts: list[str], *, extra_numbers=()) -> tuple[str, str]:
+def narrate(model: LocalModel, facts: list[str], *, extra_numbers=(),
+            system: str | None = None) -> tuple[str, str]:
     """English for a decision, or ``("", why not)``.
 
     ``facts`` is the decision record already rendered as lines -- the same
@@ -385,7 +386,8 @@ def narrate(model: LocalModel, facts: list[str], *, extra_numbers=()) -> tuple[s
         return "", "there is nothing to explain"
     if not model.available():
         return "", model.why_not or "no model available"
-    reply = model.complete(_NARRATE_SYSTEM, "Facts:\n" + "\n".join(f"- {f}" for f in facts))
+    reply = model.complete(system or _NARRATE_SYSTEM,
+                           "Facts:\n" + "\n".join(f"- {f}" for f in facts))
     if not reply.ok:
         return "", reply.why
     allowed = set()
