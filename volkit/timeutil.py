@@ -120,6 +120,20 @@ _DATETIME_FORMATS = (
     "%m/%d/%Y",
     "%d-%b-%y",
     "%d-%b-%Y",
+    # The spellings a person types into an expiry box, appended so that every
+    # format above is still tried first and nothing that already parsed moves.
+    # Each of these carries a month *name* or leads with the year, so none of
+    # them can be read two ways: the one genuinely ambiguous form, a
+    # day-first "05/06/2026", is deliberately absent -- "%m/%d/%Y" above
+    # already claims it, and a second slash format that only caught the days
+    # past the 12th would read half a column one way and half the other.
+    "%d%b%y", "%d%b%Y",                       # 15Sep26, 15Sep2026
+    "%d %b %y", "%d %b %Y",                   # 15 Sep 26
+    "%d-%B-%y", "%d-%B-%Y", "%d %B %Y",       # 15-September-2026
+    "%b %d %Y", "%b %d, %Y",                  # Sep 15 2026
+    "%B %d %Y", "%B %d, %Y",                  # September 15, 2026
+    "%Y/%m/%d %H:%M", "%Y/%m/%d", "%Y.%m.%d",  # 2026/09/15, 2026.09.15
+    "%Y%m%d",                                 # 20260915
 )
 
 
@@ -127,7 +141,12 @@ def parse_datetime(text: str) -> datetime:
     """Parse a date/datetime string: the tabular formats, then ISO 8601.
 
     The explicit formats are tried first and unchanged, so nothing a workbook
-    or a paste already parses moves.  ISO 8601 is the fallback because it is
+    or a paste already parses moves.  The typed spellings at the end of the
+    list were added for the pricing screen's expiry box, which takes a date
+    as readily as a tenor and should not make somebody translate ``15Sep26``
+    -- the very form this package *prints* in a leg label -- by hand.
+
+    ISO 8601 is the fallback because it is
     the form the tool itself *writes* -- the valuation stamp in
     ``/api/state``, the timestamps in a session file, the value a browser's
     ``datetime-local`` field carries -- and reading back what you printed

@@ -3,7 +3,8 @@
 # build_windows_github.sh — build volkit.exe on GitHub's Windows runner and
 # bring it back here.
 #
-#   ./build_windows_github.sh                 standalone exe, Analysis hidden
+#   ./build_windows_github.sh                 standalone exe; Analysis, Market
+#                                             maker and Monitor hidden
 #   ./build_windows_github.sh --explain       why did the last run fail?
 #   ./build_windows_github.sh --folder        one folder instead of one file
 #   ./build_windows_github.sh --hidden-tab mm --hidden-tab analysis
@@ -37,7 +38,7 @@ set -euo pipefail
 WORKFLOW="build-windows.yml"
 ARTIFACT="volkit-windows"
 ONEFILE="true"
-HIDDEN="analysis"
+HIDDEN="analysis,mm,monitor"
 HIDDEN_SET=""
 EXCLUDE=""
 BRANCH=""

@@ -790,6 +790,23 @@ def implied_stats(hist: PairHistory, lookback_days: float, field_name: str, teno
     return SeriesStats.of(series[i:j], current)
 
 
+#: How long a window :func:`vol_dynamics` is measured over unless the caller
+#: says otherwise, and deliberately **not** the realized lookback.  A realized
+#: volatility is matched to the tenor because a one-month implied volatility
+#: forecasts one month; ``rho`` and ``nu`` are properties of the process
+#: rather than of a horizon, and measuring them on a one-month window is
+#: twenty-odd paired observations of mostly noise.  Worse, the minimum this
+#: measurement needs is *higher* than the one a realized volatility needs, so
+#: on a short lookback the level comparison went on working while the shape
+#: comparison silently had nothing to say at any tenor -- which is what an
+#: at-the-money shape of zero beside four blank wings actually was.  Which
+#: at-the-money column is read is still the tenor's own, because SABR has no
+#: mean reversion and ``nu`` genuinely differs by the tenor of the series; it
+#: is the *length of the window* that is a slow measurement, exactly as
+#: ``relvalue.HISTORY_DAYS`` is for how much a volatility moves.
+DYNAMICS_DAYS = 250.0
+
+
 @dataclass(frozen=True)
 class VolDynamics:
     """What the volatility itself did: how it moved with spot, and how much.

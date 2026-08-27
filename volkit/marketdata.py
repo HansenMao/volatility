@@ -24,6 +24,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from .cross import dollar_legs, infer_leg_signs, is_cross as pair_is_cross
 from .surface import SmileMark
 from .timeutil import UTC, parse_datetime
 
@@ -41,6 +42,13 @@ PARAM_ROWS = {
     "shortdecay": "short_decay",
     "short decay": "short_decay",
 }
+
+# The one column a CONFIG sheet must have: the pairs to build.  "BASE" is
+# the legacy spelling of the same column and is read the same way -- it used
+# to mean "dollar pairs only", and a sheet still written that way lists its
+# crosses in COR beside it.
+CONFIG_PAIR_COLUMNS = ("pairs", "pair", "currency pairs", "currency pair",
+                       "target pairs", "target", "base")
 
 SMILE_COLUMNS = {
     "expiry": "tenor",
@@ -69,6 +77,11 @@ class PairSpec:
     is_cross: bool = False
     legs: tuple[str, ...] = ()
     premium_adjusted: bool | None = None
+    #: The legs were worked out from the name rather than named in the sheet.
+    derived: bool = False
+    #: This pair is here because that cross needs it, not because it was
+    #: listed.  Empty for anything the sheet actually asked for.
+    implied_by: str = ""
 
     def resolved_premium_adjusted(self) -> bool:
         if self.premium_adjusted is not None:
@@ -100,6 +113,10 @@ class MarketData:
     marks: dict[str, list[SmileMark]] = field(default_factory=dict)
     tenor_points: tuple[str, ...] = ("1w", "2w", "3w", "1m", "2m", "3m", "6m", "9m", "1y")
     problems: list[str] = field(default_factory=list)
+    #: Things the reader worked out rather than read: a cross broken into its
+    #: dollar legs, a leg added because a cross needed it.  Not problems --
+    #: the workbook is fine -- but never silent either.
+    notes: list[str] = field(default_factory=list)
     source: str = ""
 
     def require_clean(self) -> None:
@@ -172,41 +189,138 @@ class ExcelSource:
 
     # -- CONFIG -----------------------------------------------------------
     def _load_config(self, xls, data: MarketData) -> None:
+        """Read the two columns a desk actually maintains: pairs and tenors.
+
+        A pair with the dollar on one side is marked on its own backbone.  A
+        pair without one is a **cross**, and a cross is not marked directly:
+        it is broken into the two dollar pairs the market quotes -- AUDJPY
+        into AUDUSD and USDJPY, EURGBP into EURUSD and GBPUSD -- and what
+        gets marked for it is the **correlation** between them.  That is the
+        model this tool has always used (``CrossAtmCurve``, and the
+        initial / long term / MR cells of a cross's PARAMS column being
+        correlation initial / final / decay); until now the sheet had to
+        spell it out, with a COR column naming every cross and a further
+        column per cross naming its two legs.  Nothing about that was a
+        decision -- EURGBP has exactly one sensible pair of legs -- so it is
+        worked out from the name instead, by ``cross.dollar_legs``.
+
+        The old layout still loads.  A COR column is read as more pairs, and
+        a column named after a cross still names that cross's legs and wins
+        over the derived ones, because a sheet that says something explicitly
+        must not be second-guessed by a convention.
+
+        A leg nothing listed is **added**: a cross cannot be built without
+        both of its legs, and refusing to build the pair somebody asked for
+        because they did not also ask for its plumbing is the kind of silent
+        gap this project exists to remove.  Every derivation is reported in
+        ``data.notes``, because a pair that came out of a convention and one
+        that was written down must not read the same.
+        """
         cfg = pd.read_excel(xls, "CONFIG")
         cols = {_norm(c): c for c in cfg.columns}
-        if "base" not in cols:
-            raise MarketDataError("CONFIG sheet needs a 'BASE' column listing the base pairs")
+        pair_col = next((cols[k] for k in CONFIG_PAIR_COLUMNS if k in cols), None)
+        if pair_col is None:
+            raise MarketDataError(
+                "CONFIG sheet needs a 'PAIRS' column listing the pairs to build "
+                f"(a legacy 'BASE' column is read the same way); found {list(cfg.columns)}"
+            )
 
-        for name in cfg[cols["base"]].dropna():
-            name = str(name).strip()
-            data.pairs[name] = PairSpec(name=name, is_cross=False)
+        listed: list[str] = []
+        for column in (pair_col, cols.get("cor")):
+            if column is None:
+                continue
+            for raw in cfg[column].dropna():
+                name = str(raw).strip().upper()
+                if not name:
+                    continue
+                if len(name) != 6 or not name.isalpha():
+                    data.problems.append(
+                        f"CONFIG lists {str(raw).strip()!r}, which is not a six-letter currency pair"
+                    )
+                    continue
+                if name not in listed:
+                    listed.append(name)
 
-        if "cor" in cols:
-            for name in cfg[cols["cor"]].dropna():
-                name = str(name).strip()
-                if name not in cfg.columns:
-                    data.problems.append(
-                        f"CONFIG lists cross {name!r} but has no {name!r} column naming its two legs"
-                    )
+        derived: list[str] = []
+        for name in listed:
+            spec = self._pair_spec(name, cfg, cols, data)
+            if spec is None:
+                continue
+            data.pairs[name] = spec
+            if spec.derived:
+                derived.append(name)
+
+        # A leg nobody listed still has to exist.  The work list is a loop
+        # rather than one pass because a leg named in the sheet may itself be
+        # a cross; the dollar legs a name is broken into never are.
+        implied: list[str] = []
+        pending = [n for n, s in data.pairs.items() if s.is_cross]
+        while pending:
+            owner = pending.pop(0)
+            for leg in data.pairs[owner].legs:
+                if leg in data.pairs:
                     continue
-                legs = tuple(str(x).strip() for x in cfg[name].dropna())
-                if len(legs) != 2:
-                    data.problems.append(
-                        f"cross {name!r} needs exactly 2 legs, found {len(legs)}: {legs}"
-                    )
+                spec = self._pair_spec(leg, cfg, cols, data, implied_by=owner)
+                if spec is None:
                     continue
-                missing = [l for l in legs if l not in data.pairs]
-                if missing:
-                    data.problems.append(
-                        f"cross {name!r} refers to leg(s) {missing} that are not listed under BASE"
-                    )
-                    continue
-                data.pairs[name] = PairSpec(name=name, is_cross=True, legs=legs)
+                data.pairs[leg] = spec
+                implied.append(leg)
+                if spec.is_cross:
+                    pending.append(leg)
+
+        if derived:
+            data.notes.append(
+                f"CONFIG: {len(derived)} cross(es) broken into dollar legs and marked by "
+                "correlation -- "
+                + "; ".join(f"{n} = {' x '.join(data.pairs[n].legs)}" for n in derived)
+            )
+        if implied:
+            data.notes.append(
+                "CONFIG: leg(s) added because a cross needs them -- "
+                + "; ".join(f"{n} (for {data.pairs[n].implied_by})" for n in implied)
+            )
 
         if "tenors" in cols:
             tenors = tuple(str(x).strip().lower() for x in cfg[cols["tenors"]].dropna())
             if tenors:
                 data.tenor_points = tenors
+
+    def _pair_spec(self, name: str, cfg, cols: dict, data: MarketData,
+                   implied_by: str = "") -> PairSpec | None:
+        """One row of the pairs column, as a spec: dollar pair or cross.
+
+        ``None`` when the sheet named a cross's legs and they cannot build it;
+        the problem is recorded rather than raised, so a trader sees every
+        bad cell in the workbook at once.
+        """
+        if not pair_is_cross(name):
+            # A dollar pair is never a cross, whatever else the sheet happens
+            # to have a column called: only a cross reads a column of legs.
+            return PairSpec(name=name, is_cross=False, implied_by=implied_by)
+
+        explicit = cols.get(_norm(name))
+        if explicit is not None:
+            legs = tuple(str(x).strip().upper() for x in cfg[explicit].dropna())
+            if len(legs) != 2:
+                data.problems.append(
+                    f"cross {name!r} needs exactly 2 legs, found {len(legs)}: {legs}"
+                )
+                return None
+            try:
+                infer_leg_signs(name, *legs)
+            except ValueError as exc:
+                data.problems.append(f"CONFIG column {name!r}: {exc}")
+                return None
+            return PairSpec(name=name, is_cross=True, legs=legs, implied_by=implied_by)
+
+        try:
+            legs = dollar_legs(name)
+        except ValueError as exc:
+            data.problems.append(f"CONFIG lists {name!r}: {exc}")
+            return None
+        return PairSpec(name=name, is_cross=True, legs=legs, derived=True,
+                        implied_by=implied_by)
+
 
     # -- PARAMS -----------------------------------------------------------
     def _load_params(self, xls, data: MarketData) -> None:

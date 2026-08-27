@@ -70,6 +70,15 @@ class ListedUnderlying:
     uses it; a fit needs no notion of size.  ``CUSTOM`` has none, and a
     positions panel on a custom contract says so rather than quietly working
     in units of one.
+
+    ``known`` says whether the code came out of :data:`UNDERLYINGS` or was
+    simply typed.  The contract is a free text field -- a desk trades more
+    listed contracts than any list shipped here will hold -- and a typed one
+    is perfectly usable: it maps to whatever pair, direction and size the
+    panel says.  What it must never do is *read* like a contract this build
+    knows, because then a typo (``6R`` for ``6E``) would look like a contract
+    that simply has no pair and no size.  So every screen that shows a code
+    shows this beside it.
     """
 
     code: str
@@ -79,6 +88,26 @@ class ListedUnderlying:
     scale: float = 1.0
     note: str = ""
     contract_size: float = 0.0
+    known: bool = True
+
+    @property
+    def premium_ccy(self) -> str:
+        """The currency an option on this contract is paid in, or ``""``.
+
+        The premium comes out of Black-76 in the currency the *listed strike
+        axis* is quoted in, which is the pair's term currency the way up the
+        pair is written and its base currency when the contract is the
+        reciprocal.  Every CME FX contract works out as USD, which is why the
+        money columns have always added up across them; a contract somebody
+        typed need not, and the positions panel has to be able to say so
+        rather than printing a sum of euros and dollars.  No pair means no
+        answer -- the premium is still a number, in a currency this tool was
+        never told.
+        """
+        pair = (self.pair or "").strip().upper()
+        if len(pair) != 6:
+            return ""
+        return pair[:3] if self.invert else pair[3:]
 
     def to_fx(self, strike):
         """Map a listed strike (or array of them) into the FX pair's units."""
@@ -127,17 +156,45 @@ UNDERLYINGS: dict[str, ListedUnderlying] = {
 }
 
 
+# What a typed contract code may be made of.  This is not a whitelist of
+# products -- the whole point of the free text box is that there is no such
+# list -- it is only enough shape to catch a mis-pasted cell before it becomes
+# the name of a contract.  A desk writes ``6E``, ``6E SEP26``, ``EUR/USD-DEC``;
+# nobody writes a tab-separated quote row.
+_CODE_OK = set("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ._-/&")
+_CODE_MAX = 24
+
+
 def resolve_underlying(code: str | None, *, pair: str | None = None,
                        invert: bool | None = None, scale: float | None = None,
                        contract_size: float | None = None) -> ListedUnderlying:
-    """Look a contract up, with per-panel overrides applied on top."""
+    """Look a contract up, with per-panel overrides applied on top.
+
+    A code this build does not know is **not** an error.  The contract is a
+    free text field on the screen, because a desk trades more listed contracts
+    than any table shipped in here will ever hold, and refusing the ones that
+    are missing would mean every such panel had to be called ``CUSTOM`` -- at
+    which point two of them on one screen cannot be told apart and a position
+    line naming one of them is refused as ambiguous.  A typed code is a
+    contract with the name that was typed, whose pair, direction and size are
+    the panel's own; it carries ``known=False`` so that nothing shows it as
+    though this build recognised it.
+    """
     key = (code or "CUSTOM").strip().upper()
     base = UNDERLYINGS.get(key)
     if base is None:
-        raise ValueError(
-            f"unknown listed underlying {code!r}; expected one of "
-            f"{', '.join(sorted(UNDERLYINGS))}, or CUSTOM with an explicit pair"
-        )
+        if len(key) > _CODE_MAX or set(key) - _CODE_OK:
+            raise ValueError(
+                f"{code!r} does not look like a contract code: a code is at most "
+                f"{_CODE_MAX} characters of letters, digits and . _ - / &. Known codes are "
+                f"{', '.join(sorted(UNDERLYINGS))}; anything else is taken as typed."
+            )
+        # Nothing is inferred from the name -- not the pair, not the direction
+        # of the strikes, not the size.  Guessing that ``6E SEP26`` is the euro
+        # would be the same failure as guessing which panel a position belongs
+        # to: right often enough to be trusted and wrong without saying so.
+        base = ListedUnderlying(code=key, name="typed contract, not in this build's list",
+                                known=False)
     if scale is not None and scale <= 0:
         raise ValueError(f"strike scale must be positive, got {scale!r}")
     if contract_size is not None and contract_size <= 0:
@@ -150,6 +207,7 @@ def resolve_underlying(code: str | None, *, pair: str | None = None,
         scale=base.scale if scale is None else float(scale),
         note=base.note,
         contract_size=(base.contract_size if contract_size is None else float(contract_size)),
+        known=base.known,
     )
 
 
@@ -1016,7 +1074,8 @@ class Panel:
             if self.underlying.pair not in book:
                 raise ValueError(
                     f"{self.underlying.pair} is not in the book; the panel's underlying "
-                    f"{self.underlying.code} maps to it. Add the pair or choose CUSTOM."
+                    f"{self.underlying.code} maps to it. Add the pair to the workbook, or "
+                    f"clear the panel's FX pair box to fit the curve without a comparison."
                 )
             surface = book[self.underlying.pair]
         # The valuation clock, in order of nearness to the thing being priced:
@@ -1104,7 +1163,9 @@ class Panel:
             "label": self.label,
             "underlying": {"code": self.underlying.code, "name": self.underlying.name,
                            "pair": self.underlying.pair, "invert": self.underlying.invert,
-                           "scale": self.underlying.scale, "note": self.underlying.note},
+                           "scale": self.underlying.scale, "note": self.underlying.note,
+                           "known": self.underlying.known,
+                           "premium_ccy": self.underlying.premium_ccy},
             "expiry": expiry_dt.isoformat(),
             "valuation": the_clock.now.isoformat(),
             "years": t,
@@ -1175,6 +1236,16 @@ def panel_from_request(payload: dict) -> Panel:
         contract_size=(None if payload.get("contract_size") in (None, "") else
                        float(payload["contract_size"])),
     )
+    # A code that was typed rather than looked up is said once, here, so it
+    # reaches the panel, the CLI and anything else that reads the notes.  A
+    # typo is otherwise indistinguishable from a contract that genuinely has
+    # no mapping.
+    typed: tuple[str, ...] = ()
+    if not u.known:
+        typed = (f"{u.code} is not a contract this build knows, so it was taken as typed: "
+                 f"its FX pair, strike direction and contract size are whatever this panel "
+                 f"says" + (f" (pair {u.pair})" if u.pair else ", and it has none"),)
+
     if "quotes" in payload and payload["quotes"]:
         quotes = tuple(Quote(strike=float(q["strike"]), vol=float(q["vol"]),
                              kind=q.get("kind"), weight=float(q.get("weight", 1.0) or 1.0))
@@ -1194,6 +1265,7 @@ def panel_from_request(payload: dict) -> Panel:
                  f"strike from column {parsed.strike_column}, volatility from "
                  f"{parsed.vol_column}",) + parsed.notes
         notes += tuple(f"line {n} skipped ({why}): {txt[:60]}" for n, txt, why in parsed.skipped)
+    notes = typed + notes
 
     forward = payload.get("forward")
     if forward in (None, ""):
@@ -1638,9 +1710,16 @@ def _match_panel(pos: Position, entries: list[_Entry], clock) -> _Entry:
                                                for e in live})))
         live = dated
     if len(live) > 1:
+        # Two panels can legitimately be the same contract at the same expiry
+        # -- two venues, two sources, a what-if beside the real one -- so the
+        # advice has to reach past the contract and the expiry to the one
+        # thing that is always free to differ.  Offering only the two columns
+        # a position line has was a dead end whenever both panels agreed on
+        # them, which is exactly when this refusal is hardest to act on.
         raise ValueError(
             f"this line matches {len(live)} panels ({', '.join(e.name for e in live)}); "
-            f"name the contract and the expiry so it can only mean one of them")
+            f"name the contract and the expiry so it can only mean one of them, or give "
+            f"those panels different labels and name the label")
     return live[0]
 
 
@@ -1761,6 +1840,8 @@ class PositionPanel:
 
             g = groups.setdefault(e.index, {
                 "panel": e.name, "underlying": e.code, "pair": e.panel.underlying.pair,
+                "known": e.panel.underlying.known,
+                "premium_ccy": e.panel.underlying.premium_ccy,
                 "expiry": prep.expiry.isoformat(), "forward": params.f,
                 "contract_size": size, "n": 0, "premium": 0.0,
                 "atm_vol": float(atm_vol(params)) * 100.0,
@@ -1776,22 +1857,91 @@ class PositionPanel:
                         g[which][key] += v
             rows.append(row)
 
-        totals = {"premium": 0.0,
-                  "bs": {k: 0.0 for k in ADDITIVE_GREEKS},
-                  "smile": {k: 0.0 for k in ADDITIVE_GREEKS}}
-        for g in groups.values():
-            totals["premium"] += g["premium"]
+        # Two aggregates above the lines, because two different things add.
+        #
+        # *Per contract*, every column adds: the panels under one code are the
+        # same contract at different expiries, and a futures-equivalent delta
+        # is a count of that contract's futures.  Different delivery months
+        # are not literally the same future -- September euro against December
+        # euro is a calendar spread, not a flat position -- and the note says
+        # so; it is still the number a desk asks for when it asks how much 6E
+        # it is running, and refusing to add it would be refusing the question.
+        #
+        # *Across contracts*, only money adds, and only money in one currency.
+        # Every CME FX option settles in US dollars, which is why this was a
+        # single total for as long as the contract was picked off a list; a
+        # typed contract need not, so the total is struck per settlement
+        # currency and the screen shows which.
+        contracts: dict[str, dict] = {}
+        for e in entries:
+            g = groups.get(e.index)
+            if g is None:
+                continue
+            c = contracts.setdefault(g["underlying"], {
+                "underlying": g["underlying"], "pair": g["pair"], "known": g["known"],
+                "premium_ccy": g["premium_ccy"], "panels": 0, "n": 0, "premium": 0.0,
+                "expiries": [],
+                "bs": {k: 0.0 for k, _ in GREEK_FIELDS},
+                "smile": {k: 0.0 for k, _ in GREEK_FIELDS},
+            })
+            c["panels"] += 1
+            c["n"] += g["n"]
+            c["premium"] += g["premium"]
+            if g["expiry"] not in c["expiries"]:
+                c["expiries"].append(g["expiry"])
             for which in ("bs", "smile"):
-                for key in ADDITIVE_GREEKS:
-                    totals[which][key] += g[which][key]
+                for key, _ in GREEK_FIELDS:
+                    c[which][key] += g[which][key]
 
-        codes = {g["underlying"] for g in groups.values()}
+        def _money_bucket(label):
+            return {"ccy": label, "n": 0, "premium": 0.0,
+                    "bs": {k: 0.0 for k in ADDITIVE_GREEKS},
+                    "smile": {k: 0.0 for k in ADDITIVE_GREEKS}}
+
+        currencies: dict[str, dict] = {}
+        totals = {k: v for k, v in _money_bucket("").items() if k != "ccy"}
+        for c in contracts.values():
+            bucket = currencies.setdefault(c["premium_ccy"], _money_bucket(c["premium_ccy"]))
+            for target in (bucket, totals):
+                target["n"] += c["n"]
+                target["premium"] += c["premium"]
+                for which in ("bs", "smile"):
+                    for key in ADDITIVE_GREEKS:
+                        target[which][key] += c[which][key]
+
+        named = sorted(k for k in currencies if k)
+        if len(named) > 1:
+            # A sum of euros and dollars is not a number.  The per-currency
+            # rows below hold every figure; the all-in row is blanked rather
+            # than left showing a total nobody can act on.
+            totals["premium"] = None
+            for which in ("bs", "smile"):
+                totals[which] = {k: None for k in ADDITIVE_GREEKS}
+            warnings.append(
+                f"the panels settle in {len(named)} currencies ({', '.join(named)}), so there "
+                f"is no all-in money total; the money columns are totalled per settlement "
+                f"currency instead.")
+        if "" in currencies and named:
+            warnings.append(
+                "some panels have no FX pair, so the currency their premium is in is not "
+                "known; they are included in the money totals as though they matched.")
+
+        codes = sorted(contracts)
         if len(codes) > 1:
+            money = (f"Money is totalled per settlement currency ({', '.join(named)}) and "
+                     f"not across them" if len(named) > 1
+                     else "Money is totalled across all of them")
             notes.append(
-                f"{len(codes)} contracts ({', '.join(sorted(codes))}). The money columns are "
-                f"totalled -- every CME FX option settles in US dollars -- and the "
-                f"futures-equivalent delta and gamma are not, because a future of one contract "
-                f"is not a future of another. Those two are per contract only.")
+                f"{len(codes)} contracts ({', '.join(codes)}). {money}; the "
+                f"futures-equivalent delta and gamma are totalled per contract only, because "
+                f"a future of one contract is not a future of another.")
+        multi = [c for c in contracts.values() if c["panels"] > 1]
+        if multi:
+            notes.append(
+                "the per-contract rows add across expiries: " +
+                ", ".join(f"{c['underlying']} over {c['panels']} panels" for c in multi) +
+                ". Different delivery months of one contract are not the same future, so a "
+                "futures-equivalent total there is a net position and not a hedge ratio.")
         failed = [r for r in rows if r["error"] and r["bs"]["vega"] is None]
         if failed:
             warnings.append(f"{len(failed)} of {len(rows)} position line(s) could not be priced; "
@@ -1805,6 +1955,8 @@ class PositionPanel:
             "additive": list(ADDITIVE_GREEKS),
             "positions": rows,
             "groups": [groups[k] for k in sorted(groups)],
+            "contracts": [contracts[k] for k in sorted(contracts)],
+            "currencies": [currencies[k] for k in sorted(currencies)],
             "totals": totals,
             "panels": [{"index": e.index, "name": e.name, "underlying": e.code,
                         "pair": e.panel.underlying.pair,

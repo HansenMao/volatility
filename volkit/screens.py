@@ -96,7 +96,7 @@ class Screen:
 SCREENS: tuple[Screen, ...] = (
     Screen(
         name="pricing", label="Pricing", panel="p-pricing",
-        routes=("/api/price",),
+        routes=("/api/price", "/api/legs"),
         commands=("vol", "smile"),
     ),
     Screen(
@@ -123,8 +123,16 @@ SCREENS: tuple[Screen, ...] = (
     ),
     Screen(
         name="mm", label="Market maker", panel="p-mm",
-        routes=("/api/mm/fit", "/api/mm/learn", "/api/mm/bank"),
-        commands=("mm",),
+        # The desk agent is a card *inside* this screen rather than a screen
+        # of its own: it answers a question about the market on this tab, and
+        # a build without the market-maker tab has nothing for it to answer.
+        # The marking agent is the other card: it plans and judges *this*
+        # screen's fit, so it belongs here with the fit it is aimed at, and
+        # its command comes with it.  Excluding the tab takes both agents.
+        routes=("/api/mm/fit", "/api/mm/quote", "/api/mm/learn", "/api/mm/bank",
+                "/api/mm/agent", "/api/mm/agent/ingest", "/api/mm/agent/file",
+                "/api/mm/agent/fetch", "/api/mm/mark", "/api/mm/mark/record"),
+        commands=("mm", "agent", "mark"),
     ),
 )
 

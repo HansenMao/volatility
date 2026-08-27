@@ -354,7 +354,8 @@ class VolSurface:
         # cache that could not tell them apart would serve the first answer
         # for the rest of the session.
         key = (round(t, 10), method, cut.upper(), round(forward, 10),
-               self.band_treatment if method == "BAND" else None)
+               self.band_treatment if method == "BAND" else None,
+               self._band_placement(t) if method == "BAND" else None)
         hit = self._slices.get(key)
         if hit is not None:
             return hit
@@ -379,6 +380,33 @@ class VolSurface:
         return sl
 
     # -- managed bands ----------------------------------------------------
+    def _band_placement(self, t: float) -> float | None:
+        """The absolute forward a band slice would be placed against.
+
+        Part of the cache key for the same reason the treatment is: the feed
+        is a publication and is re-read all morning (see the auto-reload
+        switch), the peg is placed against whatever it then says, and two
+        spots are two smiles.  Without this the band card printed the
+        republished forward in its own column beside probabilities still
+        calibrated against the old one -- the cached slice was served because
+        nothing in its key had changed.
+
+        It is read for every band slice rather than only for the moneyness
+        ones ``band_for_slice`` actually looks the feed up for: a key that has
+        to reproduce a decision made further down is a second place for that
+        decision to live.  The cost of the difference is one recompute of an
+        absolute-forward slice when the feed moves.  A lookup that fails is
+        not the cache's business to report -- ``band_for_slice`` raises the
+        real message with the real diagnosis a moment later.
+        """
+        if self.band is None or self.forward_lookup is None:
+            return None
+        try:
+            level = self.forward_lookup(t)
+        except Exception:  # noqa: BLE001 - band_for_slice reports this properly
+            return None
+        return round(float(level), 10) if level else None
+
     def band_for_slice(self, t: float, forward: float):
         """This pair's band, moved into the space a slice at ``forward`` uses.
 

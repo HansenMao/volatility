@@ -36,10 +36,13 @@ from .cross import CrossAtmCurve
 from .feed import FeedError, MarketFeed
 from .listed import (GREEK_FIELDS, UNDERLYINGS, WEIGHTINGS, panel_from_request,
                      positions_from_request)
+from . import dtcc
+from .archive import Archive, ArchiveError
 from .knowledge import KnowledgeBank, KnowledgeError, RULE_INSTRUMENTS, RULE_KINDS, SIZE_BASES
 from .marketmaker import (BACKBONE_KNOBS, CROSS_KNOBS, DEFAULT_BACKBONE_FREE,
                           DEFAULT_CROSS_FREE, TARGET_SOURCES, learn_from_panel)
 from .marketmaker import panel_from_request as mm_panel_from_request
+from .marketmaker import quote_panel_from_request as mm_quote_panel_from_request
 from .marketmaker import rules_from_request
 from .quotes import FLY_CONVENTIONS
 from .quotes import VOL_UNITS as QUOTE_VOL_UNITS
@@ -53,8 +56,10 @@ from .curves import panel_from_request as curve_panel_from_request
 from .monitor import DEFAULT_WAS_DATE, DEFAULT_WAS_KIND, MAX_TILES
 from .monitor import panel_from_request as monitor_panel_from_request
 from .history import ANNUALISATIONS, VOL_UNITS, HistoryError, load_history
-from .pricing import PRODUCTS, OptionLeg, price_strip, resolve_expiry
-from . import screens, session
+from .pricing import PRODUCTS, OptionLeg, price_strip, resolve_legs
+from . import remarks, screens, session
+from .marking import MIN_INSTANCES as MARK_MIN_INSTANCES
+from .marking import SCREEN_VERDICTS as MARK_VERDICTS
 from .smile import INTERPOLATORS
 from .timeutil import UTC, Clock, parse_datetime, tenor_to_years
 
@@ -75,7 +80,10 @@ class BookService:
 
     def __init__(self, path: str, clock: Clock | None = None, feed_path: str | None = None,
                  history_path: str | None = None, bank_path: str | None = None,
-                 session_path: str | None = None, auto_reload: float = 0.0):
+                 session_path: str | None = None, auto_reload: float = 0.0,
+                 archive_path: str | None = None, agent_chats=None, agent_sdr=None,
+                 ingest_state_path: str | None = None, dtcc_proxy: str | None = None,
+                 journal_path: str | None = None):
         self.path = path
         self.clock = clock or Clock.utcnow()
         self.feed_path = feed_path
@@ -136,6 +144,44 @@ class BookService:
         except KnowledgeError as exc:
             self.bank = KnowledgeBank(path=bank_path)
             self.bank_error = str(exc)
+        # The observation archive is the desk's own file too, and it has the
+        # same life as the bank: a corrupt line in it must not stop the marks
+        # loading, so it is read here and its trouble is reported on the card
+        # rather than raised at startup.
+        self.archive_path = archive_path
+        self.archive_error: str | None = None
+        # The folders the agent card may scan.  Declared at startup and never
+        # taken from the browser: a path posted by a page is a path anything
+        # that can reach the page may read, and this server binds to
+        # localhost by choice rather than by protocol.
+        self.agent_chats = [str(x) for x in (agent_chats or [])]
+        self.agent_sdr = [str(x) for x in (agent_sdr or [])]
+        self.ingest_state_path = ingest_state_path
+        # The proxy the download goes through, from the command line or from
+        # the environment.  Not from the browser: a page that can name a proxy
+        # can send this server's requests wherever it likes.
+        self.dtcc_proxy = dtcc_proxy or dtcc.default_proxy()
+        # The archive gets a lock of its own rather than sharing the book's.
+        # Reading a folder can take a minute -- a large dissemination file, or
+        # a language model working through prose the grammar refused -- and
+        # under the book's lock that minute is a minute in which the pricing
+        # screen does not answer. Nothing here touches the book beyond
+        # borrowing its clock, which is read under the book's lock and let go.
+        self._archive_lock = threading.RLock()
+        try:
+            self.archive = Archive.load(archive_path)
+        except ArchiveError as exc:
+            self.archive = Archive(path=str(archive_path or ""))
+            self.archive_error = str(exc)
+        # The re-marking journal, the marking agent's file.  Same life as the
+        # archive: the desk's own, read here, trouble reported on the card.
+        self.journal_path = journal_path
+        self.journal_error: str | None = None
+        try:
+            self.journal = remarks.Journal.load(journal_path)
+        except remarks.RemarkError as exc:
+            self.journal = remarks.Journal(path=str(journal_path or ""))
+            self.journal_error = str(exc)
         self.reload()
         if session_path:
             # Asked for by name, so a failure is said out loud rather than
@@ -174,7 +220,7 @@ class BookService:
         with self._lock:
             if self.book is None:
                 return {"pairs": [], "error": self.load_error, "warnings": [],
-                        "auto": self.auto_state(),
+                        "notes": [], "auto": self.auto_state(),
                         "screens": list(screens.enabled())}
             return {
                 # Which tabs this build has.  The page hides the rest, and
@@ -240,6 +286,17 @@ class BookService:
                     "rule_instruments": list(RULE_INSTRUMENTS),
                     "size_bases": list(SIZE_BASES),
                     "bank": self.bank_state(),
+                    # The marking agent's file, so the card can say what it
+                    # will learn from before anything has been run.
+                    "journal": {
+                        "path": self.journal.path,
+                        "instances": len(self.journal),
+                        "pairs": self.journal.pairs(),
+                        "problems": list(self.journal.problems),
+                        "error": self.journal_error,
+                        "verdicts": list(MARK_VERDICTS),
+                        "min_instances": MARK_MIN_INSTANCES,
+                    },
                 },
                 "listed": {
                     "underlyings": [
@@ -257,6 +314,10 @@ class BookService:
                 "valuation": self.book.clock.now.isoformat(),
                 "source": str(self.path),
                 "warnings": self.book.all_problems(),
+                # What the reader worked out rather than read -- a cross
+                # broken into its dollar legs, a leg added because a cross
+                # needed it.  Not problems, and never silent either.
+                "notes": list(self.book.data.notes),
                 "error": self.load_error,
                 "crosses": {k: list(v.legs) for k, v in self.book.data.pairs.items() if v.is_cross},
             }
@@ -328,6 +389,10 @@ class BookService:
                 "spot": level["spot"],
                 "forward": level["forward"],
                 "feed": level["feed"],
+                # A level composed from the legs is still a level, and it is
+                # still not one the feed published.  The pill says which.
+                "derived": level["derived"],
+                "via": level["via"],
                 "curve": [{"k": float(k), "v": float(v) * 100} for k, v in zip(ks, vols)],
                 "density": [{"k": float(k), "d": float(d)} for k, d in zip(ks, dens)],
                 "points": [
@@ -446,6 +511,14 @@ class BookService:
             out = {"loaded": True, "source": feed.source, "asof": feed.asof,
                    "problems": feed.problems, "pairs": feed.summary(),
                    "covered": sorted(feed.pairs),
+                   # The crosses the file does not quote and does build: a
+                   # feed carrying EURUSD and USDJPY carries EURJPY, and a
+                   # status line that counted only the rows in the file said
+                   # the pair had no feed on the very screens that price it.
+                   "derived": sorted(
+                       name for name in self.book.data.pairs
+                       if name not in feed.pairs
+                       and self.book.market_level(name, 1.0)["feed"]),
                    "path": self.feed_path or "",
                    # When the data in the book was written, taken from the
                    # file rather than from a clock: it is a fact about the
@@ -486,7 +559,9 @@ class BookService:
 
         A leg is reported, never silently skipped: one with no feed for its
         pair, or an expiry that will not resolve, keeps its place and carries
-        the reason.
+        the reason.  ``pricing.resolve_legs`` does the reading, so what the
+        Fill button writes into a row and what the pricer reads out of it come
+        from one place and one level lookup.
         """
         payload = payload or {}
         with self._lock:
@@ -501,25 +576,7 @@ class BookService:
             self.book.feed = feed
             self.feed_mtime = self._feed_mtime()
 
-            legs = []
-            for i, row in enumerate(payload.get("legs") or [], start=1):
-                out: dict = {"index": i - 1, "pair": str(row.get("pair") or ""),
-                             "spot": None, "points": None, "pip": None, "forward": None,
-                             "extrapolated": False, "error": ""}
-                try:
-                    pair = out["pair"]
-                    if not pair:
-                        raise ValueError("the leg has no currency pair")
-                    expiry = resolve_expiry(self.book, pair, row.get("expiry", ""))
-                    t = self.book.clock.years_to(
-                        datetime.combine(expiry, datetime.min.time()).replace(tzinfo=UTC))
-                    q = feed.quote(pair, t)
-                    out.update({"spot": q["spot"], "points": q["points"], "pip": q["pip"],
-                                "forward": q["forward"], "extrapolated": q["extrapolated"],
-                                "expiry": expiry.isoformat(), "years": t})
-                except (FeedError, ValueError, KeyError) as exc:
-                    out["error"] = str(exc)
-                legs.append(out)
+            legs = resolve_legs(self.book, payload.get("legs") or [])
             return {"ok": True, "legs": legs, "feed": self.feed_state()}
 
     # -- watching the market feed ------------------------------------------
@@ -713,6 +770,23 @@ class BookService:
                 with self._lock:
                     self._auto_record("watch", False, f"{type(exc).__name__}: {exc}")
 
+    def legs(self, payload: dict) -> dict:
+        """Resolve the pricing legs' expiry and market boxes, without pricing.
+
+        The screen calls this while somebody is still typing -- a tenor or a
+        typed date turns into the one standard date, and the feed's spot and
+        outright forward at that expiry go into the two boxes beside it.  The
+        feed file is deliberately *not* re-read here: that is what ``Refresh``
+        and the auto-load watcher are for, and going to disk on a keystroke
+        would make a pause in typing a file read.
+        """
+        with self._lock:
+            if self.book is None:
+                raise ValueError(self.load_error or "no workbook is loaded")
+            rows = (payload or {}).get("legs") or []
+            return {"ok": True, "legs": resolve_legs(self.book, rows),
+                    "feed": self.feed_state()}
+
     def price(self, payload: dict) -> dict:
         """Price a strip of option legs against the current marks."""
         rows = payload.get("legs") or []
@@ -730,7 +804,14 @@ class BookService:
                 cut=str(row.get("cut", "TK")),
                 method=str(row.get("method", "SVI")),
                 spot=float(row["spot"]) if row.get("spot") not in (None, "") else None,
-                forward_points=float(row.get("points") or 0.0),
+                forward=float(row["forward"]) if row.get("forward") not in (None, "") else None,
+                # Points are the other spelling of the same thing and are read
+                # only when they are actually sent: a leg that says nothing
+                # about them wants the feed's forward, and one that says zero
+                # wants the forward at spot.  Defaulting them to 0.0 here made
+                # every leg the second kind.
+                forward_points=(float(row["points"])
+                                if row.get("points") not in (None, "") else None),
                 pip=float(row.get("pip") or 10000.0),
                 notional=float(row.get("notional") or 1.0),
                 direction=-1.0 if str(row.get("side", "buy")).lower().startswith("s") else 1.0,
@@ -1052,8 +1133,10 @@ class BookService:
                 "tenors": list(self.book.data.tenor_points),
                 "is_cross": bool(self.book.data.pairs[pair].is_cross),
                 "legs": list(self.book.data.pairs[pair].legs),
-                "has_feed": bool(self.book.feed is not None
-                                 and pair.upper() in getattr(self.book.feed, "pairs", {})),
+                # The same lookup every level on every screen comes from, so
+                # a cross the feed builds out of its legs is not reported here
+                # as having no feed while the carry table prices off one.
+                "has_feed": bool(self.book.market_level(pair, 1.0)["feed"]),
                 "carry": None, "fair": None, "realized": None, "triangle": None,
                 "unavailable": {},
             }
@@ -1158,8 +1241,7 @@ class BookService:
             surface = self.book[pair]
             tenors = [q["tenor"]] if q.get("tenor") else list(self.book.data.tenor_points)
             out = band_panel(surface, tenors, cut=q.get("cut", "NY"))
-            out["has_feed"] = bool(self.book.feed is not None
-                                   and pair.upper() in getattr(self.book.feed, "pairs", {}))
+            out["has_feed"] = bool(self.book.market_level(pair, 1.0)["feed"])
             return out
 
     def set_band(self, payload: dict) -> dict:
@@ -1204,25 +1286,81 @@ class BookService:
             return out
 
     def mm_fit(self, payload: dict) -> dict:
-        """Fit, fine tune and quote one market-maker panel.
+        """Fit and fine tune one market-maker panel.  It quotes nothing.
 
         Like the listed screen, the server keeps no panel state: the browser
         owns the panel and posts it whole, so the same call reproduces the
-        same screen from the command line.  The knowledge bank is the one
-        thing that *is* server state, because it is a file the desk keeps.
+        same screen from the command line.  What it hands back includes
+        ``marks`` -- the parameters the fit arrived at -- which the browser
+        holds and posts to :meth:`mm_quote`.  That is what lets a price stand
+        on the morning's fit without the server remembering anything.
         """
         with self._lock:
             if self.book is None:
                 raise ValueError(self.load_error or "no workbook is loaded")
             panel = mm_panel_from_request(payload)
-            hist = None
-            if self.history is not None and panel.pair in self.history:
-                hist = self.history[panel.pair]
-            out = panel.run(self.book, bank=self.bank, hist=hist)
+            out = panel.run(self.book)
             # Only when it left its marks on the book: a panel that reported
             # and restored has changed nothing to lose.
             self.dirty = self.dirty or bool(out.get("applied"))
+            return out
+
+    def mm_quote(self, payload: dict) -> dict:
+        """Price the instruments in the request box.  It fits nothing.
+
+        The other half of the split.  The marks it stands on come in the
+        payload, from a fit the browser is holding; without them it quotes the
+        surface as it stands and says so.  The knowledge bank is the one thing
+        that *is* server state, because it is a file the desk keeps.
+        """
+        with self._lock:
+            if self.book is None:
+                raise ValueError(self.load_error or "no workbook is loaded")
+            panel = mm_quote_panel_from_request(payload)
+            hist = None
+            if self.history is not None and panel.pair in self.history:
+                hist = self.history[panel.pair]
+            # The archive is the desk agent's file and the quote's third rung
+            # (§17): read under its own lock, like the agent card reads it.
+            with self._archive_lock:
+                out = panel.run(self.book, bank=self.bank, hist=hist, archive=self.archive)
             out["bank"]["error"] = self.bank_error
+            out["archive"]["error"] = self.archive_error
+            return out
+
+    def mm_mark(self, payload: dict) -> dict:
+        """The marking-agent card: plan the fit on the screen, run it, judge it.
+
+        Aimed at the fit panel's own inputs -- the same paste, the same target
+        curve -- so the answer is about the fit the button beside it would
+        run.  Nothing stays on the book: the proposal is numbers, the browser
+        holds them, and :meth:`mm_mark_record` is the only thing that writes.
+        """
+        from .marking import panel_from_request as mark_panel_from_request
+        panel = mark_panel_from_request(payload)
+        with self._lock:
+            if self.book is None:
+                raise ValueError(self.load_error or "no workbook is loaded")
+            with self._archive_lock:
+                out = panel.run(self.book, self.journal, archive=self.archive)
+            self.dirty = self.dirty  # a proposal leaves the book as it found it
+        out["journal_error"] = self.journal_error
+        out["archive_error"] = self.archive_error
+        return out
+
+    def mm_mark_record(self, payload: dict) -> dict:
+        """What the desk did with a proposal, into the journal.
+
+        The one route on this card that writes -- to the journal, never to the
+        workbook.  With ``apply`` the recorded marks also go on the loaded
+        book, which is the fit panel's *keep the marks* decision made here.
+        """
+        from .marking import answer_from_request
+        with self._lock:
+            if self.book is None:
+                raise ValueError(self.load_error or "no workbook is loaded")
+            out = answer_from_request(self.journal, self.book, payload, clock=self.book.clock)
+            self.dirty = self.dirty or bool(out.get("applied"))
             return out
 
     def mm_learn(self, payload: dict) -> dict:
@@ -1239,6 +1377,156 @@ class BookService:
             return {"rules": [asdict(r) for r in rules],
                     "describe": [r.describe() for r in rules],
                     "notes": notes, "parse": parse}
+
+    def mm_agent(self, payload: dict) -> dict:
+        """The desk-agent card: the pasted run's widths against the archive.
+
+        Deliberately does no fitting.  A width comparison needs the paste, the
+        bank and the archive and no surface at all, so this answers without
+        touching the curve, the wings or the marks -- which is what lets the
+        card sit on its own button beside a fit that takes a second.
+        """
+        from .agent import panel_from_request as agent_panel_from_request
+        panel = agent_panel_from_request(payload)
+        with self._lock:
+            if self.book is None:
+                raise ValueError(self.load_error or "no workbook is loaded")
+            book, bank = self.book, self.bank
+        with self._archive_lock:
+            out = panel.run(book, self.archive, bank=bank)
+        out["folders"] = {"chats": list(self.agent_chats), "sdr": list(self.agent_sdr)}
+        out["archive"]["error"] = self.archive_error
+        return out
+
+    def mm_agent_ingest(self, payload: dict) -> dict:
+        """Read whatever is new in the folders this server was started with.
+
+        The folders come from the command line and never from the payload.
+        The browser chooses *when*, not *where*: a page that could name a path
+        to read is a page that can read anything the server can.
+        """
+        from . import ingest as ingest_mod
+        folders = ([(p, "chat") for p in self.agent_chats]
+                   + [(p, "sdr") for p in self.agent_sdr])
+        if not folders:
+            return {"available": False, "added": 0, "files": [], "notes": [],
+                    "reason": ("this server was started with no folders to read; "
+                               "restart it with --chats and/or --sdr naming some, "
+                               "or fill the archive with 'volkit agent ingest'")}
+        with self._lock:
+            known = self.book.pairs if self.book is not None else None
+        with self._archive_lock:
+            state = ingest_mod.State.load(self.ingest_state_path)
+            model, model_note = self._agent_model()
+            result = ingest_mod.scan(folders, archive=self.archive, state=state,
+                                     model=model, known_pairs=known,
+                                     force=bool(payload.get("force")))
+            written = self.archive.flush()
+            state.save()
+            return {
+                "available": True, "added": result.added, "written": written,
+                "unchanged": result.unchanged, "seconds": result.seconds,
+                "model": model_note, "summary": result.summary(),
+                "notes": list(result.notes) + list(state.problems),
+                "files": [{"name": Path(f.path).name, "line": f.line(),
+                           "error": f.error, "pairs": f.pairs,
+                           "notes": f.notes[:4], "skipped": f.skipped[:6]}
+                          for f in result.files],
+            }
+
+    #: The most days the page may ask for in one go.  A backfill of a year is
+    #: a command-line job with somebody watching it, not a button that can be
+    #: leaned on: 250 requests to a public service because a click repeated is
+    #: how a desk gets itself blocked.
+    FETCH_MAX_DAYS = 30
+
+    def mm_agent_fetch(self, payload: dict) -> dict:
+        """Download the dissemination files this desk has not got yet.
+
+        The folder and the proxy come from the command line; the page chooses
+        only *how many days back*, and that is capped. What arrives is read
+        straight away, because a file downloaded and not ingested is a file
+        the desk has to remember to come back for.
+        """
+        from . import ingest as ingest_mod
+        if not self.agent_sdr:
+            return {"available": False, "written": 0, "days": [],
+                    "reason": ("this server was started with no SDR folder; restart it with "
+                               "--sdr DIR to say where the files should go")}
+        # ``or 1`` would turn an explicit 0 into a 1, which is a setting the
+        # page sent and the server quietly changed.
+        raw = payload.get("days", 1)
+        raw = 1 if raw in (None, "") else raw
+        try:
+            days_back = int(raw)
+        except (TypeError, ValueError):
+            raise ValueError(f"days must be a whole number, not {raw!r}")
+        if days_back < 1 or days_back > self.FETCH_MAX_DAYS:
+            raise ValueError(
+                f"ask for between 1 and {self.FETCH_MAX_DAYS} days from the screen; a longer "
+                f"backfill is 'volkit agent fetch --since ...', where it can be watched")
+        with self._lock:
+            today = (self.book.clock.now if self.book is not None
+                     else Clock.utcnow().now).date()
+            known = self.book.pairs if self.book is not None else None
+        folder = self.agent_sdr[0]
+        down = dtcc.Downloader(proxy=self.dtcc_proxy)
+        with self._archive_lock:
+            try:
+                result = down.fetch(dtcc.recent_days(days_back, today=today), folder,
+                                    today=today)
+            except dtcc.DtccError as exc:
+                return {"available": True, "written": 0, "days": [], "reason": str(exc),
+                        "proxy": self.dtcc_proxy or "", "folder": folder}
+            out = {
+                "available": True, "written": result.written, "folder": folder,
+                "proxy": self.dtcc_proxy or "", "seconds": result.seconds,
+                "summary": result.summary(), "reason": "",
+                "days": [{"day": d.day.isoformat(), "status": d.status, "line": d.line(),
+                          "bytes": d.bytes} for d in result.days],
+                "notes": list(result.notes), "read": None,
+            }
+            if result.written:
+                state = ingest_mod.State.load(self.ingest_state_path)
+                scan = ingest_mod.scan([(folder, "sdr")], archive=self.archive, state=state,
+                                       known_pairs=known)
+                self.archive.flush()
+                state.save()
+                out["read"] = {"added": scan.added, "summary": scan.summary(),
+                               "files": [f.line() for f in scan.files]}
+            return out
+
+    def _agent_model(self):
+        """The local model, or None and the sentence explaining why not.
+
+        Built per request rather than held: a desk starts Ollama halfway
+        through the morning, and a server that decided at startup that there
+        was no model would go on saying so until it was restarted.
+        """
+        from .llm import LlmError, LocalModel, ModelConfig
+        try:
+            model = LocalModel(ModelConfig.from_env())
+        except LlmError as exc:
+            return None, f"no model: {exc}"
+        if not model.available():
+            return None, f"no model: {model.why_not}"
+        return model, f"model: {model.config.describe()}"
+
+    def mm_agent_file(self, payload: dict) -> dict:
+        """Put the run on the screen into the archive.
+
+        What you are quoting against is evidence about how wide this thing is
+        shown, and it is evidence that is on the screen already; the only
+        thing standing between it and the archive is somebody pressing this.
+        """
+        from .agent import file_paste
+        with self._lock:
+            if self.book is None:
+                raise ValueError(self.load_error or "no workbook is loaded")
+            clock = self.book.clock
+        with self._archive_lock:
+            return file_paste(self.archive, payload, clock=clock,
+                              counterparty=str(payload.get("counterparty") or "").strip())
 
     def mm_save_bank(self, payload: dict) -> dict:
         """Replace one pair's rules and write the file.
@@ -1436,6 +1724,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self.service.calc(payload))
             elif url.path == "/api/price":
                 self._json(self.service.price(payload))
+            elif url.path == "/api/legs":
+                self._json(self.service.legs(payload))
             elif url.path == "/api/curve":
                 self._json(self.service.set_curve(payload))
             elif url.path == "/api/events":
@@ -1450,10 +1740,24 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self.service.listed_greeks(payload))
             elif url.path == "/api/mm/fit":
                 self._json(self.service.mm_fit(payload))
+            elif url.path == "/api/mm/quote":
+                self._json(self.service.mm_quote(payload))
             elif url.path == "/api/mm/learn":
                 self._json(self.service.mm_learn(payload))
             elif url.path == "/api/mm/bank":
                 self._json(self.service.mm_save_bank(payload))
+            elif url.path == "/api/mm/agent":
+                self._json(self.service.mm_agent(payload))
+            elif url.path == "/api/mm/agent/ingest":
+                self._json(self.service.mm_agent_ingest(payload))
+            elif url.path == "/api/mm/agent/file":
+                self._json(self.service.mm_agent_file(payload))
+            elif url.path == "/api/mm/agent/fetch":
+                self._json(self.service.mm_agent_fetch(payload))
+            elif url.path == "/api/mm/mark":
+                self._json(self.service.mm_mark(payload))
+            elif url.path == "/api/mm/mark/record":
+                self._json(self.service.mm_mark_record(payload))
             elif url.path == "/api/analysis":
                 self._json(self.service.analysis(payload))
             elif url.path == "/api/relvalue":
@@ -1485,10 +1789,14 @@ def serve(path: str, host: str = "127.0.0.1", port: int = 8765,
           clock: Clock | None = None, open_browser: bool = True,
           feed_path: str | None = None, history_path: str | None = None,
           bank_path: str | None = None, session_path: str | None = None,
-          auto_reload: float = 0.0) -> None:
+          auto_reload: float = 0.0, archive_path: str | None = None,
+          agent_chats=None, agent_sdr=None, ingest_state_path: str | None = None,
+          dtcc_proxy: str | None = None, journal_path: str | None = None) -> None:
     """Start the local server (blocking)."""
     Handler.service = BookService(path, clock, feed_path, history_path, bank_path,
-                                  session_path, auto_reload)
+                                  session_path, auto_reload, archive_path,
+                                  agent_chats, agent_sdr, ingest_state_path, dtcc_proxy,
+                                  journal_path)
     httpd = ThreadingHTTPServer((host, port), Handler)
     url = f"http://{host}:{port}/"
     print(f"volkit serving {path}\n  -> {url}\n  (Ctrl-C to stop)")
@@ -1502,6 +1810,13 @@ def serve(path: str, host: str = "127.0.0.1", port: int = 8765,
         print(f"  ! knowledge bank: {Handler.service.bank_error}")
     if Handler.service.session_error:
         print(f"  ! session: {Handler.service.session_error}")
+    if Handler.service.archive_error:
+        print(f"  ! observation archive: {Handler.service.archive_error}")
+    if Handler.service.journal_error:
+        print(f"  ! re-marking journal: {Handler.service.journal_error}")
+    watched_folders = Handler.service.agent_chats + Handler.service.agent_sdr
+    if watched_folders:
+        print(f"  desk agent watching: {', '.join(watched_folders)}")
     if Handler.service.start_watching():
         watched = ", ".join(w["path"] for w in Handler.service.auto_state()["watching"])
         print(f"  auto-load the feed every {Handler.service.auto_interval:g}s: "

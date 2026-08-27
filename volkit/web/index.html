@@ -73,6 +73,16 @@ table.grid th.spacer{background:var(--head)}
 table.grid td.cell input,table.grid td.cell select{border:none;border-radius:0;background:transparent;
   text-align:right;height:30px;padding:0 9px;font-variant-numeric:tabular-nums}
 table.grid td.cell input:focus,table.grid td.cell select:focus{background:var(--field);outline:2px solid var(--accent);outline-offset:-2px}
+/* A market box the feed filled.  It holds a real number and is priced as it
+   stands, so it is a live field and not a placeholder -- but a level that
+   was published and one somebody typed over it must not read the same. */
+table.grid td.cell input.fed{color:var(--muted);font-style:italic}
+/* A market box this screen worked out rather than read: the third of spot,
+   swap and forward, which is arithmetic on the other two.  It is a live box
+   and typing in it moves the other one, so it is not disabled -- but a level
+   that was computed here and one that was published must not read the same,
+   which is the same rule `.fed` exists for. */
+table.grid td.cell input.imp{color:var(--muted)}
 table.grid td.o{text-align:right;padding:0 9px;font-variant-numeric:tabular-nums;font-size:12px}
 table.grid td.o.big{font-weight:650;font-size:13px}
 table.grid td.err{color:var(--bad);font-size:11px;text-align:left;padding:0 9px;white-space:normal;line-height:1.25}
@@ -371,9 +381,23 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
   <div class="hint">
     <b>Strike</b> takes a number, <code>ATM</code>, or a delta — <code>25d</code>, <code>10dp</code>,
     <code>-25d</code>. A bare <code>25d</code> takes its wing from the option type.
-    <b>Expiry</b> takes a date or a tenor (<code>1M</code>, <code>3M</code>), resolved through
-    spot and the delivery date on the pair's holiday calendar.
-    <b>Fwd pts</b> are added to spot as <code>points / pip</code>.
+    <b>Expiry</b> takes a tenor (<code>1W</code>, <code>8d</code>, <code>3M</code>) or a date in
+    most of the ways one is written (<code>2026-09-15</code>, <code>15Sep26</code>,
+    <code>15 Sep 2026</code>, <code>September 15, 2026</code>, <code>2026/09/15</code>,
+    <code>9/15/2026</code>, <code>20260915</code>) — and whatever you type it comes back as the
+    one standard date. A tenor is resolved through spot and the delivery date on the pair's own
+    holiday calendar, once, so the leg then holds that date rather than drifting with the clock.
+    <b>Spot</b>, <b>Swap</b> and <b>Forward</b> are three boxes holding one identity —
+    <code>forward = spot + swap / pip</code>. Spot and the swap points come from the feed at
+    this leg's own expiry, and so does the outright under them; all three are shown greyed
+    while they are the feed's, and it is the outright that is priced. Type in any of them and
+    the third follows — type a swap and the forward moves, type a forward and the swap moves
+    to match. Empty a box to hand it back to the feed.
+    <br><b>The Results rows repeat none of this.</b> What the pricer resolved is written back
+    into the boxes above and is then what is priced — the expiry as the one standard date,
+    <code>ATM</code> or <code>25d</code> as the absolute strike it solved to on the marks, and
+    <code>Auto</code> as <code>C</code> or <code>P</code>. Type <code>25d</code> in again to
+    solve the strike afresh against the marks as they now stand.
     Premiums are per unit of base notional in the term currency, undiscounted — this model
     carries no rate curve. Amounts scale by the notional in millions.
     <br><b>Product</b>: <code>vanilla</code>, <code>digital</code> (European, pays at expiry),
@@ -390,12 +414,13 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
     <code>bend_back</code> the reverse. A bent barrier is time-dependent and has no closed
     form, so it is simulated and reports its Monte Carlo standard error.
     Buffers are applied <i>against</i> you: selling gets the conservative shift, buying the
-    other way. Leave <b>Spot</b> blank to take spot and interpolated forward points from the feed.
-    <br><b>Refresh spot</b> re-reads the feed file from disk and re-prices, so a leg with a blank
-    <b>Spot</b> picks up whatever has just been published. <b>Fill legs</b> does the same and then
-    <i>writes</i> the spot and the interpolated points into every leg the feed covers, at that
-    leg's own expiry — which is what a leg with a stale hand-typed spot needs. A leg the feed has
-    no pair for, or whose expiry will not resolve, is reported and left exactly as it was.
+    other way.
+    <br><b>Refresh spot</b> re-reads the feed file from disk and re-prices, so every box still
+    holding the feed's number picks up whatever has just been published. <b>Fill legs</b> does the
+    same and then writes the feed over the levels you typed as well — which is what a leg with a
+    stale hand-marked spot needs. A leg the feed has no pair for, or whose expiry will not
+    resolve, is reported and left exactly as it was. A cross the file quotes only through its
+    legs is filled from them, by the same triangle that prices it.
     <b>Watch file</b> only looks at when the file was last written and offers the refresh; nothing
     reloads underneath a price you are reading.
   </div>
@@ -464,7 +489,9 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
 
       <section class="card" id="bandcard">
         <h2>Managed band <span class="grow"></span>
+          <span class="meta" id="bandstatus"></span>
           <span class="meta" id="bandedges"></span></h2>
+        <div id="banderr"></div>
         <div id="bandbody"></div>
       </section>
 
@@ -523,11 +550,21 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
     <div class="meta" id="etostatus"></div>
   </div>
   <div class="eto" id="etolist"></div>
+  <!-- Suggestions for the Contract box, not a restriction on it: the codes
+       this build knows how to map to a pair, a strike direction and a size.
+       Filled from /api/state on boot. -->
+  <datalist id="etocodes"></datalist>
   <div class="hint">
     One panel is one <b>expiry / underlying</b> combination. Paste the exchange's strike and
     volatility columns into the box — tabs, commas or spaces, with or without a header row,
     percent or decimal, bid/ask or mid. Every column choice the parser makes is reported under
     the table, and every line it cannot use is listed with the reason.
+    <br><b>Contract</b> is free text. The codes this build knows (<code>6E</code>,
+    <code>6J</code>, …) are offered as you type and bring their FX pair, their strike
+    direction and their standard contract size with them; anything else is taken as typed,
+    is marked <i>typed</i> wherever it is shown, and takes its pair, direction and size from
+    this panel's own boxes. Nothing is guessed from the name. Two panels may share a code —
+    the same contract at two expiries — and a position line then names the expiry as well.
     <br><b>Futures price</b> is the forward the curve is fitted around, in the contract's own
     quoted units; it is not taken from the FX feed, because a listed future is its own market.
     <b>Expiry</b> carries a time of day — use the exchange's cut, not midnight, or the curve is
@@ -587,11 +624,18 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
       volatility is bumped by lifting the whole curve — normalised to a move measured at the
       forward. Both read the same volatility at the same strike, so the premiums are identical
       and the entire difference is in the sensitivities.
-      <br><b>What adds up.</b> Money adds across contracts — every CME FX option settles in US
-      dollars — so premium, vega, theta, the 1% delta and gamma money and volga are totalled.
-      Futures-equivalent delta and gamma are <i>not</i>: a euro future is not a yen future, so
-      those two are totalled per contract only. Premiums and theta are undiscounted forward
-      values, as everywhere else in volkit.
+      <br><b>What adds up</b>, and it is three rows because three different things add.
+      <i>Per panel</i>, every column adds. <i>Per contract</i>, every column still adds — the
+      panels under one code are the same contract at different expiries — and that row appears
+      only where there is more than one such panel. Two delivery months are not the same
+      future, so a futures-equivalent total there is a net position and not a hedge ratio.
+      <i>Across contracts</i>, only money adds: premium, vega, theta, the 1% delta and gamma
+      money and volga, and only across contracts settling in the <b>same currency</b>. Every
+      CME FX option settles in US dollars, which is why that is one row on an ordinary screen;
+      a contract you typed need not, so the currency is derived from its pair and the totals
+      are struck per currency. Futures-equivalent delta and gamma are never totalled across
+      contracts — a euro future is not a yen future. Premiums and theta are undiscounted
+      forward values, as everywhere else in volkit.
     </div>
   </section>
 </div>
@@ -677,8 +721,14 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
     point is a great deal on a one-year at-the-money and nothing on a one-week wing — measured
     over the <b>history window</b>, which is deliberately not the realized lookback: the lookback
     is matched to each tenor, and a month of a smooth one-month series is far too short to say how
-    much anything moves. A missing signal is renormalised away rather than counted as a zero;
-    faded cells were scored on less than half the declared weight. No history means no scale and
+    much anything moves. The &rho; and &nu; behind <b>shape</b> come off that same window and for
+    the same reason — on the lookback they were blank at every short tenor, and at every tenor at
+    once on a lookback under about a month, which left <b>shape</b> reading as a signal that never
+    worked. A missing signal is renormalised away rather than counted as a zero, and so is the
+    at-the-money's <b>shape</b>: it is zero there by statement rather than by measurement — the
+    at-the-money <i>is</i> the level — so it is shown with its reason and kept out of the average,
+    which is why an ATM cell is scored on less of the declared weight than the wings beside it.
+    Faded cells were scored on less than half the declared weight. No history means no scale and
     no score, and the volatility points beside it are still measured — inventing a scale would be
     inventing the answer.
     <br>Three things the grid says rather than leaves to be inferred. <b>level</b> is printed
@@ -876,9 +926,14 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
     <div class="f"><label>Skew cap</label><input id="mmcap" value="1" style="width:66px"></div>
     <div class="f"><label>FV horizon (d)</label><input id="mmhorizon" value="30" style="width:88px"></div>
     <div class="acts">
-      <button id="mmrun">Fit and quote</button>
+      <button id="mmrun">Fit</button>
+      <button id="mqrun">Quote</button>
       <label style="margin:0;display:flex;align-items:center;gap:6px;width:auto;color:var(--muted);font-size:11px">
         <input type="checkbox" id="mmauto" style="width:auto"> auto</label>
+      <label style="margin:0;display:flex;align-items:center;gap:6px;width:auto;color:var(--muted);font-size:11px">
+        <input type="checkbox" id="mqonfit" checked style="width:auto"> quote on the fit</label>
+      <label style="margin:0;display:flex;align-items:center;gap:6px;width:auto;color:var(--muted);font-size:11px">
+        <input type="checkbox" id="mqarchive" style="width:auto"> widths from the archive</label>
       <label style="margin:0;display:flex;align-items:center;gap:6px;width:auto;color:var(--muted);font-size:11px">
         <input type="checkbox" id="mmapply" style="width:auto"> keep the marks</label>
       <button class="ghost" id="mmsession" style="width:auto">Save marks to file</button>
@@ -893,6 +948,11 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
         <textarea id="mmtext" spellcheck="false" style="height:250px"
           placeholder="1M ATM 8.20/8.60 in 100mm vega&#10;3M 25d RR 0.35/0.55 eur call over&#10;2M 25d fly 0.20/0.28&#10;6M 1.1000 call 7.90/8.40&#10;1M/3M ATM spread 0.30/0.55&#10;&#10;or as columns — time, expiry, strike, bid/offer:&#10;09:15, 1M, ATM,  8.20/8.60&#10;09:15, 3M, 1.0900, 8.10/8.50&#10;09:41, 1M, ATM,  8.25/8.65"></textarea>
         <div class="msg" id="mmparse"></div></section>
+
+      <section class="card"><h2>What we are asked for <small>one instrument a line, no prices</small></h2>
+        <textarea id="mqtext" spellcheck="false" style="height:150px"
+          placeholder="1M ATM in 100mm&#10;3M 25d RR&#10;2M 25d fly&#10;6M 1.1000 call&#10;1M/3M ATM spread&#10;&#10;the same words as the market box, with the price left off"></textarea>
+        <div class="msg" id="mqparse"></div></section>
 
       <section class="card hide" id="mmtargetcard">
         <h2>Target at-the-money curve <small>tenor and level, one a line</small></h2>
@@ -911,8 +971,68 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
     </div>
 
     <div class="mmright">
-      <section class="card"><h2>Quote sheet <small id="mmsheethead"></small></h2>
+      <section class="card"><h2>Our quote <small id="mqsheethead"></small></h2>
+        <div class="meta" id="mqmarks"></div>
+        <div id="mqsheet"></div></section>
+
+      <section class="card"><h2>Desk agent <small id="agenthead"></small></h2>
+        <div class="mmbar" style="margin:0 0 10px">
+          <div class="f"><label>Half-life (d)</label><input id="agenthalf" value="5" style="width:84px"></div>
+          <div class="f"><label>Min evidence</label><input id="agentmin" value="2" style="width:88px"></div>
+          <div class="f"><label>Lookback (d)</label><input id="agentlook" value="90" style="width:84px"></div>
+          <div class="f"><label>Tolerance</label><input id="agenttol" value="0.1" style="width:76px"></div>
+          <div class="f"><label>Broker</label><input id="agentcpty" placeholder="who showed it" style="width:120px"></div>
+          <div class="acts">
+            <button id="agentrun">Suggest</button>
+            <button class="ghost" id="agentscan" style="width:auto">Scan folders</button>
+            <button class="ghost" id="agentfetch" style="width:auto">Fetch from DTCC</button>
+            <div class="f"><label>days back</label><input id="agentdays" value="1" style="width:64px"></div>
+            <button class="ghost" id="agentfile" style="width:auto">File this run</button>
+            <label style="margin:0;display:flex;align-items:center;gap:6px;width:auto;color:var(--muted);font-size:11px">
+              <input type="checkbox" id="agentmodel" checked style="width:auto"> count what a model read</label>
+          </div>
+        </div>
+        <div class="meta" id="agentstatus"></div>
+        <div id="agentrows"></div>
+        <div id="agentwidths"></div>
+        <div class="msg" id="agentmsg"></div>
+        <div class="hint" id="agenthint">The agent proposes and changes nothing. A width it
+          disagrees with stays on the quote sheet until you write a rule for it in the
+          knowledge bank below.</div></section>
+      <section class="card"><h2>The market against the surface <small id="mmsheethead"></small></h2>
         <div id="mmsheet"></div></section>
+
+      <section class="card"><h2>Marking agent <small id="markhead"></small></h2>
+        <div class="mmbar" style="margin:0 0 10px">
+          <div class="f"><label>Journal lookback (d)</label><input id="marklook" value="365" style="width:104px"></div>
+          <div class="f"><label>Min instances</label><input id="markmin" value="5" style="width:88px"></div>
+          <div class="acts">
+            <button id="markrun">Propose</button>
+            <label style="margin:0;display:flex;align-items:center;gap:6px;width:auto;color:var(--muted);font-size:11px">
+              <input type="checkbox" id="markchoose" checked style="width:auto"> agent chooses the knobs</label>
+            <label style="margin:0;display:flex;align-items:center;gap:6px;width:auto;color:var(--muted);font-size:11px">
+              <input type="checkbox" id="markarchive" checked style="width:auto"> score against the archive</label>
+          </div>
+        </div>
+        <div class="meta" id="markstatus"></div>
+        <div id="markbody"></div>
+        <div class="mmbar hide" id="markverdict" style="margin:10px 0 0">
+          <div class="f" style="flex:1;min-width:180px"><label>Note</label><input id="marknote" placeholder="kept beside the instance" style="width:100%"></div>
+          <div class="acts">
+            <button id="markaccept">Accept</button>
+            <button class="ghost" id="marktake" style="width:auto">Take the plan onto the fit</button>
+            <button class="ghost" id="markedited" style="width:auto">Record my fit as the edit</button>
+            <button class="ghost" id="markreject" style="width:auto">Reject</button>
+          </div>
+        </div>
+        <div class="msg" id="markmsg"></div>
+        <div class="hint" id="markhint">The agent is aimed at the <b>Fit</b> button&rsquo;s own inputs
+          &mdash; the same paste, the same target curve &mdash; and answers how it would run that fit
+          and what came out. <b>Accept</b> hands the proposal to the quote as the marks it stands on;
+          <b>Take the plan onto the fit</b> sets the knob boxes to the agent&rsquo;s plan and runs the
+          fit, so you can adjust and press Fit again, then <b>record my fit as the edit</b>. Every
+          answer is a line in the journal, and the edited ones are what it learns from.</div></section>
+
       <section class="card"><h2>At-the-money curve <small id="mmcurvehead"></small></h2>
         <div id="mmcurve"></div></section>
       <section class="card"><h2>Wings <small id="mmwinghead"></small></h2>
@@ -930,12 +1050,29 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
   </div>
 
   <div class="hint">
-    <b>What this screen does, in the order it does it.</b> The at-the-money curve is fitted to a
-    target term structure &mdash; the tenors pinned on the marking screen, a pasted curve, or the
-    mid of the at-the-money quotes in the paste. Then the four smile parameters are moved by an
-    additive shift across the whole curve until the quoted wings are satisfied. Then the mid is
-    shaded and a width is put round it. Each stage reports separately, so one that cannot run
-    leaves the others alone.
+    <b>Two buttons, because these are two jobs.</b> <b>Fit</b> reads the market box and moves the
+    marks: the at-the-money curve to a target term structure &mdash; the tenors pinned on the
+    marking screen, a pasted curve, or the mid of the at-the-money quotes in the paste &mdash;
+    and then the four smile parameters by an additive shift across the whole curve until the
+    quoted wings are satisfied. It puts a price on nothing. <b>Quote</b> reads the box below it,
+    where you write what you are being <i>asked</i> for, and makes a two-way in each line: the
+    model&rsquo;s mid, the bank&rsquo;s width round it, and the two leans. It fits nothing, which
+    is why it answers instantly and can be pressed as often as the phone rings.
+    <br><b>What the quote stands on.</b> With <b>quote on the fit</b> ticked, the parameters the
+    last fit arrived at are sent with the request and put on the surface for the length of that
+    one call; untick it, or fit nothing, and the price is made off the marks as they stand. The
+    sheet says which of the two it was every time, because a price made on this morning&rsquo;s
+    fit and one made on last night&rsquo;s marks must never read the same. Nothing is left on the
+    book either way &mdash; that is <b>keep the marks</b>, on the fit, and it is a separate
+    decision.
+    <br><b>The request box takes no prices.</b> The same words as the market box with the price
+    left off: <code>1M ATM in 100mm</code>, <code>3M 25d RR</code>, <code>6M 1.1000 call</code>.
+    A number that reads as a market is refused with the line rather than taken as a strike. A
+    request that names something the market box also quoted carries that market beside our price,
+    so <i>inside their market</i> survives the split; one nothing quoted is priced just the same,
+    which is the whole reason for asking separately. A risk reversal asked for as
+    <code>JPY call over</code> is quoted in <i>that</i> convention, and the row says so.
+    Each stage reports separately, so one that cannot run leaves the other alone.
     <br><b>The wing fit is a hinge, not a least squares.</b> There is no penalty anywhere inside a
     quoted bid and offer &mdash; the brief is that our mid falls <i>inside</i> the market, not on
     top of somebody's mid. Because a hinge has a flat bottom, a small pull toward the quoted mids
@@ -980,9 +1117,9 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
     quote and <i>never</i> applied. The narrowest matching rule wins and every row names the rule
     that set it. There is no built-in default: a quote no rule matches gets no bid and no offer
     unless a fallback width is typed above, and says which it was.
-    <br><b>Nothing here touches the workbook.</b> The fit reports and then puts the marks back.
-    Tick <b>keep the marks</b> to leave them on the loaded book &mdash; still in memory only, and
-    a reload discards them.
+    <br><b>Nothing here touches the workbook.</b> The fit reports and then puts the marks back,
+    and so does a quote made on them. Tick <b>keep the marks</b> to leave the fit on the loaded
+    book &mdash; still in memory only, and a reload discards them.
   </div>
 </div>
 
@@ -1075,15 +1212,55 @@ const C1='var(--accent)',C2='var(--accent2)',C3='var(--good)';
 const PIP={JPY:100};
 function defaultLeg(from){
   if(from)return{...from};
-  const d=new Date((STATE.valuationMs||Date.now())+30*864e5);
   const pair=(STATE.pairs||['USDJPY'])[0];
+  /* Spot, the swap and the outright start empty and are filled from the
+     feed at this leg's own expiry; type over any of them and the third is
+     worked out from the other two.  `spotsrc`
+     and `fwdsrc` are how the screen remembers which boxes are still the
+     feed's and which somebody has typed over, so a refill cannot walk over a
+     hand-marked level.  `fwdsrc` has three values, not two, because the
+     forward and the swap are one degree of freedom written two ways and it
+     has to say which of them is being held: `feed` (the feed's swap, the
+     forward implied), `swap` (a typed swap, the forward implied) and
+     `forward` (a typed outright, the swap implied).  `pip` is the divisor
+     the swap box is read with; it comes from the feed with the level, and
+     the server reads it only beside `points`, which this screen never sends
+     -- the outright is what is on the screen and the outright is what is
+     priced. */
   return{label:'',pair:pair,product:'vanilla',expiry:'1M',cut:'TK',
-    method:methodFor(pair,(STATE.methods||['SVI'])[0]),type:'C',strike:'ATM',barrier:'',spot:'',points:'0',
-    notional:'1',side:'buy',pip:'',ramp:'0',overhedge:'none',buffer:'0'};
+    method:methodFor(pair,(STATE.methods||['SVI'])[0]),type:'C',strike:'ATM',barrier:'',
+    spot:'',swap:'',forward:'',pip:'',spotsrc:'feed',fwdsrc:'feed',strikeask:'',
+    notional:'1',side:'buy',ramp:'0',overhedge:'none',buffer:'0'};
 }
 function pipFor(leg){
-  if(leg.pip)return parseFloat(leg.pip);
+  const p=parseFloat(leg.pip);
+  if(isFinite(p)&&p>0)return p;
   return PIP[(leg.pair||'').slice(3,6).toUpperCase()]||10000;
+}
+/* A level in the box, in the pair's own precision: 3 decimals on a yen pair,
+   5 on the rest, which is what `kdp` reads off the magnitude. */
+const mkt=v=>(v==null||!isFinite(v))?'':(+v).toFixed(kdp(v));
+/* Swap points, in the pair's own pips: as many decimals as the feed actually
+   published and no trailing zeros, because a swap is quoted `-45.25` and not
+   `-45.250000`. */
+const pts=v=>(v==null||!isFinite(v))?'':(+v).toFixed(4).replace(/\.?0+$/,'');
+/* Spot, the swap and the forward are three boxes holding one identity:
+   forward = spot + swap / pip.  Two of them are free and the third is
+   arithmetic, and `fwdsrc` says which of the swap and the forward is being
+   held -- so this is the one place the third is worked out, on whichever of
+   the two the screen is not holding.  It is browser arithmetic on numbers
+   already on the screen and not a second place a *level* is read: that is
+   still `pricing.resolve_legs`, and what is posted is the outright this
+   leaves in the box. */
+function syncMarket(L){
+  const sp=parseFloat(L.spot), pip=pipFor(L);
+  if(L.fwdsrc==='forward'){
+    const fw=parseFloat(L.forward);
+    L.swap=(isFinite(sp)&&isFinite(fw))?pts((fw-sp)*pip):'';
+  }else{
+    const sw=parseFloat(L.swap);
+    L.forward=(isFinite(sp)&&isFinite(sw))?mkt(sp+sw/pip):'';
+  }
 }
 /* Which products a row belongs to.  Undefined is every product.  A barrier
    on a vanilla and a strike on a one-touch are not inputs the model reads --
@@ -1095,18 +1272,25 @@ const IN=[
  ['label','Label','text'],['pair','Pair','pair'],['product','Product','product'],
  ['expiry','Expiry','text'],['cut','Cut','cut'],['type','Type','type',STRIKED],
  ['strike','Strike','text',STRIKED],['barrier','Barrier','text',TOUCH],
- ['spot','Spot','text'],['points','Fwd pts','text'],['pip','Pip divisor','text'],
+ ['spot','Spot','text'],['swap','Swap (pts)','text'],['forward','Forward','text'],
  ['notional','Notional (m)','text'],['side','Side','side'],['method','Interp','method'],
  ['ramp','Digital ramp %','text',['digital']],['overhedge','Overhedge','overhedge',TOUCH],
  ['buffer','Barrier buffer %','text',TOUCH],
 ];
 const dash=v=>(v===0||v==null||!isFinite(v))?'—':null;
+/* What the model worked out, and nothing an input box above already holds.
+   The expiry, the strike and the option type are *resolved into the boxes*
+   -- a tenor comes back the one standard date, `ATM` / `25d` comes back the
+   absolute strike it solved to, `Auto` comes back `C` or `P` -- and it is
+   those numbers that are then priced.  Shown here as well they would be the
+   same number in two places on one screen, which is two places for it to
+   disagree; and spot and the forward are worse than that, because the box is
+   the input and the row would look like an answer.  The one thing left of
+   the market is `market_source`, which is not a level but the server saying
+   which half of one it had to fill in. */
 const OUT=[
- ['expiry','Expiry date',v=>esc(v)],['days','Days',v=>num(v,1)],
- ['spot','Spot',v=>num(v,5)],['forward','Forward',v=>num(v,5)],
- ['feed_used','From feed',v=>v?'yes':'manual'],
- ['strike','Strike / barrier',v=>num(v,5)],
- ['is_call','Type',v=>v?'Call / up':'Put / down'],
+ ['days','Days',v=>num(v,1)],
+ ['market_source','Market',v=>esc(v)],
  ['vol','Vol %',v=>num(v,4),'big'],['atm_vol','ATM vol %',v=>num(v,4)],
  ['barrier_used','Barrier after buffer',v=>dash(v)??num(v,5),'',TOUCH],
  ['premium_dom','Price (term / unit)',v=>num(v,6)],
@@ -1135,7 +1319,38 @@ function ctl(kind,i,key,val){
   if(kind==='product')return `<select ${a}>${opts(STATE.products||['vanilla'],val)}</select>`;
   if(kind==='overhedge')return `<select ${a}>${opts(STATE.overhedges||['none'],val)}</select>`;
   if(kind==='side')  return `<select ${a}>${opts(['buy','sell'],val)}</select>`;
-  return `<input ${a} value="${esc(val)}">`;
+  const L=LEGS[i]||{};
+  const c=boxClass(L,key);
+  return `<input ${a}${c?` class="${c[0]}" title="${c[1]}"`:''} value="${esc(val)}">`;
+}
+/* Which of the market boxes is the feed's, which was worked out here, and
+   which is simply somebody's.  One rule, read by the painter and by `setBox`
+   alike, so a box written into while somebody is typing in the next cell
+   cannot end up labelled differently from the same box after a repaint. */
+const FEEDTIP='from the feed, at this leg’s expiry — type over it to price your own';
+function boxClass(L,key){
+  /* A strike that was asked for as `ATM` or `25d` and is now the number it
+     solved to.  It is a live box and it is what the next price uses, so it
+     is not disabled -- but it says what it was asked as, because a strike
+     the marks produced and one somebody typed must not read the same, and
+     because that is how you get the request back. */
+  if(key==='strike')return L.strikeask
+    ?['imp','solved from '+L.strikeask+' on these marks — type '+L.strikeask
+       +' in again to solve it afresh']:null;
+  if(key==='spot')return L.spotsrc==='typed'?null:['fed',FEEDTIP];
+  if(key==='swap'){
+    if(L.fwdsrc==='feed')return ['fed',FEEDTIP];
+    if(L.fwdsrc==='forward')return ['imp','implied by the forward you typed, less spot'];
+    return null;
+  }
+  if(key==='forward'){
+    if(L.fwdsrc==='forward')return null;
+    // The feed's own outright while nothing above it has been typed over;
+    // spot and the swap added up once either of them has.
+    if(L.fwdsrc==='feed'&&L.spotsrc!=='typed')return ['fed',FEEDTIP];
+    return ['imp','implied by spot and the swap — type an outright here to hold that instead'];
+  }
+  return null;
 }
 const RHW=152, COLW=150;
 function renderGrid(){
@@ -1159,12 +1374,16 @@ function renderGrid(){
     h+='<td class="spacer"></td></tr>';});
   h+=`<tr class="sec"><td colspan="${span}">Results</td></tr>`;
   const res=RESULT?RESULT.legs:[];
-  OUT.forEach(([k,lab,fmt,cls,only])=>{
-    if(!anyApplies(only))return;
+  // A leg that failed says so once, in the first result row that is on the
+  // screen.  Anchoring that to a row by name meant removing the row took the
+  // error message with it and left a column of empty red cells.
+  const shown=OUT.filter(o=>anyApplies(o[4]));
+  const firstrow=shown.length?shown[0][0]:null;
+  shown.forEach(([k,lab,fmt,cls,only])=>{
     h+=`<tr><td class="rh">${lab}</td>`;
     LEGS.forEach((L,i)=>{const r=res[i];
       if(!r){h+=`<td class="o">—</td>`;return}
-      if(!r.ok){h+=`<td class="err">${k==='expiry'?esc(r.error):''}</td>`;return}
+      if(!r.ok){h+=`<td class="err" title="${esc(r.error)}">${k===firstrow?esc(r.error):''}</td>`;return}
       if(!applies(only,L)){h+=`<td class="na" title="${esc(prodOf(L))} does not use this">·</td>`;return}
       const v=r[k]; let c='o '+(cls||'');
       if((cls||'').includes('sign')&&typeof v==='number')c+=v>0?' pos':(v<0?' neg':'');
@@ -1180,38 +1399,213 @@ function renderGrid(){
       <div><span>delta (m base)</span><span>${num(v.delta,4)}</span></div></div>`).join(''):'';
 }
 function saveLegs(){try{localStorage.setItem('volkit.legs',JSON.stringify(LEGS))}catch(e){}}
-function loadLegs(){try{const r=localStorage.getItem('volkit.legs');if(r)LEGS=JSON.parse(r)}catch(e){LEGS=[]}}
+function loadLegs(){
+  try{const r=localStorage.getItem('volkit.legs');if(r)LEGS=JSON.parse(r)}catch(e){LEGS=[]}
+  /* A leg saved before the market was two boxes carries `points` and `pip`,
+     and the server still reads points -- a stored '0' would pin every
+     forward to spot and quietly ignore the feed.  So the stored shape is
+     migrated on the way in, for the same reason a stored method its pair can
+     no longer be marked with is put back to a legal one: the browser owns
+     this state and posts it whole, and what it posts has to mean today what
+     it meant when it was written. */
+  LEGS.forEach(L=>{
+    if(L.forward===undefined){
+      const sp=parseFloat(L.spot), pt=parseFloat(L.points);
+      L.forward=(isFinite(sp)&&isFinite(pt)&&pt!==0)?mkt(sp+pt/pipFor(L)):'';
+    }
+    if(!L.spotsrc)L.spotsrc=String(L.spot||'').trim()?'typed':'feed';
+    if(!L.fwdsrc)L.fwdsrc=String(L.forward||'').trim()?'forward':'feed';
+    // `typed` was the one word for the forward when the market was two
+    // boxes.  It now has to say which of the swap and the outright is being
+    // held, and a leg saved then was holding the outright.
+    if(L.fwdsrc==='typed')L.fwdsrc='forward';
+    // The swap is the box that was not there; it is implied from the two
+    // levels that were.  `pip` is kept -- it is the pair's divisor and what
+    // the swap is read with -- and `points` is dropped, because the server
+    // reads that name and a stored zero would pin every forward to spot.
+    if(L.strikeask===undefined)L.strikeask='';
+    if(L.swap===undefined){
+      const sp=parseFloat(L.spot), fw=parseFloat(L.forward);
+      L.swap=(isFinite(sp)&&isFinite(fw))?pts((fw-sp)*pipFor(L)):'';
+    }
+    delete L.points;
+  });
+}
+
+/* ------------------ the market boxes ---------------------------------
+   Expiry, Spot and the swap are resolved by the server, because that is
+   where both authorities live: a tenor (`1W`, `8d`) or any of the date
+   spellings `timeutil` reads goes through spot and the delivery date on the
+   pair's own holiday calendar, and the level is `Book.market_level`, the one
+   place a level is read -- so a cross the feed quotes only through its legs
+   fills these boxes exactly as it prices.  What comes back is written into
+   the boxes: the expiry as the one standard date, so what is priced is what
+   is on the screen and a tenor is not silently re-read on a later morning.
+   The level comes back as all three -- spot, the swap and the outright the
+   feed itself publishes -- and while nothing has been typed over it is that
+   published outright which goes in the box.  `syncMarket` works the third
+   box out only once one of the other two is somebody's.
+
+   A box somebody has typed into is theirs.  It is refilled only by `Fill
+   legs`, which is the button that says so. */
+function setBox(i,k,v){
+  const el=$('#pgrid').querySelector('input[data-i="'+i+'"][data-k="'+k+'"]');
+  if(!el)return;
+  if(v!==undefined&&el.value!==v)el.value=v;
+  const c=boxClass(LEGS[i]||{},k);
+  if(c){el.className=c[0];el.title=c[1]}
+  else if(k==='spot'||k==='swap'||k==='forward'){el.className='';el.removeAttribute('title')}
+}
+const MKTBOX=['spot','swap','forward'];
+function applyLegRows(rows,force){
+  const bad=[];
+  (rows||[]).forEach(q=>{
+    const L=LEGS[q.index]; if(!L)return;
+    const who='#'+(q.index+1)+' '+(L.label||L.pair);
+    if(q.expiry&&q.expiry!==L.expiry){L.expiry=q.expiry;setBox(q.index,'expiry',q.expiry)}
+    if(!q.expiry){bad.push(who+': '+q.error);return}
+    // No market for this pair is the ordinary state of a screen with no feed
+    // loaded, and the feed pill already says so; it is only worth a line
+    // when somebody has just pressed the button that promises to fill it.
+    if(!q.feed){if(force)bad.push(who+': '+q.error);return}
+    /* The pip divisor travels with the level, because it is the pair's and
+       not the screen's: it is what the swap box is read with, and a cross
+       the feed builds from its legs is quoted in its own pips. */
+    if(q.pip)L.pip=String(q.pip);
+    if(force){L.spotsrc='feed';L.fwdsrc='feed';}
+    if(L.spotsrc!=='typed')L.spot=mkt(q.spot);
+    if(L.fwdsrc==='feed'&&L.spotsrc!=='typed'){
+      /* Every box is the feed's, so the outright is the feed's own and not
+         the other two added up here.  The three carry different precisions
+         -- a yen spot shows a tenth of a pip and the swap four decimals of
+         one -- so adding the *rounded* spot to the swap lands a digit away
+         from the published outright on a cross the feed builds from its
+         legs: EURJPY 1M off this repo's sample file reads 162.864 that way
+         and 162.865 as published.  What is priced should be what the file
+         says while the file is what is in the boxes. */
+      L.swap=pts(q.points); L.forward=mkt(q.forward);
+    }else{
+      if(L.fwdsrc==='feed')L.swap=pts(q.points);
+      /* Somebody has typed one of them, so the third is arithmetic on what
+         the boxes show -- and a leg holding a typed outright against a
+         republished spot has its *swap* moved instead.  The identity holds
+         across all three or the screen is showing a market that does not
+         add up. */
+      syncMarket(L);
+    }
+    MKTBOX.forEach(k=>setBox(q.index,k,L[k]));
+    if(q.extrapolated)bad.push(who+': the expiry is outside the quoted pillars, '+
+      'so the forward points are held flat');
+  });
+  saveLegs();
+  return bad;
+}
+async function resolveLegs(force){
+  if(!LEGS.length)return [];
+  try{
+    const r=await post('/api/legs',{legs:LEGS.map(L=>({pair:L.pair,expiry:L.expiry}))});
+    return applyLegRows(r.legs,force);
+  }catch(e){return ['the legs could not be resolved: '+e.message]}
+}
 let _pt=null;
 function schedulePrice(){if($('#autoprice').checked){clearTimeout(_pt);_pt=setTimeout(priceAll,320)}}
+/* What the pricer resolved goes back into the boxes it was resolved from.
+   The expiry box already worked this way -- a tenor is read on the pair's
+   calendar once and the leg then holds the date rather than drifting with
+   the clock -- and the strike and the option type are the same thing said
+   about the other two boxes: `ATM` and `25d` are ways of *asking for* a
+   strike, and once one has been solved on the marks it is that strike the
+   leg is struck at.  So it is written into the box and it is what the next
+   price uses.  Type `25d` in again to solve it afresh against the marks as
+   they now stand.
+
+   A touch product is skipped: its level is the barrier, which is already an
+   absolute number in a box of its own, and `LegResult.strike` merely repeats
+   it. */
+function adoptResolved(){
+  const res=(RESULT&&RESULT.legs)||[]; let moved=false;
+  res.forEach((r,i)=>{
+    const L=LEGS[i]; if(!L||!r.ok)return;
+    if(r.expiry&&L.expiry!==r.expiry){L.expiry=r.expiry;moved=true}
+    if(TOUCH.indexOf(prodOf(L))>=0)return;
+    // Only a box holding a *request* is filled in.  A plain number is left
+    // exactly as it was typed: it needed no solving, and rewriting 150.5 as
+    // 150.500 would be this screen editing somebody's own strike and then
+    // labelling it as something it had worked out.
+    const asked=String(L.strike||'').trim(), k=mkt(r.strike);
+    if(k&&!/^-?\d+(\.\d+)?$/.test(asked)){
+      // What it was asked as, kept so the box can say so and so that moving
+      // the leg to another pair can put the request back.
+      L.strikeask=r.strike_spec||asked||'ATM'; L.strike=k; moved=true;
+    }
+    const ty=r.is_call?'C':'P';
+    if(String(L.type||'').trim().toUpperCase()!==ty){L.type=ty;moved=true}
+  });
+  if(moved)saveLegs();
+}
 async function priceAll(){
   if(!LEGS.length){RESULT=null;renderGrid();return}
   $('#pstatus').innerHTML='<span class="spin"></span> pricing…';
   try{
-    RESULT=await post('/api/price',{legs:LEGS.map(L=>({...L,pip:pipFor(L)}))});
+    RESULT=await post('/api/price',{legs:LEGS});
+    adoptResolved();
     const n=RESULT.errors;
     $('#pstatus').innerHTML=n?`<span class="pill bad">${n} leg${n>1?'s':''} failed</span>`
       :`<span class="pill ok">${LEGS.length} priced</span>`;
   }catch(e){RESULT=null;$('#pstatus').innerHTML=`<span class="pill bad">${esc(e.message)}</span>`;}
   renderGrid();
 }
-$('#pgrid').addEventListener('change',e=>{
+$('#pgrid').addEventListener('change',async e=>{
   const t=e.target; const i=t.dataset.i;
   if(i===undefined)return;
-  const L=LEGS[+i];
-  L[t.dataset.k]=t.value;
+  const L=LEGS[+i], k=t.dataset.k;
+  L[k]=t.value;
+  // A strike typed over is a strike asked for again, whatever it says.
+  if(k==='strike')L.strikeask='';
+  // A level somebody has typed is theirs from now on, and an emptied box
+  // goes back to the feed -- which is the only way back, so it is the
+  // documented one.  Typing a swap and typing an outright are the same
+  // statement made two ways, so they set the *same* flag to different
+  // values: whichever was last typed is the one that is held, and the other
+  // of the two is worked out from it.
+  if(k==='spot')L.spotsrc=t.value.trim()?'typed':'feed';
+  if(k==='swap')L.fwdsrc=t.value.trim()?'swap':'feed';
+  if(k==='forward')L.fwdsrc=t.value.trim()?'forward':'feed';
+  if(MKTBOX.indexOf(k)>=0){syncMarket(L);MKTBOX.forEach(x=>setBox(+i,x,L[x]));}
   // BAND is only a method on a pegged pair; moving a leg off one must not
-  // leave it holding a method its new pair cannot be marked with.
-  if(t.dataset.k==='pair')L.method=methodFor(L.pair,L.method);
+  // leave it holding a method its new pair cannot be marked with.  And a
+  // level somebody typed belongs to the pair they typed it for: 150.25 is a
+  // considered mark on USDJPY and nonsense on EURUSD, so moving the leg
+  // hands both boxes back to the feed rather than carrying the number over.
+  if(k==='pair'){L.method=methodFor(L.pair,L.method);
+    L.spot='';L.swap='';L.forward='';L.pip='';L.spotsrc='feed';L.fwdsrc='feed';
+    // And a strike this screen solved belongs to the pair it solved it on --
+    // 150.446 is a considered strike on USDJPY and nonsense on EURUSD, the
+    // same trap the two level boxes are cleared for.  The *request* goes
+    // back, because that is what was actually asked for and it is as good on
+    // the new pair as it was on the old one.
+    if(L.strikeask){L.strike=L.strikeask;L.strikeask='';}}
   saveLegs();
-  if(t.dataset.k==='label'||t.dataset.k==='pair'||t.dataset.k==='product')renderGrid();
+  if(k==='label'||k==='pair'||k==='product')renderGrid();
+  // The expiry decides which forward the feed is asked for, and the pair
+  // decides which calendar the expiry is read on, so either one moves all
+  // three boxes.  The boxes are written straight into rather than repainted:
+  // the next cell may already have somebody typing in it.
+  if(k==='pair'||k==='expiry'||MKTBOX.indexOf(k)>=0){
+    const bad=await resolveLegs(false);
+    if(bad.length)$('#pstatus').innerHTML='<span style="color:var(--warn)">'+esc(bad.join(' · '))+'</span>';
+  }
   schedulePrice();
 });
 $('#pgrid').addEventListener('click',e=>{
   const el=e.target.closest('[data-del]'); if(!el)return;
   LEGS.splice(+el.dataset.del,1); saveLegs(); RESULT=null; renderGrid(); schedulePrice();
 });
-$('#addleg').onclick=()=>{LEGS.push(defaultLeg());saveLegs();renderGrid();schedulePrice()};
-$('#dupleg').onclick=()=>{if(LEGS.length){LEGS.push(defaultLeg(LEGS[LEGS.length-1]));saveLegs();renderGrid();schedulePrice()}};
+$('#addleg').onclick=async()=>{LEGS.push(defaultLeg());saveLegs();renderGrid();
+  await resolveLegs(false);schedulePrice()};
+$('#dupleg').onclick=async()=>{if(!LEGS.length)return;
+  LEGS.push(defaultLeg(LEGS[LEGS.length-1]));saveLegs();renderGrid();
+  await resolveLegs(false);schedulePrice()};
 $('#delleg').onclick=()=>{if(LEGS.length){LEGS.pop();saveLegs();RESULT=null;renderGrid();schedulePrice()}};
 $('#clearlegs').onclick=()=>{LEGS=[];RESULT=null;saveLegs();renderGrid();$('#pstatus').textContent=''};
 $('#priceall').onclick=priceAll;
@@ -1219,7 +1613,11 @@ function showFeed(f){
   const el=$('#feedstatus');
   if(!f||!f.loaded){el.innerHTML='<span class="pill warn">no feed</span>';return}
   const bad=(f.problems||[]).length;
-  el.innerHTML=`<span class="pill ok">feed: ${f.covered.length} pairs</span>`+
+  /* A cross the file does not quote but both of whose legs it does is a pair
+     the tool can price: counted apart, so the pill neither hides it nor
+     claims the feed published it. */
+  const der=(f.derived||[]).length;
+  el.innerHTML=`<span class="pill ok" title="${der?esc((f.derived||[]).join(', '))+' are built from their legs':'quoted in the file'}">feed: ${f.covered.length} pairs${der?' + '+der+' from legs':''}</span>`+
     (f.asof?` <span class="meta">asof ${esc(f.asof)}</span>`:'')+
     (f.stale?' <span class="pill warn">newer data on disk — Refresh</span>':'')+
     (bad?` <span class="pill bad">${bad} problem${bad>1?'s':''}</span>`:'');
@@ -1234,32 +1632,26 @@ $('#feedload').onclick=async()=>{
           to auto-load at all, so the switch is re-read here rather than left
           greyed out until the next reload. */
        try{ STATE.auto=await api('/api/auto'); showAuto(STATE.auto) }catch(e2){}
+       /* A feed that has just been loaded is what the empty market boxes
+          were waiting for. */
+       await resolveLegs(false);
        await priceAll(); }
   catch(e){ el.innerHTML=`<span class="pill bad">${esc(e.message)}</span>`; }
 };
 
-/* Re-read the feed file, and optionally write what it says into the legs.
-   Two buttons, one endpoint: picking up new spot and stamping it into a row
-   somebody typed a stale one into are the same action on the file and
-   different actions on the pad, and only the second one touches what the user
-   typed. */
+/* Re-read the feed file, and write what it says into the legs.
+   Two buttons, one endpoint: picking up new spot and stamping it over a level
+   somebody typed by hand are the same action on the file and different
+   actions on the pad.  Both refill the boxes the feed put a number in --
+   that is what those boxes are for -- and only `Fill legs` overwrites the
+   ones somebody has typed into. */
 async function refreshFeed(fill){
   const el=$('#feedstatus'); el.innerHTML='<span class="spin"></span> re-reading the feed…';
   try{
     const r=await post('/api/feed/refresh',
       {legs:LEGS.map(L=>({pair:L.pair,expiry:L.expiry}))});
     STATE.feed=r.feed; showFeed(r.feed);
-    const bad=[];
-    if(fill){
-      r.legs.forEach(q=>{
-        const L=LEGS[q.index]; if(!L)return;
-        if(q.error){bad.push('#'+(q.index+1)+' '+(L.label||L.pair)+': '+q.error);return}
-        L.spot=String(q.spot); L.points=String(Math.round(q.points*1e6)/1e6);
-        if(q.extrapolated)bad.push('#'+(q.index+1)+' '+(L.label||L.pair)+
-          ': the expiry is outside the quoted pillars, so the points are held flat');
-      });
-      saveLegs(); renderGrid();
-    }
+    const bad=applyLegRows(r.legs,fill);
     await priceAll();
     $('#pstatus').innerHTML=bad.length?
       ('<span style="color:var(--warn)">'+esc(bad.join(' · '))+'</span>'):
@@ -1397,8 +1789,14 @@ async function drawSmile(){
   const K=kScale(d);
   const f=d.fit?`<span class="pill ${d.fit.arbitrage_free?'ok':'bad'}">${d.fit.arbitrage_free?'arbitrage-free':'ARBITRAGE'}</span>
     <span class="meta">fit error ${d.fit.max_error_vol_pts.toExponential(1)} vol pts</span>`:'';
+  /* A cross the feed quotes only through its legs is scaled by the triangle
+     of the two, which is a published level and an identity rather than a
+     guess -- but it is not a level the feed carried, so the pill says which
+     of the two it was. */
   const lvl=K.F==null?'<span class="meta">no feed for '+esc(o.pair)+' · strikes in K/F</span>'
-    :`<span class="meta">spot ${num(d.spot,K.dp)} · fwd ${num(d.forward,K.dp)} <span class="pill ok">feed</span></span>`;
+    :`<span class="meta">spot ${num(d.spot,K.dp)} · fwd ${num(d.forward,K.dp)} <span class="pill ok"
+       title="${d.derived?'the feed does not quote '+esc(o.pair)+'; this is the '+esc(d.via)+' triangle':'straight from the feed'}"
+       >${d.derived?esc(d.via.replace(' and ',' × ')):'feed'}</span></span>`;
   p.innerHTML=`<div style="display:flex;gap:10px;align-items:center;margin-bottom:8px;flex-wrap:wrap">
       <b>${esc(o.pair)}</b><span class="meta">t = ${d.t.toFixed(4)}y · ATM ${d.atm.toFixed(4)}%</span>${f}${lvl}</div>
     <div id="c1"></div><div class="legend"><span><i style="background:${C1}"></i>implied vol (%)</span>
@@ -1584,7 +1982,13 @@ const cls=v=>(v==null||!isFinite(v))?'':(v>0?' class="pos"':(v<0?' class="neg"':
 
 const EF=[
  ['label','Label','text',132],
- ['underlying','Contract','contract',210],
+ /* Free text, not a list.  A desk trades more listed contracts than any
+    table shipped in here will hold, and every contract that was missing had
+    to be called CUSTOM -- at which point two of them on one screen cannot be
+    told apart and a position line naming one is refused as ambiguous.  The
+    codes this build knows are offered as suggestions (#etocodes) and a typed
+    one is marked as typed wherever it is shown. */
+ ['underlying','Contract','code',132],
  ['pair','FX pair','pair',118],
  ['invert','Strikes','invert',122],
  ['scale','Strike scale','text',94],
@@ -1617,9 +2021,11 @@ function efield(pan,i,f){
   const a='data-p="'+i+'" data-k="'+k+'" style="width:'+w+'px"';
   const cur=pan[k]==null?'':pan[k];
   let el;
-  if(kind==='contract'){
-    const us=(STATE.listed&&STATE.listed.underlyings)||[{code:'CUSTOM',name:'custom'}];
-    el='<select '+a+'>'+optlist(us.map(u=>[u.code,u.code==='CUSTOM'?'custom (pick a pair)':u.code+' · '+u.name]),cur)+'</select>';
+  if(kind==='code'){
+    el='<input '+a+' list="etocodes" spellcheck="false" autocomplete="off" '+
+       'title="any contract code; the ones this build knows map to a pair and a size on '+
+       'their own, anything else takes the pair, direction and size from this panel" '+
+       'value="'+esc(cur)+'">';
   }else if(kind==='pair'){
     el='<select '+a+'>'+optlist([['','(from contract)']].concat((STATE.pairs||[]).map(x=>[x,x])),cur)+'</select>';
   }else if(kind==='invert'){
@@ -1696,6 +2102,13 @@ function paintPanel(i){
       '<span>beta <b>'+num(f.beta,2)+'</b></span>'+
       '<span>'+d.n_quotes+' quotes, '+f.dof+' d.o.f.</span>'+
       '<span>'+num(d.days,2)+' days</span>'+
+      /* A code that was typed and one this build knows how to map must never
+         look the same: the second brings a pair, a strike direction and a
+         contract size with it and the first brings none of them. */
+      (d.underlying.known?'':'<span>'+esc(d.underlying.code)+
+        ' <i class="etoheld">typed</i></span>')+
+      (d.underlying.premium_ccy?'<span>settles <b>'+esc(d.underlying.premium_ccy)+
+        '</b></span>':'')+
     '</div>';
 
   const series=[{color:C1,pts:d.curve.strikes.map((k,j)=>[k,d.curve.fit[j]])}];
@@ -1854,14 +2267,19 @@ function paintG(){
   out.innerHTML='<div class="etostat">'+
     '<span>lines <b>'+d.positions.length+'</b>, priced <b>'+priced+'</b></span>'+
     '<span>panels used <b>'+d.panels.filter(p=>p.used).length+'</b> of '+d.panels.length+'</span>'+
+    '<span>contracts <b>'+(d.contracts||[]).length+'</b>'+
+      ((d.currencies||[]).length>1?', settling in '+d.currencies.map(c=>esc(c.ccy||'?')).join(' / '):'')+
+      '</span>'+
     '<span>premium <b>'+gnum(T.premium,0)+'</b></span>'+
     '<span>vega (BS) <b>'+gnum(T.bs.vega,0)+'</b></span>'+
     '<span>vega (smile) <b>'+gnum(T.smile.vega,0)+'</b></span>'+
     '<span>theta (BS) <b>'+gnum(T.bs.theta,0)+'</b></span>'+
     '<span>per <b>'+num(d.vol_bump,2)+'</b> vol pt, <b>'+num(d.theta_days,2)+'</b> day(s)</span>'+
     '</div>'+
-    '<div class="etonote">Money is the contract\u2019s premium currency and adds across '+
-    'contracts; a futures equivalent does not and is totalled per contract only.</div>';
+    '<div class="etonote">Money is the contract\u2019s settlement currency and adds across '+
+    'contracts that settle in the same one; a futures equivalent does not, and is totalled '+
+    'per contract — across that contract\u2019s expiries, which is a net position and not a '+
+    'hedge ratio, because two delivery months are not the same future.</div>';
 
   let h='';
   ['bs','smile'].forEach(which=>{
@@ -1882,6 +2300,12 @@ function paintG(){
          GCOLS.map(c=>gcell(r[which],c[0],c[2])).join('')+'</tr>';
       if(r.error)h+='<tr><td></td><td colspan="'+(6+GCOLS.length)+'" class="wmsg">'+esc(r.error)+'</td></tr>';
     });
+    /* Three aggregates, and they are three because three different things
+       add.  Per panel every column adds.  Per contract every column still
+       adds -- the panels under one code are the same contract at different
+       expiries -- and that row is shown only where it says something the
+       panel rows did not.  Across contracts only money adds, and only money
+       in one settlement currency, so the last rows are per currency. */
     d.groups.forEach(g=>{
       h+='<tr class="sep"><td></td><td>'+esc(g.panel)+'</td><td colspan="3">'+
          esc(g.underlying)+' · '+esc(String(g.expiry).replace('T',' ').slice(0,16))+'Z · '+
@@ -1889,11 +2313,24 @@ function paintG(){
          '<td>'+num(g.atm_vol,4)+'</td>'+gcell(g,'premium',0)+
          GCOLS.map(c=>gcell(g[which],c[0],c[2])).join('')+'</tr>';
     });
-    h+='<tr class="sep"><td></td><td><b>all</b></td><td colspan="4">money only</td>'+
-       gcell(T,'premium',0)+
-       GCOLS.map(c=>((d.additive||[]).indexOf(c[0])<0?
-         '<td title="not added across contracts">—</td>':gcell(T[which],c[0],c[2]))).join('')+
-       '</tr></tbody></table></div>';
+    (d.contracts||[]).filter(c=>c.panels>1).forEach(c=>{
+      h+='<tr class="sep"><td></td><td><b>'+esc(c.underlying)+'</b>'+
+         (c.known?'':' <i class="etoheld">typed</i>')+'</td><td colspan="3">'+
+         c.panels+' panels · '+c.n+' line(s) · '+c.expiries.length+' expiries'+
+         (c.premium_ccy?' · '+esc(c.premium_ccy):'')+'</td><td></td>'+
+         gcell(c,'premium',0)+
+         GCOLS.map(x=>gcell(c[which],x[0],x[2])).join('')+'</tr>';
+    });
+    const ccys=(d.currencies&&d.currencies.length)?d.currencies:[Object.assign({ccy:''},T)];
+    ccys.forEach(cc=>{
+      h+='<tr class="sep"><td></td><td><b>all</b></td><td colspan="4">money only'+
+         (cc.ccy?', in '+esc(cc.ccy):', settlement currency not known')+'</td>'+
+         gcell(cc,'premium',0)+
+         GCOLS.map(c=>((d.additive||[]).indexOf(c[0])<0?
+           '<td title="not added across contracts">—</td>':gcell(cc[which],c[0],c[2]))).join('')+
+         '</tr>';
+    });
+    h+='</tbody></table></div>';
   });
   tab.innerHTML=h;
 
@@ -2124,7 +2561,9 @@ function renderShape(d){
         '</td><td class="grp">'+anRaw(r.implied_nu)+'</td><td>'+anRaw(r.realized_nu)+'</td><td>'+
         num(r.realized_nu_se,3)+'</td><td'+cls(r.nu_difference)+'>'+anRaw(r.nu_difference)+
         '</td><td class="grp">'+anRaw(r.implied_nu==null?null:r.implied_nu*Math.sqrt(r.t))+
-        '</td><td>'+esc(r.dynamics_source||'—')+'</td><td>'+
+        '</td><td>'+esc(r.dynamics_source||'—')+
+        (r.dynamics_days==null?'':' <small>'+num(r.dynamics_days,0)+'d</small>')+
+        '</td><td>'+
         (r.implied_shape_error==null?'—':num(r.implied_shape_error*100,4))+'</td></tr>'))+
     '</div></div>'+
     '<div class="ankey"><span><b>&rho;</b> is the spot/volatility correlation a risk reversal is '+
@@ -2132,6 +2571,11 @@ function renderShape(d){
     'SABR smile would need to show the quoted wings; measured is the same pair taken from the '+
     'history — the correlation of daily spot returns with daily moves in the quoted '+
     'at-the-money, and the annualised size of those moves</span>'+
+    '<span><b>Measured on</b> names the series and the window. The window is deliberately '+
+    'not the realized lookback above: &rho; and &nu; are properties of the process rather '+
+    'than forecasts over a horizon, and they need more paired observations than a realized '+
+    'volatility needs returns — measured on a one-month lookback the whole measured half of '+
+    'this table, both <b>diff</b> columns included, was blank at every tenor</span>'+
     '<span>SABR has no mean reversion, so <b>&nu; rises at short tenors</b> on both sides and '+
     'must not be blended across them. <b>&nu;&radic;t</b> is the scale-free number that actually '+
     'sets the shape</span>'+
@@ -2487,9 +2931,16 @@ function renderRvCell(){
       (r.realized_carry_rate==null?'':'<span>measured carry <b>'+
         anSgn(r.realized_carry_rate,2)+'</b>%/yr — a level, and on its own it says '+
         'nothing about variance</span>')+
-      (r.realized_rho==null?'':'<span>measured &rho; <b>'+anRaw(r.realized_rho,3)+
-        '</b>, &nu; <b>'+anRaw(r.realized_nu,3)+'</b> ('+esc(r.dynamics_source||'')+
-        ')</span>')+'</div>')+
+      /* The window is part of the number: the dynamics are measured over the
+         history window and not over the realized lookback beside them, and
+         two windows on one line have to be told apart. */
+      (r.realized_rho==null?'':'<span title="the spot/volatility correlation and the vol of '+
+        'vol the shape signal\'s comparison smile is built from. Measured over the history '+
+        'window, not the realized lookback: they are properties of the process and need more '+
+        'paired observations than a realized volatility needs returns">measured &rho; <b>'+
+        anRaw(r.realized_rho,3)+'</b>, &nu; <b>'+anRaw(r.realized_nu,3)+'</b> ('+
+        esc(r.dynamics_source||'')+(r.dynamics_days==null?'':
+        ', '+num(r.dynamics_days,0)+' days')+')</span>')+'</div>')+
     (c.message?'<div class="etowarn">! '+esc(c.message)+'</div>':'')+
     (r.warnings||[]).slice(0,3).map(w=>'<div class="etonote">· '+esc(w)+'</div>').join('');
 }
@@ -2599,6 +3050,7 @@ async function loadBand(){
   const card=$('#bandcard');
   card.classList.toggle('hide',!bandPaired());
   if(!bandPaired()){BAND=null;return}
+  $('#banderr').innerHTML='';
   try{
     BAND=await api('/api/band?'+qs({pair:$('#mpair').value,cut:$('#mcut').value}));
     renderBand();
@@ -2607,10 +3059,20 @@ async function loadBand(){
   }
 }
 async function applyBand(){
-  $('#bandbody').innerHTML='<div class="bandnone"><span class="spin"></span> recalibrating…</div>';
-  try{ BAND=await post('/api/band',bandPayload()); renderBand(); }
-  catch(e){ $('#bandbody').innerHTML='<div class="out err"><div class="v">'+
+  /* The payload is read out of the card *before* anything is written to it.
+     The spinner used to go into `#bandbody`, which is where the fields are:
+     it removed #bandmode and #bandsolve, and bandPayload() then read
+     `null.value`.  For the same reason the failure goes in its own div
+     beside the form rather than over it -- a hazard with a typo in it is
+     the ordinary way to get here, and the form the typo is in has to stay
+     on screen to be corrected. */
+  const body=bandPayload();
+  $('#banderr').innerHTML='';
+  $('#bandstatus').innerHTML='<span class="spin"></span> recalibrating…';
+  try{ BAND=await post('/api/band',body); renderBand(); }
+  catch(e){ $('#banderr').innerHTML='<div class="out err"><div class="v">'+
     esc(e.message)+'</div></div>'; }
+  $('#bandstatus').innerHTML='';
 }
 function renderBand(){
   const d=BAND; if(!d)return;
@@ -2858,7 +3320,7 @@ async function sessLoad(){
     sessShow(r,bits.join(' · ')||'nothing to restore',!!(r.problems&&r.problems.length));
     /* the marks moved under every screen, so everything showing is redrawn */
     await loadCurve(); await loadMarks(); await loadBand(); redraw();
-    if(has('pricing'))await priceAll();
+    if(has('pricing')){await resolveLegs(false); await priceAll();}
   }catch(e){sessShow(null,e.message,true)}
 }
 $('#sesssave').onclick=()=>sessSave(false);
@@ -3033,33 +3495,90 @@ $('#molist').oninput=e=>{
    whole, so `volkit mm` reproduces a screen exactly.  The one thing the
    server does keep is the knowledge bank, because that is a file the desk
    owns rather than a screen. */
-let MM={}, MMR=null, MMRULES=[], _mmt=null;
+let MM={}, MMR=null, MQR=null, MMRULES=[], _mmt=null, _mqt=null, AGR=null, MKR=null;
+/* The marks the quote stands on, and where they came from.  One holder,
+   because two sources can fill it -- the fit's answer and an accepted
+   proposal from the marking agent -- and the quote must not have to guess
+   which of two it was handed. */
+let HELD=null;
 
-/* Every field here has to be one panel_from_request reads; a test pins it. */
+/* Two panels, two field lists, two readers on the server. Every field in each
+   has to be one its own *_from_request reads; a test pins both. Splitting the
+   lists is the point: a field the fit sends and only the quote reads would be
+   a setting that silently does nothing on the button it sits next to. */
 const MF=[
  ['pair','#mmpair'],['cut','#mmcut'],['method','#mmmethod'],
  ['target_source','#mmsource'],['fly_convention','#mmfly'],['vol_unit','#mmunit'],
+ ['text','#mmtext'],['target_text','#mmtarget'],['apply','#mmapply'],
+];
+const MQF=[
+ ['pair','#mmpair'],['cut','#mmcut'],['method','#mmmethod'],
+ ['fly_convention','#mmfly'],['vol_unit','#mmunit'],['text','#mmtext'],
+ ['request_text','#mqtext'],
  ['fallback_spread','#mmfallback'],['vega_scale','#mmscale'],['fair_weight','#mmfair'],
  ['axe_weight','#mmaxe'],['skew_cap','#mmcap'],['horizon_days','#mmhorizon'],
- ['text','#mmtext'],['target_text','#mmtarget'],['vega_text','#mmvega'],
- ['apply','#mmapply'],
+ ['vega_text','#mmvega'],
+ /* the desk agent's rung on the width ladder, on the same evidence settings
+    as its card, so the two never disagree about what the archive holds */
+ ['use_archive_width','#mqarchive'],['archive_half_life','#agenthalf'],
+ ['archive_min_effective','#agentmin'],['archive_lookback_days','#agentlook'],
+];
+/* The marking agent's card: the fit panel's own fields, plus its own. Read by
+   marking.panel_from_request, and a test pins this list against it. */
+const MKF=[
+ ['pair','#mmpair'],['cut','#mmcut'],['method','#mmmethod'],
+ ['target_source','#mmsource'],['fly_convention','#mmfly'],['vol_unit','#mmunit'],
+ ['text','#mmtext'],['target_text','#mmtarget'],
+ ['choose_knobs','#markchoose'],['use_archive','#markarchive'],
+ ['lookback_days','#marklook'],['min_instances','#markmin'],
+ ['half_life','#agenthalf'],['min_effective','#agentmin'],['evidence_lookback','#agentlook'],
 ];
 const MMKNOBS=['#mmfree','#mmsmilefree'];
 
-function mmPayload(){
+function readFields(list){
   const out={};
-  MF.forEach(f=>{const el=$(f[1]);out[f[0]]=el.type==='checkbox'?el.checked:el.value});
+  list.forEach(f=>{const el=$(f[1]);out[f[0]]=el.type==='checkbox'?el.checked:el.value});
+  return out;
+}
+function mmPayload(){
+  const out=readFields(MF);
   out.free=[...$('#mmfree').querySelectorAll('input:checked')].map(x=>x.dataset.k);
   out.smile_free=[...$('#mmsmilefree').querySelectorAll('input:checked')].map(x=>x.dataset.k);
   out.fit_curve=out.free.length>0&&out.target_source!=='none';
   out.tune_wings=out.smile_free.length>0;
   return out;
 }
-function saveMM(){try{localStorage.setItem('volkit.mm',JSON.stringify(mmPayload()))}catch(e){}}
+/* The marks are the whole hand-off between the two stages, and the browser is
+   what holds them -- the server keeps no screen state. They go over only when
+   the box is ticked *and* there is a fit of this pair to send; the server says
+   on the sheet which of the two it priced off, so the two can never look the
+   same. */
+function mqMarks(){
+  if(!$('#mqonfit').checked||!HELD||!HELD.marks)return null;
+  if(HELD.marks.pair!==$('#mmpair').value)return null;
+  return HELD.marks;
+}
+function holdMarks(marks,from){HELD=marks?{marks:marks,from:from}:null;mqAvailable()}
+function mqPayload(){
+  const out=readFields(MQF);
+  const m=mqMarks();
+  if(m)out.marks=m;
+  return out;
+}
+function mqAvailable(){
+  /* A checkbox that can be ticked and then quietly does nothing is the same
+     failure as a box that is filled in and ignored. */
+  const ok=!!(HELD&&HELD.marks&&HELD.marks.pair===$('#mmpair').value);
+  $('#mqonfit').disabled=!ok;
+  $('#mqonfit').title=ok?('standing on '+(HELD.from==='agent'?"the marking agent's accepted proposal":'the last fit')):
+    'no fit of this pair yet — the quote stands on the marks as they are';
+}
+function saveMM(){try{localStorage.setItem('volkit.mm',
+  JSON.stringify(Object.assign({},mmPayload(),readFields(MQF),readFields(MKF))))}catch(e){}}
 function loadMM(){
   try{const r=localStorage.getItem('volkit.mm');if(r)MM=JSON.parse(r)}catch(e){MM={}}
   if(!MM||typeof MM!=='object')MM={};
-  MF.forEach(f=>{const el=$(f[1]),v=MM[f[0]];if(v==null)return;
+  MF.concat(MQF,MKF).forEach(f=>{const el=$(f[1]),v=MM[f[0]];if(v==null)return;
     if(el.type==='checkbox')el.checked=!!v; else el.value=v;});
 }
 
@@ -3086,36 +3605,55 @@ function renderKnobs(){
      '<code>short_decay</code> is normally left pinned: nine tenors barely see it.');
 }
 
-/* -- the run ----------------------------------------------------------- */
+/* -- the two runs ------------------------------------------------------- */
 async function runMM(){
   const body=mmPayload();
-  if(!(body.text||'').trim()){
+  if(!(body.text||'').trim()&&body.target_source==='quotes'){
     $('#mmstatus').textContent='paste a market first';
     $('#mmsheet').innerHTML='<div class="annone">Nothing pasted yet.</div>';return}
   $('#mmstatus').innerHTML='<span class="spin"></span> fitting…';
   try{
     MMR=await post('/api/mm/fit',body);
+    holdMarks(MMR.marks,'fit');
     saveMM();
     paintMM();
     $('#mmstatus').textContent=(MMR.warnings||[]).length?
-      (MMR.warnings.length+' message(s)'):'done';
+      (MMR.warnings.length+' message(s)'):'fitted';
   }catch(e){
-    MMR=null;
+    MMR=null; holdMarks(null);
     $('#mmstatus').innerHTML='<span style="color:var(--bad)">'+esc(e.message)+'</span>';
     $('#mmsheet').innerHTML='<div class="out err"><div class="v">'+esc(e.message)+'</div></div>';
     $('#mmcurve').innerHTML='';$('#mmwings').innerHTML='';
   }
+  mqAvailable();
+}
+async function runMQ(){
+  const body=mqPayload();
+  if(!(body.request_text||'').trim()){
+    $('#mqsheethead').textContent='';
+    $('#mqmarks').textContent='';
+    $('#mqsheet').innerHTML='<div class="annone">Nothing asked for yet. Write what you are '+
+      'being asked to price — one instrument a line, no prices on them.</div>';return}
+  $('#mmstatus').innerHTML='<span class="spin"></span> quoting…';
+  try{
+    MQR=await post('/api/mm/quote',body);
+    saveMM();
+    paintMQ();
+    $('#mmstatus').textContent=(MQR.warnings||[]).length?
+      (MQR.warnings.length+' message(s)'):'quoted';
+  }catch(e){
+    MQR=null;
+    $('#mmstatus').innerHTML='<span style="color:var(--bad)">'+esc(e.message)+'</span>';
+    $('#mqsheet').innerHTML='<div class="out err"><div class="v">'+esc(e.message)+'</div></div>';
+  }
 }
 function scheduleMM(){if($('#mmauto').checked){clearTimeout(_mmt);_mmt=setTimeout(runMM,600)}}
+function scheduleMQ(){if($('#mmauto').checked){clearTimeout(_mqt);_mqt=setTimeout(runMQ,600)}}
 
 function paintMM(){
   const d=MMR; if(!d)return;
-  paintSheet(d); paintCurve(d); paintWings(d); paintAxe(d);
-  MMRULES=((d.bank||{}).rules||[]).slice();
-  renderRules();
-  $('#mmbankhead').textContent=(d.bank&&d.bank.path?d.bank.path:'no file yet')+
-    (d.bank&&d.bank.updated?' · updated '+d.bank.updated.replace('T',' ').slice(0,16):'');
-  const sh=d.sheet||{};
+  paintMarket(d); paintCurve(d); paintWings(d);
+  const sh=d.market||{};
   $('#mmparse').innerHTML=(sh.notes||[]).map(n=>'<div class="etonote">· '+esc(n)+'</div>').join('')+
     (sh.skipped||[]).map(x=>'<div class="etowarn">! line '+x.line+' skipped ('+esc(x.why)+'): '+
       esc(String(x.text).slice(0,70))+'</div>').join('')+
@@ -3128,33 +3666,112 @@ function paintMM(){
       '</div>').join('');
 }
 
+function paintMQ(){
+  const d=MQR; if(!d)return;
+  paintQuote(d); paintAxe(d); paintBank(d.bank);
+  const sh=d.sheet||{};
+  $('#mqparse').innerHTML=(sh.notes||[]).map(n=>'<div class="etonote">· '+esc(n)+'</div>').join('')+
+    (sh.skipped||[]).map(x=>'<div class="etowarn">! line '+x.line+' skipped ('+esc(x.why)+'): '+
+      esc(String(x.text).slice(0,70))+'</div>').join('');
+}
+
+function paintBank(b){
+  if(!b)return;
+  MMRULES=(b.rules||[]).slice();
+  renderRules();
+  $('#mmbankhead').textContent=(b.path?b.path:'no file yet')+
+    (b.updated?' · updated '+b.updated.replace('T',' ').slice(0,16):'');
+}
+/* The bank is a file the desk keeps, not a result, so the card fills without
+   anything having been run: a rule cannot be edited on a screen that will only
+   show it after a price has been made. */
+async function loadBank(){
+  try{paintBank(await api('/api/mm/bank?'+qs({pair:$('#mmpair').value})))}catch(e){}
+}
+
 const MMTAG={'inside':'in','below':'out','above':'out'};
 function mmVerdictTag(r){
-  if(r.our_bid==null)return '<span class="mmtag none">'+esc(r.verdict||'—')+'</span>';
+  if(r.our_bid==null&&r.model==null)return '<span class="mmtag none">'+esc(r.verdict||'—')+'</span>';
   if((r.crossing||'').indexOf('through')>=0)return '<span class="mmtag thru">'+esc(r.verdict)+'</span>';
-  const c=MMTAG[r.position]||'none';
+  const c=r.position?(MMTAG[r.position]||'none'):'none';
   return '<span class="mmtag '+c+'">'+esc(r.verdict)+'</span>';
 }
-function paintSheet(d){
-  const sh=d.sheet, host=$('#mmsheet');
-  $('#mmsheethead').textContent=sh.n_quotes+' quote(s) · '+sh.inside+' with our mid inside · '+
-    sh.priced+' with a width · fly = '+sh.fly_convention+' · '+sh.vol_unit;
+function mmWhy(r,extra){
+  const why=[].concat(r.warnings||[],r.width_source?['width: '+r.width_source]:[],
+    (r.flags||[]).map(x=>'archive: '+x),
+    r.skew_reason?[r.skew_reason]:[],r.notes||[],extra||[]);
+  const advice=(r.advice||[]).map(x=>'<b>'+esc(x)+'</b>').join(' &nbsp;·&nbsp; ');
+  if(!why.length&&!advice)return '';
+  return (advice?advice+(why.length?' &nbsp;·&nbsp; ':''):'')+why.map(esc).join(' &nbsp;·&nbsp; ');
+}
+
+/* -- the market against the surface: the fit's own table ---------------- *
+ * What it answers is "did the fit reach the market", which is the fit's
+ * question.  There is no width and no price here: what we would show is the
+ * quote panel's, and it is asked of the request box rather than of the run
+ * that moved the marks. */
+function paintMarket(d){
+  const sh=d.market, host=$('#mmsheet');
+  if(!sh){$('#mmsheethead').textContent='';host.innerHTML='';return}
+  $('#mmsheethead').textContent=sh.n_quotes+' quote(s) · model inside '+sh.inside_before+
+    ' → '+sh.inside+' of them · fly = '+sh.fly_convention+' · '+sh.vol_unit;
   if(!sh.rows.length){host.innerHTML='<div class="annone">No quote could be read from the paste.</div>';return}
   /* The time column only appears when the paste was timed. A column of
      dashes on a run nobody timestamped is noise in a table already this wide. */
   const timed=sh.rows.some(r=>r.timestamp)||((sh.superseded||[]).length>0);
+  /* The agent's two columns appear only when its last run was against this
+     exact paste. Suggestions computed from an older market sitting beside a
+     newer quote is the one way this card could mislead. */
+  const ag=agentFresh()?new Map((AGR.rows||[]).map(r=>[r.line,r])):null;
+  const ncol=(timed?9:8)+(ag?2:0);
   let h='<div class="mmwide"><table><thead><tr>'+
     '<th>Quote</th>'+(timed?'<th>Time</th>':'')+
-    '<th>Size</th><th>Their bid</th><th>Their ask</th><th>Model</th><th>Moved</th>'+
-    '<th>Fair</th><th>Axe</th><th>Bank</th><th>Skew</th>'+
-    '<th>Our bid</th><th>Our ask</th><th>Width</th><th>Verdict</th></tr></thead><tbody>';
+    '<th>Size</th><th>Their bid</th><th>Their ask</th><th>Was</th><th>Now</th><th>Moved</th>'+
+    (ag?'<th>Archive</th><th>Agent</th>':'')+
+    '<th>Verdict</th></tr></thead><tbody>';
   sh.rows.forEach(r=>{
     h+='<tr><td>'+esc(r.describe)+(r.label?' <small>'+esc(r.label)+'</small>':'')+'</td>'+
        (timed?'<td class="mmv">'+esc(r.timestamp||'—')+'</td>':'')+
        '<td class="mmv">'+(r.size==null?'—':num(r.size,0)+'mm')+'</td>'+
        '<td class="mmv">'+num(r.market_bid,4)+'</td><td class="mmv">'+num(r.market_ask,4)+'</td>'+
-       '<td class="mmv">'+num(r.model_after,4)+'</td>'+
+       '<td class="mmv">'+num(r.model_before,4)+'</td>'+
+       '<td class="mmv"><b>'+num(r.model_after,4)+'</b></td>'+
        '<td class="mmv"'+cls(r.model_move)+'>'+sgn(r.model_move,4)+'</td>'+
+       (ag?('<td class="mmv">'+num((ag.get(r.line)||{}).archive_width,3)+'</td>'+
+            '<td>'+(ag.has(r.line)?agentTag(ag.get(r.line)):'—')+'</td>'):'')+
+       '<td>'+mmVerdictTag(r)+'</td></tr>';
+    const suggestion=ag&&ag.has(r.line)&&['tight','wide','no rule'].indexOf(
+      ag.get(r.line).verdict)>=0?['agent: '+ag.get(r.line).note]:[];
+    const why=mmWhy(r,suggestion);
+    if(why)h+='<tr><td class="mmwhy" colspan="'+ncol+'">'+why+'</td></tr>';
+  });
+  h+='</tbody></table></div>';
+  if(d.marks)h+='<div class="etonote">· the fit moved '+esc(d.marks.what)+
+    '; that is what the quote above stands on.</div>';
+  host.innerHTML=h;
+}
+
+/* -- our quote: the instruments somebody asked for ---------------------- */
+function paintQuote(d){
+  const sh=d.sheet, host=$('#mqsheet');
+  $('#mqsheethead').textContent=sh.n_quotes+' asked for · '+sh.priced+' with a width · '+
+    sh.matched+' also in the market paste';
+  const m=d.marks||{};
+  $('#mqmarks').innerHTML='<span class="etonote">· '+esc(m.note||'')+
+    (m.stamp?' ('+esc(m.stamp.replace('T',' ').slice(0,16))+')':'')+'</span>';
+  if(!sh.rows.length){host.innerHTML='<div class="annone">Nothing could be read from the '+
+    'request box.</div>';return}
+  const ncol=12;
+  let h='<div class="mmwide"><table><thead><tr>'+
+    '<th>Instrument</th><th>Size</th><th>Model</th>'+
+    '<th>Fair</th><th>Axe</th><th>Bank</th><th>Skew</th>'+
+    '<th>Our bid</th><th>Our ask</th><th>Width</th>'+
+    '<th>Their market</th><th>Verdict</th></tr></thead><tbody>';
+  sh.rows.forEach(r=>{
+    const theirs=(r.market_bid==null)?'—':(num(r.market_bid,4)+' / '+num(r.market_ask,4));
+    h+='<tr><td>'+esc(r.describe)+(r.label?' <small>'+esc(r.label)+'</small>':'')+'</td>'+
+       '<td class="mmv">'+(r.size==null?'—':num(r.size,0)+'mm')+'</td>'+
+       '<td class="mmv">'+num(r.model,4)+'</td>'+
        '<td class="mmv">'+sgn(r.skew_fair,3)+'</td>'+
        '<td class="mmv">'+sgn(r.skew_axe,3)+'</td>'+
        '<td class="mmv">'+sgn(r.skew_bank,3)+'</td>'+
@@ -3162,17 +3779,24 @@ function paintSheet(d){
        '<td class="mmv"><b>'+num(r.our_bid,4)+'</b></td>'+
        '<td class="mmv"><b>'+num(r.our_ask,4)+'</b></td>'+
        '<td class="mmv">'+num(r.width,3)+'</td>'+
+       '<td class="mmv">'+theirs+'</td>'+
        '<td>'+mmVerdictTag(r)+'</td></tr>';
-    const why=[].concat(r.warnings||[],r.width_source?['width: '+r.width_source]:[],
-      r.skew_reason?[r.skew_reason]:[],r.notes||[]);
-    const advice=(r.advice||[]).map(x=>'<b>'+esc(x)+'</b>').join(' &nbsp;·&nbsp; ');
-    if(why.length||advice)h+='<tr><td class="mmwhy" colspan="'+(timed?15:14)+'">'+
-      (advice?advice+(why.length?' &nbsp;·&nbsp; ':''):'')+why.map(esc).join(' &nbsp;·&nbsp; ')+'</td></tr>';
+    const why=mmWhy(r);
+    if(why)h+='<tr><td class="mmwhy" colspan="'+ncol+'">'+why+'</td></tr>';
   });
   h+='</tbody></table></div>';
   const capped=sh.rows.filter(r=>r.skew_capped).length;
   if(capped)h+='<div class="etonote">· * '+capped+' row(s) had the shading capped at the skew cap '+
     'times the half width; the axe wanted to lean the price further than a quote may lean.</div>';
+  const ar=d.archive||{};
+  if(ar.used){
+    const fromArchive=sh.rows.filter(r=>(r.width_source||'').indexOf('the archive')===0).length;
+    h+='<div class="'+(ar.available?'etonote':'etowarn')+'">'+(ar.available?'· ':'! ')+
+      (ar.available?('archive on the width ladder: '+fromArchive+' row(s) took their width from it, '+
+        (ar.widths||0)+' width(s) held with enough behind them, '+(ar.counted||0)+
+        ' observation(s) counted'):esc(ar.reason||''))+'</div>';
+    if(ar.error)h+='<div class="etowarn">! '+esc(ar.error)+'</div>';
+  }
   host.innerHTML=h;
 }
 
@@ -3302,7 +3926,7 @@ $('#mmsave').onclick=async()=>{
     if(!r.ok){$('#mmbankmsg').innerHTML='<span style="color:var(--bad)">'+
       esc(r.problems.join('; '))+'</span>';return}
     $('#mmbankmsg').textContent='saved to '+r.written;
-    await runMM();
+    await runMQ();
   }catch(e){$('#mmbankmsg').innerHTML='<span style="color:var(--bad)">'+esc(e.message)+'</span>'}
 };
 
@@ -3326,15 +3950,364 @@ $('#mmsession').onclick=async()=>{
 function mmTargetVisible(){
   $('#mmtargetcard').classList.toggle('hide',$('#mmsource').value!=='paste');
 }
+
+/* -- the desk agent ------------------------------------------------------
+   A card inside this tab rather than a tab of its own: it answers a question
+   about the market pasted above it, and it answers it without fitting
+   anything, so it runs on its own button beside a fit that takes a second.
+   It proposes and it changes nothing -- the quote sheet's width moves when a
+   rule is written for it in the bank below, and not before. */
+const AF=[
+ ['pair','#mmpair'],['text','#mmtext'],['fly_convention','#mmfly'],['vol_unit','#mmunit'],
+ ['fallback_spread','#mmfallback'],['half_life','#agenthalf'],['min_effective','#agentmin'],
+ ['lookback_days','#agentlook'],['tolerance','#agenttol'],
+ ['include_model_read','#agentmodel'],['counterparty','#agentcpty'],
+];
+function agentPayload(){
+  const out={};
+  AF.forEach(f=>{const el=$(f[1]);out[f[0]]=el.type==='checkbox'?el.checked:el.value});
+  return out;
+}
+/* The suggestions are only allowed beside the quotes they were computed from.
+   A paste edited after a run leaves a sheet whose rows no longer match, and a
+   stale width sitting next to a fresh quote is worse than no width at all. */
+function agentFresh(){return AGR&&AGR.text_key===$('#mmtext').value}
+const AGTAG={'agrees':'in','tight':'thru','wide':'out','no rule':'out','thin':'none',
+             'not read':'none'};
+
+async function runAgent(){
+  $('#agentstatus').innerHTML='<span class="spin"></span> reading the archive…';
+  $('#agentmsg').className='msg';$('#agentmsg').textContent='';
+  try{
+    const body=agentPayload();
+    AGR=await post('/api/mm/agent',body);
+    AGR.text_key=body.text;
+    paintAgent();
+    if(MMR)paintMarket(MMR);
+    const n=(AGR.rows||[]).filter(r=>r.verdict==='tight'||r.verdict==='wide').length;
+    $('#agentstatus').textContent=n?(n+' row(s) the archive does not support'):'nothing to flag';
+  }catch(e){
+    AGR=null;
+    $('#agentstatus').innerHTML='<span style="color:var(--bad)">'+esc(e.message)+'</span>';
+    $('#agentrows').innerHTML='';$('#agentwidths').innerHTML='';
+  }
+}
+
+async function scanAgent(){
+  $('#agentstatus').innerHTML='<span class="spin"></span> reading the folders…';
+  try{
+    const r=await post('/api/mm/agent/ingest',{});
+    if(!r.available){
+      $('#agentmsg').className='msg warn';$('#agentmsg').textContent=r.reason;
+      $('#agentstatus').textContent='';return}
+    $('#agentmsg').className='msg ok';
+    $('#agentmsg').innerHTML=esc(r.summary)+' · '+esc(r.model)+
+      (r.files||[]).map(f=>'<div class="'+(f.error?'etowarn':'etonote')+'">'+
+        (f.error?'! ':'· ')+esc(f.line)+'</div>').join('')+
+      (r.notes||[]).map(n=>'<div class="etonote">· '+esc(n)+'</div>').join('');
+    $('#agentstatus').textContent=r.added+' observation(s) added';
+    await runAgent();
+  }catch(e){
+    $('#agentstatus').textContent='';
+    $('#agentmsg').className='msg bad';$('#agentmsg').textContent=e.message}
+}
+
+/* Downloading is a *when*, not a *where*: the folder and the proxy are the
+   server's, named on its command line, and the page chooses only how many
+   days back. The server caps that -- a year's backfill is a command with
+   somebody watching it, not a button that can be leaned on. */
+async function fetchAgent(){
+  const days=parseInt($('#agentdays').value,10);
+  if(!(days>=1)){
+    $('#agentmsg').className='msg warn';
+    $('#agentmsg').textContent='ask for at least one day back';return}
+  $('#agentstatus').innerHTML='<span class="spin"></span> asking DTCC…';
+  $('#agentmsg').className='msg';$('#agentmsg').textContent='';
+  try{
+    const r=await post('/api/mm/agent/fetch',{days:days});
+    if(!r.available){
+      $('#agentmsg').className='msg warn';$('#agentmsg').textContent=r.reason;
+      $('#agentstatus').textContent='';return}
+    const lines=(r.days||[]).map(d=>'<div class="'+
+      (d.status==='written'?'etonote':d.status==='failed'?'etowarn':'etonote')+'">'+
+      (d.status==='failed'?'! ':'· ')+esc(d.line)+'</div>').join('');
+    $('#agentmsg').className=r.written?'msg ok':'msg warn';
+    $('#agentmsg').innerHTML=esc(r.reason||r.summary||'')+
+      (r.proxy?' <span class="etonote">through '+esc(r.proxy)+'</span>':'')+lines+
+      (r.read?'<div class="etonote">· '+esc(r.read.summary)+'</div>'+
+        (r.read.files||[]).map(f=>'<div class="etonote">· '+esc(f)+'</div>').join(''):'')+
+      (r.notes||[]).map(n=>'<div class="etonote">· '+esc(n)+'</div>').join('');
+    $('#agentstatus').textContent=r.written+' file(s) fetched';
+    if(r.read&&r.read.added)await runAgent();
+  }catch(e){
+    $('#agentstatus').textContent='';
+    $('#agentmsg').className='msg bad';$('#agentmsg').textContent=e.message}
+}
+
+async function fileAgent(){
+  const body=agentPayload();
+  if(!(body.text||'').trim()){
+    $('#agentmsg').className='msg warn';
+    $('#agentmsg').textContent='there is nothing pasted to file';return}
+  try{
+    const r=await post('/api/mm/agent/file',body);
+    $('#agentmsg').className='msg ok';
+    $('#agentmsg').innerHTML=r.added+' of '+r.read+' quote(s) filed to '+esc(r.path)+
+      (r.already_held?' · '+r.already_held+' already held':'')+
+      (r.refused||[]).map(x=>'<div class="etowarn">! '+esc(x)+'</div>').join('')+
+      (r.notes||[]).map(n=>'<div class="etonote">· '+esc(n)+'</div>').join('');
+    await runAgent();
+  }catch(e){$('#agentmsg').className='msg bad';$('#agentmsg').textContent=e.message}
+}
+
+function paintAgent(){
+  const d=AGR; if(!d)return;
+  const a=d.archive||{};
+  const age=a.age_days==null?'nothing yet':
+    (a.age_days<1?'newest today':'newest '+num(a.age_days,0)+' days ago');
+  $('#agenthead').textContent=(a.path||'no archive file yet')+' · '+(a.records||0)+
+    ' record(s) for '+d.pair+' · '+age+
+    (a.model_read?' · '+a.model_read+' read by a model':'');
+  const folders=[].concat((d.folders||{}).chats||[],(d.folders||{}).sdr||[]);
+
+  /* the per-quote comparison, also shown here so the card stands alone
+     before anything has been fitted */
+  const rows=d.rows||[];
+  let h='';
+  if(!rows.length){
+    h='<div class="annone">'+esc(d.text_key&&d.text_key.trim()?
+      'No quote could be read from the paste.':'Paste a market above, then press Suggest.')+
+      '</div>';
+  }else{
+    h='<div class="mmwide"><table><thead><tr><th>Quote</th><th>Their width</th>'+
+      '<th>We would show</th><th>Archive</th><th>Seen</th><th>Verdict</th></tr></thead><tbody>';
+    rows.forEach(r=>{
+      h+='<tr><td>'+esc(r.describe)+(r.superseded?' <small>superseded</small>':'')+'</td>'+
+         '<td class="mmv">'+num(r.market_width,3)+'</td>'+
+         '<td class="mmv">'+num(r.bank_width,3)+'</td>'+
+         '<td class="mmv">'+num(r.archive_width,3)+'</td>'+
+         '<td class="mmv">'+(r.archive_observations||0)+' / '+(r.archive_sources||0)+'</td>'+
+         '<td>'+agentTag(r)+'</td></tr>';
+      if(r.note)h+='<tr><td class="mmwhy" colspan="6">'+esc(r.note)+
+        (r.bank_rule?' &nbsp;·&nbsp; '+esc(r.bank_rule):'')+'</td></tr>';
+    });
+    h+='</tbody></table></div><div class="etonote">· “Seen” is how many observations '+
+      'stand behind the archived width, and from how many brokers.</div>';
+  }
+  $('#agentrows').innerHTML=h;
+
+  const w=d.widths||[];
+  let g=w.length?('<div class="mmstat"><span>half-life <b>'+num(d.half_life,0)+
+      '</b> days</span><span>floor <b>'+num(d.min_effective,1)+
+      '</b> age-weighted</span><span>window <b>'+num(d.lookback_days,0)+
+      '</b> days</span></div><div class="mmwide"><table><thead><tr><th>Instrument</th>'+
+      '<th>Tenors</th><th>Width</th><th>Quartiles</th><th>Obs</th><th>Brokers</th>'+
+      '<th>Newest</th></tr></thead><tbody>'+
+    w.map(x=>'<tr><td>'+esc((x.delta!=null?num(x.delta*100,0)+'d ':'')+
+        x.instrument.toUpperCase())+'</td><td>'+esc(x.bucket)+'</td>'+
+      '<td class="mmv">'+(x.enough?'<b>'+num(x.median,3)+'</b>':'—')+'</td>'+
+      '<td class="mmv">'+num(x.low,3)+' – '+num(x.high,3)+'</td>'+
+      '<td class="mmv">'+x.observations+'</td><td class="mmv">'+x.sources+'</td>'+
+      '<td class="mmv">'+(x.newest_days<1?'today':num(x.newest_days,0)+'d')+'</td></tr>'+
+      (x.enough?'':'<tr><td class="mmwhy" colspan="7">'+esc(x.why_not)+'</td></tr>')).join('')+
+    '</tbody></table></div>'):
+    '<div class="annone">The archive holds no widths for '+esc(d.pair)+' yet.</div>';
+  g+='<div class="etonote">· '+(folders.length?
+      'Watching '+folders.map(esc).join(', '):
+      'No folders are watched; start volkit with --chats and --sdr to scan from here')+'</div>';
+  (d.notes||[]).forEach(n=>{g+='<div class="etonote">· '+esc(n)+'</div>'});
+  (d.warnings||[]).forEach(n=>{g+='<div class="etowarn">! '+esc(n)+'</div>'});
+  (d.skipped||[]).forEach(x=>{g+='<div class="etowarn">! line '+x.line+' ('+esc(x.why)+'): '+
+      esc(String(x.text).slice(0,70))+'</div>'});
+  $('#agentwidths').innerHTML=g;
+}
+function agentTag(r){
+  return '<span class="mmtag '+(AGTAG[r.verdict]||'none')+'">'+esc(r.verdict)+'</span>';
+}
+$('#agentrun').onclick=runAgent;
+$('#agentscan').onclick=scanAgent;
+$('#agentfetch').onclick=fetchAgent;
+$('#agentfile').onclick=fileAgent;
+
+/* -- the marking agent -----------------------------------------------------
+   The other card, on the fit side of the split. It reads the fit panel's
+   own inputs and answers how it would run that fit and whether to take what
+   came out; the desk answers back with a verdict, and the verdict is what it
+   learns from. It changes nothing on its own: Accept hands marks to the
+   quote the way a fit does, and only "keep the marks" leaves them on the
+   book. */
+function markPayload(){
+  const out=readFields(MKF);
+  out.free=[...$('#mmfree').querySelectorAll('input:checked')].map(x=>x.dataset.k);
+  out.smile_free=[...$('#mmsmilefree').querySelectorAll('input:checked')].map(x=>x.dataset.k);
+  return out;
+}
+function markKey(b){return [b.pair,b.text,b.target_source,b.target_text].join('\u0001')}
+/* A proposal is only a proposal about the paste it was computed from; the
+   verdict buttons go away when the market box has moved on, for the same
+   reason the desk agent's columns do. */
+function markFresh(){return !!(MKR&&MKR.key===markKey(markPayload()))}
+const SRC={rule:'in',learned:'thru',caller:'none'};
+function markTag(src){return '<span class="mmtag '+(SRC[src]||'none')+'">'+esc(src)+'</span>'}
+
+async function runMark(){
+  const body=markPayload();
+  $('#markstatus').innerHTML='<span class="spin"></span> planning the fit…';
+  $('#markmsg').className='msg';$('#markmsg').textContent='';
+  try{
+    MKR=await post('/api/mm/mark',body);
+    MKR.key=markKey(body);
+    saveMM();
+    paintMark();
+    const p=MKR.proposal||{};
+    $('#markstatus').textContent=p.moved?((p.changes||[]).length+' knob(s) proposed — answer it below'):
+      'nothing proposed';
+  }catch(e){
+    MKR=null;
+    $('#markstatus').innerHTML='<span style="color:var(--bad)">'+esc(e.message)+'</span>';
+    $('#markbody').innerHTML='';$('#markverdict').classList.add('hide');
+  }
+}
+
+function paintMark(){
+  const d=MKR; if(!d)return;
+  const p=d.proposal||{}, t=d.tendencies||{}, c=d.critique;
+  $('#markhead').textContent=(t.path||'no journal yet')+' · '+(t.instances||0)+' instance(s) for '+
+    d.pair+', '+(t.answered||0)+' answering a proposal · '+
+    (d.choose_knobs?'agent chose the knobs':'knobs as ticked on the fit panel');
+  let h='';
+  /* the plan: what was decided and by what kind of reason */
+  h+='<table><thead><tr><th>Decision</th><th>Value</th><th>By</th><th>Why</th></tr></thead><tbody>'+
+    (p.plan||[]).map(x=>'<tr><td>'+esc(x.what)+'</td><td>'+esc(x.value)+'</td><td>'+markTag(x.source)+
+      '</td><td class="mmwhy">'+esc(x.why)+'</td></tr>').join('')+'</tbody></table>';
+  h+='<div class="etonote">· target curve: '+esc((d.targets||{}).evidence||'none')+'</div>';
+  /* what the fit did */
+  const f=p.fit, w=p.wings;
+  h+='<div class="mmstat">';
+  if(f)h+='<span>curve: <b>'+f.rows.length+'</b> target(s), rmse <b>'+num(f.rmse,4)+'</b>, worst <b>'+
+    sgn(f.max_error,4)+'</b> at '+esc(f.max_error_tenor)+(f.converged?'':' <span style="color:var(--bad)">did not converge</span>')+'</span>';
+  else h+='<span>curve: not fitted</span>';
+  if(w)h+='<span>wings: <b>'+w.inside_before+' → '+w.inside_after+'</b> inside, worst <b>'+
+    sgn(w.worst_after,4)+'</b>'+(w.converged?'':' <span style="color:var(--bad)">did not converge</span>')+'</span>';
+  else h+='<span>wings: left alone</span>';
+  h+='</div>';
+  if(f&&f.rows.length)h+='<div class="mmwide"><table><thead><tr><th>Tenor</th><th>Target</th><th>Was</th>'+
+    '<th>Proposed</th><th>Source</th></tr></thead><tbody>'+f.rows.map(r=>'<tr><td>'+esc(r.tenor)+
+    '</td><td class="mmv">'+num(r.target,4)+'</td><td class="mmv">'+num(r.before,4)+'</td><td class="mmv"><b>'+
+    num(r.after,4)+'</b></td><td class="mmwhy">'+esc(r.source)+'</td></tr>').join('')+'</tbody></table></div>';
+  /* the move, knob by knob, with the learned nudge marked where it applied */
+  const corr=new Map((p.corrections||[]).map(x=>[x.knob,x]));
+  if((p.changes||[]).length){
+    h+='<table style="margin-top:10px"><thead><tr><th>Knob</th><th>Was</th><th>Proposed</th><th>Move</th>'+
+      '<th>Learned nudge</th></tr></thead><tbody>'+p.changes.map(x=>{
+      const k=x.key.split('.').pop(), cr=corr.get(k);
+      return '<tr><td>'+esc(x.key)+'</td><td class="mmv">'+num(x.before,4)+'</td><td class="mmv"><b>'+
+        num(x.after,4)+'</b></td><td class="mmv"'+cls(x.move)+'>'+sgn(x.move,4)+'</td><td class="mmwhy">'+
+        (cr?(sgn(cr.applied-cr.fitted,4)+(cr.capped?' (capped)':'')+' · '+esc(cr.why)):'—')+'</td></tr>'}).join('')+
+      '</tbody></table>';
+  }else h+='<div class="annone">The fit landed where the surface already is; there is nothing to propose.</div>';
+  /* the desk agent's critique */
+  if(c){
+    h+='<div class="mmstat" style="margin-top:10px"><span>the quoting agent: <b>'+esc(c.verdict)+'</b></span>'+
+      (c.available?'<span><b>'+c.inside_before+' → '+c.inside_after+'</b> of '+(c.findings||[]).length+
+        ' archived market(s) with the surface inside</span>':'')+'</div>';
+    const moved=(c.rows||[]).filter(r=>r.improved||r.worsened);
+    if(moved.length)h+='<table><thead><tr><th>Archived market</th><th>Was</th><th>Proposed</th><th>After</th>'+
+      '<th></th></tr></thead><tbody>'+moved.map(r=>'<tr><td>'+esc(r.describe)+'</td><td class="mmv">'+num(r.before,3)+
+      '</td><td class="mmv">'+num(r.after,3)+'</td><td class="mmv">'+(r.inside_after?'inside':sgn(r.gap_after,3)+' outside')+
+      '</td><td><span class="mmtag '+(r.worsened?'thru':'in')+'">'+(r.worsened?'broke':'fixed')+'</span></td></tr>').join('')+
+      '</tbody></table>';
+    (c.notes||[]).forEach(n=>{h+='<div class="etonote">· '+esc(n)+'</div>'});
+  }
+  /* what it learned from */
+  const rows=t.rows||[];
+  if(rows.length)h+='<details style="margin-top:8px"><summary class="etonote">what the journal says about this desk ('+
+    rows.length+' knob(s))</summary>'+rows.map(r=>'<div class="etonote">· '+esc(r.describe)+'</div>').join('')+'</details>';
+  (d.notes||[]).concat(p.notes||[]).forEach(n=>{h+='<div class="etonote">· '+esc(n)+'</div>'});
+  (d.warnings||[]).concat(p.warnings||[]).forEach(n=>{h+='<div class="etowarn">! '+esc(n)+'</div>'});
+  if(d.journal_error)h+='<div class="etowarn">! journal: '+esc(d.journal_error)+'</div>';
+  ((d.parse||{}).skipped||[]).forEach(x=>{h+='<div class="etowarn">! line '+x.line+' skipped ('+esc(x.why)+'): '+
+    esc(String(x.text).slice(0,70))+'</div>'});
+  $('#markbody').innerHTML=h;
+  $('#markverdict').classList.toggle('hide',!(p.moved&&markFresh()&&!d.answered));
+  $('#markedited').disabled=!(HELD&&HELD.from==='fit'&&HELD.marks.pair===d.pair);
+  $('#markedited').title=$('#markedited').disabled?'run the fit your way first; its marks are the edit':'';
+}
+
+async function recordMark(verdict){
+  if(!MKR||!markFresh()){
+    $('#markmsg').className='msg warn';
+    $('#markmsg').textContent='the paste has moved on since this proposal; press Propose again';return}
+  const body={proposal:MKR.proposal,verdict:verdict,note:$('#marknote').value,
+    apply:$('#mmapply').checked};
+  if(verdict==='edited')body.marks=HELD&&HELD.from==='fit'?HELD.marks:null;
+  $('#markstatus').innerHTML='<span class="spin"></span> recording…';
+  try{
+    const r=await post('/api/mm/mark/record',body);
+    MKR.answered=verdict;
+    $('#markmsg').className='msg ok';
+    $('#markmsg').innerHTML=esc(verdict)+' · '+esc(r.describe)+' · written to '+esc(r.path)+
+      (r.notes||[]).map(n=>'<div class="etonote">· '+esc(n)+'</div>').join('')+
+      (r.warnings||[]).map(n=>'<div class="etowarn">! '+esc(n)+'</div>').join('');
+    $('#markstatus').textContent='recorded as '+verdict;
+    if(verdict==='accepted'){
+      /* the same hand-off the fit makes: the proposal's marks are what the
+         quote stands on now, and the sheet says so */
+      holdMarks(MKR.marks,'agent');
+      if($('#mqonfit').checked)await runMQ();
+    }
+    if(MKR.tendencies){MKR.tendencies.instances=(MKR.tendencies.instances||0)+1;
+      MKR.tendencies.answered=(MKR.tendencies.answered||0)+1}
+    paintMark();
+  }catch(e){
+    $('#markstatus').textContent='';
+    $('#markmsg').className='msg bad';$('#markmsg').textContent=e.message}
+}
+/* The agent's plan onto the fit panel's own boxes, then the fit. What the
+   desk does after that is the edit, and "record my fit as the edit" writes
+   it down beside what the agent proposed. */
+async function takeMarkPlan(){
+  if(!MKR||!MKR.plan)return;
+  const pl=MKR.plan;
+  $('#mmfree').querySelectorAll('input').forEach(x=>{x.checked=pl.free.indexOf(x.dataset.k)>=0});
+  $('#mmsmilefree').querySelectorAll('input').forEach(x=>{x.checked=pl.tune_wings&&pl.smile_free.indexOf(x.dataset.k)>=0});
+  MM=mmPayload(); saveMM();
+  await runMM();
+  $('#markstatus').textContent='the fit ran with the agent\u2019s plan — adjust and Fit again, then record it as the edit';
+  paintMark();
+}
+$('#markrun').onclick=runMark;
+$('#markaccept').onclick=()=>recordMark('accepted');
+$('#markedited').onclick=()=>recordMark('edited');
+$('#markreject').onclick=()=>recordMark('rejected');
+$('#marktake').onclick=takeMarkPlan;
+['#markchoose','#markarchive'].forEach(id=>{$(id).onchange=saveMM});
+['#marklook','#markmin'].forEach(id=>{$(id).oninput=saveMM});
+
 $('#mmrun').onclick=runMM;
+$('#mqrun').onclick=runMQ;
+/* Each control re-runs the stage it belongs to and only that one. A width or
+   an axe scale cannot move a fit, and a target curve cannot move a price, so
+   a control that re-ran both would spend a second and a half of fitting on a
+   change that could not touch it. What both stages read -- the pair, the cut,
+   the interpolation, the market paste -- re-runs both. */
 $('#mmpair').onchange=()=>{setMethodSel('#mmmethod',$('#mmpair').value);
-  MM=mmPayload();renderKnobs();saveMM();scheduleMM()};
-['#mmcut','#mmmethod','#mmfly','#mmunit','#mmapply'].forEach(id=>{
-  $(id).onchange=()=>{saveMM();scheduleMM()}});
+  MM=mmPayload();renderKnobs();mqAvailable();loadBank();saveMM();scheduleMM();scheduleMQ()};
+['#mmcut','#mmmethod','#mmfly','#mmunit'].forEach(id=>{
+  $(id).onchange=()=>{saveMM();scheduleMM();scheduleMQ()}});
+$('#mmapply').onchange=()=>{saveMM();scheduleMM()};
+$('#mqonfit').onchange=()=>{saveMM();scheduleMQ()};
+$('#mqarchive').onchange=()=>{saveMM();scheduleMQ()};
+/* the archive's evidence settings sit on the desk agent's card and are read
+   by the quote too, so a change there re-quotes when the archive is on */
+['#agenthalf','#agentmin','#agentlook'].forEach(id=>{$(id).oninput=()=>{saveMM();
+  if($('#mqarchive').checked)scheduleMQ()}});
 $('#mmsource').onchange=()=>{mmTargetVisible();saveMM();scheduleMM()};
 ['#mmfallback','#mmscale','#mmfair','#mmaxe','#mmcap','#mmhorizon'].forEach(id=>{
-  $(id).oninput=()=>{saveMM();scheduleMM()}});
-['#mmtext','#mmtarget','#mmvega'].forEach(id=>{$(id).oninput=()=>{saveMM();scheduleMM()}});
+  $(id).oninput=()=>{saveMM();scheduleMQ()}});
+['#mmtext'].forEach(id=>{$(id).oninput=()=>{saveMM();scheduleMM();scheduleMQ()}});
+['#mmtarget'].forEach(id=>{$(id).oninput=()=>{saveMM();scheduleMM()}});
+['#mqtext','#mmvega'].forEach(id=>{$(id).oninput=()=>{saveMM();scheduleMQ()}});
 MMKNOBS.forEach(id=>{$(id).addEventListener('change',()=>{MM=mmPayload();saveMM();scheduleMM()})});
 
 
@@ -3360,7 +4333,7 @@ function showPanel(name){
   else if(PANEL==='monitor'){renderTiles();
     if(MOR)paintMonitor(MOR); else runMonitor();
     if(CMPR)paintCompare(CMPR); else runCompare();}
-  else if(PANEL==='mm'){if(MMR)paintMM(); else renderRules()}
+  else if(PANEL==='mm'){if(MMR)paintMM(); if(MQR)paintMQ(); if(MKR)paintMark(); if(!MQR)renderRules()}
   else if(PANEL==='pricing')renderGrid();
 }
 $('#nav').onclick=e=>{const b=e.target.closest('button');if(!b)return;showPanel(b.dataset.p);};
@@ -3429,7 +4402,11 @@ async function boot(){
       '</option>').join('');
     fillSel('#mmunit',MMS.vol_units||['auto']);
     loadMM();
-    renderKnobs(); mmTargetVisible(); renderRules();
+    const J=MMS.journal||{};
+    if(!MKR)$('#markhead').textContent=(J.path||'no journal yet')+' · '+(J.instances||0)+
+      ' instance(s) held'+(J.error?' · '+J.error:'');
+    if(J.min_instances&&!MM.min_instances)$('#markmin').value=J.min_instances;
+    renderKnobs(); mmTargetVisible(); renderRules(); mqAvailable(); loadBank();
   }
   const SS=STATE.session||{};
   $('#sesspath').value=SS.path||SS.default||'';
@@ -3442,9 +4419,15 @@ async function boot(){
   if(has('marking')&&!$('#chartexpiry').value)
     $('#chartexpiry').value=new Date(STATE.valuationMs+90*864e5).toISOString().slice(0,10);
   const w=(STATE.warnings||[]).slice(); if(STATE.error)w.unshift(STATE.error);
-  $('#warnbox').style.display=w.length?'block':'none';
-  $('#warnhead').textContent=`${w.length} message${w.length===1?'':'s'} from the workbook`;
-  $('#warnlist').innerHTML=w.slice(0,60).map(x=>`<li>${esc(x)}</li>`).join('');
+  // Notes are not warnings: they are what the reader worked out rather than
+  // read -- a cross broken into its dollar legs, a leg added because a cross
+  // needs it.  Shown in the same box, because there is only one place the
+  // workbook speaks, and muted so a derivation never reads as a problem.
+  const nts=(STATE.notes||[]), n=w.length+nts.length;
+  $('#warnbox').style.display=n?'block':'none';
+  $('#warnhead').textContent=`${n} message${n===1?'':'s'} from the workbook`;
+  $('#warnlist').innerHTML=nts.map(x=>`<li class="etonote">${esc(x)}</li>`).join('')
+    +w.slice(0,60).map(x=>`<li>${esc(x)}</li>`).join('');
   showFeed(STATE.feed);
   showAuto(STATE.auto);
   if(AUTOSEQ<0)AUTOSEQ=(STATE.auto||{}).seq||0;
@@ -3460,7 +4443,11 @@ async function boot(){
     LEGS.forEach(L=>{L.method=methodFor(L.pair,L.method)});
     renderGrid();
   }
-  if(has('listed')){loadPanels(); renderPanels(); loadG(); paintG();}
+  if(has('listed')){
+    const us=(STATE.listed&&STATE.listed.underlyings)||[];
+    $('#etocodes').innerHTML=us.map(u=>'<option value="'+esc(u.code)+'">'+
+      esc(u.code==='CUSTOM'?'custom — give the pair below':u.name)+'</option>').join('');
+    loadPanels(); renderPanels(); loadG(); paintG();}
   showPanel(PANEL);
   if(has('marking')){await loadCurve(); await loadMarks(); await loadBand();}
   if(has('pricing'))await priceAll();

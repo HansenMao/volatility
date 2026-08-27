@@ -109,8 +109,41 @@ def _expiry_label(expiry) -> str:
     return str(expiry)
 
 
+class _Instrument:
+    """What an instrument *is*, apart from what it is worth.
+
+    A broker's quote and a request to be quoted name the same things --
+    ``3M 25d RR``, ``1M ATM in 100mm`` -- and differ only in whether a price
+    came with it.  The naming lives here so the two cannot drift apart: a
+    label that read one way on the market sheet and another on the quote
+    sheet would be two names for one instrument on one screen.
+    """
+
+    def describe(self) -> str:
+        """A short human label, used in tables and error messages."""
+        base = _expiry_label(self.expiry)
+        if self.instrument == "spread":
+            leg = {"atm": "ATM", "rr": f"{int(round((self.delta or 0) * 100))}d RR",
+                   "fly": f"{int(round((self.delta or 0) * 100))}d fly"}.get(
+                       self.leg or "atm", (self.leg or "").upper())
+            return f"{_expiry_label(self.expiry_far)} less {base} {leg}".strip()
+        if self.instrument == "atm":
+            return f"{base} ATM"
+        if self.instrument in ("rr", "fly"):
+            return f"{base} {int(round((self.delta or 0) * 100))}d {self.instrument.upper()}"
+        if self.strike is not None:
+            # A volatility at an absolute strike is one number whichever side
+            # it is quoted from, so a strike-column quote is allowed to leave
+            # the side out and must not be described as a put by default.
+            if self.is_call is None:
+                return f"{base} {self.strike:g}"
+            return f"{base} {self.strike:g} {'call' if self.is_call else 'put'}"
+        side = "call" if self.is_call else "put"
+        return f"{base} {int(round((self.delta or 0) * 100))}d {side}"
+
+
 @dataclass(frozen=True)
-class MarketQuote:
+class MarketQuote(_Instrument):
     """One line of a broker run, in the book's own conventions.
 
     ``bid`` and ``ask`` are decimals and are always ordered, whatever order the
@@ -160,29 +193,6 @@ class MarketQuote:
         """A single number rather than a two-way price."""
         return self.ask <= self.bid
 
-    def describe(self) -> str:
-        """A short human label, used in tables and error messages."""
-        base = _expiry_label(self.expiry)
-        if self.instrument == "spread":
-            leg = {"atm": "ATM", "rr": f"{int(round((self.delta or 0) * 100))}d RR",
-                   "fly": f"{int(round((self.delta or 0) * 100))}d fly"}.get(
-                       self.leg or "atm", (self.leg or "").upper())
-            return f"{_expiry_label(self.expiry_far)} less {base} {leg}".strip()
-        if self.instrument == "atm":
-            return f"{base} ATM"
-        if self.instrument in ("rr", "fly"):
-            return f"{base} {int(round((self.delta or 0) * 100))}d {self.instrument.upper()}"
-        if self.strike is not None:
-            # A volatility at an absolute strike is one number whichever side
-            # it is quoted from, so a strike-column quote is allowed to leave
-            # the side out and must not be described as a put by default.
-            if self.is_call is None:
-                return f"{base} {self.strike:g}"
-            return f"{base} {self.strike:g} {'call' if self.is_call else 'put'}"
-        side = "call" if self.is_call else "put"
-        return f"{base} {int(round((self.delta or 0) * 100))}d {side}"
-
-
 @dataclass(frozen=True)
 class ParsedRun:
     """Everything a paste produced, including what it could not use."""
@@ -210,6 +220,57 @@ class ParsedRun:
         ``quotes`` and only the bank reads this.
         """
         return tuple(sorted(self.quotes + self.superseded, key=lambda q: q.line))
+
+
+@dataclass(frozen=True)
+class QuoteRequest(_Instrument):
+    """An instrument somebody has asked for a price in, with no price on it.
+
+    The market paste says where the market is; this says what is being asked
+    for.  They are the same grammar with one thing taken out, so they are read
+    by the same tokeniser -- and the *absence* of a price is enforced rather
+    than ignored, because a broker run pasted into the request box would
+    otherwise read as a list of strikes and be quoted at levels nobody asked
+    about.
+    """
+
+    instrument: str
+    expiry: object
+    expiry_far: object | None = None
+    leg: str | None = None
+    delta: float | None = None
+    strike: float | None = None
+    is_call: bool | None = None
+    fly_kind: str | None = None
+    size: float | None = None            # millions
+    size_basis: str = "unspecified"
+    label: str = ""
+    line: int = 0
+    raw: str = ""
+    #: ``+1`` when the request is asked in the book's own convention and
+    #: ``-1`` when it is the other side of it -- ``JPY call over`` on USDJPY.
+    #: The model works in the book's convention throughout and this is applied
+    #: once, where the row is built, so a price quoted back the way it was
+    #: asked for is never a second place for a sign to live.  §5's first entry
+    #: is what a second place for a sign costs.
+    sign: float = 1.0
+    direction: str | None = None
+    notes: tuple[str, ...] = ()
+
+    def describe(self) -> str:
+        base = super().describe()
+        if self.sign < 0 and self.direction:
+            return f"{base} ({self.direction.upper()} call over)"
+        return base
+
+
+@dataclass(frozen=True)
+class ParsedRequests:
+    """Everything the request box produced, including what it could not use."""
+
+    requests: tuple[QuoteRequest, ...]
+    notes: tuple[str, ...] = ()
+    skipped: tuple[tuple[int, str, str], ...] = ()   # line number, text, reason
 
 
 class QuoteError(ValueError):
@@ -729,7 +790,7 @@ def _decide_unit(quotes: list[MarketQuote], forced: str) -> tuple[str, str]:
 _NOMINAL_DAY = "1970-01-01"
 
 
-def _conflict_key(q: MarketQuote) -> tuple:
+def instrument_key(q) -> tuple:
     """What makes two lines quotes of *the same thing*.
 
     Everything that would send the two to different points on the surface is
@@ -742,6 +803,11 @@ def _conflict_key(q: MarketQuote) -> tuple:
 
     return (q.instrument, ekey(q.expiry), ekey(q.expiry_far), q.leg,
             q.delta, q.strike, q.is_call, q.fly_kind)
+
+
+#: The historical spelling, kept because everything inside this module reads
+#: like the rule it states: two lines are the same quote when this matches.
+_conflict_key = instrument_key
 
 
 def _resolve_stamps(quotes: list[MarketQuote], notes: list[str]) -> list[MarketQuote]:
@@ -950,3 +1016,149 @@ def parse_vega_profile(text: str) -> tuple[dict[str, float], tuple[str, ...], tu
         else:
             profile[tenor] = value
     return profile, tuple(notes), tuple(skipped)
+
+
+# ---------------------------------------------------------------------------
+# the request: what is being asked for, with no price on it
+# ---------------------------------------------------------------------------
+
+
+def _build_request(state: _Line, pair: str | None, default_fly: str, line_no: int,
+                   raw: str) -> QuoteRequest:
+    """One request line, from the tokens :func:`_consume` left behind.
+
+    The same validation :func:`_build` does, minus the price and plus a
+    refusal in its place: whatever numbers are left have to be a strike, and
+    anything else is a market that has been pasted into the wrong box.
+    """
+    notes = list(state.notes)
+    assumed = state.instrument is None
+    if assumed:
+        state.instrument = "atm" if state.delta is None and state.strike is None else "outright"
+    if state.explicit_spread and len(state.expiries) == 2:
+        instrument = "spread"
+    else:
+        instrument = state.instrument
+
+    if state.numbers:
+        values = [v for v, _ in state.numbers]
+        # One number, on a line that has not already said what it is struck
+        # at, is a strike -- '6M 1.1000 call'.  Anything else is a price, and a
+        # price in this box is a market that belongs in the one above it.
+        # Read as a strike it would quote a level nobody asked about, which is
+        # the silent-wrong-answer this project exists to remove.
+        if len(values) == 1 and state.strike is None and state.delta is None \
+                and (assumed or state.instrument == "outright"):
+            state.strike = values[0]
+            instrument = state.instrument = "outright"
+            notes.append(f"the only number on the line read as the strike ({state.strike:g})")
+        else:
+            raise ValueError(
+                "this box holds what is being asked for, not what it is worth: "
+                + ", ".join(f"{v:g}" for v in values)
+                + " reads as a price. Paste the market in the market box; write here the "
+                  "instrument alone, as in '1M ATM in 100mm' or '3M 25d RR'")
+
+    if instrument in ("rr", "fly") and state.delta is None:
+        raise ValueError(f"a {instrument} needs a delta, e.g. '25d'")
+    if instrument == "outright" and state.strike is None and state.delta is None:
+        raise ValueError("an outright needs a strike or a delta")
+    if instrument == "outright" and state.is_call is None and state.strike is None:
+        state.is_call = True
+        notes.append("a bare delta does not say which wing; read as the call, as the pricing "
+                     "screen reads a bare '25d'. Write '25dp' or '-25d' for the put")
+    if not state.expiries:
+        raise ValueError("no tenor or expiry date on the line")
+    if instrument == "spread" and len(state.expiries) != 2:
+        raise ValueError("a spread needs exactly two tenors")
+    if instrument != "spread" and len(state.expiries) > 1:
+        raise ValueError(f"{len(state.expiries)} tenors on a line that is not a spread")
+
+    sign = 1.0
+    if instrument == "rr" or (instrument == "spread" and state.instrument == "rr"):
+        sign = _resolve_sign(state, pair, notes)
+        if sign < 0:
+            notes.append(
+                f"{(state.over or '').upper()} over on {pair or '?'} is the other side of the "
+                f"book's risk reversal, so every number on this row is negated: it is quoted "
+                f"the way it was asked for, not the way the book marks it")
+
+    near, far = state.expiries[0], (state.expiries[1] if len(state.expiries) > 1 else None)
+    if instrument == "spread":
+        if state.literal_order:
+            notes.append(f"'{near}-{far}' read literally: {near} less {far}")
+            near, far = far, near
+        else:
+            notes.append(f"'{near}/{far}' read as the calendar convention: {far} less {near}")
+
+    return QuoteRequest(
+        instrument=instrument, expiry=near, expiry_far=far,
+        leg=(state.instrument if instrument == "spread" else None),
+        delta=state.delta, strike=state.strike, is_call=state.is_call,
+        fly_kind=state.fly_kind or (default_fly if instrument == "fly" or
+                                    state.instrument == "fly" else None),
+        size=state.size, size_basis=state.size_basis, label=state.label,
+        line=line_no, raw=raw.strip(), sign=sign, direction=state.over,
+        notes=tuple(notes),
+    )
+
+
+def parse_requests(text: str, *, pair: str | None = None,
+                   fly_convention: str = "market") -> ParsedRequests:
+    """Read a list of instruments to be quoted.  No prices, and none accepted.
+
+    Nothing is dropped quietly, exactly as :func:`parse_quotes` drops nothing:
+    a line that cannot be used comes back in ``skipped`` with the reason, and
+    every inference is on the request itself.
+
+    There is no volatility unit to decide here, because there is no volatility
+    on the page: a strike is an absolute price and a delta is a fraction.  That
+    is one fewer thing to get wrong than the market box has, and it is why the
+    two are read by two functions rather than one with a flag on it.
+    """
+    if fly_convention not in FLY_CONVENTIONS:
+        raise ValueError(
+            f"unknown butterfly convention {fly_convention!r}; expected one of {FLY_CONVENTIONS}")
+
+    requests: list[QuoteRequest] = []
+    skipped: list[tuple[int, str, str]] = []
+    headers: list[int] = []
+    for n, raw in enumerate(text.splitlines(), start=1):
+        body = raw.split("#")[0].split("//")[0]
+        if not body.strip():
+            continue
+        if _is_header(body):
+            headers.append(n)
+            continue
+        state = _Line()
+        try:
+            _consume(_norm(body), state)
+            requests.append(_build_request(state, pair, fly_convention, n, raw))
+        except (ValueError, TenorError) as exc:
+            skipped.append((n, raw.strip(), str(exc)))
+
+    notes: list[str] = []
+    if headers:
+        notes.append(f"line{'s' if len(headers) > 1 else ''} "
+                     f"{', '.join(str(n) for n in headers)} read as a column header and "
+                     f"passed over")
+    unsigned = [q for q in requests
+                if (q.instrument == "rr" or (q.instrument == "spread" and q.leg == "rr"))
+                and q.direction is None]
+    if unsigned:
+        notes.append(
+            f"{len(unsigned)} risk reversal(s) carried no direction word and are quoted in the "
+            f"book's own convention: a base-currency call over is positive. Write "
+            f"'{(pair or 'EURUSD')[:3].upper()} call over' or "
+            f"'{(pair or 'EURUSD')[3:6].upper()} call over' to be quoted the other way round")
+    flies = [q for q in requests if q.instrument == "fly"]
+    if flies:
+        notes.append(
+            f"{len(flies)} butterfly request(s), quoted as the {fly_convention} convention"
+            + (" (the market strangle, which is what the workbook marks)"
+               if fly_convention == "market" else " (the smile butterfly)"))
+    # Duplicates are left alone.  A request box is a list of things to price
+    # and the same instrument asked for twice, in two sizes, is two questions;
+    # the market box's later-wins rule is about a conversation, and this is not
+    # one.
+    return ParsedRequests(requests=tuple(requests), notes=tuple(notes), skipped=tuple(skipped))

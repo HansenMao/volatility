@@ -1,9 +1,25 @@
-"""Making a two-way price: fit the curve, fine tune the wings, then quote.
+"""Making a two-way price: fit the curve and the wings, and quote off them.
 
 The other three screens answer "what is this worth".  This one answers "what
 do I show", which is a different question with three parts to it, and the
 module keeps them apart because they fail for different reasons and a desk
 needs to see which one broke.
+
+Those three parts are **two panels**, and the split is the shape of the
+screen.  :class:`Panel` reads a broker run and moves the marks -- parts 1 and
+2 below -- and puts a price on nothing.  :class:`QuotePanel` reads a list of
+instruments somebody has asked for, with no prices on them, and makes a
+two-way in each -- part 3 -- and fits nothing.  A fit is a morning's decision
+taken against a run that has just arrived; a quote is answered in seconds,
+over and over, against whatever was fitted.  Tying the two together meant a
+request could only be priced by re-running a fit against a market that had
+nothing to do with it, and a market could not be fitted without also
+producing prices in instruments nobody had asked for.
+
+They meet at :func:`capture_marks`: the fit hands back the parameters it
+arrived at, the browser holds them like every other piece of panel state
+(§4 -- the server holds none), and posts them with the quote.  A quote given
+no marks prices the surface as it stands, and says which of the two it did.
 
 **1. The curve, fitted to a target at-the-money.**  ``fit_atm_curve`` puts the
 backbone parameters through a target term structure -- the tenor overwrites
@@ -40,7 +56,13 @@ knowledge bank (:mod:`volkit.knowledge`), the mid is shaded by what the fair
 value screen says about richness and by the vega already on the book, and both
 shadings are capped as a fraction of the width so an axe can lean the price
 but never walk it out of the market on its own.  Every number that moved the
-quote is reported next to it with the rule or the input that moved it.
+quote is reported next to it with the rule or the input that moved it.  What
+is quoted is the **request box** -- ``1M ATM in 100mm``, ``3M 25d RR``, read
+by :func:`volkit.quotes.parse_requests`, which refuses a price on the line
+rather than reading it as a strike.  A request that names something the market
+paste also quoted carries that market beside our price, so "inside their
+market" survives the split; a request nothing quoted is priced just the same,
+which is the point of asking for it separately.
 
 Two things this deliberately does *not* do.  It does not apply a fair value or
 a vega axe to a risk reversal or a butterfly: a break-even against realized
@@ -59,6 +81,7 @@ from __future__ import annotations
 import copy
 import math
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -68,8 +91,8 @@ from . import black, sabr
 from .cross import CrossAtmCurve
 from .knowledge import KnowledgeBank, PairKnowledge, Rule, rule_from_dict, suggest_rules
 from .numerics import ConvergenceError
-from .quotes import (FLY_CONVENTIONS, MarketQuote, VOL_UNITS, parse_quotes,
-                     parse_vega_profile)
+from .quotes import (FLY_CONVENTIONS, MarketQuote, QuoteError, VOL_UNITS,
+                     instrument_key, parse_quotes, parse_requests, parse_vega_profile)
 from .sabr import SabrParams
 from .smile import INTERPOLATORS
 from .surface import PARAM_NAMES
@@ -920,13 +943,164 @@ def skew_for(q: MarketQuote, t: float, *, half_width: float | None, richness, ax
 
 
 # ===========================================================================
-# 5. the panel
+# 5. the two panels: the fit, and the quote
 # ===========================================================================
+
+# Fitting and quoting are two jobs and they are two panels, because they fail
+# for different reasons, they are asked at different moments, and they read
+# different things.
+#
+# **The fit** reads the market -- a broker run with two-way prices on it --
+# and moves the marks: the backbone through a target term structure, then the
+# four smile parameters by a curve-wide shift until the quoted wings are
+# satisfied.  It reports where the surface sits against every quote it was
+# shown and it produces no price at all.
+#
+# **The quote** reads a list of instruments somebody has asked for, with no
+# prices on them, and makes a two-way in each: the model's mid, the bank's
+# width round it, and the two leans.  It fits nothing.
+#
+# They meet at :func:`capture_marks` -- a dictionary of the parameters the fit
+# arrived at, which travels back through the browser and is put on the surface
+# for the length of one quote run.  That is what keeps the server free of
+# screen state (§4) while letting the price stand on the morning's fit: the
+# browser owns the fit's answer exactly as it owns the panel, and posts it
+# whole.  A quote run given no marks prices the surface as it stands, and says
+# which of the two it did.
+
+
+def _knob_points(name: str, value: float) -> float:
+    """A knob on its way out: volatility parameters in points, the rest raw."""
+    return value * 100.0 if name in _PERCENT_KNOBS else value
+
+
+def _knob_decimal(name: str, value: float) -> float:
+    """A knob on its way back in.  The exact inverse of :func:`_knob_points`."""
+    return value / 100.0 if name in _PERCENT_KNOBS else value
+
+
+def capture_marks(surface) -> dict:
+    """Every parameter the two fits can move, as the panel boundary spells it.
+
+    Volatility points at the edge and decimals inside, like everything else
+    that crosses this line (§4).  A person reading the payload sees the same
+    numbers the curve card shows them.
+    """
+    knobs = _Knobs(surface.atm)
+    values = knobs.get()
+    return {
+        "knobs": {k: _knob_points(k, values[k]) for k in knobs.available if k in values},
+        "shifts": {k: float(surface.param_shifts.get(k, 0.0)) for k in PARAM_NAMES},
+    }
+
+
+def apply_marks(surface, marks: dict) -> list[str]:
+    """Put a captured set of marks on a surface.  Returns what would not take.
+
+    A name this curve does not have is a **refusal**, not a silent skip: these
+    marks are posted by a browser and can be typed by hand, and a knob that
+    quietly did nothing is the failure this project exists to remove.
+    """
+    knobs = _Knobs(surface.atm)
+    legal = set(knobs.available)
+    values, bad = {}, []
+    for name, value in (marks.get("knobs") or {}).items():
+        if name not in legal:
+            bad.append(name)
+            continue
+        values[name] = _knob_decimal(name, float(value))
+    if bad:
+        raise ValueError(
+            f"the marks name {', '.join(sorted(bad))}, which this curve does not have; it holds "
+            f"{', '.join(knobs.available)}")
+    shifts = marks.get("shifts")
+    if shifts is not None:
+        stray = [k for k in shifts if k not in PARAM_NAMES]
+        if stray:
+            raise ValueError(
+                f"the marks name smile parameter(s) {', '.join(sorted(stray))}; the four are "
+                f"{', '.join(PARAM_NAMES)}")
+    problems = knobs.set(values) if values else []
+    if shifts is not None:
+        surface.set_param_shifts({k: float(v) for k, v in shifts.items()})
+    surface.invalidate()
+    return problems
+
+
+@contextmanager
+def applied_marks(surface, marks: dict | None, warnings: list[str]):
+    """Quote off a set of marks, then put back exactly what was there.
+
+    The restore is *verified* rather than assumed, for the reason
+    :func:`volkit.marking.marked` gives: a surface left half-marked by a quote
+    nobody kept, priced off all morning, is the worst outcome available to a
+    tool whose whole job is marking.  It reports rather than raises, because
+    the quote sheet the caller is holding is still correct -- what is no
+    longer safe is the book, and saying so is what the reader needs.
+    """
+    before = capture_marks(surface)
+    try:
+        if marks:
+            for problem in apply_marks(surface, marks):
+                warnings.append(f"the fit's marks did not go on cleanly: {problem}")
+        yield
+    finally:
+        try:
+            apply_marks(surface, before)
+            back = capture_marks(surface)
+        except (ValueError, ArithmeticError) as exc:  # pragma: no cover - a broken restore
+            back, exc_text = None, str(exc)
+            warnings.append(
+                f"the marks could not be put back after the quote ({exc_text}). Reload the "
+                f"workbook before anything is priced off this book")
+        if back is not None and back != before:
+            moved = sorted(set(
+                [k for k, v in before["knobs"].items() if back["knobs"].get(k) != v]
+                + [k for k, v in before["shifts"].items() if back["shifts"].get(k) != v]))
+            warnings.append(
+                f"the marks were not put back exactly after the quote: "
+                f"{', '.join(moved)} did not return. Reload the workbook before anything is "
+                f"priced off this book")
+
+
+def _forwards_for(book, pair: str, expiries: dict) -> tuple[dict, list[str]]:
+    """The outright forward at every expiry a panel mentions, and what it cost.
+
+    Both panels ask, and they must ask the same way: a strike is turned into a
+    moneyness here and nowhere else, and a pair the feed reaches only through
+    its legs is composed by ``Book.market_level`` rather than refused (§4).
+    """
+    from .analytics import _forward_at
+    forwards, notes, said = {}, [], set()
+    for key, (_, t) in expiries.items():
+        fwd, real, note = _forward_at(book, pair, t)
+        forwards[key] = fwd if real else None
+        # Said once, not once a tenor: which pair the feed quotes is a
+        # property of the feed, and eight tenors repeating one sentence is
+        # a note nobody reads.  A tenor's own trouble carries its own
+        # ``t`` and so is never the same text twice.
+        for part in (x.strip() for x in note.split(";")) if real and note else ():
+            if part and part not in said:
+                said.add(part)
+                notes.append(f"{key}: {part}")
+    if expiries and not any(v is not None for v in forwards.values()):
+        notes.append(
+            f"there is no forward feed for {pair}, so an instrument written against an "
+            f"absolute strike cannot be turned into a moneyness and is reported as "
+            f"unavailable rather than priced at a forward of 1")
+    return forwards, notes
 
 
 @dataclass
 class Panel:
-    """One pair's making screen: the unit the browser owns and posts whole."""
+    """One pair's fit: the market in, the marks out.
+
+    The unit the browser owns and posts whole.  It reads a broker run, moves
+    the curve and the wings, and reports where the surface sits against every
+    quote it was shown.  It puts no price on anything -- that is
+    :class:`QuotePanel`, and the two are separate because a fit is a morning's
+    decision and a quote is answered in seconds, over and over, against it.
+    """
 
     pair: str
     cut: str = "NY"
@@ -949,18 +1123,6 @@ class Panel:
     smile_free: tuple[str, ...] = PARAM_NAMES
     mid_pull: float = 0.05
     max_nfev: int = 300
-
-    # skewing the mid
-    vega_text: str = ""
-    vega_scale: float = 0.0
-    fair_weight: float = 0.25
-    axe_weight: float = 0.5
-    skew_cap: float = 1.0
-    horizon_days: float = 30.0
-    lookback_days: float | None = None
-
-    # widths
-    fallback_spread: float | None = None       # volatility points
 
     apply: bool = False
     notes: tuple[str, ...] = field(default_factory=tuple)
@@ -1028,18 +1190,8 @@ class Panel:
                          f"expected one of {TARGET_SOURCES}")
 
     # -- the run ----------------------------------------------------------
-    def run(self, book, *, bank: KnowledgeBank | None = None, hist=None) -> dict:
-        if book is None:
-            raise ValueError("the market-maker screen needs a loaded book")
-        if self.pair not in book:
-            raise ValueError(f"{self.pair} is not built in this book; it holds "
-                             f"{', '.join(book.pairs)}")
-        surface = book[self.pair]
-        method = self.method or surface.method
-        if method not in INTERPOLATORS:
-            raise ValueError(f"unknown interpolation method {method!r}; "
-                             f"expected one of {INTERPOLATORS}")
-        clock = book.clock
+    def run(self, book) -> dict:
+        surface, method, clock = _prepare(book, self.pair, self.method)
         knobs = _Knobs(surface.atm)
 
         out: dict = {
@@ -1049,8 +1201,7 @@ class Panel:
             "knobs": list(knobs.available),
             "applied": bool(self.apply),
             "notes": list(self.notes), "warnings": [], "unavailable": {},
-            "curve": None, "wings": None, "sheet": None, "bank": None,
-            "axe": None, "fair": None,
+            "curve": None, "wings": None, "market": None, "marks": None,
         }
 
         # -- the paste -----------------------------------------------------
@@ -1063,15 +1214,10 @@ class Panel:
             raise ValueError(
                 f"{', '.join(stale)} is not in the future at the valuation time "
                 f"{clock.now:%Y-%m-%d %H:%M}Z")
-        forwards, forward_notes = self._forwards(book, expiries)
-
-        # -- the position and the fair value -------------------------------
-        axe_at, axe_block = self._axe(clock)
-        out["axe"] = axe_block
-        rich_at, fair_block = self._fair(book, hist, method)
-        out["fair"] = fair_block
+        forwards, forward_notes = _forwards_for(book, self.pair, expiries)
 
         # -- what the surface says before anything moves --------------------
+        before = capture_marks(surface)
         before_knobs = knobs.get()
         before_shifts = {k: float(surface.param_shifts.get(k, 0.0)) for k in PARAM_NAMES}
         ev0 = Evaluator(surface, method, self.cut)
@@ -1151,19 +1297,22 @@ class Panel:
             except (ValueError, ArithmeticError, ConvergenceError):
                 model_after.append(None)
 
-        # -- 3. the sheet ----------------------------------------------------
-        bank = bank if bank is not None else KnowledgeBank()
-        pk = bank.for_pair(self.pair)
-        out["bank"] = {
-            "pair": self.pair.upper(),
-            "path": bank.path,
-            "rules": [_rule_json(r) for r in pk.rules],
-            "updated": pk.updated,
-            "source_note": pk.source_note,
-            "problems": list(bank.problems),
+        # -- the marks the quote panel will stand on --------------------------
+        # Captured *before* the restore below, because that is the whole point
+        # of the split: the fit's answer leaves here as numbers, and nothing of
+        # it is left on the book unless somebody asked for that separately.
+        out["marks"] = {
+            **capture_marks(surface),
+            "pair": self.pair, "cut": self.cut, "method": method,
+            "fitted": bool(curve_fit is not None or tune is not None),
+            "stamp": clock.now.isoformat(),
+            "what": ", ".join(
+                x for x in (
+                    ("the at-the-money curve" if curve_fit is not None else ""),
+                    ("the wings" if tune is not None else "")) if x) or "nothing",
         }
-        out["sheet"] = self._sheet(quotes, expiries, model_before, model_after, row_errors,
-                                   pk, rich_at, axe_at, run_, forward_notes)
+        out["market"] = self._market(quotes, expiries, model_before, model_after, row_errors,
+                                     run_, forward_notes)
 
         # -- restore unless asked to keep -------------------------------------
         if not self.apply:
@@ -1174,6 +1323,10 @@ class Panel:
                 out["warnings"].append(
                     "the marks could not be put back exactly after the fit: "
                     + "; ".join(problems) + ". Reload the workbook before trusting this book")
+            elif capture_marks(surface) != before:
+                out["warnings"].append(
+                    "the marks were not put back exactly after the fit. Reload the workbook "
+                    "before trusting this book")
         else:
             out["warnings"].append(
                 f"the fitted marks were written into the loaded book for {self.pair}. They are "
@@ -1182,21 +1335,430 @@ class Panel:
         return out
 
     # -- pieces of the run --------------------------------------------------
-    def _forwards(self, book, expiries) -> tuple[dict, list[str]]:
-        from .analytics import _forward_at
-        forwards, notes = {}, []
-        for key, (_, t) in expiries.items():
-            fwd, real, note = _forward_at(book, self.pair, t)
-            forwards[key] = fwd if real else None
-            if note and real:
-                notes.append(f"{key}: {note}")
-        if not any(v is not None for v in forwards.values()):
-            notes.append(
-                f"there is no forward feed for {self.pair}, so a quote written against an "
-                f"absolute strike cannot be turned into a moneyness and is reported as "
-                f"unavailable rather than priced at a forward of 1")
-        return forwards, notes
+    def _curve_block(self, fit: CurveFit, evidence: str, knobs: _Knobs) -> dict:
+        return {
+            "evidence": evidence,
+            "source": self.target_source,
+            "free": list(fit.free),
+            "before": {k: _knob_points(k, v) for k, v in fit.before.items()},
+            "after": {k: _knob_points(k, v) for k, v in fit.after.items()},
+            "rows": [
+                {"tenor": tg.tenor, "days": tg.t * DAYS_IN_YEAR, "source": tg.source,
+                 "target": tg.vol * 100.0, "before": b * 100.0, "after": a * 100.0,
+                 "diff": (a - tg.vol) * 100.0, "moved": (a - b) * 100.0}
+                for tg, b, a in zip(fit.targets, fit.achieved_before, fit.achieved_after)
+            ],
+            "rmse": fit.rmse * 100.0, "max_error": fit.max_error * 100.0,
+            "max_error_tenor": fit.max_error_tenor,
+            "converged": fit.converged, "message": fit.message,
+            "evaluations": fit.evaluations, "seconds": fit.seconds,
+            "warnings": list(fit.warnings),
+        }
 
+    def _market(self, quotes, expiries, before, after, errors, run_, forward_notes) -> dict:
+        """Where the surface sits against every quote the paste contained.
+
+        No width and no price: this table answers "did the fit reach the
+        market", which is the fit's own question.  What we would show is the
+        quote panel's, and it is asked of the instruments in the request box
+        rather than of the market that moved the marks.
+        """
+        rows = []
+        for q, mb, ma, err in zip(quotes, before, after, errors):
+            _, t = expiries[_key(q.expiry_far if q.instrument == "spread" else q.expiry)]
+            row = {
+                "line": q.line, "raw": q.raw, "label": q.label, "describe": q.describe(),
+                "instrument": q.instrument, "leg": q.leg, "delta": q.delta,
+                "strike": q.strike, "is_call": q.is_call, "fly_kind": q.fly_kind,
+                "tenor": _key(q.expiry), "tenor_far": (None if q.expiry_far is None
+                                                       else _key(q.expiry_far)),
+                # What was written, not the resolved instant: a run with no
+                # date in it is ordered on a nominal day, and showing that day
+                # back would be a date the paste never contained.
+                "timestamp": q.timestamp_text,
+                "days": t * DAYS_IN_YEAR, "size": q.size, "size_basis": q.size_basis,
+                "market_bid": q.bid * 100.0, "market_ask": q.ask * 100.0,
+                "market_mid": q.mid * 100.0, "market_width": q.spread * 100.0,
+                "model_before": None if mb is None else mb * 100.0,
+                "model_after": None if ma is None else ma * 100.0,
+                "model_move": None if (mb is None or ma is None) else (ma - mb) * 100.0,
+                "position": None, "edge": None, "verdict": "",
+                "notes": list(q.notes), "warnings": [],
+            }
+            if err:
+                row["verdict"] = "not priced"
+                row["warnings"].append(err)
+            else:
+                row["position"] = ("inside" if q.bid <= ma <= q.ask
+                                   else ("below" if ma < q.bid else "above"))
+                row["edge"] = _hinge(ma, q.bid, q.ask) * 100.0
+                row["verdict"] = ("in line" if row["position"] == "inside"
+                                  else f"the model is {row['position']} their market")
+            rows.append(row)
+
+        inside = sum(1 for r in rows if r["position"] == "inside")
+        was_inside = sum(1 for r, mb in zip(rows, before)
+                         if mb is not None and r["market_bid"] / 100.0 <= mb
+                         <= r["market_ask"] / 100.0)
+        return {
+            "rows": rows,
+            "vol_unit": run_.vol_unit,
+            "unit_evidence": run_.unit_evidence,
+            "notes": list(run_.notes) + list(forward_notes),
+            "skipped": [{"line": n, "text": t, "why": w} for n, t, w in run_.skipped],
+            # Read, understood, and then replaced by a later quote of the same
+            # thing.  Reported rather than dropped: a line that disappeared
+            # between the paste and the screen is a silent zero in disguise.
+            "superseded": [{"line": q.line, "text": q.raw, "describe": q.describe(),
+                            "timestamp": q.timestamp_text, "replaced_by": q.replaced_by,
+                            "bid": q.bid * 100.0, "ask": q.ask * 100.0}
+                           for q in run_.superseded],
+            "n_quotes": len(rows), "inside": inside, "inside_before": was_inside,
+            "fly_convention": self.fly_convention,
+        }
+
+
+@dataclass
+class QuotePanel:
+    """What we would show, on the instruments somebody has asked for.
+
+    It fits nothing.  Its inputs are the request box, the marks it is told to
+    stand on, the knowledge bank, the position and the fair value -- and the
+    market paste, optionally and for one purpose only: a request that names
+    the same instrument as a quoted line carries that market beside our price,
+    so "inside their market" is still a thing this screen can say.
+    """
+
+    pair: str
+    cut: str = "NY"
+    method: str | None = None
+    label: str = ""
+
+    # what is being asked for
+    request_text: str = ""
+    fly_convention: str = "market"
+
+    # the market, for comparison only.  Never fitted to here.
+    text: str = ""
+    vol_unit: str = "auto"
+
+    # the marks to quote off: what a fit handed back, or nothing
+    marks: dict | None = None
+
+    # skewing the mid
+    vega_text: str = ""
+    vega_scale: float = 0.0
+    fair_weight: float = 0.25
+    axe_weight: float = 0.5
+    skew_cap: float = 1.0
+    horizon_days: float = 30.0
+    lookback_days: float | None = None
+
+    # widths
+    fallback_spread: float | None = None       # volatility points
+    # The desk agent's rung on the width ladder: bank, then what the archive
+    # has seen this shown at, then the typed fallback, then no price.  Off,
+    # the ladder is the bank and the fallback and nothing else -- the archive
+    # is evidence about the market and a desk may not trust it yet.
+    use_archive_width: bool = False
+    archive_half_life: float = 5.0
+    archive_min_effective: float = 2.0
+    archive_lookback_days: float = 90.0
+
+    notes: tuple[str, ...] = field(default_factory=tuple)
+
+    def run(self, book, *, bank: KnowledgeBank | None = None, hist=None,
+            archive=None) -> dict:
+        surface, method, clock = _prepare(book, self.pair, self.method)
+
+        out: dict = {
+            "pair": self.pair, "cut": self.cut, "method": method, "label": self.label,
+            "valuation": clock.now.isoformat(),
+            "notes": list(self.notes), "warnings": [], "unavailable": {},
+            "sheet": None, "bank": None, "axe": None, "fair": None, "marks": None,
+        }
+
+        asked = parse_requests(self.request_text, pair=self.pair,
+                               fly_convention=self.fly_convention)
+        requests = list(asked.requests)
+
+        # The market, if there is one, for the comparison columns only.  A
+        # paste that cannot be read does not stop the quote: the price is a
+        # property of the marks and the bank, and never of what a broker
+        # happened to show.
+        market: dict = {}
+        market_notes: list[str] = []
+        if self.text.strip():
+            try:
+                run_ = parse_quotes(self.text, pair=self.pair, vol_unit=self.vol_unit,
+                                    fly_convention=self.fly_convention)
+                market = {instrument_key(q): q for q in run_.quotes}
+                # Its own notes are not repeated here.  The paste is read by
+                # the fit, which reports what it inferred from it; saying the
+                # same three sentences again beside a price is how a panel
+                # trains somebody to stop reading its notes.
+            except (QuoteError, ValueError) as exc:
+                market_notes = [f"the market paste could not be read for comparison ({exc}); "
+                                f"the prices below are unaffected"]
+
+        expiries = resolve_expiries(clock, requests)
+        stale = [k for k, (_, t) in expiries.items() if t <= 0]
+        if stale:
+            raise ValueError(
+                f"{', '.join(stale)} is not in the future at the valuation time "
+                f"{clock.now:%Y-%m-%d %H:%M}Z")
+        forwards, forward_notes = _forwards_for(book, self.pair, expiries)
+
+        axe_at, axe_block = self._axe(clock)
+        out["axe"] = axe_block
+
+        # The desk agent's evidence, worked once for the sheet.  A width that
+        # came off the archive names itself on the row, and the archive's
+        # level check rides on the row as a flag and is applied to nothing:
+        # a mid that follows the last thing it was shown is being led by the
+        # party it is about to trade with.
+        synthesis, archive_block = self._archive(archive, clock)
+        out["archive"] = archive_block
+
+        bank = bank if bank is not None else KnowledgeBank()
+        pk = bank.for_pair(self.pair)
+        out["bank"] = {
+            "pair": self.pair.upper(),
+            "path": bank.path,
+            "rules": [_rule_json(r) for r in pk.rules],
+            "updated": pk.updated,
+            "source_note": pk.source_note,
+            "problems": list(bank.problems),
+        }
+
+        # Everything that reads the surface happens inside the marks, and the
+        # fair value with it: richness is the mark against realized, and the
+        # mark being shaded is the one being quoted.  Measured outside, a fit
+        # that moved the at-the-money half a point would be shaded by the
+        # richness of the level it had just left.
+        with applied_marks(surface, self.marks, out["warnings"]):
+            rich_at, fair_block = self._fair(book, hist, method)
+            out["fair"] = fair_block
+            ev = Evaluator(surface, method, self.cut)
+            rows = [self._row(q, ev, expiries, forwards, pk, rich_at, axe_at, market,
+                              synthesis)
+                    for q in requests]
+
+        stood = dict(self.marks or {})
+        out["marks"] = {
+            "on_the_fit": bool(self.marks),
+            "fitted": bool(stood.get("fitted")),
+            "what": stood.get("what") or "",
+            "stamp": stood.get("stamp") or "",
+            "note": (f"quoted off the marks this panel was handed: "
+                     f"{stood.get('what') or 'unnamed'}" if self.marks else
+                     "quoted off the marks as they stand on the book; run the fit and hand its "
+                     "answer over to price on that instead"),
+        }
+        out["sheet"] = {
+            "rows": rows,
+            "notes": list(asked.notes) + market_notes + forward_notes,
+            "skipped": [{"line": n, "text": t, "why": w} for n, t, w in asked.skipped],
+            "n_quotes": len(rows),
+            "priced": sum(1 for r in rows if r["our_bid"] is not None),
+            "matched": sum(1 for r in rows if r["market_mid"] is not None),
+            "fly_convention": self.fly_convention,
+            "fallback_spread": self.fallback_spread,
+        }
+        out["warnings"].extend(surface.warnings[-6:])
+        return out
+
+    # -- one row ------------------------------------------------------------
+    def _archive(self, archive, clock) -> tuple[object, dict]:
+        """The archive worked into evidence, or the reason it was not."""
+        if not self.use_archive_width:
+            return None, {"available": False, "used": False,
+                          "reason": "the archive is not on the width ladder for this quote; "
+                                    "tick 'widths from the archive' to put it there"}
+        if archive is None:
+            return None, {"available": False, "used": True,
+                          "reason": "no observation archive is loaded, so the archive rung "
+                                    "of the width ladder is empty"}
+        from . import synthesis as syn
+        made = syn.synthesize(archive, self.pair, asof=clock.now,
+                              half_life=self.archive_half_life,
+                              min_effective=self.archive_min_effective,
+                              lookback_days=self.archive_lookback_days)
+        return made, {"available": True, "used": True, "path": archive.path,
+                      "counted": made.counted, "half_life": self.archive_half_life,
+                      "min_effective": self.archive_min_effective,
+                      "lookback_days": self.archive_lookback_days,
+                      "widths": sum(1 for w in made.widths if w.enough),
+                      "notes": list(made.notes)}
+
+    def _row(self, q, ev, expiries, forwards, pk: PairKnowledge, rich_at, axe_at,
+             market: dict, synthesis=None) -> dict:
+        dt_key = _key(q.expiry_far if q.instrument == "spread" else q.expiry)
+        t = expiries[dt_key][1]
+        days = t * DAYS_IN_YEAR
+        row = {
+            "line": q.line, "raw": q.raw, "label": q.label, "describe": q.describe(),
+            "instrument": q.instrument, "leg": q.leg, "delta": q.delta,
+            "strike": q.strike, "is_call": q.is_call, "fly_kind": q.fly_kind,
+            "tenor": _key(q.expiry), "tenor_far": (None if q.expiry_far is None
+                                                   else _key(q.expiry_far)),
+            "days": days, "size": q.size, "size_basis": q.size_basis,
+            "sign": q.sign, "direction": q.direction,
+            "model": None,
+            "skew_fair": None, "skew_axe": None, "skew_bank": None,
+            "skew_total": None, "skew_cap": None, "skew_capped": False, "skew_reason": "",
+            "our_mid": None, "our_bid": None, "our_ask": None,
+            "width": None, "width_source": None, "floor": None,
+            "market_bid": None, "market_ask": None, "market_mid": None, "market_width": None,
+            "position": None, "edge": None, "crossing": "",
+            "richness": None, "axe": None, "verdict": "",
+            "archive_width": None, "archive_observations": None, "archive_level": None,
+            "archive_gap": None, "flags": [],
+            # The bank's prose kept apart from the reader's own notes: a
+            # note exists to be read, and burying it among parser chatter
+            # is most of the way to not applying it at all.
+            "advice": [], "notes": list(q.notes), "warnings": [],
+        }
+        try:
+            # The book's convention throughout, then the sign once, here: a
+            # request asked as 'JPY call over' is answered in that convention
+            # and every number on the row turns with it.  §5 item 1 is what a
+            # sign applied in two places costs.
+            model = ev.value(q, expiries, forwards) * q.sign
+        except (ValueError, ArithmeticError, ConvergenceError) as exc:
+            row["verdict"] = "not priced"
+            row["warnings"].append(f"{type(exc).__name__}: {exc}")
+            return row
+        row["model"] = model * 100.0
+
+        overlay = pk.overlay(instrument=q.instrument, days=days, tenor=_key(q.expiry),
+                             size=q.size, size_basis=q.size_basis, delta=q.delta,
+                             fallback=None if self.fallback_spread in (None, "")
+                             else float(self.fallback_spread))
+        width = None if overlay.spread is None else overlay.spread / 100.0
+        row["width"] = overlay.spread
+        row["width_source"] = overlay.spread_rule or (
+            "panel fallback" if width is not None else None)
+        row["floor"] = overlay.floor
+        row["advice"] = list(overlay.notes)
+        if overlay.reason:
+            row["warnings"].append(overlay.reason)
+        row["notes"].extend(f"beaten: {b}" for b in overlay.beaten)
+        # -- the archive rung, between the bank and the fallback -------------
+        # Same ladder as ``agent.run`` and in the same order: a rule the desk
+        # wrote beats what the market showed, and what the market showed
+        # beats a number typed on a panel this morning.  A spread has no
+        # width evidence of its own -- the archive keeps outrights.
+        if synthesis is not None and q.instrument != "spread":
+            evidence = synthesis.width_for(instrument=q.instrument, days=days, delta=q.delta)
+            if evidence is not None and evidence.enough:
+                row["archive_width"] = evidence.median
+                row["archive_observations"] = evidence.observations
+                # A bank rule beats the archive; the archive beats the typed
+                # fallback, which the overlay has already folded in when no
+                # rule matched (``spread`` set, ``spread_rule`` not).
+                if overlay.spread_rule is None:
+                    if overlay.spread is not None:
+                        row["notes"].append("the panel fallback was not needed; the archive "
+                                            "holds a width for this")
+                    width = evidence.median / 100.0
+                    row["width"] = evidence.median
+                    row["width_source"] = (f"the archive: {evidence.observations} "
+                                           f"observation(s) from {evidence.sources} "
+                                           f"broker(s), newest "
+                                           + ("today" if evidence.newest_days < 1 else
+                                              f"{evidence.newest_days:.0f}d ago"))
+                    row["advice"].append("this width came from the archive and not from "
+                                         "the bank; 'Learn widths' writes it in as a rule")
+                    if overlay.reason and overlay.reason in row["warnings"]:
+                        # The bank's refusal stands as the reason the archive
+                        # was asked; it is not a warning any more.
+                        row["warnings"].remove(overlay.reason)
+                        row["notes"].append(overlay.reason)
+            elif evidence is not None and overlay.spread_rule is None:
+                row["notes"].append(f"archive: {evidence.why_not}")
+            level = synthesis.level_for(instrument=q.instrument, tenor=_key(q.expiry),
+                                        delta=q.delta)
+            if level is not None and level.enough:
+                # The archive holds the book's convention; the row is in the
+                # convention it was asked in.  Compared in the archive's.
+                gap, what = level.gap_to(row["model"] * q.sign)
+                row["archive_level"] = level.typical
+                row["archive_gap"] = gap
+                if "worth knowing" in what:
+                    row["flags"].append(what + "; applied to nothing")
+
+        # A calendar spread's level statement is the *difference* of the two
+        # legs' statements.  Taking the far leg's richness alone would shade a
+        # 1M/3M spread by the whole of the 3M richness, which is not what
+        # owning the spread exposes anybody to.
+        if q.instrument == "spread":
+            t_near = expiries[_key(q.expiry)][1]
+            richness = (None if rich_at is None else rich_at(t) - rich_at(t_near))
+            axe = (None if axe_at is None else axe_at(t) - axe_at(t_near))
+            row["notes"].append(
+                f"the width and the shading are taken across the spread: the bank rule is "
+                f"matched on the {_key(q.expiry_far)} leg, and the richness and the axe are "
+                f"the {_key(q.expiry_far)} figure less the {_key(q.expiry)} one")
+        else:
+            richness = None if rich_at is None else rich_at(t)
+            axe = None if axe_at is None else axe_at(t)
+        row["richness"] = None if richness is None else richness * 100.0
+        row["axe"] = axe
+        skew = skew_for(q, t, half_width=None if width is None else width / 2.0,
+                        richness=richness, axe=axe, fair_weight=self.fair_weight,
+                        axe_weight=self.axe_weight, cap_ratio=self.skew_cap,
+                        bank_shift=q.sign * overlay.shift / 100.0)
+        row["skew_fair"] = skew.fair * 100.0
+        row["skew_axe"] = skew.axe * 100.0
+        row["skew_bank"] = skew.bank * 100.0
+        row["skew_total"] = skew.total * 100.0
+        row["skew_cap"] = None if skew.cap is None else skew.cap * 100.0
+        row["skew_capped"] = skew.capped
+        row["skew_reason"] = skew.reason
+        if overlay.shift_rule:
+            row["notes"].append(f"bank shift: {overlay.shift_rule}")
+
+        our_mid = model + skew.total
+        row["our_mid"] = our_mid * 100.0
+        bid = ask = None
+        if width is not None:
+            bid, ask = our_mid - width / 2.0, our_mid + width / 2.0
+            row["our_bid"], row["our_ask"] = bid * 100.0, ask * 100.0
+
+        # The market, when this exact instrument was quoted in the paste.  In
+        # the row's own convention, like everything else on it.
+        theirs = market.get(instrument_key(q))
+        if theirs is not None:
+            t_bid, t_ask = theirs.bid, theirs.ask
+            if q.sign < 0:
+                t_bid, t_ask = -t_ask, -t_bid
+            row["market_bid"], row["market_ask"] = t_bid * 100.0, t_ask * 100.0
+            row["market_mid"] = 0.5 * (t_bid + t_ask) * 100.0
+            row["market_width"] = (t_ask - t_bid) * 100.0
+            row["position"] = ("inside" if t_bid <= our_mid <= t_ask
+                               else ("below" if our_mid < t_bid else "above"))
+            row["edge"] = _hinge(our_mid, t_bid, t_ask) * 100.0
+            row["notes"].append(f"line {theirs.line} of the market paste quotes this")
+            if bid is not None:
+                if bid > t_ask:
+                    row["crossing"] = "our bid is through their offer"
+                elif ask < t_bid:
+                    row["crossing"] = "our offer is through their bid"
+                elif bid > t_bid and ask < t_ask:
+                    row["crossing"] = "inside their market on both sides"
+
+        if width is None:
+            row["verdict"] = "no width"
+        elif row["market_mid"] is None:
+            row["verdict"] = "quoted"
+        else:
+            row["verdict"] = row["crossing"] or (
+                "in line" if row["position"] == "inside" else
+                f"our mid is {row['position']} their market")
+        return row
+
+    # -- the two leans ------------------------------------------------------
     def _axe(self, clock) -> tuple[object, dict]:
         if not self.vega_text.strip():
             return None, {"available": False,
@@ -1255,157 +1817,24 @@ class Panel:
         vals = [r.richness for r in live]
         return (lambda t: _interp(ts, vals, t)), block
 
-    def _curve_block(self, fit: CurveFit, evidence: str, knobs: _Knobs) -> dict:
-        def unit(name, value):
-            return value * 100.0 if name in _PERCENT_KNOBS else value
-        return {
-            "evidence": evidence,
-            "source": self.target_source,
-            "free": list(fit.free),
-            "before": {k: unit(k, v) for k, v in fit.before.items()},
-            "after": {k: unit(k, v) for k, v in fit.after.items()},
-            "rows": [
-                {"tenor": tg.tenor, "days": tg.t * DAYS_IN_YEAR, "source": tg.source,
-                 "target": tg.vol * 100.0, "before": b * 100.0, "after": a * 100.0,
-                 "diff": (a - tg.vol) * 100.0, "moved": (a - b) * 100.0}
-                for tg, b, a in zip(fit.targets, fit.achieved_before, fit.achieved_after)
-            ],
-            "rmse": fit.rmse * 100.0, "max_error": fit.max_error * 100.0,
-            "max_error_tenor": fit.max_error_tenor,
-            "converged": fit.converged, "message": fit.message,
-            "evaluations": fit.evaluations, "seconds": fit.seconds,
-            "warnings": list(fit.warnings),
-        }
 
-    def _sheet(self, quotes, expiries, before, after, errors, pk: PairKnowledge,
-               rich_at, axe_at, run_, forward_notes) -> dict:
-        rows = []
-        # The bank is written in volatility points -- what the desk says out
-        # loud -- and everything inside the model is decimals.  The conversion
-        # happens here, once, on the way out of the lookup, and nowhere else.
-        fallback = None if self.fallback_spread in (None, "") else float(self.fallback_spread)
-        for q, mb, ma, err in zip(quotes, before, after, errors):
-            dt, t = expiries[_key(q.expiry_far if q.instrument == "spread" else q.expiry)]
-            days = t * DAYS_IN_YEAR
-            row = {
-                "line": q.line, "raw": q.raw, "label": q.label, "describe": q.describe(),
-                "instrument": q.instrument, "leg": q.leg, "delta": q.delta,
-                "strike": q.strike, "is_call": q.is_call, "fly_kind": q.fly_kind,
-                "tenor": _key(q.expiry), "tenor_far": (None if q.expiry_far is None
-                                                       else _key(q.expiry_far)),
-                # What was written, not the resolved instant: a run with no
-                # date in it is ordered on a nominal day, and showing that day
-                # back would be a date the paste never contained.
-                "timestamp": q.timestamp_text,
-                "days": days, "size": q.size, "size_basis": q.size_basis,
-                "market_bid": q.bid * 100.0, "market_ask": q.ask * 100.0,
-                "market_mid": q.mid * 100.0, "market_width": q.spread * 100.0,
-                "model_before": None if mb is None else mb * 100.0,
-                "model_after": None if ma is None else ma * 100.0,
-                "model_move": None if (mb is None or ma is None) else (ma - mb) * 100.0,
-                "position": None, "edge": None,
-                "skew_fair": None, "skew_axe": None, "skew_bank": None,
-                "skew_total": None, "skew_capped": False, "skew_reason": "",
-                "our_mid": None, "our_bid": None, "our_ask": None,
-                "width": None, "width_source": None, "floor": None,
-                "crossing": "", "verdict": "",
-                "richness": None, "axe": None,
-                # The bank's prose kept apart from the reader's own notes: a
-                # note exists to be read, and burying it among parser chatter
-                # is most of the way to not applying it at all.
-                "advice": [], "notes": list(q.notes), "warnings": [],
-            }
-            if err:
-                row["verdict"] = "not priced"
-                row["warnings"].append(err)
-                rows.append(row)
-                continue
+def _prepare(book, pair: str, method: str | None):
+    """The three things both panels need, checked the one way.
 
-            row["position"] = ("inside" if q.bid <= ma <= q.ask
-                               else ("below" if ma < q.bid else "above"))
-            row["edge"] = _hinge(ma, q.bid, q.ask) * 100.0
-
-            overlay = pk.overlay(instrument=q.instrument, days=days, tenor=_key(q.expiry),
-                                 size=q.size, size_basis=q.size_basis, delta=q.delta,
-                                 fallback=fallback)
-            width = None if overlay.spread is None else overlay.spread / 100.0
-            row["width"] = overlay.spread
-            row["width_source"] = overlay.spread_rule or (
-                "panel fallback" if width is not None else None)
-            row["floor"] = overlay.floor
-            row["advice"] = list(overlay.notes)
-            if overlay.reason:
-                row["warnings"].append(overlay.reason)
-            row["notes"].extend(f"beaten: {b}" for b in overlay.beaten)
-
-            # A calendar spread's level statement is the *difference* of the two
-            # legs' statements.  Taking the far leg's richness alone would shade a
-            # 1M/3M spread by the whole of the 3M richness, which is not what
-            # owning the spread exposes anybody to.
-            if q.instrument == "spread":
-                t_near = expiries[_key(q.expiry)][1]
-                richness = (None if rich_at is None else rich_at(t) - rich_at(t_near))
-                axe = (None if axe_at is None else axe_at(t) - axe_at(t_near))
-                row["notes"].append(
-                    f"the width and the shading are taken across the spread: the bank rule is "
-                    f"matched on the {_key(q.expiry_far)} leg, and the richness and the axe are "
-                    f"the {_key(q.expiry_far)} figure less the {_key(q.expiry)} one")
-            else:
-                richness = None if rich_at is None else rich_at(t)
-                axe = None if axe_at is None else axe_at(t)
-            row["richness"] = None if richness is None else richness * 100.0
-            row["axe"] = axe
-            skew = skew_for(q, t, half_width=None if width is None else width / 2.0,
-                            richness=richness, axe=axe, fair_weight=self.fair_weight,
-                            axe_weight=self.axe_weight, cap_ratio=self.skew_cap,
-                            bank_shift=overlay.shift / 100.0)
-            row["skew_fair"] = skew.fair * 100.0
-            row["skew_axe"] = skew.axe * 100.0
-            row["skew_bank"] = skew.bank * 100.0
-            row["skew_total"] = skew.total * 100.0
-            row["skew_cap"] = None if skew.cap is None else skew.cap * 100.0
-            row["skew_capped"] = skew.capped
-            row["skew_reason"] = skew.reason
-            if overlay.shift_rule:
-                row["notes"].append(f"bank shift: {overlay.shift_rule}")
-
-            our_mid = ma + skew.total
-            row["our_mid"] = our_mid * 100.0
-            if width is not None:
-                bid, ask = our_mid - width / 2.0, our_mid + width / 2.0
-                row["our_bid"], row["our_ask"] = bid * 100.0, ask * 100.0
-                if bid > q.ask:
-                    row["crossing"] = "our bid is through their offer"
-                elif ask < q.bid:
-                    row["crossing"] = "our offer is through their bid"
-                elif bid > q.bid and ask < q.ask:
-                    row["crossing"] = "inside their market on both sides"
-                row["verdict"] = row["crossing"] or (
-                    "in line" if row["position"] == "inside" else
-                    f"our mid is {row['position']} their market")
-            else:
-                row["verdict"] = "no width"
-            rows.append(row)
-
-        inside = sum(1 for r in rows if r["position"] == "inside")
-        priced = sum(1 for r in rows if r["our_bid"] is not None)
-        return {
-            "rows": rows,
-            "vol_unit": run_.vol_unit,
-            "unit_evidence": run_.unit_evidence,
-            "notes": list(run_.notes) + list(forward_notes),
-            "skipped": [{"line": n, "text": t, "why": w} for n, t, w in run_.skipped],
-            # Read, understood, and then replaced by a later quote of the same
-            # thing.  Reported rather than dropped: a line that disappeared
-            # between the paste and the screen is a silent zero in disguise.
-            "superseded": [{"line": q.line, "text": q.raw, "describe": q.describe(),
-                            "timestamp": q.timestamp_text, "replaced_by": q.replaced_by,
-                            "bid": q.bid * 100.0, "ask": q.ask * 100.0}
-                           for q in run_.superseded],
-            "n_quotes": len(rows), "inside": inside, "priced": priced,
-            "fly_convention": self.fly_convention,
-            "fallback_spread": self.fallback_spread,
-        }
+    A pair the book does not build and an interpolation nobody implements are
+    the two ways either panel is asked for something that cannot exist, and
+    they must read the same on both.
+    """
+    if book is None:
+        raise ValueError("the market-maker screen needs a loaded book")
+    if pair not in book:
+        raise ValueError(f"{pair} is not built in this book; it holds {', '.join(book.pairs)}")
+    surface = book[pair]
+    resolved = method or surface.method
+    if resolved not in INTERPOLATORS:
+        raise ValueError(f"unknown interpolation method {resolved!r}; "
+                         f"expected one of {INTERPOLATORS}")
+    return surface, resolved, book.clock
 
 
 def _rule_json(r: Rule) -> dict:
@@ -1415,30 +1844,40 @@ def _rule_json(r: Rule) -> dict:
     return out
 
 
-def panel_from_request(payload: dict) -> Panel:
-    """Build a Panel from a JSON body or a CLI namespace-like mapping."""
-    def opt_float(key, default=None):
-        v = payload.get(key)
-        if v in (None, "", "-"):
-            return default
-        return float(v)
+# -- reading a panel off a request ------------------------------------------
 
-    def opt_bool(key, default):
-        v = payload.get(key)
-        if v in (None, ""):
-            return default
-        if isinstance(v, bool):
-            return v
-        return str(v).strip().lower() in ("1", "true", "yes", "on")
+def _opt_float(payload, key, default=None):
+    v = payload.get(key)
+    if v in (None, "", "-"):
+        return default
+    return float(v)
 
-    def opt_tuple(key, default):
-        v = payload.get(key)
-        if v in (None, "", []):
-            return default
-        if isinstance(v, str):
-            v = [x for x in v.replace(",", " ").split() if x]
-        return tuple(str(x) for x in v)
 
+def _opt_bool(payload, key, default):
+    v = payload.get(key)
+    if v in (None, ""):
+        return default
+    if isinstance(v, bool):
+        return v
+    return str(v).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _opt_tuple(payload, key, default):
+    v = payload.get(key)
+    if v in (None, "", []):
+        return default
+    if isinstance(v, str):
+        v = [x for x in v.replace(",", " ").split() if x]
+    return tuple(str(x) for x in v)
+
+
+def _common(payload: dict) -> tuple[str, str, str | None, str, str]:
+    """Pair, cut, method, butterfly convention and volatility unit.
+
+    Both panels take these and both validate them the same way, because a
+    butterfly that meant one thing to the fit and another to the quote would
+    be two conventions on one screen.
+    """
     pair = str(payload.get("pair") or "").strip().upper()
     if not pair:
         raise ValueError("a currency pair is required")
@@ -1449,35 +1888,70 @@ def panel_from_request(payload: dict) -> Panel:
     if fly not in FLY_CONVENTIONS:
         raise ValueError(f"unknown butterfly convention {fly!r}; "
                          f"expected one of {FLY_CONVENTIONS}")
+    cut = str(payload.get("cut") or "NY").strip().upper()
+    method = str(payload["method"]).strip() if payload.get("method") else None
+    return pair, cut, method, fly, vol_unit
+
+
+def panel_from_request(payload: dict) -> Panel:
+    """Build the fit panel from a JSON body or a CLI namespace-like mapping."""
+    pair, cut, method, fly, vol_unit = _common(payload)
     source = str(payload.get("target_source") or "overwrites").strip().lower()
     if source not in TARGET_SOURCES:
         raise ValueError(f"unknown target source {source!r}; expected one of {TARGET_SOURCES}")
-
     return Panel(
-        pair=pair,
-        cut=str(payload.get("cut") or "NY").strip().upper(),
-        method=(str(payload["method"]).strip() if payload.get("method") else None),
+        pair=pair, cut=cut, method=method,
         label=str(payload.get("label") or ""),
         text=str(payload.get("text") or ""),
         vol_unit=vol_unit,
         fly_convention=fly,
         target_source=source,
         target_text=str(payload.get("target_text") or ""),
-        fit_curve=opt_bool("fit_curve", True),
-        free=opt_tuple("free", None),
-        tune_wings=opt_bool("tune_wings", True),
-        smile_free=opt_tuple("smile_free", PARAM_NAMES),
-        mid_pull=opt_float("mid_pull", 0.05),
-        max_nfev=int(opt_float("max_nfev", 300)),
+        fit_curve=_opt_bool(payload, "fit_curve", True),
+        free=_opt_tuple(payload, "free", None),
+        tune_wings=_opt_bool(payload, "tune_wings", True),
+        smile_free=_opt_tuple(payload, "smile_free", PARAM_NAMES),
+        mid_pull=_opt_float(payload, "mid_pull", 0.05),
+        max_nfev=int(_opt_float(payload, "max_nfev", 300)),
+        apply=_opt_bool(payload, "apply", False),
+    )
+
+
+def quote_panel_from_request(payload: dict) -> QuotePanel:
+    """Build the quote panel from a JSON body or a CLI namespace-like mapping."""
+    pair, cut, method, fly, vol_unit = _common(payload)
+    marks = payload.get("marks") or None
+    if marks is not None:
+        if not isinstance(marks, dict):
+            raise ValueError("the marks to quote off must be the object a fit returned")
+        named = str(marks.get("pair") or "").strip().upper()
+        if named and named != pair:
+            # The browser holds the fit and the pair selector separately, and
+            # the two can be moved apart.  Quoting EURUSD off a USDJPY fit is
+            # a wrong answer that reads perfectly well, so it is refused.
+            raise ValueError(
+                f"these marks were fitted on {named} and this panel is quoting {pair}; "
+                f"fit {pair} before quoting it, or quote off the marks as they stand")
+    return QuotePanel(
+        pair=pair, cut=cut, method=method,
+        label=str(payload.get("label") or ""),
+        request_text=str(payload.get("request_text") or ""),
+        fly_convention=fly,
+        text=str(payload.get("text") or ""),
+        vol_unit=vol_unit,
+        marks=marks,
         vega_text=str(payload.get("vega_text") or ""),
-        vega_scale=opt_float("vega_scale", 0.0) or 0.0,
-        fair_weight=opt_float("fair_weight", 0.25),
-        axe_weight=opt_float("axe_weight", 0.5),
-        skew_cap=opt_float("skew_cap", 1.0),
-        horizon_days=opt_float("horizon_days", 30.0),
-        lookback_days=opt_float("lookback_days", None),
-        fallback_spread=opt_float("fallback_spread", None),
-        apply=opt_bool("apply", False),
+        vega_scale=_opt_float(payload, "vega_scale", 0.0) or 0.0,
+        fair_weight=_opt_float(payload, "fair_weight", 0.25),
+        axe_weight=_opt_float(payload, "axe_weight", 0.5),
+        skew_cap=_opt_float(payload, "skew_cap", 1.0),
+        horizon_days=_opt_float(payload, "horizon_days", 30.0),
+        lookback_days=_opt_float(payload, "lookback_days", None),
+        fallback_spread=_opt_float(payload, "fallback_spread", None),
+        use_archive_width=_opt_bool(payload, "use_archive_width", False),
+        archive_half_life=_opt_float(payload, "archive_half_life", 5.0),
+        archive_min_effective=_opt_float(payload, "archive_min_effective", 2.0),
+        archive_lookback_days=_opt_float(payload, "archive_lookback_days", 90.0),
     )
 
 

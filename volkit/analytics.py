@@ -26,7 +26,8 @@ from . import black, moments, sabr
 from .cross import CrossAtmCurve
 from .numerics import ConvergenceError
 from .marketdata import open_workbook
-from .history import Realized, SeriesStats, implied_stats, realized, vol_dynamics
+from .history import (DYNAMICS_DAYS, Realized, SeriesStats, implied_stats, realized,
+                      vol_dynamics)
 from .surface import VolSurface
 from .timeutil import Clock, parse_datetime, tenor_to_years
 
@@ -279,15 +280,23 @@ def _target_legs(target: str) -> list[tuple[float, float, bool]]:
 
 
 def _forward_at(book, pair: str, t: float) -> tuple[float, bool, str]:
-    """Outright forward at ``t`` years, and whether it really came from a feed."""
-    feed = getattr(book, "feed", None)
-    if feed is None or pair.upper() not in getattr(feed, "pairs", {}):
+    """Outright forward at ``t`` years, and whether it really came from a feed.
+
+    Through ``Book.market_level`` and not the feed directly, so every screen
+    that needs a level gets the same one -- including a cross the feed does
+    not quote but whose legs it does, which this used to refuse while the
+    marking screen's chart was scaling its axis by the very same triangle.
+    """
+    level = book.market_level(pair, t)
+    if not level["feed"]:
         return 1.0, False, "no forward feed for this pair"
-    q = feed.quote(pair, t)
-    note = ""
-    if q["extrapolated"]:
-        note = f"the forward at {t:.4f}y is outside the quoted pillars and was held flat"
-    return float(q["forward"]), True, note
+    notes = []
+    if level["derived"]:
+        notes.append(f"the feed does not quote {pair.upper()} itself, so the forward is "
+                     f"the {level['via']} triangle")
+    if level["extrapolated"]:
+        notes.append(f"the forward at {t:.4f}y is outside the quoted pillars and was held flat")
+    return float(level["forward"]), True, "; ".join(notes)
 
 
 @dataclass(frozen=True)
@@ -339,6 +348,19 @@ class CarryRow:
     skew_delta: float | None = None
     carry_pnl: float | None = None
     carry_vols: float | None = None
+    #: ``carry_pnl`` with the position's own first-order exposure to the
+    #: forward taken out: ``carry_pnl - delta * (forward_rolled - forward)``.
+    #: That is what the forward's roll is worth to a **delta-hedged** book,
+    #: which is the only reading of it that is a statement about the
+    #: *volatility* rather than about the direction.  ``carry_pnl`` itself is
+    #: the right number for the position -- a spot-hedged book keeps the whole
+    #: of it -- and the wrong one for a break-even, because at a strike with
+    #: any delta on it the first-order term is the forward move times that
+    #: delta and it is equal and opposite for a call and a put at one strike.
+    #: What is left here is the gamma over the move, which is call/put
+    #: symmetric by put-call parity: ``C - P = F - K`` in price and
+    #: ``delta_c - delta_p = 1`` in delta, so the two cancel exactly.
+    carry_hedged: float | None = None
     total_pnl: float | None = None
     warnings: tuple[str, ...] = ()
 
@@ -378,6 +400,13 @@ def carry_table(book, pair: str, *, horizon_days: float = 30.0, target: str = "a
     the forward.  It is computed by full revaluation rather than as
     ``delta * (F2 - F1)``, so the gamma over the move is in it; ``delta`` is
     reported beside it as the first-order reading.
+
+    ``carry_hedged`` is the same move with that first-order reading taken out.
+    A break-even volatility is a property of a **strike** and cannot depend on
+    whether the option at it is written as a call or a put, so anything asking
+    what the forward's roll is worth to the *mark* has to read that column and
+    not ``carry_pnl``: at a 25 delta strike the two differ by a quarter of the
+    forward move, with the sign of the option's direction.
 
     Without a forward feed there is no curve to roll down, and both are left
     unavailable rather than reported as zero.
@@ -499,10 +528,16 @@ def carry_table(book, pair: str, *, horizon_days: float = 30.0, target: str = "a
         smile_delta_out: float | None = None
         skew_delta_out: float | None = None
         carry_out: float | None = None
+        carry_hedged: float | None = None
         total_pnl: float | None = None
         if from_feed:
             carry_rate = (f2 - f1) / (f1 * h)
             delta_out, carry_out = pos_delta, carry_pnl
+            # The same move with the position's own delta taken out.  See the
+            # field's own note: this is the half of the forward's roll that
+            # says something about the volatility, and it is the one a
+            # break-even has to be built on.
+            carry_hedged = carry_pnl - pos_delta * (f2 - f1)
             if smile_delta_ok:
                 smile_delta_out = pos_smile_delta
                 skew_delta_out = pos_smile_delta - pos_delta
@@ -525,7 +560,7 @@ def carry_table(book, pair: str, *, horizon_days: float = 30.0, target: str = "a
             forward_carry=f2 - f1,
             carry_rate=carry_rate, delta=delta_out, smile_delta=smile_delta_out,
             skew_delta=skew_delta_out, carry_pnl=carry_out,
-            carry_vols=carry_vols, total_pnl=total_pnl,
+            carry_vols=carry_vols, carry_hedged=carry_hedged, total_pnl=total_pnl,
             warnings=tuple(warn),
         ))
     return rows
@@ -549,10 +584,14 @@ class FairValueRow:
     #: The forward curve's price-side carry on the position, and the break-even
     #: volatility it is worth.  ``carry_rate`` is the annualised proportional
     #: roll-down of the forward, ``carry_pnl`` the straddle's revaluation at
-    #: the rolled forward, and ``carry_value`` that P&L expressed as the
-    #: volatility it takes to pay for it, on the same footing as ``roll_value``.
+    #: the rolled forward, ``carry_hedged`` that revaluation with the
+    #: straddle's own delta taken out -- the gamma over the move, which is
+    #: what a delta-hedged break-even is actually paid -- and ``carry_value``
+    #: *that* P&L expressed as the volatility it takes to pay for it, on the
+    #: same footing as ``roll_value``.
     carry_rate: float = float("nan")
     carry_pnl: float | None = None
+    carry_hedged: float | None = None
     carry_value: float = 0.0
     #: What the realized volatility was measured on: ``spot``, or the forward
     #: to this tenor.  An implied volatility is a volatility of the forward.
@@ -637,11 +676,17 @@ def fair_value_table(book, pair: str, hist=None, *,
 
         # The forward slide, at fixed strike, fixed volatility and fixed
         # maturity, so it is the forward's contribution alone and not a second
-        # helping of the roll.  A straddle rather than one side of it: the
-        # at-the-money is quoted as a straddle and its delta is zero by
-        # construction, which is exactly why this term is small.
+        # helping of the roll.  A straddle rather than one side of it, and
+        # **delta hedged**: what pays for a break-even is the gamma over the
+        # move, and the first-order piece is the hedge's, not the option's.
+        # The at-the-money straddle is delta neutral in the pair's own quoted
+        # convention, so on a pair that quotes an unadjusted delta the hedge
+        # is exactly zero and nothing here moves; on a premium-adjusted pair
+        # the delta-neutral strike is neutral in *that* convention and this
+        # ``dV/dF`` is not quite zero, which is the small correction.
         carry_rate = float("nan")
         carry_pnl = None
+        carry_hedged = None
         carry_value = 0.0
         if math.isfinite(row.forward_rolled) and row.forward_rolled != row.forward:
             f1, f2 = row.forward, row.forward_rolled
@@ -650,8 +695,11 @@ def fair_value_table(book, pair: str, hist=None, *,
                 float(black.price(f2, k_abs, implied, t, call)
                       - black.price(f1, k_abs, implied, t, call))
                 for call in (True, False))
+            carry_delta = sum(
+                float(black.delta(f1, k_abs, implied, t, call)) for call in (True, False))
+            carry_hedged = carry_pnl - carry_delta * (f2 - f1)
             if vega_now > 0:
-                carry_value = carry_pnl * (t / h) / (2.0 * vega_now)
+                carry_value = carry_hedged * (t / h) / (2.0 * vega_now)
 
         rv = None
         window = None
@@ -684,7 +732,8 @@ def fair_value_table(book, pair: str, hist=None, *,
             roll=row.roll, roll_multiplier=multiplier, roll_value=roll_value,
             forward_value=fwd_value, fair=fair,
             richness=None if fair is None else implied - fair,
-            carry_rate=carry_rate, carry_pnl=carry_pnl, carry_value=carry_value,
+            carry_rate=carry_rate, carry_pnl=carry_pnl, carry_hedged=carry_hedged,
+            carry_value=carry_value,
             realized_basis=basis, realized_spot=rv_spot,
             warnings=tuple(warn),
         ))
@@ -741,6 +790,9 @@ class RealizedRow:
     rho_difference: float | None = None
     nu_difference: float | None = None
     dynamics_source: str | None = None
+    #: The window ``(rho, nu)`` were measured over, which is deliberately not
+    #: ``window_days``.  See :data:`history.DYNAMICS_DAYS`.
+    dynamics_days: float | None = None
     history: dict = field(default_factory=dict)
     warnings: tuple[str, ...] = ()
 
@@ -749,7 +801,8 @@ def realized_table(book, pair: str, hist, *, lookback_days: float | None = None,
                    method: str | None = None, cut: str = "NY",
                    annualisation: str = "weighted", with_moments: bool = True,
                    realized_basis: str = "auto", with_sabr: bool = False,
-                   sabr_delta: float = 0.25) -> list[RealizedRow]:
+                   sabr_delta: float = 0.25,
+                   dynamics_days: float | None = None) -> list[RealizedRow]:
     """Realized volatility, skew and kurtosis against what the surface implies.
 
     ``lookback_days`` of ``None`` means *match the tenor*, which is the only
@@ -783,13 +836,57 @@ def realized_table(book, pair: str, hist, *, lookback_days: float | None = None,
     against what happened.  Both are approximations of a surface that is not
     SABR, and the fit reports its own residual so a smile SABR cannot reach
     says so instead of quietly returning the nearest thing.
+
+    The measured half of that comparison is **not** taken over
+    ``lookback_days``.  A realized volatility is matched to the tenor because
+    a one-month implied volatility forecasts one month; a spot/volatility
+    correlation and a vol of vol are properties of the process and want as
+    much data as there is.  They also need more observations than a realized
+    volatility does, so on a short lookback every tenor's realized figure came
+    back and every tenor's ``(rho, nu)`` was blank -- the whole column group,
+    both difference columns included, on a table whose other columns were
+    fine.  ``dynamics_days`` is that window (:data:`history.DYNAMICS_DAYS` by
+    default) and is never shorter than the realized lookback; every row
+    reports the window it was measured on.
     """
     surface = book[pair]
     out: list[RealizedRow] = []
     for tenor in book.data.tenor_points:
         t = tenor_to_years(tenor)
         window = float(lookback_days) if lookback_days else t * 365.2425
+        dyn_window = max(window, float(DYNAMICS_DAYS if dynamics_days is None
+                                       else dynamics_days))
         warn: list[str] = []
+        expiry = book.clock.datetime_from_years(t)
+        implied = float(surface.atm_vol(expiry, cut))
+
+        # The wings as a SABR shape are built before the realized statistics
+        # and do not depend on them: the marked half needs no history at all
+        # and the measured half is taken over its own, longer window.  Built
+        # after them, a one-week row -- which can never have seven days' worth
+        # of returns in a seven-day window -- lost the whole column group to a
+        # failure that had nothing to do with it, and did so at every tenor
+        # whose realized window came up short.
+        shape = _sabr_shape(surface, expiry, t, implied, sabr_delta, method, cut, warn) \
+            if with_sabr else None
+        dyn = _measured_dynamics(hist, dyn_window, tenor, warn) if with_sabr else None
+        sabr_group = dict(
+            sabr_delta=sabr_delta if with_sabr else None,
+            implied_rho=(shape[0].rho if shape else None),
+            implied_nu=(shape[0].nu if shape else None),
+            implied_shape_error=(shape[0].max_error if shape else None),
+            marked_rr=(shape[1] if shape else None),
+            marked_fly=(shape[2] if shape else None),
+            realized_rho=(dyn.rho if dyn else None),
+            realized_nu=(dyn.nu if dyn else None),
+            realized_rho_se=(dyn.rho_se if dyn else None),
+            realized_nu_se=(dyn.nu_se if dyn else None),
+            rho_difference=(None if not (shape and dyn) else shape[0].rho - dyn.rho),
+            nu_difference=(None if not (shape and dyn) else shape[0].nu - dyn.nu),
+            dynamics_source=(dyn.source if dyn else None),
+            dynamics_days=(dyn_window if with_sabr else None),
+        )
+
         try:
             stats = realized(hist, window, annualisation=annualisation,
                              basis=realized_basis, basis_tenor=tenor)
@@ -801,15 +898,13 @@ def realized_table(book, pair: str, hist, *, lookback_days: float | None = None,
             out.append(RealizedRow(
                 tenor=tenor, t=t, window_days=window, observations=0,
                 realized=nan, realized_calendar=nan, realized_count=nan,
-                implied=float(surface.atm_vol(book.clock.datetime_from_years(t), cut)),
+                implied=implied,
                 premium=nan, realized_skew=nan, realized_skew_scaled=nan,
                 realized_kurtosis=nan, realized_kurtosis_scaled=nan,
                 skew_se=nan, kurtosis_se=nan, implied_skew=None,
                 implied_kurtosis=None, implied_vol_of_density=None,
-                history={}, warnings=(str(exc),)))
+                history={}, warnings=(str(exc),) + tuple(warn), **sabr_group))
             continue
-        expiry = book.clock.datetime_from_years(t)
-        implied = float(surface.atm_vol(expiry, cut))
 
         imp_skew = imp_kurt = imp_vol = None
         if with_moments:
@@ -832,10 +927,6 @@ def realized_table(book, pair: str, hist, *, lookback_days: float | None = None,
                 history[name] = {"n": st.n, "last": st.last, "mean": st.mean,
                                  "low": st.low, "high": st.high, "percentile": st.percentile}
 
-        shape = _sabr_shape(surface, expiry, t, implied, sabr_delta, method, cut, warn) \
-            if with_sabr else None
-        dyn = _measured_dynamics(hist, window, tenor, warn) if with_sabr else None
-
         out.append(RealizedRow(
             tenor=tenor, t=t, window_days=window, observations=stats.observations,
             realized=stats.vol, realized_calendar=stats.vol_calendar,
@@ -847,20 +938,7 @@ def realized_table(book, pair: str, hist, *, lookback_days: float | None = None,
             implied_skew=imp_skew, implied_kurtosis=imp_kurt, implied_vol_of_density=imp_vol,
             realized_basis=stats.basis, realized_spot=stats.vol_spot,
             points_vol=stats.points_vol, points_correlation=stats.points_correlation,
-            carry_rate=stats.carry_rate,
-            sabr_delta=sabr_delta if with_sabr else None,
-            implied_rho=(shape[0].rho if shape else None),
-            implied_nu=(shape[0].nu if shape else None),
-            implied_shape_error=(shape[0].max_error if shape else None),
-            marked_rr=(shape[1] if shape else None),
-            marked_fly=(shape[2] if shape else None),
-            realized_rho=(dyn.rho if dyn else None),
-            realized_nu=(dyn.nu if dyn else None),
-            realized_rho_se=(dyn.rho_se if dyn else None),
-            realized_nu_se=(dyn.nu_se if dyn else None),
-            rho_difference=(None if not (shape and dyn) else shape[0].rho - dyn.rho),
-            nu_difference=(None if not (shape and dyn) else shape[0].nu - dyn.nu),
-            dynamics_source=(dyn.source if dyn else None),
+            carry_rate=stats.carry_rate, **sabr_group,
             history=history, warnings=tuple(warn) + stats.warnings,
         ))
     return out
@@ -892,11 +970,16 @@ def _sabr_shape(surface, expiry, t: float, atm: float, delta: float,
 
 
 def _measured_dynamics(hist, window: float, tenor: str, warn: list[str]):
-    """Realized spot/volatility correlation and vol of vol, or the reason there is none."""
+    """Realized spot/volatility correlation and vol of vol, or the reason there is none.
+
+    ``window`` is the dynamics window and not the realized lookback, and it is
+    named in the failure: "not enough observations" is a different sentence
+    depending on how much of the sheet was asked for.
+    """
     try:
         dyn = vol_dynamics(hist, window, tenor)
     except Exception as exc:  # noqa: BLE001 - one column group, reported in place
-        warn.append(f"no measured volatility dynamics at {tenor}: {exc}")
+        warn.append(f"no measured volatility dynamics at {tenor} over {window:.0f} days: {exc}")
         return None
     warn.extend(dyn.warnings)
     return dyn

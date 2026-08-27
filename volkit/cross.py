@@ -125,8 +125,71 @@ def infer_leg_signs(pair: str, leg_a: str, leg_b: str) -> tuple[int, int]:
         raise ValueError(
             f"legs {leg_a} and {leg_b} share no third currency, so they cannot build {pair}"
         )
+    # A shared third currency is not on its own enough: EURUSD and EURUSD
+    # share the dollar and build nothing, and a sheet that names two legs by
+    # hand can say exactly that.  Each side of the pair has to come from a
+    # different leg.
+    a_ccy, b_ccy = {a_base, a_term}, {b_base, b_term}
+    if not ((base in a_ccy and term in b_ccy) or (base in b_ccy and term in a_ccy)):
+        raise ValueError(
+            f"legs {leg_a} and {leg_b} do not carry {base} and {term} between them, "
+            f"so they cannot build {pair}"
+        )
     c = common.pop()
     # +1 if the leg reads as (pair currency)/(common currency), -1 if inverted.
     sign_a = 1 if a_term == c else -1
     sign_b = 1 if b_term == c else -1
     return (sign_a, sign_b)
+
+
+#: Currencies the market quotes with the dollar as the *term* currency, so
+#: their dollar leg is written ``XXXUSD``.  Everything else is written
+#: ``USDXXX``.  This is quotation and not a preference -- nobody publishes
+#: ``USDEUR`` -- and getting it wrong is not cosmetic: a leg written upside
+#: down is a leg the feed does not hold, and it enters the triangle with the
+#: other sign (see :func:`infer_leg_signs`), which is exactly the mistake
+#: MIGRATION.md's first entry is about.
+USD_TERM_CURRENCIES = frozenset({"EUR", "GBP", "AUD", "NZD"})
+
+
+def usd_leg(ccy: str) -> str:
+    """The pair in which ``ccy`` trades against the dollar.
+
+    ``JPY`` -> ``USDJPY``, ``EUR`` -> ``EURUSD``.
+    """
+    ccy = str(ccy).strip().upper()
+    if len(ccy) != 3 or not ccy.isalpha():
+        raise ValueError(f"{ccy!r} is not a three-letter currency code")
+    if ccy == "USD":
+        raise ValueError("USD has no dollar leg of its own")
+    return f"{ccy}USD" if ccy in USD_TERM_CURRENCIES else f"USD{ccy}"
+
+
+def is_cross(pair: str) -> bool:
+    """True when neither side of the pair is the dollar."""
+    pair = str(pair).strip().upper()
+    return "USD" not in (pair[:3], pair[3:6])
+
+
+def dollar_legs(pair: str) -> tuple[str, str]:
+    """The two dollar pairs a cross is built from, base leg first.
+
+    ``AUDJPY`` -> ``("AUDUSD", "USDJPY")``, ``EURGBP`` -> ``("EURUSD",
+    "GBPUSD")``, ``EURCNH`` -> ``("EURUSD", "USDCNH")``.
+
+    The order is not arbitrary and is relied on twice: the first leg carries
+    the cross's base currency and the second its term currency, which is what
+    ``Book._feed_level`` composes an outright with and what
+    :func:`infer_leg_signs` reads the triangle's signs out of.  A cross whose
+    legs are named in the sheet is left exactly as it was named; this is only
+    what to do when nobody named them.
+    """
+    pair = str(pair).strip().upper()
+    if len(pair) != 6 or not pair.isalpha():
+        raise ValueError(f"{pair!r} is not a six-letter currency pair")
+    base, term = pair[:3], pair[3:6]
+    if base == term:
+        raise ValueError(f"{pair} is one currency against itself")
+    if not is_cross(pair):
+        raise ValueError(f"{pair} is already a dollar pair, so it has no legs")
+    return (usd_leg(base), usd_leg(term))

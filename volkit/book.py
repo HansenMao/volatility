@@ -25,7 +25,7 @@ from .calendars import CalendarSet, DEFAULT_CALENDARS
 from .cross import CorrelationCurve, CrossAtmCurve, infer_leg_signs
 from .events import EventSchedule
 from .econ import EconCalendar
-from .feed import MarketFeed
+from .feed import MarketFeed, pip_divisor
 from .marketdata import ExcelSource, MarketData, MarketDataError
 from .surface import VolSurface
 from .timeutil import Clock
@@ -93,15 +93,85 @@ class Book:
         put a strike axis in absolute terms would be naming levels nobody
         published.  One function for both, so a strike a chart shows and a
         band edge the model places can never come from different forwards.
+
+        A **cross the feed does not quote is built from its legs**, which it
+        does quote: a published EURUSD and USDJPY are a published EURJPY, by
+        the same triangle the surface itself is built on, and refusing one
+        while pricing the other off the same file is a feed that is loaded and
+        cannot be seen.  ``derived`` says it happened and ``via`` names the
+        legs, because a level that came out of an identity and one that was
+        published must not read the same.
         """
-        feed = self.feed
-        out = {"spot": None, "forward": None, "feed": False, "extrapolated": False}
-        if feed is None or pair.upper() not in getattr(feed, "pairs", {}):
+        out = {"spot": None, "forward": None, "points": None, "pip": None,
+               "feed": False, "extrapolated": False, "derived": False, "via": ""}
+        level = self._feed_level(pair, t)
+        if level is None:
             return out
-        quote = feed.quote(pair, t)
-        out.update(spot=float(quote["spot"]), forward=float(quote["forward"]),
-                   feed=True, extrapolated=bool(quote["extrapolated"]))
+        out.update(spot=level["spot"], forward=level["forward"],
+                   points=level["points"], pip=level["pip"], feed=True,
+                   extrapolated=level["extrapolated"],
+                   derived=bool(level["via"]), via=level["via"])
         return out
+
+    def _feed_level(self, pair: str, t: float,
+                    trail: tuple[str, ...] = ()) -> dict | None:
+        """One pair's spot and outright forward, quoted or composed from legs.
+
+        ``None`` when neither is possible -- no feed, no quote for the pair and
+        no pair of legs that has one.  The composition is exact rather than a
+        convenience: a cross outright is the product of its legs' outrights in
+        the right orientation, which is triangular arbitrage and not a model.
+        ``trail`` is what stops a cross of a cross walking in a circle.
+        """
+        key = pair.upper()
+        feed = self.feed
+        if feed is None:
+            return None
+        if key in getattr(feed, "pairs", {}):
+            quote = feed.quote(key, t)
+            return {"spot": float(quote["spot"]), "forward": float(quote["forward"]),
+                    "points": float(quote["points"]), "pip": float(quote["pip"]),
+                    "extrapolated": bool(quote["extrapolated"]), "via": ""}
+        if key in trail:
+            return None
+        spec = self.data.pairs.get(key)
+        legs = tuple(getattr(spec, "legs", ()) or ())
+        if len(legs) != 2:
+            return None
+        try:
+            sign_a, sign_b = infer_leg_signs(key, legs[0], legs[1])
+        except ValueError:
+            return None
+        a = self._feed_level(legs[0], t, trail + (key,))
+        b = self._feed_level(legs[1], t, trail + (key,))
+        if a is None or b is None:
+            return None
+        if min(a["spot"], a["forward"], b["spot"], b["forward"]) <= 0:
+            return None
+
+        def compose(x_a: float, x_b: float) -> float:
+            # The first leg carries the base currency and the second the term,
+            # and each is turned the right way up before they meet.  The signs
+            # are the triangle's own (``infer_leg_signs``), read here as
+            # quotation rather than as correlation: +1 on the first leg means
+            # it already reads (base)/(common), +1 on the second means it reads
+            # (term)/(common) and so enters inverted.  EURJPY is EURUSD *
+            # USDJPY; EURGBP is EURUSD / GBPUSD.
+            first = x_a if sign_a > 0 else 1.0 / x_a
+            second = 1.0 / x_b if sign_b > 0 else x_b
+            return first * second
+
+        spot = compose(a["spot"], b["spot"])
+        forward = compose(a["forward"], b["forward"])
+        # The points are the composed outright less the composed spot, in the
+        # cross's own pips.  They are never the legs' points added: a point of
+        # EURUSD and a point of USDJPY are different amounts of money, and the
+        # sum of them is not a number anybody quotes.
+        pip = pip_divisor(key)
+        return {"spot": spot, "forward": forward,
+                "points": (forward - spot) * pip, "pip": pip,
+                "extrapolated": bool(a["extrapolated"] or b["extrapolated"]),
+                "via": f"{legs[0]} and {legs[1]}"}
 
     def forward_at(self, pair: str, t: float) -> float | None:
         """The outright forward from the feed, or None when there is no feed."""

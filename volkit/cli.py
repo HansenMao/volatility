@@ -9,14 +9,22 @@ workbook without building anything.
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import sys
 from datetime import datetime
 from pathlib import Path
 
-from . import config, paths, screens, session
+# archive, llm and synthesis are imported at module level because
+# ``build_parser`` names their constants in the agent command's help and
+# choices, and a parser cannot be built from a module imported inside a
+# function.  All three are stdlib-only, so this does not drag the numeric
+# stack into anything that did not already have it.
+from . import (archive, config, consult, dtcc, llm, marking, paths, remarks,
+               screens, session, synthesis)
 from .book import Book
 from .marketdata import ExcelSource, MarketDataError
+from .pricing import expiry_datetime
 from .timeutil import UTC, Clock, parse_datetime, tenor_to_years
 
 #: Every subcommand name, whether or not this build registers it.  Used before
@@ -175,6 +183,8 @@ def cmd_check(args) -> int:
     print(f"  tenors  : {', '.join(data.tenor_points)}")
     print(f"  quotes  : {sum(len(m) for m in data.marks.values())} across {len(data.marks)} sheets")
     print(f"  events  : {sum(len(p.events) for p in data.params.values())}")
+    for note in data.notes:
+        print(f"    . {note}")
     if data.problems:
         print(f"\n  {len(data.problems)} problem(s):")
         for p in data.problems:
@@ -212,7 +222,11 @@ def cmd_vol(args) -> int:
     book = _book(args, [args.pair])
     _apply_band(args, book)
     surface = book[args.pair]
-    expiry = parse_datetime(args.expiry)
+    # The pricing screen's own expiry box, on the command line: a tenor is
+    # resolved on the pair's calendar and a date is read in any of the
+    # spellings `timeutil` takes.  The two must not understand different
+    # things -- this command is that screen's equivalent.
+    expiry = expiry_datetime(book, args.pair, args.expiry)
     if args.strike is None:
         print(f"{surface.atm_vol(expiry, args.cut) * 100:.6f}")
         return 0
@@ -225,7 +239,7 @@ def cmd_smile(args) -> int:
     book = _book(args, [args.pair])
     _apply_band(args, book)
     surface = book[args.pair]
-    expiry = parse_datetime(args.expiry)
+    expiry = expiry_datetime(book, args.pair, args.expiry)
     sl = surface.slice_at(expiry, args.method, args.cut)
     print(f"{args.pair}  expiry {expiry:%Y-%m-%d}  t={sl.t:.5f}y  method={args.method}")
     # The same scale the marking screen's chart uses: with a feed the strikes
@@ -238,6 +252,8 @@ def cmd_smile(args) -> int:
         print(f"  {row['label']:<10}{row['strike'] * scale:>12.6f}{row['vol'] * 100:>10.4f}")
     if level["feed"]:
         print(f"  spot {level['spot']:.6f}  forward {scale:.6f}"
+              + (f"  (the {level['via']} triangle; the feed does not quote "
+                 f"{args.pair.upper()} itself)" if level["derived"] else "")
               + ("  (extrapolated beyond the feed's pillars)"
                  if level["extrapolated"] else ""))
     if sl.svi is not None:
@@ -441,7 +457,7 @@ def cmd_analysis(args) -> int:
             print(f"\nwings as SABR shape — {tag} delta, marked smile against measured history")
             print(f"  {'tenor':<6}{'rr':>9}{'fly':>9}{'i.rho':>9}{'r.rho':>9}{'±se':>7}"
                   f"{'diff':>9}{'i.nu':>9}{'r.nu':>9}{'±se':>7}{'diff':>9}"
-                  f"{'i.nu*sqrt(t)':>13}{'measured on':>13}{'fit err':>9}")
+                  f"{'i.nu*sqrt(t)':>13}{'measured on':>13}{'window':>7}{'fit err':>9}")
             for r in rows:
                 if r.implied_rho is None and r.realized_rho is None:
                     print(f"  {r.tenor:<6}  {'; '.join(r.warnings[:1]) or 'unavailable'}")
@@ -453,13 +469,18 @@ def cmd_analysis(args) -> int:
                       f"{g(r.rho_difference)}{g(r.implied_nu)}{g(r.realized_nu)}"
                       f"{g(r.realized_nu_se, 7)}{g(r.nu_difference)}{g(nu_scaled, 13)}"
                       f"{(r.dynamics_source or '—'):>13}"
+                      f"{('—' if r.dynamics_days is None else f'{r.dynamics_days:.0f}d'):>7}"
                       f"{('—'.rjust(9) if r.implied_shape_error is None else f'{r.implied_shape_error * 100:>9.4f}')}")
             print("  rho is the spot/volatility correlation a risk reversal is paid for, nu the vol "
                   "of vol a\n  butterfly is paid for. SABR has no mean reversion, so nu rises at "
                   "short tenors on both sides;\n  nu*sqrt(t) is the scale-free number that "
                   "actually sets the shape. 'fit err' is how far the\n  marked smile is from any "
                   "SABR smile at all, in volatility points — a large one means these\n  two "
-                  "parameters do not describe it and the comparison is loose.")
+                  "parameters do not describe it and the comparison is loose. 'window' is what "
+                  "the\n  measured pair was taken over, and it is deliberately not the realized "
+                  "lookback: rho and nu\n  are properties of the process rather than forecasts "
+                  "over a horizon, and they need more\n  paired observations than a realized "
+                  "volatility needs returns.")
 
     if book.data.pairs[args.pair].is_cross:
         tri = analytics.triangle_table(book, args.pair, method=args.method, cut=args.cut,
@@ -835,23 +856,42 @@ def cmd_listed(args) -> int:
         print(f"  ! {w}")
 
     if args.positions:
-        # The same call the screen makes, with this one panel as the whole
-        # screen: a position naming another contract is told so rather than
-        # being priced against the only curve to hand.
+        # The same call the screen makes, with this command's panels as the
+        # whole screen: a position naming another contract is told so rather
+        # than being priced against the only curve to hand.  --panels is what
+        # lets a screen holding several contracts be reproduced here, since
+        # aggregating across them is the whole point of the positions table.
+        panels = [payload]
+        if args.panels:
+            more = json.loads(paths.read_text(args.panels))
+            if not isinstance(more, list):
+                raise ValueError(f"{args.panels} must hold a JSON list of panels, "
+                                 f"got {type(more).__name__}")
+            panels += more
         g = listed_mod.positions_from_request({
             "text": (sys.stdin.read() if args.positions == "-"
                      else paths.read_text(args.positions)),
-            "panels": [payload], "vol_bump": args.vol_bump, "theta_days": args.theta_days,
+            "panels": panels, "vol_bump": args.vol_bump, "theta_days": args.theta_days,
         }).run(clock=_clock(args))
         _print_listed_positions(g)
         return 1 if (r["warnings"] or g["warnings"]) else 0
     return 1 if r["warnings"] else 0
 
 
+def _m(v) -> str:
+    """One money cell, blank when there is no number to print.
+
+    A money total across two settlement currencies is not a number, so it is
+    reported as absent rather than as a sum -- the per-currency rows beside it
+    hold every figure.
+    """
+    return "--" if v is None else f"{v:,.0f}"
+
+
 def _print_listed_positions(g: dict) -> None:
     """The positions table and the aggregate, in the screen's own order."""
     print(f"\n  positions   vega, vanna and volga per {g['vol_bump']:g} vol point(s); "
-          f"theta over {g['theta_days']:g} day(s); money in the contract's premium currency")
+          f"theta over {g['theta_days']:g} day(s); money in the contract's settlement currency")
     head = (f"  {'#':>3} {'panel':<12}{'strike':>12}{'c/p':>5}{'qty':>9}{'vol %':>9}"
             f"{'premium':>13}{'delta fut':>11}{'vega':>12}{'theta':>11}{'gamma 1%':>11}")
     print(head)
@@ -872,11 +912,26 @@ def _print_listed_positions(g: dict) -> None:
             print(f"      {'= ' + grp['panel'][:10]:<12}{'':>12}{'':>5}{'':>9}{'':>9}"
                   f"{grp['premium']:>13,.0f}{k['delta_futures']:>11,.2f}"
                   f"{k['vega']:>12,.0f}{k['theta']:>11,.0f}{k['gamma_1pct']:>11,.0f}")
-        t = g["totals"][kind]
-        print(f"      {'= all':<12}{'':>12}{'':>5}{'':>9}{'':>9}{g['totals']['premium']:>13,.0f}"
-              f"{'--':>11}{t['vega']:>12,.0f}{t['theta']:>11,.0f}{t['gamma_1pct']:>11,.0f}")
-    print("      futures-equivalent delta is per contract and is not totalled: a future of "
-          "one contract is not a future of another")
+        # Per contract, every column still adds; the row is only worth
+        # printing where more than one panel is under the code.
+        for con in g.get("contracts") or ():
+            if con["panels"] < 2:
+                continue
+            k = con[kind]
+            print(f"      {'= ' + con['underlying'][:10]:<12}{'':>12}{'':>5}{'':>9}{'':>9}"
+                  f"{con['premium']:>13,.0f}{k['delta_futures']:>11,.2f}"
+                  f"{k['vega']:>12,.0f}{k['theta']:>11,.0f}{k['gamma_1pct']:>11,.0f}"
+                  f"   ({con['panels']} panels)")
+        # Across contracts only money adds, and only within one settlement
+        # currency: a sum of euros and dollars is not a number.
+        for cc in (g.get("currencies") or [dict(g["totals"], ccy="")]):
+            t, label = cc[kind], f"= all {cc['ccy']}".rstrip()
+            print(f"      {label:<12}{'':>12}{'':>5}{'':>9}{'':>9}{_m(cc['premium']):>13}"
+                  f"{'--':>11}{_m(t['vega']):>12}{_m(t['theta']):>11}"
+                  f"{_m(t['gamma_1pct']):>11}")
+    print("      futures-equivalent delta is totalled per contract, across that contract's "
+          "expiries, and never across contracts: a future of one contract is not a future "
+          "of another, and two delivery months are not the same future either")
     for x in g["skipped"]:
         print(f"  ! line {x['line']} skipped ({x['why']}): {x['text']}")
     for n in g["notes"]:
@@ -886,36 +941,77 @@ def _print_listed_positions(g: dict) -> None:
 
 
 def cmd_mm(args) -> int:
-    """Fit a curve, fine tune the wings and build a two-way price.
+    """Fit a curve and the wings to a market, and quote what is being asked for.
+
+    Two stages and two panels, exactly as the screen has them (§11): the fit
+    reads the market paste and moves the marks, the quote reads the request
+    file and puts a two-way on each line of it.  Both run here when both are
+    given, and the fit's marks are handed to the quote the same way the
+    browser hands them over -- so this command and the screen stand on the
+    same numbers.  Either half runs on its own: a market with no request file
+    fits and reports, a request file with ``--no-curve --no-wings`` quotes off
+    the marks as they stand.
 
     The web screen's Market-maker tab and this command share
-    ``marketmaker.panel_from_request``, so a panel set up in the browser and
-    the same panel run from a shell script produce identical numbers.
+    ``marketmaker.panel_from_request`` and ``.quote_panel_from_request``, so a
+    panel set up in the browser and the same panel run from a shell script
+    produce identical numbers.
     """
     from . import marketmaker as mm
     from .knowledge import KnowledgeBank
 
-    text = sys.stdin.read() if args.file in (None, "-") else paths.read_text(args.file)
-    payload = {
-        "pair": args.pair, "cut": args.cut, "method": args.method, "text": text,
-        "vol_unit": args.vol_unit, "fly_convention": args.fly,
+    if args.file == "-" and args.request == "-":
+        print("  ! only one of --file and --request can be read from stdin", file=sys.stderr)
+        return 2
+    # stdin is the market when nothing says otherwise, which is what
+    # ``volkit mm EURUSD < run.txt`` has always meant.
+    if args.file == "-" or (args.file is None and args.request is None):
+        market_text = sys.stdin.read()
+    elif args.file:
+        market_text = paths.read_text(args.file)
+    else:
+        market_text = ""
+    if args.request == "-":
+        request_text = sys.stdin.read()
+    elif args.request:
+        request_text = paths.read_text(args.request)
+    else:
+        request_text = ""
+
+    common = {
+        "pair": args.pair, "cut": args.cut, "method": args.method,
+        "vol_unit": args.vol_unit, "fly_convention": args.fly, "text": market_text,
+    }
+    fit_payload = {
+        **common,
         "target_source": args.target_source,
         "target_text": (paths.read_text(args.target) if args.target else ""),
         "fit_curve": not args.no_curve, "free": args.free,
         "tune_wings": not args.no_wings, "smile_free": args.smile_free,
         "mid_pull": args.mid_pull, "max_nfev": args.max_evals,
+        "apply": False,
+    }
+    quote_payload = {
+        **common,
+        "request_text": request_text,
         "vega_text": (paths.read_text(args.vega) if args.vega else ""),
         "vega_scale": args.axe_scale, "fair_weight": args.fair_weight,
         "axe_weight": args.axe_weight, "skew_cap": args.skew_cap,
         "horizon_days": args.horizon, "fallback_spread": args.fallback_spread,
-        "apply": False,
+        "use_archive_width": bool(args.archive_width),
     }
     bank = KnowledgeBank.load(args.knowledge)
     clock = _clock(args)
+    arc = None
+    if args.archive_width:
+        from . import archive as archive_mod
+        arc = archive_mod.Archive.load(args.archive)
+        for problem in arc.problems:
+            print(f"  ! archive: {problem}", file=sys.stderr)
 
     if args.learn:
         book = Book.from_excel(args.workbook, clock)
-        rules, notes, parse = mm.learn_from_panel(payload, clock)
+        rules, notes, parse = mm.learn_from_panel(fit_payload, clock)
         print(f"{args.pair}: {parse['n_quotes']} quote(s) read, {parse['vol_unit']}")
         for r in rules:
             print(f"  {r.describe()}")
@@ -940,6 +1036,16 @@ def cmd_mm(args) -> int:
             print(f"  . {n}")
         return 0
 
+    # A fit needs something to aim at: a market to read the at-the-money off,
+    # or a target curve that does not come out of one.  Neither, and there is
+    # nothing to fit and the request is quoted off the marks as they stand.
+    do_fit = bool(market_text.strip()) or args.target_source not in ("quotes", "none")
+    do_quote = bool(request_text.strip())
+    if not do_fit and not do_quote:
+        print("  ! nothing to do: paste a market to fit to (--file), or a list of instruments "
+              "to quote (--request)", file=sys.stderr)
+        return 2
+
     book = _book(args, [args.pair])
     if args.feed:
         # The screen has a feed loaded, so this must be able to have one too:
@@ -959,8 +1065,32 @@ def cmd_mm(args) -> int:
             hist = loaded[args.pair]
         else:
             print(f"  ! {args.history} has no sheet for {args.pair}", file=sys.stderr)
-    r = mm.panel_from_request(payload).run(book, bank=bank, hist=hist)
 
+    warnings = 0
+    if do_fit:
+        fit = mm.panel_from_request(fit_payload).run(book)
+        _print_fit(fit, do_quote)
+        warnings += len(fit["warnings"])
+        # The same hand-off the browser makes, for the same reason: the fit's
+        # answer travels as numbers and is put on the surface for the length
+        # of one quote run.
+        quote_payload["marks"] = fit["marks"]
+    if do_quote:
+        out = mm.quote_panel_from_request(quote_payload).run(book, bank=bank, hist=hist,
+                                                             archive=arc)
+        _print_quote(out, float(args.skew_cap))
+        warnings += len(out["warnings"])
+    return 1 if warnings else 0
+
+
+def _cell(value, width=10, dp=4, signed=False):
+    if value is None:
+        return f"{'-':>{width}}"
+    return f"{value:>+{width}.{dp}f}" if signed else f"{value:>{width}.{dp}f}"
+
+
+def _print_fit(r: dict, quoting: bool) -> None:
+    """The fit: what moved, and where the surface now sits against the market."""
     print(f"{r['pair']}  cut {r['cut']}  {r['method']}  "
           f"valuation {r['valuation'][:16].replace('T', ' ')}Z"
           + ("   [cross]" if r["is_cross"] else ""))
@@ -993,36 +1123,66 @@ def cmd_mm(args) -> int:
         print(f"      {w['evaluations']} evaluations, {w['slices']} smile fits, "
               f"{w['seconds']:.2f}s")
 
-    sheet = r["sheet"]
-    print(f"\n  {sheet['n_quotes']} quote(s), {sheet['inside']} with our mid inside their market, "
-          f"{sheet['priced']} with a width")
-    panel_cap = float(args.skew_cap)
+    market = r["market"]
+    print(f"\n  {market['n_quotes']} quote(s) read, {market['inside_before']} with the model "
+          f"inside their market before the fit and {market['inside']} after")
     # The time column only appears when the paste was timed; a column of dashes
     # on a run nobody timestamped is noise in a table that is already wide.
-    timed = any(row.get("timestamp") for row in sheet["rows"]) or bool(sheet.get("superseded"))
-    stamp_w = max([5] + [len(row.get("timestamp") or "") for row in sheet["rows"]]) + 2
+    timed = any(row.get("timestamp") for row in market["rows"]) or bool(market.get("superseded"))
+    stamp_w = max([5] + [len(row.get("timestamp") or "") for row in market["rows"]]) + 2
     head = f"  {'quote':<26}"
     if timed:
         head += f"{'time':>{stamp_w}}"
-    print(head + f"{'their bid':>10}{'their ask':>10}{'model':>9}{'skew':>9}"
+    print(head + f"{'their bid':>10}{'their ask':>10}{'was':>9}{'now':>9}{'moved':>9}  verdict")
+    for row in market["rows"]:
+        stamp = f"{(row.get('timestamp') or '-'):>{stamp_w}}" if timed else ""
+        print(f"  {row['describe']:<26}{stamp}{_cell(row['market_bid'])}{_cell(row['market_ask'])}"
+              f"{_cell(row['model_before'], 9)}{_cell(row['model_after'], 9)}"
+              f"{_cell(row['model_move'], 9, 4, True)}  {row['verdict']}")
+        for x in row["warnings"]:
+            print(f"      ! {x}")
+    for n_ in market["notes"]:
+        print(f"  . {n_}")
+    for row in market["skipped"]:
+        print(f"  ! line {row['line']} skipped ({row['why']}): {row['text'][:60]}")
+    for row in market.get("superseded") or []:
+        # Not an error and not skipped: read, understood, and replaced by a
+        # later quote of the same thing.  Printed so a run whose update was
+        # mis-typed shows the quote that went missing rather than hiding it.
+        print(f"  . line {row['line']} superseded by line {row['replaced_by']}: "
+              f"{row['describe']} {row['bid']:.4f}/{row['ask']:.4f}"
+              + (f" at {row['timestamp']}" if row["timestamp"] else ""))
+    marks = r["marks"]
+    print(f"  . the fit moved {marks['what']}"
+          + ("; those marks are what the quote below stands on" if quoting else
+             ", and put the book back. Add --request to quote off what it arrived at"))
+    for x in r["warnings"]:
+        print(f"  ! {x}")
+
+
+def _print_quote(r: dict, panel_cap: float) -> None:
+    """The quote: a two-way in each instrument that was asked for."""
+    sheet = r["sheet"]
+    print(f"\n  {sheet['n_quotes']} instrument(s) asked for, {sheet['priced']} with a width, "
+          f"{sheet['matched']} also quoted in the market paste")
+    print(f"  . {r['marks']['note']}")
+    ar = r.get("archive") or {}
+    if ar.get("used"):
+        print("  . " + (f"archive on the width ladder: {ar.get('widths', 0)} width(s) held "
+                        f"with enough behind them, {ar.get('counted', 0)} observation(s) counted"
+                        if ar.get("available") else ar.get("reason", "")))
+    print(f"  {'instrument':<26}{'their bid':>10}{'their ask':>10}{'model':>9}{'skew':>9}"
           f"{'our bid':>9}{'our ask':>10}{'width':>8}  verdict")
-
-    def cell(value, width=10, dp=4, signed=False):
-        if value is None:
-            return f"{'-':>{width}}"
-        return f"{value:>+{width}.{dp}f}" if signed else f"{value:>{width}.{dp}f}"
-
     capped = 0
     for row in sheet["rows"]:
         # A starred lean is one the cap bound: the axe wanted to move the price
         # further than a quote is allowed to be moved.
         if row["skew_capped"]:
             capped += 1
-        stamp = f"{(row.get('timestamp') or '-'):>{stamp_w}}" if timed else ""
-        print(f"  {row['describe']:<26}{stamp}{cell(row['market_bid'])}{cell(row['market_ask'])}"
-              f"{cell(row['model_after'], 9)}{cell(row['skew_total'], 8, 3, True)}"
+        print(f"  {row['describe']:<26}{_cell(row['market_bid'])}{_cell(row['market_ask'])}"
+              f"{_cell(row['model'], 9)}{_cell(row['skew_total'], 8, 3, True)}"
               f"{'*' if row['skew_capped'] else ' '}"
-              f"{cell(row['our_bid'], 9)}{cell(row['our_ask'])}{cell(row['width'], 8, 3)}"
+              f"{_cell(row['our_bid'], 9)}{_cell(row['our_ask'])}{_cell(row['width'], 8, 3)}"
               f"  {row['verdict']}")
         if row["width_source"]:
             print(f"      . width: {row['width_source']}")
@@ -1030,6 +1190,8 @@ def cmd_mm(args) -> int:
             print(f"      . {row['skew_reason']}")
         for x in row["advice"]:
             print(f"      > {x}")
+        for x in row["notes"]:
+            print(f"      . {x}")
         for x in row["warnings"]:
             print(f"      ! {x}")
     if capped:
@@ -1039,16 +1201,8 @@ def cmd_mm(args) -> int:
         print(f"  . {n_}")
     for row in sheet["skipped"]:
         print(f"  ! line {row['line']} skipped ({row['why']}): {row['text'][:60]}")
-    for row in sheet.get("superseded") or []:
-        # Not an error and not skipped: read, understood, and replaced by a
-        # later quote of the same thing.  Printed so a run whose update was
-        # mis-typed shows the quote that went missing rather than hiding it.
-        print(f"  . line {row['line']} superseded by line {row['replaced_by']}: "
-              f"{row['describe']} {row['bid']:.4f}/{row['ask']:.4f}"
-              + (f" at {row['timestamp']}" if row["timestamp"] else ""))
     for x in r["warnings"]:
         print(f"  ! {x}")
-    return 1 if r["warnings"] else 0
 
 
 def cmd_validate(args) -> int:
@@ -1168,7 +1322,544 @@ def cmd_serve(args) -> int:
           history_path=getattr(args, "history", None),
           bank_path=getattr(args, "knowledge", None),
           session_path=getattr(args, "session", None),
-          auto_reload=getattr(args, "auto_reload", 0.0) or 0.0)
+          auto_reload=getattr(args, "auto_reload", 0.0) or 0.0,
+          archive_path=getattr(args, "archive", None),
+          agent_chats=getattr(args, "chats", None) or [],
+          agent_sdr=getattr(args, "sdr", None) or [],
+          ingest_state_path=getattr(args, "ingest_state", None),
+          dtcc_proxy=getattr(args, "proxy", None),
+          journal_path=getattr(args, "journal", None))
+    return 0
+
+
+def _agent_model(args):
+    """The local model this run may use, or ``None`` and why not.
+
+    Built here rather than inside the agent so that *every* action prints the
+    same sentence about it.  A build that quietly used a model and a build
+    that quietly did not must never look the same from the outside.
+    """
+    from .llm import LlmError, LocalModel, ModelConfig
+    if getattr(args, "no_llm", False):
+        return None, "no model: --no-llm was given"
+    try:
+        cfg = ModelConfig.from_env(backend=getattr(args, "llm_backend", None),
+                                   base_url=getattr(args, "llm_url", None),
+                                   model=getattr(args, "llm_model", None))
+    except LlmError as exc:
+        return None, f"no model: {exc}"
+    model = LocalModel(cfg)
+    if not model.available():
+        return None, f"no model: {model.why_not}"
+    return model, f"model: {cfg.describe()}"
+
+
+def _agent_folders(args) -> list[tuple[str, str]]:
+    return ([(p, "chat") for p in (getattr(args, "chats", None) or [])]
+            + [(p, "sdr") for p in (getattr(args, "sdr", None) or [])])
+
+
+def cmd_agent(args) -> int:
+    """The desk agent: ingest, synthesize, quote, explain, and keep the record.
+
+    Every action here goes through the same functions the screen would call,
+    which is what keeps a price made in a shell and a price made in a browser
+    the same price -- the rule §10 sets for every screen in this tool.
+    """
+    import json as _json
+    from datetime import timedelta
+    from . import agent as agent_mod
+    from . import archive as archive_mod
+    from . import ingest as ingest_mod
+    from . import synthesis as synthesis_mod
+    from .knowledge import KnowledgeBank, merge_rules
+
+    action = args.action
+    pair = (args.pair or "").upper()
+    arc = archive_mod.Archive.load(args.archive)
+    for problem in arc.problems:
+        print(f"  ! {problem}", file=sys.stderr)
+    clock = _clock(args)
+
+    # ---- the record of what has been seen --------------------------------
+    if action == "archive":
+        rows = arc.summary() if not pair else [r for r in arc.summary() if r["pair"] == pair]
+        if not rows:
+            print(f"the archive at {arc.path} holds nothing"
+                  + (f" for {pair}" if pair else ""))
+            return 0
+        for r in rows:
+            print(f"{r['pair']}: {r['records']} record(s) -- {r['quote']} quote, {r['trade']} "
+                  f"trade, {r['shown']} shown, {r['outcome']} outcome; "
+                  f"{r['first'][:16]} to {r['last'][:16]}"
+                  + (f"; {r['model_read']} read by a model" if r["model_read"] else ""))
+        if pair and args.kind:
+            print()
+            for o in arc.query(pair=pair, kinds=args.kind)[-int(args.limit or 40):]:
+                print(f"  {o.id}  {o.at[:16]}  {o.describe()}")
+        return 0
+
+    # ---- reading the folders ---------------------------------------------
+    if action in ("ingest", "watch"):
+        folders = _agent_folders(args)
+        if not folders:
+            print("error: nothing to read; give --chats and/or --sdr a folder",
+                  file=sys.stderr)
+            return 2
+        model, model_note = _agent_model(args)
+        print(model_note)
+        state = ingest_mod.State.load(args.ingest_state)
+        for problem in state.problems:
+            print(f"  ! {problem}", file=sys.stderr)
+        if args.forget:
+            print(f"forgotten: {state.forget(args.forget if args.forget != '*' else '')} "
+                  f"file(s) will be read again")
+        book = _book(args) if args.known_pairs else None
+        known = book.pairs if book is not None else None
+
+        def report(result) -> None:
+            print(result.summary())
+            for f in result.files:
+                print(f"  {f.line()}")
+                for note in f.notes[:6]:
+                    print(f"      . {note}")
+                for skip in f.skipped[:8]:
+                    print(f"      ! {skip}")
+                if len(f.skipped) > 8:
+                    print(f"      ! ... and {len(f.skipped) - 8} more not understood")
+            for note in result.notes:
+                print(f"  . {note}")
+
+        if action == "ingest":
+            result = ingest_mod.scan(folders, archive=arc, state=state, model=model,
+                                     known_pairs=known, pair=pair,
+                                     counterparty=args.counterparty, force=args.force)
+            report(result)
+            print(f"written: {arc.flush()} record(s) to {arc.path}")
+            state.save()
+            return 0
+        print(f"watching every {args.every:g}s; stop with Ctrl-C")
+        ingest_mod.watch(folders, archive=arc, state=state, every=args.every,
+                         rounds=args.rounds, on_result=report, model=model,
+                         known_pairs=known, pair=pair, counterparty=args.counterparty)
+        return 0
+
+    # ---- fetching the dissemination files --------------------------------
+    if action == "fetch":
+        from . import dtcc
+        folders = [p for p in (args.sdr or [])]
+        if not folders:
+            print("error: say where to put them with --sdr DIR", file=sys.stderr)
+            return 2
+        today = clock.now.date()
+        if args.days:
+            days = dtcc.recent_days(int(args.days), today=today)
+        else:
+            try:
+                start = (datetime.strptime(args.since, "%Y-%m-%d").date() if args.since
+                         else today - timedelta(days=1))
+                end = (datetime.strptime(args.until, "%Y-%m-%d").date() if args.until
+                       else today - timedelta(days=1))
+            except ValueError as exc:
+                print(f"error: a date must be YYYY-MM-DD ({exc})", file=sys.stderr)
+                return 2
+            days = dtcc.business_days(start, end)
+        proxy = args.proxy or dtcc.default_proxy()
+        down = dtcc.Downloader(jurisdiction=args.jurisdiction, asset_class=args.asset,
+                               report=args.report, proxy=proxy, timeout=args.timeout)
+        print(f"{len(days)} date(s) into {folders[0]}"
+              + (f" through {proxy}" if proxy else "")
+              + f"  ({down.base}/{args.report}/{args.jurisdiction})")
+        result = down.fetch(days, folders[0], today=today, overwrite=args.force,
+                            on_day=lambda row: print(f"  {row.line()}"))
+        for note in result.notes:
+            print(f"  . {note}")
+        print(result.summary())
+        if not args.no_ingest and result.written:
+            print("\nreading what was fetched:")
+            state = ingest_mod.State.load(args.ingest_state)
+            book = _book(args) if args.known_pairs else None
+            scan = ingest_mod.scan([(folders[0], "sdr")], archive=arc, state=state,
+                                   known_pairs=(book.pairs if book is not None else None))
+            for f in scan.files:
+                print(f"  {f.line()}")
+            print(f"  written: {arc.flush()} record(s) to {arc.path}")
+            state.save()
+        return 1 if result.failed and not result.written else 0
+
+    if not pair:
+        print(f"error: '{action}' needs a pair", file=sys.stderr)
+        return 2
+
+    # ---- what the archive says -------------------------------------------
+    if action == "evidence":
+        syn = synthesis_mod.synthesize(
+            arc, pair, asof=clock.now, half_life=args.half_life,
+            min_effective=args.min_evidence, lookback_days=args.lookback,
+            include_model_read=not args.no_model_read)
+        for line in syn.lines():
+            print(line)
+        return 0
+
+    if action == "learn":
+        bank = KnowledgeBank.load(args.knowledge)
+        syn = synthesis_mod.synthesize(
+            arc, pair, asof=clock.now, half_life=args.half_life,
+            min_effective=args.min_evidence, lookback_days=args.lookback,
+            include_model_read=not args.no_model_read)
+        rules = syn.proposed_rules()
+        if not rules:
+            print(f"{pair}: nothing in the archive has enough behind it to propose a width. "
+                  f"'volkit agent evidence {pair}' shows what there is")
+            return 0
+        for r in rules:
+            print(f"  {r.describe()}")
+            print(f"      {r.text}")
+        if not args.save:
+            print("\n  nothing was written; add --save to put these into the bank")
+            return 0
+        merged, notes = merge_rules(list(bank.for_pair(pair).rules), rules)
+        problems = bank.set_pair(pair, merged, clock.now,
+                                 f"learned from {syn.counted} archived observation(s)")
+        for note in notes:
+            print(f"  . {note}")
+        for problem in problems:
+            print(f"  ! {problem}", file=sys.stderr)
+        print(f"saved: {bank.save(args.knowledge)}")
+        return 0
+
+    # ---- what printed, in volatility terms -------------------------------
+    if action == "trades":
+        hist_pair = None
+        if args.history:
+            from .history import load_history
+            history = load_history(args.history)
+            hist_pair = history.pairs.get(pair)
+            for problem in history.problems[:5]:
+                print(f"  ! {problem}", file=sys.stderr)
+        rows = arc.query(pair=pair, kinds="trade",
+                         since=clock.now - timedelta(days=args.lookback), until=clock.now)
+        print(f"{pair}: {len(rows)} printed trade(s) in the last {args.lookback:g} days")
+        if not args.invert:
+            for o in rows[-int(args.limit or 40):]:
+                print(f"  {o.at[:16]}  {o.describe()}")
+            print("\n  add --invert to turn these into volatilities "
+                  "(--history is needed for the forward)")
+            return 0
+        vols, notes = synthesis_mod.invert_trades(
+            arc, pair, asof=clock.now, hist_pair=hist_pair, lookback_days=args.lookback,
+            discount_rate=args.discount_rate)
+        for v in vols[-int(args.limit or 40):]:
+            print(f"  {v.at[:16]}  {v.describe()}")
+            print(f"       {v.why}")
+        for note in notes:
+            print(f"  . {note}")
+        return 0
+
+    # ---- a price we made, recorded by hand -------------------------------
+    if action == "shown":
+        from .quotes import QuoteError, parse_quotes
+        text = sys.stdin.read() if args.file in (None, "-") else paths.read_text(args.file)
+        try:
+            run_ = parse_quotes(text, pair=pair, fly_convention=args.fly)
+        except QuoteError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        # Read by the same grammar a broker run is read by, and then filed as
+        # *ours*: the difference between a market somebody showed and a price
+        # we made is not in the text, it is in who made it, so it is said here
+        # and not inferred from the line.
+        written = []
+        for obs in archive_mod.from_quotes(run_, pair=pair, source="desk", origin="typed",
+                                           counterparty=args.counterparty, via="hand",
+                                           default_time=clock.now):
+            ours = archive_mod.replace(obs, kind="shown")
+            ok, why = arc.add(ours)
+            if ok:
+                written.append(ours)
+            else:
+                print(f"  ! {ours.describe()}: {why}", file=sys.stderr)
+        arc.flush()
+        for o in written:
+            print(f"{o.id}  {o.describe()}")
+        print(f"recorded: {len(written)} price(s); answer one with "
+              f"'volkit agent outcome {pair} --ref <id> --result traded_ask'")
+        return 0
+
+    if action == "outcome":
+        if not args.ref or not args.result:
+            print("error: an outcome needs --ref (the id of the price shown) and --result",
+                  file=sys.stderr)
+            return 2
+        target = arc.by_id(args.ref)
+        if target is None:
+            print(f"error: no record in the archive has the id {args.ref}. "
+                  f"'volkit agent archive {pair} --kind shown' lists them", file=sys.stderr)
+            return 2
+        if target.kind != "shown":
+            print(f"error: {args.ref} is a {target.kind} record, not a price we showed; an "
+                  f"outcome answers a price we made", file=sys.stderr)
+            return 2
+        obs = archive_mod.outcome(target, args.result, away_level=args.away, at=clock.now,
+                                  counterparty=args.counterparty)
+        ok, why = arc.add(obs)
+        if not ok:
+            print(f"error: {why}", file=sys.stderr)
+            return 2
+        arc.flush()
+        print(f"{obs.id}  {obs.describe()}  (answers {target.describe()})")
+        return 0
+
+    # ---- the price -------------------------------------------------------
+    if action != "quote":
+        print(f"error: unknown action {action!r}", file=sys.stderr)
+        return 2
+
+    text = sys.stdin.read() if args.file in (None, "-") else paths.read_text(args.file)
+    if not text.strip():
+        print("error: nothing to price; give one instrument a line, e.g. '1M ATM in 100mm vega'",
+              file=sys.stderr)
+        return 2
+
+    model, model_note = _agent_model(args)
+    book = _book(args, [pair])
+    _apply_band(args, book)
+    bank = KnowledgeBank.load(args.knowledge)
+    for problem in bank.problems:
+        print(f"  ! {problem}", file=sys.stderr)
+    hist = None
+    if args.history:
+        from .history import load_history
+        hist = load_history(args.history, book.pairs)
+        for problem in hist.problems:
+            print(f"  ! {problem}", file=sys.stderr)
+
+    request = agent_mod.Request(
+        pair=pair, text=text, cut=args.cut, method=args.method,
+        fly_convention=args.fly, use_archive_width=not args.no_archive_width,
+        half_life=args.half_life, min_effective=args.min_evidence,
+        lookback_days=args.lookback, include_model_read=not args.no_model_read,
+        fair_weight=args.fair_weight, axe_weight=args.axe_weight,
+        skew_cap=args.skew_cap, horizon_days=args.horizon,
+        vega_text=(paths.read_text(args.vega) if args.vega else ""),
+        vega_scale=args.axe_scale, fallback_spread=args.fallback_spread,
+        stale_days=args.stale_days, narrate=not args.no_narration)
+    try:
+        out = agent_mod.run(request, book=book, archive=arc, bank=bank, hist=hist, model=model)
+    except agent_mod.AgentError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    if args.json:
+        print(_json.dumps(out.to_json(), indent=1, sort_keys=True))
+    else:
+        print(model_note)
+        print(out.text())
+    if args.record:
+        written = agent_mod.record_shown(arc, out, counterparty=args.counterparty,
+                                         at=clock.now)
+        arc.flush()
+        print(f"\nrecorded {len(written)} price(s) in {arc.path}:")
+        for o in written:
+            print(f"  {o.id}  {o.describe()}")
+    unpriced = [d for d in out.decisions if not d.priced]
+    return 1 if unpriced and len(unpriced) == len(out.decisions) else 0
+
+
+def cmd_mark(args) -> int:
+    """The marking agent: how to run the fit, and what this desk does after it.
+
+    Every action goes through the same functions a screen would call, per
+    §10's rule.  ``propose`` and ``confer`` write nothing to the book and
+    nothing to the workbook; ``record`` is the only one that writes at all,
+    and it writes to the journal.
+    """
+    import json as _json
+    from . import consult as consult_mod
+    from . import marking as marking_mod
+    from . import remarks as remarks_mod
+    from . import session as session_mod
+
+    action = args.action
+    pair = (args.pair or "").upper()
+    journal = remarks_mod.Journal.load(args.journal)
+    for problem in journal.problems:
+        print(f"  ! {problem}", file=sys.stderr)
+    clock = _clock(args)
+
+    if action == "journal":
+        rows = journal.summary() if not pair else [r for r in journal.summary()
+                                                   if r["pair"] == pair]
+        if not rows:
+            print(f"the journal at {journal.path} holds nothing"
+                  + (f" for {pair}" if pair else ""))
+            return 0
+        for r in rows:
+            print(f"{r['pair']}: {r['instances']} instance(s) -- {r['answered']} answered "
+                  f"a proposal ({r['accepted']} accepted, {r['edited']} edited, "
+                  f"{r['rejected']} rejected), {r['unprompted']} unprompted; "
+                  f"{r['first'][:16]} to {r['last'][:16]}")
+        if pair:
+            print()
+            for e in journal.query(pair=pair)[-int(args.limit or 20):]:
+                print(f"  {e.id}  {e.describe()}")
+        return 0
+
+    if not pair:
+        print(f"error: '{action}' needs a pair", file=sys.stderr)
+        return 2
+
+    tendencies = marking_mod.learn(journal, pair, asof=clock.now,
+                                   lookback_days=args.lookback,
+                                   min_instances=args.min_instances)
+    if action == "learn":
+        for line in tendencies.lines():
+            print(line)
+        return 0
+
+    book = _book(args, [pair])
+    _apply_band(args, book)
+
+    if action == "record":
+        if not args.proposal:
+            print("error: 'record' needs --proposal, the file 'propose --out' wrote",
+                  file=sys.stderr)
+            return 2
+        try:
+            saved = _json.loads(paths.read_text(args.proposal))
+        except (OSError, ValueError) as exc:
+            print(f"error: the proposal file could not be read: {exc}", file=sys.stderr)
+            return 2
+        # The book is the outcome.  A session file named here is put on it
+        # first, which is how an edit made on the screen gets recorded as the
+        # edit rather than as the proposal the screen started from.
+        if args.session:
+            session_mod.restore(book, args.session)
+        try:
+            entry = marking_mod.answer(
+                journal, pair, before=saved.get("before") or {},
+                proposed=saved.get("after") or {},
+                after=session_mod.capture_pair(book, pair),
+                verdict=args.verdict, note=args.note, source="cli", at=clock.now,
+                context=saved.get("context") or {})
+        except marking_mod.MarkingError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        print(f"{entry.id}  {entry.describe()}")
+        moved = entry.changes()
+        if args.verdict == "edited" and not any(c.correction for c in moved):
+            print("  . nothing differs from the proposal; 'accepted' is the verdict for that")
+        print(f"recorded to {journal.path}")
+        return 0
+
+    # ---- propose / confer -------------------------------------------------
+    if action == "confer":
+        from . import archive as archive_mod
+        from . import synthesis as synthesis_mod
+        arc = archive_mod.Archive.load(args.archive)
+        for problem in arc.problems:
+            print(f"  ! {problem}", file=sys.stderr)
+        syn = synthesis_mod.synthesize(arc, pair, asof=clock.now,
+                                       half_life=args.half_life,
+                                       min_effective=args.min_evidence,
+                                       lookback_days=args.evidence_lookback)
+        conference = consult_mod.confer(book, pair, syn, tendencies=tendencies,
+                                        method=args.method, cut=args.cut,
+                                        rounds=args.rounds, mid_pull=args.mid_pull)
+        if args.json:
+            print(_json.dumps(conference.to_json(), indent=1, sort_keys=True))
+        else:
+            for line in conference.lines():
+                print(line)
+        proposal = conference.proposal
+    elif args.file or args.target_source:
+        # The card's own path: the same panel the browser posts, so what
+        # this prints is what the market-maker tab shows.
+        from . import archive as archive_mod
+        arc = None
+        if not args.no_archive:
+            arc = archive_mod.Archive.load(args.archive)
+            for problem in arc.problems:
+                print(f"  ! archive: {problem}", file=sys.stderr)
+        market_text = ""
+        if args.file == "-":
+            market_text = sys.stdin.read()
+        elif args.file:
+            market_text = paths.read_text(args.file)
+        source = args.target_source or ("paste" if args.target else "quotes")
+        panel = marking_mod.panel_from_request({
+            "pair": pair, "cut": args.cut, "method": args.method, "text": market_text,
+            "target_source": source,
+            "target_text": paths.read_text(args.target) if args.target else "",
+            "free": args.free, "smile_free": args.smile_free,
+            "choose_knobs": not args.no_choose, "mid_pull": args.mid_pull,
+            "lookback_days": args.lookback, "min_instances": args.min_instances,
+            "use_archive": not args.no_archive, "half_life": args.half_life,
+            "min_effective": args.min_evidence, "evidence_lookback": args.evidence_lookback,
+        })
+        out = panel.run(book, journal, archive=arc)
+        proposal = None
+        if args.json:
+            print(_json.dumps(out, indent=1, sort_keys=True, default=str))
+        else:
+            print(f"{pair}: target curve -- {out['targets']['evidence']}")
+            for line in out["lines"]:
+                print(line)
+            crit = out.get("critique")
+            if crit:
+                print(f"  judge  {crit['verdict']}")
+                for r in crit.get("rows", []):
+                    if r["improved"] or r["worsened"]:
+                        print(f"         {r['line']}")
+            for n in out["notes"]:
+                print(f"  note   {n}")
+            for w in out["warnings"]:
+                print(f"  !      {w}")
+        if args.out:
+            paths.write_text(args.out, _json.dumps(out["proposal"], indent=1, sort_keys=True))
+            print(f"\nproposal written to {args.out}")
+            print(f"  accept or edit it, then: volkit mark record {pair} "
+                  f"--proposal {args.out} --verdict edited")
+        elif not args.json:
+            print("\n  nothing has been written; --out saves this so 'mark record' can answer it")
+        return 0
+    else:
+        targets, weights = [], []
+        if args.target:
+            from .marketmaker import CurveTarget
+            for n, line in enumerate(paths.read_text(args.target).splitlines(), start=1):
+                bits = line.split()
+                if len(bits) < 2:
+                    continue
+                try:
+                    targets.append(CurveTarget(tenor=bits[0].upper(),
+                                               t=tenor_to_years(bits[0]),
+                                               vol=float(bits[1]) / 100.0, source="pasted"))
+                except (ValueError, KeyError) as exc:
+                    print(f"  ! target line {n}: {exc}", file=sys.stderr)
+        if not targets:
+            print("error: 'propose' needs a target curve; give --target a file of "
+                  "'tenor vol' lines, or use 'confer' to take them from the archive",
+                  file=sys.stderr)
+            return 2
+        proposal = marking_mod.propose(book, pair, targets=targets, tendencies=tendencies,
+                                       method=args.method, cut=args.cut,
+                                       mid_pull=args.mid_pull, free=args.free)
+        if args.json:
+            print(_json.dumps(proposal.to_json(), indent=1, sort_keys=True))
+        else:
+            for line in proposal.lines():
+                print(line)
+
+    if proposal is None:
+        return 0
+    if args.out:
+        paths.write_text(args.out, _json.dumps(proposal.to_json(), indent=1, sort_keys=True))
+        print(f"\nproposal written to {args.out}")
+        print(f"  accept or edit it, then: volkit mark record {pair} "
+              f"--proposal {args.out} --verdict edited")
+    elif not args.json:
+        print("\n  nothing has been written; --out saves this so 'mark record' can answer it")
     return 0
 
 
@@ -1284,12 +1975,32 @@ def build_parser() -> argparse.ArgumentParser:
                         "historical sheet stay on their buttons, because reloading the "
                         "workbook discards this session's marks. The pricing screen has the "
                         "same switch")
+    # The desk agent's card lives inside the market-maker tab, and its folders
+    # are named here rather than typed into the page: a path a browser can
+    # post is a path anything that reaches the browser can read.
+    s.add_argument("--archive", help=f"the observation archive the desk-agent card reads "
+                                     f"(default: {archive.ARCHIVE_FILENAME} beside the workbook)")
+    s.add_argument("--chats", action="append", default=[], metavar="DIR",
+                   help="a folder of broker chats the agent card may scan; repeatable")
+    s.add_argument("--sdr", action="append", default=[], metavar="DIR",
+                   help="a folder of SDR dissemination files it may scan; repeatable")
+    s.add_argument("--ingest-state", help="where the record of what has been read lives")
+    s.add_argument("--proxy", help="HTTP proxy for the DTCC download (default: the one the "
+                                   "environment names in https_proxy / HTTP_PROXY)")
+    s.add_argument("--journal", help=f"the re-marking journal the marking-agent card reads "
+                                     f"and writes (default: {remarks.JOURNAL_FILENAME} beside "
+                                     f"the workbook)")
     s.set_defaults(func=cmd_serve)
 
     s = add_command("mm", parents=[common],
-                       help="fit a curve to a market, fine tune the wings and quote it")
+                       help="fit a curve and the wings to a market, and quote what is asked for")
     s.add_argument("pair")
-    s.add_argument("--file", default="-", help="pasted market quotes (default: stdin)")
+    s.add_argument("--file", help="the market: a pasted broker run, what the fit is aimed at "
+                                  "(default: stdin, when --request is not given)")
+    s.add_argument("--request", help="the options to be quoted, one an instrument a line and no "
+                                     "prices on them: '1M ATM in 100mm', '3M 25d RR'. Priced off "
+                                     "the fit above when there is one, and off the marks as they "
+                                     "stand when there is not")
     s.add_argument("--target-source", default="overwrites", choices=list(_target_sources()),
                    help="where the target at-the-money curve comes from")
     s.add_argument("--target", help="file of 'tenor vol' lines, for --target-source paste")
@@ -1312,6 +2023,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--horizon", type=float, default=30.0, help="fair value horizon in days")
     s.add_argument("--fallback-spread", type=float,
                    help="width in vol points for quotes no bank rule matches")
+    s.add_argument("--archive-width", action="store_true",
+                   help="put the observation archive on the width ladder, between the bank "
+                        "and the fallback: a quote no rule matches is shown at the width the "
+                        "market has shown it at, when the archive holds enough")
+    s.add_argument("--archive", help=f"the observation archive, with --archive-width "
+                                     f"(default: {archive.ARCHIVE_FILENAME} beside the workbook)")
     s.add_argument("--knowledge", help="knowledge bank JSON (default: beside the workbook)")
     s.add_argument("--feed", default=_default_feed(),
                    help="spot / forward feed CSV. Needed for a quote written against an "
@@ -1328,6 +2045,177 @@ def build_parser() -> argparse.ArgumentParser:
                    help="propose bank rules from the pasted widths instead of quoting")
     s.add_argument("--save", action="store_true", help="with --learn, write them to the bank")
     s.set_defaults(func=cmd_mm)
+
+    # The desk agent.  One command with an action on it rather than a family
+    # of commands: every action shares the archive, the bank and the model
+    # options, and splitting them would mean repeating that list five times
+    # and having it drift four ways.
+    s = add_command("agent", parents=[common],
+                    help="keep an archive of what the market has shown, and quote from it")
+    s.add_argument("action", choices=("quote", "ingest", "watch", "fetch", "trades",
+                                      "evidence", "learn", "shown", "outcome", "archive"),
+                   help="quote: make a price. fetch: download DTCC's public dissemination "
+                        "files. ingest/watch: read the folders. trades: what printed, and "
+                        "what volatility it implies. evidence: what the archive says. learn: "
+                        "propose bank rules from it. shown/outcome: record a price and what "
+                        "became of it. archive: what is held")
+    s.add_argument("pair", nargs="?", help="the currency pair")
+    s.add_argument("--file", default="-",
+                   help="what to price, one instrument a line (default: stdin)")
+    s.add_argument("--archive", help=f"the observation archive "
+                                     f"(default: {archive.ARCHIVE_FILENAME} beside the workbook)")
+    s.add_argument("--chats", action="append", default=[], metavar="DIR",
+                   help="a folder of broker chats to read; repeatable")
+    s.add_argument("--sdr", action="append", default=[], metavar="DIR",
+                   help="a folder of SDR dissemination files; repeatable")
+    s.add_argument("--ingest-state", help="where the record of what has been read lives")
+    s.add_argument("--force", action="store_true", help="read every watched file again")
+    s.add_argument("--forget", metavar="PATTERN",
+                   help="drop what has been read for paths containing PATTERN ('*' for all)")
+    s.add_argument("--known-pairs", action="store_true",
+                   help="load the workbook first and keep only pairs it builds")
+    s.add_argument("--every", type=float, default=30.0, help="watch interval in seconds")
+    s.add_argument("--rounds", type=int, default=0, help="stop after this many passes (0: never)")
+    s.add_argument("--counterparty", default="", help="who the quotes or the price are with")
+    s.add_argument("--kind", choices=archive.KINDS, help="with 'archive', list records of a kind")
+    s.add_argument("--limit", type=int, default=40, help="how many records to list")
+    s.add_argument("--ref", help="with 'outcome', the id of the price being answered")
+    s.add_argument("--result", choices=archive.RESULTS, help="with 'outcome', what happened")
+    s.add_argument("--away", type=float,
+                   help="with 'outcome --result done_away', the level it traded at")
+    # the archive
+    s.add_argument("--half-life", type=float, default=synthesis.DEFAULT_HALF_LIFE,
+                   help="days after which an observation counts half (default 5)")
+    s.add_argument("--min-evidence", type=float, default=synthesis.DEFAULT_MIN_EFFECTIVE,
+                   help="age-weighted observations needed before a width is produced")
+    s.add_argument("--lookback", type=float, default=90.0,
+                   help="how far back the archive is read, in days")
+    s.add_argument("--no-model-read", action="store_true",
+                   help="leave observations a language model transcribed out of the figures")
+    s.add_argument("--no-archive-width", action="store_true",
+                   help="widths from the bank only; the archive is shown and not used")
+    s.add_argument("--stale-days", type=float, default=5.0,
+                   help="an archived level older than this is called stale on the row")
+    # the model
+    s.add_argument("--llm-backend", choices=list(llm.BACKENDS),
+                   help="ollama (default) or an OpenAI-compatible endpoint")
+    s.add_argument("--llm-url", help="where it listens, e.g. http://127.0.0.1:11434")
+    s.add_argument("--llm-model", help="the model name to ask for")
+    s.add_argument("--no-llm", action="store_true", help="do not use a local model at all")
+    s.add_argument("--no-narration", action="store_true",
+                   help="skip the written explanation; the itemised one is always there")
+    # the leans, named as the market-maker screen names them
+    s.add_argument("--fair-weight", type=float, default=0.25,
+                   help="how much of the fair-value richness leans the mid")
+    s.add_argument("--axe-weight", type=float, default=0.5,
+                   help="how much of a half width a full axe leans the mid")
+    s.add_argument("--skew-cap", type=float, default=1.0,
+                   help="cap on the total lean, as a multiple of the half width")
+    s.add_argument("--horizon", type=float, default=30.0, help="fair value horizon in days")
+    s.add_argument("--vega", help="file of 'tenor vega' lines: the position leaning the mid")
+    s.add_argument("--axe-scale", type=float, default=0.0,
+                   help="the position that counts as a full axe, in the profile's own unit")
+    s.add_argument("--fallback-spread", type=float,
+                   help="width for quotes no bank rule and no archive evidence covers")
+    s.add_argument("--knowledge", help="knowledge bank JSON (default: beside the workbook)")
+    s.add_argument("--history", default=_default_history(),
+                   help="historical workbook, for the fair-value lean")
+    s.add_argument("--feed", default=_default_feed(),
+                   help="spot / forward feed CSV, needed for an absolute strike")
+    s.add_argument("--cut", default="NY")
+    s.add_argument("--method", default=None, help="default: the pair's marked method")
+    s.add_argument("--fly", default="market", choices=("market", "smile"),
+                   help="which butterfly an unqualified 'fly' is")
+    s.add_argument("--record", action="store_true",
+                   help="write the prices this run made into the archive, so they can be "
+                        "answered later with 'agent outcome'")
+    # fetching from DTCC
+    s.add_argument("--since", metavar="YYYY-MM-DD", help="with 'fetch', the first date")
+    s.add_argument("--until", metavar="YYYY-MM-DD", help="with 'fetch', the last date")
+    s.add_argument("--days", type=int, help="with 'fetch', the last N business days instead")
+    s.add_argument("--jurisdiction", default="cftc", choices=list(dtcc.JURISDICTIONS))
+    s.add_argument("--asset", default="FOREX", choices=list(dtcc.ASSET_CLASSES))
+    s.add_argument("--report", default="cumulative", choices=list(dtcc.REPORTS),
+                   help="cumulative: a whole day, published after it. slice: intraday")
+    s.add_argument("--proxy", help="HTTP proxy for the download (default: the one the "
+                                   "environment names in https_proxy / HTTP_PROXY)")
+    s.add_argument("--timeout", type=float, default=120.0, help="seconds per request")
+    s.add_argument("--no-ingest", action="store_true",
+                   help="with 'fetch', download only and do not read what arrived")
+    # what printed
+    s.add_argument("--invert", action="store_true",
+                   help="with 'trades', turn each premium into a volatility. Needs --history "
+                        "for the forward on the trade's own date; a trade whose forward "
+                        "cannot be found is refused rather than priced off today's")
+    s.add_argument("--discount-rate", type=float,
+                   help="with 'trades --invert', a continuously compounded rate to discount "
+                        "at. This package carries no rate curve, so without one the premium "
+                        "is inverted undiscounted and the volatility reads a touch low")
+    s.add_argument("--save", action="store_true",
+                   help="with 'learn', write the proposed rules into the knowledge bank. "
+                        "Proposing and saving are two steps here for the same reason they are "
+                        "on the market-maker screen: a width nobody approved is a width "
+                        "nobody can be asked about")
+    s.add_argument("--json", action="store_true", help="the whole decision as JSON")
+    s.set_defaults(func=cmd_agent)
+
+    # The marking agent.  Owned by the marking screen: it decides how to run
+    # that screen's fit, and a build without the tab has nothing for it to do.
+    s = add_command("mark", parents=[common],
+                    help="the marking agent: plan the fit, learn what this desk does after it")
+    s.add_argument("action", choices=("propose", "confer", "learn", "journal", "record"),
+                   help="propose: plan and run the fit against a target curve. confer: take "
+                        "the targets from the quote archive and let the two agents settle "
+                        "on a re-mark. learn: what the journal says about this desk. "
+                        "journal: what is held. record: answer a proposal")
+    s.add_argument("pair", nargs="?")
+    s.add_argument("--journal", help=f"the re-marking journal "
+                                     f"(default: {remarks.JOURNAL_FILENAME} beside the workbook)")
+    s.add_argument("--target", help="with 'propose', a file of 'tenor vol' lines")
+    s.add_argument("--file", help="with 'propose', the market: a pasted broker run, read "
+                                  "exactly as 'mm' reads it. With this the proposal is the "
+                                  "market-maker card's -- the wings are tuned to the run "
+                                  "and the target curve comes from --target-source")
+    s.add_argument("--target-source", default=None, choices=list(_target_sources()),
+                   help="with --file, where the target at-the-money curve comes from "
+                        "(default: 'paste' when --target is given, else 'quotes')")
+    s.add_argument("--no-choose", action="store_true",
+                   help="with --file, free exactly --free and --smile-free rather than "
+                        "letting the agent choose the knobs")
+    s.add_argument("--smile-free", nargs="*", help="smile parameters, with --no-choose")
+    s.add_argument("--no-archive", action="store_true",
+                   help="with --file, do not score the proposal against the archive")
+    s.add_argument("--free", nargs="*", help="curve parameters to leave free, overriding "
+                                             "both the default set and anything learned")
+    s.add_argument("--out", metavar="PATH", help="write the proposal, so 'record' can answer it")
+    s.add_argument("--proposal", metavar="PATH", help="with 'record', the file --out wrote")
+    s.add_argument("--verdict", default="edited", choices=list(remarks.VERDICTS),
+                   help="with 'record', what you did to the proposal")
+    s.add_argument("--note", default="", help="with 'record', a line kept beside the instance")
+    s.add_argument("--limit", type=int, default=20, help="how many instances to list")
+    # what it learns from
+    s.add_argument("--lookback", type=float, default=365.0,
+                   help="how far back the journal is read, in days. Age is not a weight "
+                        "here: how a desk marks is a fact about the desk")
+    s.add_argument("--min-instances", type=int, default=marking.MIN_INSTANCES,
+                   help="instances behind a knob before any tendency about it is stated")
+    # the exchange
+    s.add_argument("--archive", help="with 'confer', the observation archive the quoting "
+                                     "agent reads")
+    s.add_argument("--rounds", type=int, default=consult.MAX_ROUNDS,
+                   help="with 'confer', propose-and-critique rounds before a person decides")
+    s.add_argument("--half-life", type=float, default=synthesis.DEFAULT_HALF_LIFE,
+                   help="days after which an archived quote counts half")
+    s.add_argument("--min-evidence", type=float, default=synthesis.DEFAULT_MIN_EFFECTIVE)
+    s.add_argument("--evidence-lookback", type=float, default=90.0)
+    s.add_argument("--mid-pull", type=float, default=0.05,
+                   help="weight of the pull toward the quoted mids inside the hinge")
+    s.add_argument("--cut", default="NY")
+    s.add_argument("--method", default=None, help="default: the pair's marked method")
+    s.add_argument("--feed", default=_default_feed(),
+                   help="spot / forward feed CSV")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_mark)
 
     s = add_command("validate", parents=[common], help="hunt for competing smile calibrations")
     s.add_argument("pair", nargs="?", help="default: every pair")
@@ -1364,7 +2252,8 @@ def build_parser() -> argparse.ArgumentParser:
     s = add_command("vol", parents=[common, band_opts],
                        help="volatility for a strike and expiry")
     s.add_argument("pair")
-    s.add_argument("expiry", help="e.g. 2024-05-28")
+    s.add_argument("expiry", help="a tenor (1W, 8d, 3M) or a date (2024-05-28, "
+                                  "28May24, 5/28/2024)")
     s.add_argument("--strike", type=float)
     s.add_argument("--forward", type=float, default=1.0)
     s.add_argument("--method", default="SVI", choices=list(_methods()))
@@ -1444,7 +2333,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = add_command("listed", parents=[common],
                        help="fit SABR to an exchange-traded strike/vol table")
-    s.add_argument("underlying", help=f"contract code, or CUSTOM with --pair")
+    s.add_argument("underlying",
+                   help="contract code. The ones this build knows (6E, 6J, ...) bring their "
+                        "pair, strike direction and contract size with them; any other code "
+                        "is taken as typed and takes those from --pair / --invert / "
+                        "--contract-size")
     s.add_argument("--expiry", required=True, help="e.g. '2026-09-11 19:00' (the exchange's own cut)")
     s.add_argument("--forward", type=float, required=True, help="futures price in the listed units")
     s.add_argument("--file", default="-", help="strike/vol table (default: stdin)")
@@ -1469,8 +2362,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--positions", metavar="PATH",
                    help="a position table to price against this panel and aggregate: "
                         "'contract, expiry, strike, C/P, contracts', or just "
-                        "'strike, C/P, contracts' since there is one panel here. Greeks are "
-                        "reported both Black-Scholes and on the fitted smile")
+                        "'strike, C/P, contracts' when there is one panel to answer. Greeks "
+                        "are reported both Black-Scholes and on the fitted smile")
+    s.add_argument("--panels", metavar="PATH",
+                   help="a JSON list of further fit panels to price --positions against, in "
+                        "the shape the Exchange-traded screen posts. This is what reproduces "
+                        "a screen holding several contracts; the panel built from the "
+                        "arguments above is the first of them")
     s.add_argument("--contract-size", type=float,
                    help="units of the base currency one option covers (default: the "
                         "contract's own, e.g. 125000 for 6E). Only the position greeks use it")
@@ -1483,7 +2381,8 @@ def build_parser() -> argparse.ArgumentParser:
     s = add_command("smile", parents=[common, band_opts],
                        help="print the smile at one expiry")
     s.add_argument("pair")
-    s.add_argument("expiry")
+    s.add_argument("expiry", help="a tenor (1W, 8d, 3M) or a date (2024-05-28, "
+                                  "28May24, 5/28/2024)")
     s.add_argument("--method", default="SVI", choices=list(_methods()))
     s.add_argument("--cut", default="TK")
     s.add_argument("--feed", default=_default_feed(),

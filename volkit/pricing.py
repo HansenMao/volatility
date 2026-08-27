@@ -76,24 +76,96 @@ def parse_strike(text) -> StrikeSpec:
         ) from None
 
 
-def resolve_expiry(book, pair: str, text) -> date:
-    """Accept a date, or a tenor such as ``1M`` resolved on the pair's calendar."""
+def expiry_datetime(book, pair: str, text) -> datetime:
+    """A typed expiry as an instant: a tenor on the calendar, or a date as given.
+
+    One box takes both, because a desk writes both: ``1W`` and ``8d`` go
+    through spot and the delivery date on the pair's own calendar, as the
+    market does, and anything else is handed to ``timeutil.parse_datetime``,
+    which reads the tabular formats, the spellings a person types
+    (``28May24``, ``28 May 2024``, ``2024/05/28``) and ISO 8601.
+
+    A time of day survives.  A tenor has none and lands at midnight UTC; a
+    string that carried one keeps it, because an option struck at a cut is
+    not the option struck at midnight.
+    """
     if isinstance(text, datetime):
-        return text.date()
+        return text if text.tzinfo else text.replace(tzinfo=UTC)
     if isinstance(text, date):
-        return text
+        return datetime.combine(text, datetime.min.time()).replace(tzinfo=UTC)
     s = str(text).strip()
     if not s:
         raise ValueError("expiry is required")
     try:
         parse_tenor(s)
     except ValueError:
-        return parse_datetime(s).date()
-    # A tenor: go through spot and the delivery date, as the market does.
-    return book.calendars.expiry_date(pair, s, book.clock.now.date())
+        return parse_datetime(s)
+    return datetime.combine(book.calendars.expiry_date(pair, s, book.clock.now.date()),
+                            datetime.min.time()).replace(tzinfo=UTC)
+
+
+def resolve_expiry(book, pair: str, text) -> date:
+    """Accept a date, or a tenor such as ``1M`` resolved on the pair's calendar."""
+    if isinstance(text, datetime):
+        return text.date()
+    if isinstance(text, date):
+        return text
+    return expiry_datetime(book, pair, text).date()
 
 
 PRODUCTS = ("vanilla", "digital", "one_touch", "no_touch")
+
+
+def resolve_legs(book, rows) -> list[dict]:
+    """What each leg's expiry and market boxes resolve to, without pricing it.
+
+    The pricing screen's three market boxes -- spot, the outright forward and
+    the expiry -- are filled from this: a tenor or one of the date spellings
+    ``timeutil`` reads comes back as the one standard date, and the feed's
+    level at *that* expiry comes back beside it.  It is deliberately not a
+    price: it is called while somebody is still typing, and it must not wait
+    for a smile.
+
+    The level is ``Book.market_level``, the one place a level is read, so a
+    cross the feed quotes only through its legs answers here exactly as it
+    does when the leg is priced.  Asking the feed for the pair *by name*, as
+    this screen's fill button used to, refused EURJPY off a file quoting both
+    of its legs while the pricing beneath it went through perfectly well.
+
+    A row that cannot be resolved keeps its place and carries the reason, and
+    a row whose expiry resolved but whose market did not keeps the expiry:
+    the two are separate failures and one does not hide the other.
+    """
+    out: list[dict] = []
+    for i, row in enumerate(rows or []):
+        r: dict = {"index": i, "pair": str(row.get("pair") or "").upper(),
+                   "text": str(row.get("expiry") or ""), "expiry": "",
+                   "days": None, "years": None, "spot": None, "forward": None,
+                   "points": None, "pip": None, "extrapolated": False,
+                   "feed": False, "derived": False, "via": "", "error": ""}
+        try:
+            if not r["pair"]:
+                raise ValueError("the leg has no currency pair")
+            expiry = resolve_expiry(book, r["pair"], r["text"])
+            when = datetime.combine(expiry, datetime.min.time()).replace(tzinfo=UTC)
+            t = book.clock.years_to(when)
+            r.update(expiry=expiry.isoformat(), years=t,
+                     days=(when - book.clock.now).total_seconds() / 86400.0)
+            level = book.market_level(r["pair"], t)
+            if not level["feed"]:
+                raise ValueError(
+                    f"the feed does not quote {r['pair']}"
+                    + ("" if book.feed is None else
+                       ", and it does not quote both of the legs it could be built from")
+                )
+            r.update(spot=float(level["spot"]), forward=float(level["forward"]),
+                     points=float(level["points"]), pip=float(level["pip"]),
+                     extrapolated=bool(level["extrapolated"]), feed=True,
+                     derived=bool(level["derived"]), via=level["via"])
+        except (ValueError, KeyError, TypeError) as exc:
+            r["error"] = str(exc)
+        out.append(r)
+    return out
 
 
 @dataclass
@@ -107,7 +179,8 @@ class OptionLeg:
     cut: str = "TK"
     method: str = "SVI"
     spot: float | None = None
-    forward_points: float = 0.0
+    forward: float | None = None   # outright; blank takes the feed's
+    forward_points: float | None = None   # the other spelling: points on spot
     pip: float = 10000.0
     notional: float = 1.0         # in millions of base (payout units for exotics)
     direction: float = 1.0        # +1 bought, -1 sold
@@ -134,6 +207,7 @@ class LegResult:
     t: float = 0.0
     spot: float = 0.0
     forward: float = 0.0
+    market_source: str = "typed"    # which half of the market the feed gave
     strike: float = 0.0
     strike_ratio: float = 0.0
     strike_spec: str = ""
@@ -158,7 +232,7 @@ class LegResult:
     overhedge_cost: float = 0.0
     pricing_method: str = "closed form"
     mc_error: float = 0.0
-    feed_used: bool = False
+    feed_used: bool = False         # the feed gave the spot, the forward, or both
 
 
 def price_leg(book, leg: OptionLeg) -> LegResult:
@@ -170,28 +244,67 @@ def price_leg(book, leg: OptionLeg) -> LegResult:
                          error=f"{type(exc).__name__}: {exc}")
 
 
-def _resolve_market(book, leg: OptionLeg, t: float) -> tuple[float, float, float, bool]:
-    """Spot, forward and pip for a leg, from the feed when it has no explicit spot."""
-    feed = getattr(book, "feed", None)
-    used = False
+def _resolve_market(book, leg: OptionLeg, t: float):
+    """Spot and the outright forward for a leg: what the leg says, else the feed.
+
+    The pricing screen shows **one box each** for spot and the forward and
+    fills both from the feed, so a leg normally arrives with both and this
+    reads them straight off -- what is priced is what is on the screen, and
+    ``market_source`` says "typed" because it was.  A box left empty falls
+    back to the feed on its own: clearing the forward and keeping a
+    hand-typed spot is an ordinary thing to do to one leg of a strip, and it
+    should not need the other box cleared as well.
+
+    The forward is the **outright**, in the pair's own units, because that is
+    what the screen shows and what the model uses.  ``forward_points`` /
+    ``pip`` are the other spelling, for a caller holding points rather than an
+    outright; giving them is itself a statement of where the forward is, so
+    the feed does not then fill it in.  That is why they default to ``None``
+    and not to zero -- a leg that named its own spot to override the feed and
+    said nothing about points wants the feed's forward, and a leg that said
+    ``forward_points=0`` wants the forward *at* spot.  Nothing else can tell
+    those two apart.
+
+    Through ``Book.market_level``, which is the one place a level is read, so
+    a cross the feed quotes only through its legs fills a blank box here
+    exactly as it scales the marking screen's strike axis.  ``via`` names the
+    legs when that happened and is empty when the pair was quoted itself.
+    """
     spot = float(leg.spot) if leg.spot else None
+    forward = float(leg.forward) if leg.forward else None
+    points = None if leg.forward_points is None else float(leg.forward_points)
     pip = float(leg.pip) if leg.pip else None
-    points = float(leg.forward_points or 0.0)
-    if spot is None and feed is not None and leg.pair.upper() in feed:
-        q = feed.quote(leg.pair, t)
-        spot, points, pip, used = q["spot"], q["points"], q["pip"], True
-    if spot is None:
-        spot = 1.0
+    used_spot = used_fwd = False
+    via = ""
+    if spot is None or (forward is None and points is None):
+        level = book.market_level(leg.pair, t)
+        if level["feed"]:
+            via = level["via"]
+            if pip is None:
+                pip = float(level["pip"])
+            if spot is None:
+                spot, used_spot = float(level["spot"]), True
+            if forward is None and points is None:
+                forward, used_fwd = float(level["forward"]), True
     if pip is None:
         pip = 10000.0
+    if spot is None:
+        # No feed and nothing typed.  An outright on its own is still a
+        # market: this model carries no discount curve, so spot has nothing
+        # to say here that the forward has not already said.
+        spot = forward if forward is not None else 1.0
     if spot <= 0:
         raise ValueError(f"spot must be positive, got {spot!r}")
-    forward = spot + points / pip
+    if forward is None:
+        forward = spot + (points or 0.0) / pip
     if forward <= 0:
         raise ValueError(
-            f"forward is not positive: spot {spot:.6g} with {points:.6g} points"
+            f"forward is not positive: spot {spot:.6g}, forward {forward:.6g}"
         )
-    return spot, forward, pip, used
+    source = ("feed" if used_spot and used_fwd else
+              "spot from the feed" if used_spot else
+              "forward from the feed" if used_fwd else "typed")
+    return spot, forward, pip, source, via
 
 
 def _price_leg(book, leg: OptionLeg) -> LegResult:
@@ -203,7 +316,7 @@ def _price_leg(book, leg: OptionLeg) -> LegResult:
     expiry_dt = datetime.combine(expiry, datetime.min.time()).replace(tzinfo=UTC)
     sl = surface.slice_at(expiry_dt, leg.method, leg.cut)
     t = sl.t
-    spot, forward, pip, feed_used = _resolve_market(book, leg, t)
+    spot, forward, pip, market_source, feed_via = _resolve_market(book, leg, t)
 
     def vol_at(K_abs: float, *, fwd: float = None, shift: float = 0.0) -> float:
         """Smile vol for an absolute strike, optionally on a shifted surface."""
@@ -214,8 +327,13 @@ def _price_leg(book, leg: OptionLeg) -> LegResult:
         pair=leg.pair, expiry=expiry.strftime("%Y-%m-%d"),
         days=(expiry_dt - book.clock.now).total_seconds() / 86400.0, t=t,
         spot=spot, forward=forward, atm_vol=sl.atm_vol * 100.0,
-        product=product, feed_used=feed_used, warnings=list(sl.warnings),
+        product=product, market_source=market_source,
+        feed_used=market_source != "typed", warnings=list(sl.warnings),
     )
+    if feed_via:
+        common["warnings"] = list(common["warnings"]) + [
+            f"the feed does not quote {leg.pair.upper()}; spot and the outright forward "
+            f"came from the {feed_via} triangle"]
     notional = float(leg.notional) * float(leg.direction)
 
     def band_note(level: float) -> None:

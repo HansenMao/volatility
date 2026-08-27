@@ -9,12 +9,15 @@ the same reason the web interface is stdlib-only.
 from __future__ import annotations
 
 import math
+import shutil
 import unittest
+import inspect as _inspect
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -24,7 +27,8 @@ from volkit.atm import AtmCurve, BackboneParams
 from volkit.black import DeltaConvention
 from volkit.book import Book
 from volkit.calendars import CalendarSet, easter
-from volkit.cross import CorrelationCurve, CrossAtmCurve, infer_leg_signs
+from volkit.cross import (CorrelationCurve, CrossAtmCurve, dollar_legs,
+                          infer_leg_signs)
 from volkit import exotics
 from volkit.banded import Band, BetaBandSmile, JumpSpec, calibrate_band_smile, load_bands
 from volkit.econ import EconCalendar, generate_nfp, generate_us_cpi, nth_weekday
@@ -32,6 +36,7 @@ from volkit.feed import FeedError, MarketFeed, pip_divisor
 from volkit import analytics, history, listed, marketmaker, moments, quotes
 from volkit.events import EventSchedule
 from volkit.knowledge import KnowledgeBank, PairKnowledge, Rule, suggest_rules
+from volkit import marketdata
 from volkit.marketdata import ExcelSource, MarketDataError
 from volkit.numerics import ConvergenceError, fixed_point, integrate_piecewise, solve_scalar
 from volkit.pricing import OptionLeg, StrikeSpec, parse_strike, price_strip, resolve_expiry
@@ -499,12 +504,178 @@ class TestSurface(unittest.TestCase):
 
 
 class TestMarketData(unittest.TestCase):
+    def _workbook(self, config: dict, pairs: list) -> Path:
+        """A minimal workbook with the given CONFIG columns, in a temp dir.
+
+        PARAMS carries whatever ``pairs`` names, so a test can say what the
+        sheet declares and nothing else.
+        """
+        import tempfile
+        d = Path(tempfile.mkdtemp())
+        path = d / "book.xlsx"
+        self.addCleanup(shutil.rmtree, d, True)
+        params = pd.DataFrame(
+            {p: [8.0, 9.0, 0.0, 0.0, 5.0, 0.0, 50.0] for p in pairs},
+            index=["initial", "long term", "ratevol", "addon", "MR",
+                   "rate corr", "short decay"],
+        )
+        for p in pairs:
+            if "USD" not in (p[:3], p[3:6]):
+                params[p] = [0.4, 0.3, 0.0, 0.0, 4.0, 0.0, 50.0]
+        with pd.ExcelWriter(path) as xw:
+            width = max(len(v) for v in config.values())
+            padded = {k: list(v) + [None] * (width - len(v)) for k, v in config.items()}
+            pd.DataFrame(padded).to_excel(xw, sheet_name="CONFIG", index=False)
+            params.to_excel(xw, sheet_name="PARAMS")
+        return path
+
     def test_real_workbook_loads_without_problems(self):
         data = ExcelSource(WORKBOOK).load()
         self.assertEqual(data.problems, [], data.problems)
         self.assertIn("USDJPY", data.pairs)
         self.assertTrue(data.pairs["AUDJPY"].is_cross)
         self.assertEqual(data.pairs["AUDJPY"].legs, ("AUDUSD", "USDJPY"))
+
+    def test_the_shipped_config_is_two_columns(self):
+        """The sheet a desk maintains is pairs and tenors, and nothing else.
+
+        The COR column and the column-per-cross naming its legs are gone: a
+        cross has exactly one sensible pair of dollar legs, so it is worked
+        out from the name instead of written down thirteen times.
+        """
+        with marketdata.open_workbook(WORKBOOK) as xls:
+            cfg = pd.read_excel(xls, "CONFIG")
+        self.assertEqual([str(c).strip().upper() for c in cfg.columns],
+                         ["PAIRS", "TENORS"])
+        data = ExcelSource(WORKBOOK).load()
+        self.assertTrue(data.pairs["EURGBP"].derived)
+        self.assertEqual(data.pairs["EURGBP"].legs, ("EURUSD", "GBPUSD"))
+
+    def test_both_layouts_of_the_shipped_workbook_agree(self):
+        """The same marks under both CONFIG layouts are the same book.
+
+        ``vol_marks_legacy_format.xlsx`` is the sheet as it was -- BASE, COR
+        and a column per cross -- kept because the legacy tool in the repo
+        root reads only that.  It is also the strongest guard there is on the
+        derivation: the legs it names by hand are the legs the two-column
+        sheet works out from the names.
+        """
+        legacy = WORKBOOK.parent / "vol_marks_legacy_format.xlsx"
+        new, old = ExcelSource(WORKBOOK).load(), ExcelSource(legacy).load()
+        self.assertEqual(old.problems, [], old.problems)
+        self.assertEqual(sorted(new.pairs), sorted(old.pairs))
+        for name, spec in new.pairs.items():
+            self.assertEqual(spec.is_cross, old.pairs[name].is_cross, name)
+            self.assertEqual(spec.legs, old.pairs[name].legs, name)
+        self.assertEqual(new.tenor_points, old.tenor_points)
+
+    def test_a_cross_is_broken_into_two_dollar_pairs(self):
+        path = self._workbook({"PAIRS": ["EURJPY"], "TENORS": ["1m", "3m"]},
+                              ["EURJPY", "EURUSD", "USDJPY"])
+        data = ExcelSource(path).load()
+        self.assertEqual(data.problems, [], data.problems)
+        self.assertTrue(data.pairs["EURJPY"].is_cross)
+        self.assertTrue(data.pairs["EURJPY"].derived)
+        self.assertEqual(data.pairs["EURJPY"].legs, ("EURUSD", "USDJPY"))
+        # The legs nobody listed are there, and say which cross wanted them.
+        self.assertEqual(data.pairs["EURUSD"].implied_by, "EURJPY")
+        self.assertEqual(data.pairs["USDJPY"].implied_by, "EURJPY")
+        self.assertFalse(data.pairs["EURUSD"].is_cross)
+        self.assertTrue(any("EURJPY" in n for n in data.notes), data.notes)
+
+    def test_a_derived_cross_is_marked_by_correlation(self):
+        """The mechanism is the correlation, not a backbone of its own.
+
+        A cross's initial / long term / MR cells have always meant
+        correlation initial / final / decay; deriving the legs must not
+        change which of the two a pair gets.
+        """
+        path = self._workbook({"PAIRS": ["EURJPY"], "TENORS": ["1m", "3m"]},
+                              ["EURJPY", "EURUSD", "USDJPY"])
+        book = Book.from_excel(path, ASOF).build()
+        self.assertIsInstance(book["EURJPY"].atm, CrossAtmCurve)
+        # 0.4 -> 0.3 with decay 4: those cells are read as a correlation and
+        # are not divided by 100 the way a volatility is.
+        self.assertAlmostEqual(float(book["EURJPY"].atm.correlation(0.0)), 0.4)
+        self.assertAlmostEqual(float(book["EURJPY"].atm.correlation(50.0)), 0.3)
+
+    def test_a_derived_cross_gets_the_same_legs_the_sheet_used_to_name(self):
+        """The orientation is the whole of MIGRATION.md's first entry.
+
+        AUDJPY is AUDUSD and USDJPY -- the dollar in opposite places, so the
+        triangle takes +2*rho -- while EURGBP is EURUSD and GBPUSD, the
+        dollar in the same place and -2*rho.  A leg written upside down would
+        flip that sign silently.
+        """
+        for pair, legs in (("AUDJPY", ("AUDUSD", "USDJPY")),
+                           ("EURGBP", ("EURUSD", "GBPUSD")),
+                           ("GBPNZD", ("GBPUSD", "NZDUSD")),
+                           ("EURCNH", ("EURUSD", "USDCNH")),
+                           ("CNHHKD", ("USDCNH", "USDHKD"))):
+            self.assertEqual(dollar_legs(pair), legs)
+        self.assertEqual(infer_leg_signs("AUDJPY", *dollar_legs("AUDJPY")), (1, -1))
+        self.assertEqual(infer_leg_signs("EURGBP", *dollar_legs("EURGBP")), (1, 1))
+
+    def test_a_dollar_pair_has_no_legs_to_derive(self):
+        with self.assertRaises(ValueError):
+            dollar_legs("USDJPY")
+        with self.assertRaises(ValueError):
+            dollar_legs("EURUR")
+
+    def test_the_legacy_layout_still_loads_and_its_legs_win(self):
+        """BASE / COR / a column per cross is still a workbook we read.
+
+        And a sheet that names legs is not second-guessed: the derived legs
+        would be EURUSD and USDJPY, and this one says to go through sterling
+        instead.  A leg that is itself a cross is then broken down in its
+        turn, which is why the legs are resolved on a work list.
+        """
+        path = self._workbook(
+            {"BASE": ["EURUSD", "USDJPY", "GBPUSD"], "COR": ["EURJPY"],
+             "EURJPY": ["EURGBP", "GBPJPY"], "TENORS": ["1m", "3m"]},
+            ["EURUSD", "USDJPY", "GBPUSD", "EURJPY", "EURGBP", "GBPJPY"])
+        data = ExcelSource(path).load()
+        self.assertEqual(data.problems, [], data.problems)
+        self.assertTrue(data.pairs["EURJPY"].is_cross)
+        self.assertFalse(data.pairs["EURJPY"].derived)
+        self.assertEqual(data.pairs["EURJPY"].legs, ("EURGBP", "GBPJPY"))
+        # GBPJPY was named by nothing but that column, and is a cross itself.
+        self.assertEqual(data.pairs["GBPJPY"].implied_by, "EURJPY")
+        self.assertEqual(data.pairs["GBPJPY"].legs, ("GBPUSD", "USDJPY"))
+
+    def test_legs_that_cannot_build_the_cross_are_reported_not_raised(self):
+        path = self._workbook(
+            {"BASE": ["EURUSD", "USDJPY"], "COR": ["EURJPY"],
+             "EURJPY": ["EURUSD", "EURUSD"], "TENORS": ["1m"]},
+            ["EURUSD", "USDJPY", "EURJPY"])
+        data = ExcelSource(path).load()
+        self.assertTrue(any("EURJPY" in p for p in data.problems), data.problems)
+        self.assertNotIn("EURJPY", data.pairs)
+
+    def test_a_row_that_is_not_a_pair_is_named_and_the_rest_still_load(self):
+        path = self._workbook({"PAIRS": ["EURUSD", "EUR/USD", "USDJPY"],
+                               "TENORS": ["1m"]},
+                              ["EURUSD", "USDJPY"])
+        data = ExcelSource(path).load()
+        self.assertIn("EURUSD", data.pairs)
+        self.assertIn("USDJPY", data.pairs)
+        self.assertTrue(any("EUR/USD" in p for p in data.problems), data.problems)
+
+    def test_a_derivation_reaches_the_page(self):
+        """A pair that came out of a convention must not read like one that
+        was written down, so the note travels with the state and the page
+        shows it -- muted, beside the workbook's real problems."""
+        from volkit.webapp import BookService
+        state = BookService(str(WORKBOOK), ASOF).state()
+        self.assertTrue(any("EURGBP = EURUSD x GBPUSD" in n for n in state["notes"]),
+                        state["notes"])
+        self.assertIn("STATE.notes", _source("volkit", "web", "index.html"))
+
+    def test_a_config_with_no_pairs_column_says_what_it_wants(self):
+        path = self._workbook({"THINGS": ["EURUSD"], "TENORS": ["1m"]}, ["EURUSD"])
+        with self.assertRaises(MarketDataError) as ctx:
+            ExcelSource(path).load()
+        self.assertIn("PAIRS", str(ctx.exception))
 
     def test_units_are_converted_once(self):
         data = ExcelSource(WORKBOOK).load()
@@ -1389,6 +1560,28 @@ class TestBandInterpolation(unittest.TestCase):
         self.assertNotAlmostEqual(low, high, places=6)
         self.assertGreater(high, low)          # more break risk, more wing value
 
+    def test_the_feed_level_is_part_of_the_cache_key_as_well(self):
+        """The old bug: it was not.
+
+        The feed is a publication and is re-read all morning (the auto-reload
+        switch exists for exactly that), and a band is placed against whatever
+        it then says -- so two spots are two smiles, the same way two hazards
+        are.  Nothing in the key moved when the feed did, so the marking
+        screen's band card printed the *republished* forward in its own column
+        beside probabilities still calibrated against the old one.
+        """
+        _, surface = self.surface()
+        level = {"f": 1.086}
+        surface.forward_lookup = lambda t: level["f"]
+        before = float(surface.vol(1.01, self.EXPIRY, "BAND", "NY"))
+        level["f"] = 1.09              # the market is republished higher
+        after = float(surface.vol(1.01, self.EXPIRY, "BAND", "NY"))
+        self.assertNotAlmostEqual(before, after, places=6)
+        # and it is still a cache: the same level gives the same slice back.
+        level["f"] = 1.086
+        self.assertAlmostEqual(
+            float(surface.vol(1.01, self.EXPIRY, "BAND", "NY")), before, places=12)
+
     def test_a_blend_is_between_the_two_and_says_it_is_not_a_model(self):
         from volkit.banded import BandTreatment
         _, surface = self.surface()
@@ -1746,8 +1939,56 @@ class TestListedOptions(unittest.TestCase):
     def test_overrides_beat_the_registry(self):
         u = listed.resolve_underlying("CUSTOM", pair="EURGBP", invert=True, scale=2.0)
         self.assertEqual((u.pair, u.invert, u.scale), ("EURGBP", True, 2.0))
-        with self.assertRaises(ValueError):
-            listed.resolve_underlying("NOT_A_CONTRACT")
+
+    def test_a_code_this_build_does_not_know_is_taken_as_typed(self):
+        """The contract was a dropdown, and every contract missing from it had
+        to be entered as CUSTOM -- at which point two of them on one screen
+        cannot be told apart, and a position line naming one is refused as
+        ambiguous with no way to settle it.  A typed code is now a contract
+        with the name that was typed."""
+        u = listed.resolve_underlying("M6E SEP26", pair="EURUSD", contract_size=12_500)
+        self.assertFalse(u.known)
+        self.assertEqual(u.code, "M6E SEP26")
+        self.assertEqual((u.pair, u.invert, u.scale), ("EURUSD", False, 1.0))
+        self.assertEqual(u.contract_size, 12_500)
+        # Nothing is inferred from the name: a code that merely looks like the
+        # euro brings no pair, no direction and no size of its own.
+        bare = listed.resolve_underlying("M6E SEP26")
+        self.assertIsNone(bare.pair)
+        self.assertEqual(bare.contract_size, 0.0)
+        # And the ones in the registry are still known, with everything on.
+        self.assertTrue(listed.resolve_underlying("6J").known)
+
+    def test_a_typed_code_says_it_was_typed_rather_than_looked_up(self):
+        """Otherwise a typo (6R for 6E) is indistinguishable from a contract
+        that genuinely has no mapping, which is a comparison quietly gone."""
+        r = listed.panel_from_request({
+            "underlying": "6R", "expiry": "2024-06-14 19:00", "forward": 1.085,
+            "text": "1.06 7.9\n1.085 7.42\n1.11 7.6"}).run(clock=ASOF)
+        self.assertFalse(r["underlying"]["known"])
+        self.assertEqual(r["underlying"]["code"], "6R")
+        self.assertTrue(any("taken as typed" in n for n in r["notes"]))
+
+    def test_a_mis_pasted_cell_is_still_refused_as_a_contract_code(self):
+        """Free text is not "anything at all": a code has a shape, and a
+        pasted quote row landing in the box must not become a contract."""
+        for bad in ("1.0800\t7.42", "x" * 40, "6E, 1.0800"):
+            with self.assertRaises(ValueError):
+                listed.resolve_underlying(bad)
+
+    def test_the_settlement_currency_is_derived_from_the_pair_and_the_direction(self):
+        """The premium comes out of Black-76 in the currency the *listed
+        strike axis* is quoted in.  Every CME contract works out as USD, which
+        is the whole reason the money columns have always added up across
+        them; a typed contract need not."""
+        self.assertEqual(listed.resolve_underlying("6E").premium_ccy, "USD")
+        self.assertEqual(listed.resolve_underlying("6J").premium_ccy, "USD")
+        self.assertEqual(listed.resolve_underlying("6C").premium_ccy, "USD")
+        self.assertEqual(
+            listed.resolve_underlying("XYZ", pair="EURGBP").premium_ccy, "GBP")
+        # No pair, no answer -- the premium is still a number, in a currency
+        # this tool was never told.
+        self.assertEqual(listed.resolve_underlying("CUSTOM").premium_ccy, "")
 
     # -- against the marked surface --------------------------------------
     def _panel_from_the_book(self, code, pair, fx_forward, book):
@@ -2248,8 +2489,13 @@ class TestAnalysis(unittest.TestCase):
             self.assertAlmostEqual(r.roll, r.roll_term + r.roll_smile, places=15, msg=r.tenor)
 
     def test_without_a_forward_feed_the_smile_slide_is_zero_and_says_so(self):
-        """EURJPY has marks but no feed, so the strike can only be held in moneyness."""
-        rows = [r for r in analytics.carry_table(self.book, "EURJPY", horizon_days=30, cut="NY")
+        """USDCNY has marks but no feed, so the strike can only be held in moneyness.
+
+        Not a cross: a cross the feed quotes both legs of has a forward built
+        from the triangle (``TestCrossLevelsFromTheLegs``), so EURJPY -- which
+        this used to be written on -- is no longer a pair with no feed.
+        """
+        rows = [r for r in analytics.carry_table(self.book, "USDCNY", horizon_days=30, cut="NY")
                 if r.expiry]
         self.assertTrue(rows)
         for r in rows:
@@ -2404,6 +2650,90 @@ class TestAnalysis(unittest.TestCase):
         self.assertAlmostEqual(term, r.smile_delta, places=12)
         self.assertNotAlmostEqual(own, term, places=3)
 
+    def test_the_forward_carry_is_delta_hedged_before_it_pays_for_a_break_even(self):
+        """A break-even volatility is a property of the strike, not of the side.
+
+        ``carry_pnl`` is the whole revaluation at the rolled forward and is
+        the right number for a spot-hedged *position*.  It is the wrong one
+        for a break-even: put-call parity puts the entire difference between
+        the call's and the put's revaluation at one strike into the
+        first-order term ``delta * (F2 - F1)``, so read unhedged the same
+        strike is "rich" as a call and "cheap" as a put by a quarter of the
+        forward move.  ``carry_hedged`` takes that term out and what is left
+        is the gamma over the move -- which, being the convexity of a long
+        option, cannot be negative whichever side it is written as.  That is
+        the bug the relative-value grid's carry signal had: the score flipped
+        sign across the strike axis with the option's direction.
+        """
+        for pair in ("EURUSD", "USDJPY", "EURJPY"):
+            for target in ("atm", "25dp", "25dc", "10dp", "10dc"):
+                rows = [r for r in analytics.carry_table(
+                    self.book, pair, horizon_days=7, target=target, cut="NY")
+                    if r.expiry and r.carry_pnl is not None]
+                self.assertTrue(rows, f"{pair} {target}")
+                for r in rows:
+                    where = f"{pair} {target} {r.tenor}"
+                    self.assertAlmostEqual(
+                        r.carry_hedged,
+                        r.carry_pnl - r.delta * (r.forward_rolled - r.forward),
+                        places=15, msg=where)
+                    # Convexity: V(F2) - V(F1) - delta * (F2 - F1) >= 0.
+                    self.assertGreaterEqual(r.carry_hedged, -1e-15, msg=where)
+
+    def test_a_call_and_a_put_at_one_strike_carry_the_same_break_even(self):
+        """The exact identity behind the fix, at one strike rather than two.
+
+        The carry columns are read at a 25 delta *call* strike and a 25 delta
+        *put* strike, which are two different strikes, so the grid alone
+        cannot show that the direction has stopped mattering.  Here both sides
+        are priced at one strike: the raw revaluations differ by the whole
+        forward move, and the hedged ones are the same number.
+        """
+        r = [x for x in analytics.carry_table(
+            self.book, "USDJPY", horizon_days=7, target="25dc", cut="NY") if x.expiry][-1]
+        f1, f2, k, vol, t = r.forward, r.forward_rolled, r.strike, r.level, r.t
+        pnl, hedged = {}, {}
+        for call in (True, False):
+            pnl[call] = float(black.price(f2, k, vol, t, call) - black.price(f1, k, vol, t, call))
+            hedged[call] = pnl[call] - float(black.delta(f1, k, vol, t, call)) * (f2 - f1)
+        self.assertAlmostEqual(pnl[True] - pnl[False], f2 - f1, places=12)
+        self.assertGreater(abs(pnl[True] - pnl[False]), 0.9 * abs(f2 - f1))
+        # A yen strike is ~150, so the cancellation leaves a few times 1e-14
+        # of dust on a number of order 1e-5; the identity is exact in exact
+        # arithmetic and this is the last bit of a double, not a difference.
+        self.assertAlmostEqual(hedged[True], hedged[False], delta=1e-12)
+        self.assertAlmostEqual(hedged[True], r.carry_hedged, delta=1e-12)
+
+    def test_the_fair_value_carry_is_the_gamma_and_not_the_residual_delta(self):
+        """What the delta hedge changed on the fair-value card, and where.
+
+        The at-the-money straddle is delta neutral in the pair's **own**
+        quoted convention, so on a pair quoting an unadjusted delta the hedge
+        is exactly zero and nothing moves.  On a premium-adjusted pair the
+        delta-neutral strike is neutral in *that* convention and its ``dV/dF``
+        is not quite zero, so the old ``carry_value`` carried a residual first
+        order term.  The tell is that it grew with the tenor -- a delta term
+        is linear in the forward move -- while a real gamma term is flat.
+        """
+        eur = analytics.fair_value_table(self.book, "EURUSD", None, horizon_days=7, cut="NY")
+        self.assertFalse(bool(self.book["EURUSD"].conv))
+        for r in eur:
+            if r.carry_pnl is not None:
+                self.assertAlmostEqual(r.carry_hedged, r.carry_pnl, places=15, msg=r.tenor)
+        jpy = [r for r in analytics.fair_value_table(
+            self.book, "USDJPY", None, horizon_days=7, cut="NY") if r.carry_pnl is not None]
+        self.assertTrue(bool(self.book["USDJPY"].conv))
+        self.assertTrue(jpy)
+        for r in jpy:
+            self.assertLess(abs(r.carry_hedged), 0.5 * abs(r.carry_pnl), msg=r.tenor)
+        # Flat, not growing: the residual delta was linear in the forward move
+        # and so scaled with the tenor, and the gamma over one horizon's move
+        # does not.  Unhedged this ratio was better than twenty.
+        values = [abs(r.carry_value) for r in jpy]
+        unhedged = [abs(r.carry_value * r.carry_pnl / r.carry_hedged) for r in jpy]
+        self.assertLess(max(values), 2.0 * min(values))
+        self.assertGreater(max(unhedged), 10.0 * min(unhedged))
+
     def test_the_fair_value_roll_is_the_atm_roll_whatever_is_displayed(self):
         """Feeding an at-the-money implied and a risk-reversal roll into one
         break-even mixes two different positions."""
@@ -2547,8 +2877,12 @@ class TestAnalysis(unittest.TestCase):
 
     def test_without_a_feed_the_carry_is_unavailable_not_zero(self):
         """f1 and f2 are both 1.0 without a feed, so every carry figure would
-        come out an exact zero -- a silent zero dressed as a measurement."""
-        rows = [r for r in analytics.carry_table(self.book, "EURJPY", horizon_days=30,
+        come out an exact zero -- a silent zero dressed as a measurement.
+
+        USDCNY rather than EURJPY: the feed carries neither, but it carries
+        both of EURJPY's legs and so builds its forward from the triangle.
+        """
+        rows = [r for r in analytics.carry_table(self.book, "USDCNY", horizon_days=30,
                                                  target="25dc", cut="NY") if r.expiry]
         self.assertTrue(rows)
         for r in rows:
@@ -2618,6 +2952,48 @@ class TestAnalysis(unittest.TestCase):
     def test_the_sabr_shape_is_off_unless_it_is_asked_for(self):
         rows = analytics.realized_table(self.book, "USDJPY", self.history["USDJPY"])
         self.assertTrue(all(r.implied_rho is None and r.realized_rho is None for r in rows))
+
+    def test_the_dynamics_are_measured_over_their_own_window_not_the_lookback(self):
+        """The bug: both difference columns blank at every tenor.
+
+        ``(rho, nu)`` used to be measured over whatever realized lookback the
+        screen was set to.  They need more paired observations than a realized
+        volatility needs returns, so on a three-week lookback every tenor's
+        realized figure came back and every tenor's measured pair was missing
+        -- and with it both ``diff`` columns, which is the whole point of the
+        card.  The window is a property of the measurement, not of the tenor
+        being forecast, and it is never shorter than the lookback.
+        """
+        short = analytics.realized_table(self.book, "USDJPY", self.history["USDJPY"],
+                                         lookback_days=21, with_sabr=True)
+        self.assertTrue(short)
+        for r in short:
+            self.assertEqual(r.window_days, 21.0, r.tenor)
+            self.assertGreaterEqual(r.dynamics_days, history.DYNAMICS_DAYS, r.tenor)
+            self.assertIsNotNone(r.realized_rho, r.tenor)
+            self.assertIsNotNone(r.rho_difference, r.tenor)
+            self.assertIsNotNone(r.nu_difference, r.tenor)
+        # A lookback longer than the dynamics window is not shortened to it.
+        long = analytics.realized_table(self.book, "USDJPY", self.history["USDJPY"],
+                                        lookback_days=500, with_sabr=True)
+        self.assertTrue(all(r.dynamics_days == 500.0 for r in long))
+
+    def test_a_tenor_with_no_realized_window_still_carries_its_sabr_shape(self):
+        """A one-week window can never hold a week of returns.
+
+        The realized statistics for that row are unavailable and say so; the
+        wings as a SABR shape do not depend on them -- the marked half needs
+        no history at all -- so losing the column group with them left the
+        card's first row permanently blank.
+        """
+        rows = analytics.realized_table(self.book, "USDJPY", self.history["USDJPY"],
+                                        with_sabr=True)
+        short = [r for r in rows if not r.observations]
+        self.assertTrue(short, "no tenor came up short, so this pins nothing")
+        for r in short:
+            self.assertIsNotNone(r.implied_rho, r.tenor)
+            self.assertIsNotNone(r.realized_rho, r.tenor)
+            self.assertIsNotNone(r.rho_difference, r.tenor)
 
 
 class TestAnalysisApi(unittest.TestCase):
@@ -2721,6 +3097,63 @@ class TestRelativeValue(unittest.TestCase):
                 self.assertEqual(shape.value, 0.0, row.tenor)
                 self.assertIn("level", shape.message)
 
+    def test_the_at_the_money_shape_is_shown_and_not_averaged_in(self):
+        """A statement is not a measurement.
+
+        The at-the-money's shape is zero by construction, and averaging that
+        zero into the score pulled every at-the-money cell a fifth of the way
+        to the middle -- the same failure the module refuses when a signal is
+        *missing*, arriving through the one signal that is present.  It is
+        still reported, with its value and its reason, because "zero" and "not
+        measured" are different answers.
+        """
+        checked = 0
+        for row in self.grid.rows:
+            for cell in row.cells:
+                if cell.column != "atm" or cell.score is None:
+                    continue
+                shape = [s for s in cell.signals if s.name == "shape"][0]
+                if shape.value is None:
+                    continue
+                self.assertEqual(shape.value, 0.0, row.tenor)
+                self.assertFalse(shape.used, row.tenor)
+                self.assertIsNone(shape.z, row.tenor)
+                self.assertNotIn("shape", cell.used, row.tenor)
+                rest = [s for s in cell.signals if s.used]
+                self.assertAlmostEqual(
+                    cell.score,
+                    sum(s.weight * s.z for s in rest) / sum(s.weight for s in rest),
+                    places=12, msg=row.tenor)
+                checked += 1
+        self.assertGreater(checked, 2)
+
+    def test_the_shape_signal_survives_a_short_realized_lookback(self):
+        """The bug: shape zero at the at-the-money and unavailable everywhere else.
+
+        The comparison smile's ``(rho, nu)`` were measured over the realized
+        lookback, which needs *more* paired observations than a realized
+        volatility needs returns.  Set the lookback to three weeks and the
+        level signal went on working while the shape signal was blank at every
+        strike of every tenor -- which reads as a signal that does not work
+        rather than as a window that is too short.  They come off the history
+        window now, for the same reason the scale does.
+        """
+        grid = self.relvalue.relative_value(
+            self.book, "EURUSD", self.history["EURUSD"], horizon_days=7, cut="NY",
+            lookback_days=21)
+        wings = 0
+        for row in grid.rows:
+            if row.realized_rho is None:
+                continue
+            self.assertGreaterEqual(row.dynamics_days, history.DYNAMICS_DAYS, row.tenor)
+            for cell in row.cells:
+                if cell.column == "atm":
+                    continue
+                shape = [s for s in cell.signals if s.name == "shape"][0]
+                self.assertIsNotNone(shape.value, f"{row.tenor} {cell.column}")
+                wings += 1
+        self.assertGreater(wings, 10, "no wing was actually scored on its shape")
+
     def test_the_score_is_the_weighted_mean_of_the_signals_it_used(self):
         """And of no others: a missing signal is renormalised away, never
         counted as a zero, which would drag every score toward the middle."""
@@ -2749,6 +3182,60 @@ class TestRelativeValue(unittest.TestCase):
                         self.assertIsNone(sig.z)
                         self.assertTrue(sig.message or cell.message,
                                         f"{row.tenor} {cell.column} {sig.name} is silent")
+
+    def test_the_carry_signal_does_not_carry_the_option_s_own_direction(self):
+        """The bug this was written for: the score flipped sign across a row.
+
+        The carry signal used to be built on ``carry_pnl``, the whole
+        revaluation of the column's option at the rolled forward.  At a strike
+        with any delta on it that is dominated by ``delta * (F2 - F1)`` -- a
+        directional number with nothing to say about a volatility -- and by
+        put-call parity it is equal and *opposite* for the call columns and
+        the put columns.  So one row of the grid was pushed rich on one side
+        and cheap on the other, the composite changed sign somewhere between
+        them, and the at-the-money column barely showed it because a
+        delta-neutral straddle has almost no first-order term.  On the sample
+        marks a USDJPY one-year 25 delta put scored ``+13.8`` against the call's
+        ``-0.46``, and 30 basis points of forward carry was the whole of it.
+
+        Delta hedged, what is left is the gamma over the move: the same
+        positive number whichever side the strike is written as, so the signal
+        can no longer split a row by direction.
+        """
+        h = 7 / 365.2425
+        rows = {col.name: {r.tenor: r for r in analytics.carry_table(
+            self.book, "USDJPY", horizon_days=7, target=col.target, cut="NY")}
+            for col in self.relvalue.COLUMNS}
+        split = 0
+        for tenor in self.book.data.tenor_points:
+            here = [rows[c][tenor] for c in rows if rows[c][tenor].carry_pnl is not None]
+            if len(here) < len(self.relvalue.COLUMNS):
+                continue
+            # The forward's half of the signal, column by column.  Hedged it is
+            # a gamma and is one sign right across the row, so it cannot be
+            # what separates the wings; unhedged it took the sign of each
+            # column's own delta, and did.
+            hedged = [r.carry_hedged * (r.t / h) / r.vega for r in here]
+            raw = [r.carry_pnl * (r.t / h) / r.vega for r in here]
+            self.assertEqual(len({v >= 0 for v in hedged}), 1, msg=tenor)
+            if len({v >= 0 for v in raw}) > 1:
+                split += 1
+                self.assertGreater(max(raw) - min(raw), 5.0 * (max(hedged) - min(hedged)),
+                                   msg=tenor)
+        self.assertGreater(split, 3, "the old reading split the row at most tenors")
+
+        # And on the grid itself: the whole carry signal, roll included, now
+        # spans less than a volatility point across a row.
+        grid = self.relvalue.relative_value(self.book, "USDJPY", self.history["USDJPY"],
+                                            horizon_days=7, cut="NY")
+        checked = 0
+        for row in grid.rows:
+            values = [c.signal["carry"].value for c in row.cells]
+            if any(v is None for v in values):
+                continue
+            self.assertLess(max(values) - min(values), 0.01, msg=row.tenor)
+            checked += 1
+        self.assertGreater(checked, 4)
 
     def test_the_scale_is_measured_over_its_own_window_not_the_realized_lookback(self):
         """The bug this was written for.
@@ -3244,6 +3731,99 @@ class TestSmileStrikeScale(unittest.TestCase):
         self.assertIsNone(service.book.forward_at("XXXYYY", 0.25))
 
 
+class TestCrossLevelsFromTheLegs(unittest.TestCase):
+    """A cross the feed quotes only through its legs still has a level.
+
+    The bug: the feed publishes EURUSD and USDJPY and therefore publishes
+    EURJPY, but every level lookup asked the feed for the pair by name and
+    refused.  On the market-maker screen that made a loaded feed invisible --
+    a quote written against an absolute strike came back "there is no forward
+    feed for EURJPY" while the pricing screen was quoting both its legs off
+    the same file.
+    """
+
+    def book(self, pairs=("EURJPY", "EURGBP", "GBPNZD")):
+        from volkit.feed import MarketFeed
+        book = Book.from_excel(WORKBOOK, ASOF).load_all(list(pairs))
+        book.feed = MarketFeed.load(FEED)
+        return book
+
+    def test_a_cross_is_the_product_of_its_legs(self):
+        book = self.book()
+        t = 0.25
+        level = book.market_level("EURJPY", t)
+        self.assertTrue(level["feed"])
+        self.assertTrue(level["derived"])
+        self.assertEqual(level["via"], "EURUSD and USDJPY")
+        legs = (book.feed.quote("EURUSD", t), book.feed.quote("USDJPY", t))
+        self.assertAlmostEqual(level["forward"], legs[0]["forward"] * legs[1]["forward"], places=12)
+        self.assertAlmostEqual(level["spot"], legs[0]["spot"] * legs[1]["spot"], places=12)
+        # The points are the cross's own, in the cross's own pips, and never
+        # the legs' points added together.
+        self.assertAlmostEqual(level["spot"] + level["points"] / level["pip"],
+                               level["forward"], places=12)
+        self.assertEqual(level["pip"], 100.0)
+
+    def test_a_cross_of_two_same_side_legs_divides(self):
+        """EURGBP is EURUSD / GBPUSD, not EURUSD * GBPUSD."""
+        book = self.book()
+        t = 0.25
+        level = book.market_level("EURGBP", t)
+        a, b = book.feed.quote("EURUSD", t), book.feed.quote("GBPUSD", t)
+        self.assertAlmostEqual(level["forward"], a["forward"] / b["forward"], places=12)
+        self.assertEqual(level["via"], "EURUSD and GBPUSD")
+
+    def test_a_pair_the_feed_quotes_itself_is_not_derived(self):
+        book = self.book(["EURUSD"])
+        level = book.market_level("EURUSD", 0.25)
+        self.assertTrue(level["feed"])
+        self.assertFalse(level["derived"])
+        self.assertEqual(level["via"], "")
+
+    def test_a_leg_the_feed_does_not_carry_is_still_a_refusal(self):
+        """Half a triangle is not a level, and is refused rather than guessed."""
+        book = self.book()
+        self.assertNotIn("NZDUSD", book.feed.pairs)
+        level = book.market_level("GBPNZD", 0.25)
+        self.assertFalse(level["feed"])
+        self.assertIsNone(level["forward"])
+        self.assertIsNone(book.forward_at("GBPNZD", 0.25))
+
+    def test_the_market_maker_prices_an_absolute_strike_on_a_cross(self):
+        """The bug, on the screen it was found on."""
+        from volkit import marketmaker as mm
+        book = self.book(["EURJPY"])
+        panel = mm.panel_from_request({
+            "pair": "EURJPY", "cut": "NY", "target_source": "quotes",
+            "fit_curve": False, "tune_wings": False,
+            "text": "1M ATM 8.2/8.6\n1M, 162.00, 8.4/8.8\n3M, 162.00, 8.4/8.8\n"})
+        rows = panel.run(book)["market"]["rows"]
+        self.assertEqual(len(rows), 3)
+        for row in rows:
+            self.assertIsNotNone(row["model_before"], row["raw"])
+            self.assertEqual([w for w in row["warnings"] if "forward feed" in w], [])
+
+    def test_the_derivation_is_said_once_and_not_once_a_tenor(self):
+        from volkit import marketmaker as mm
+        book = self.book(["EURJPY"])
+        panel = mm.panel_from_request({
+            "pair": "EURJPY", "cut": "NY", "target_source": "quotes",
+            "fit_curve": False, "tune_wings": False,
+            "text": "1M, 162.00, 8.4/8.8\n2M, 162.00, 8.4/8.8\n3M, 162.00, 8.4/8.8\n"})
+        notes = [n for n in panel.run(book)["market"]["notes"] if "triangle" in n]
+        self.assertEqual(len(notes), 1, notes)
+        self.assertIn("EURUSD and USDJPY", notes[0])
+
+    def test_every_screen_reads_the_one_lookup(self):
+        """``analytics._forward_at`` is the same number as ``market_level``."""
+        from volkit.analytics import _forward_at
+        book = self.book(["EURJPY"])
+        fwd, real, note = _forward_at(book, "EURJPY", 0.25)
+        self.assertTrue(real)
+        self.assertEqual(fwd, book.market_level("EURJPY", 0.25)["forward"])
+        self.assertIn("triangle", note)
+
+
 class TestCurveComparison(unittest.TestCase):
     """Several curves side by side, and the same curve on other dates."""
 
@@ -3403,8 +3983,9 @@ class TestMarketMakerApi(unittest.TestCase):
                           {"kind": "note", "text": "wider into the ECB"}]})
             self.assertTrue(saved["ok"], saved.get("problems"))
             self.assertTrue(Path(saved["written"]).exists())
-            out = service.mm_fit({"pair": "EURUSD", "text": self.RUN,
-                                  "target_source": "quotes", "tune_wings": False})
+            # The bank is the quote route's, not the fit's: a width is a
+            # property of what we show, and the fit shows nothing.
+            out = service.mm_quote({"pair": "EURUSD", "request_text": "1M ATM\n"})
             atm = next(r for r in out["sheet"]["rows"] if r["instrument"] == "atm")
             self.assertAlmostEqual(atm["width"], 0.28)
             # A note is advice, kept apart from the reader's own notes so it
@@ -3566,6 +4147,76 @@ class TestWebAssets(unittest.TestCase):
         for product in PRODUCTS:
             self.assertIn(product, named, f"no grid row mentions {product!r}")
 
+    def test_every_field_a_pricing_leg_sends_is_one_the_server_reads(self):
+        """The same guard the listed and market-maker panels have.
+
+        A leg is owned by the browser and posted whole, so its fields *are*
+        the payload; one the server has never heard of is a box that can be
+        filled in and is then ignored.  The exceptions are declared here and
+        never reach the pricer as themselves.  ``spotsrc`` / ``fwdsrc`` are
+        screen state -- which market boxes are still showing the feed's
+        numbers, which somebody has typed over, and which of the swap and the
+        outright the leg is holding.  ``strikeask`` is the same thing said
+        about the strike box: what was asked for before the marks solved it
+        into the number now sitting there.  ``swap`` is the outright written the
+        other way: the browser converts it where it is typed, exactly as
+        every other edge of this tool converts volatility points into
+        decimals once, and posts the outright it leaves in the box.  The
+        server must not start reading any of them -- the leg it is sent is
+        already the answer.
+        """
+        import re as _re
+        from volkit import webapp as _webapp
+        BROWSER_SIDE = {"spotsrc", "fwdsrc", "swap", "strikeask"}
+        html = _source("volkit", "web", "index.html")
+        js = html.split("<script>")[1].split("</script>")[0]
+        body = js.split("function defaultLeg(")[1].split("\n}")[0]
+        block = body.split("return{")[-1].split("}")[0]     # the object literal itself
+        sent = set(_re.findall(r"([A-Za-z]+):", block))
+        self.assertIn("forward", sent, "the leg has no outright forward box")
+        reader = _inspect.getsource(_webapp.BookService.price)
+        for key in sorted(sent - BROWSER_SIDE):
+            with self.subTest(key):
+                self.assertTrue(f'"{key}"' in reader,
+                                f"the grid sends {key!r} and BookService.price never reads it")
+        # And the rows the grid draws are fields the leg actually has: a row
+        # keyed on something `defaultLeg` does not make is a box that starts
+        # blank on every new leg and is read as nothing.
+        rows = set(_re.findall(r"\['([a-z]+)','[^']+','(?:text|pair|cut|type|method|side|product|overhedge)'",
+                               js.split("const IN=[")[1].split("];")[0]))
+        self.assertTrue(rows)
+        self.assertEqual(rows - sent, set())
+        # The market is three boxes -- spot, the swap and the outright -- and
+        # the leg still never sends `points`, which is the name the server
+        # reads: the outright is what the screen shows and what is priced,
+        # and a stored `points` of zero would pin every forward to spot.
+        self.assertLessEqual({"spot", "swap", "forward"}, rows)
+        self.assertNotIn("points", sent)
+
+    def test_the_pricing_results_repeat_no_input_box(self):
+        """The old screen showed the expiry, spot, the forward, the strike
+        and the option type twice: once as a box you fill in and once as an
+        answer beneath it.
+
+        They are the same numbers.  What the pricer resolves is written back
+        into the boxes -- a tenor becomes the one standard date, `ATM` or
+        `25d` becomes the strike it solved to, `Auto` becomes `C` or `P` --
+        and it is those that are priced, so a second copy under *Results* is
+        one number in two places on one screen and two places for it to
+        disagree.
+        """
+        import re as _re
+        from volkit.pricing import PRODUCTS
+        js = _source("volkit", "web", "index.html").split("<script>")[1]
+        out = js.split("const OUT=[")[1].split("];")[0]
+        keys = {k for k in _re.findall(r"\['([a-z_]+)','", out) if k not in PRODUCTS}
+        self.assertTrue(keys)
+        # `is_call` is the option type and `strike` doubles as the barrier;
+        # both have a box of their own above.
+        for key in ("expiry", "spot", "forward", "points", "swap", "strike",
+                    "is_call", "barrier"):
+            self.assertNotIn(key, keys, f"the results still repeat the {key!r} box")
+
     def test_every_class_the_script_looks_up_is_one_it_emits(self):
         """The panel shell and the painter that fills it are different functions.
 
@@ -3577,6 +4228,38 @@ class TestWebAssets(unittest.TestCase):
         js = html.split("<script>")[1].split("</script>")[0]
         for name in set(_re.findall(r"querySelector\('\.([A-Za-z0-9_-]+)'\)", js)):
             self.assertIn(f'class="{name}"', js, f".{name} is looked up but never emitted")
+
+    def test_applying_a_band_reads_the_form_before_it_overwrites_it(self):
+        """The old bug: `applyBand` wrote its spinner into `#bandbody` -- which
+        is the div holding the treatment fields -- and only then called
+        `bandPayload()`, which read `$('#bandmode').value` off a node that had
+        just been removed.  Every Apply on the managed-band card died with
+        "Cannot read properties of null (reading 'value')" before a request
+        was ever made.  A panel's payload is read first, and the failure is
+        reported *beside* the form rather than over it: a hazard with a typo
+        in it is the ordinary way to get here, and the field the typo is in
+        has to stay on screen to be corrected.
+        """
+        import re
+        html = _source("volkit", "web", "index.html")
+        js = html.split("<script>")[1].split("</script>")[0]
+        # the fields really do live inside #bandbody, which is what makes the
+        # order matter: renderBand paints the whole form into it.
+        painter = js.split("function renderBand(){")[1].split("\n}")[0]
+        self.assertIn("id=\"bandmode\"", painter)
+        self.assertIn("$('#bandbody').innerHTML=f", painter)
+
+        body = js.split("async function applyBand(){")[1].split("\n}")[0]
+        body = re.sub(r"/\*.*?\*/", "", body, flags=re.S)   # the comment names both
+        read = body.index("bandPayload()")
+        for target in ("$('#banderr')", "$('#bandstatus')", "$('#bandbody')"):
+            if target in body:
+                self.assertLess(
+                    read, body.index(target),
+                    f"applyBand writes to {target} before it reads the form")
+        self.assertNotIn(
+            "$('#bandbody').innerHTML", body,
+            "a failed apply must not take the treatment fields off the screen")
 
     def test_the_listed_panel_fields_are_all_understood_by_the_server(self):
         """A field the browser sends and the server ignores is a setting that
@@ -3592,6 +4275,31 @@ class TestWebAssets(unittest.TestCase):
         handler = src.split("def panel_from_request")[1]
         for f in fields:
             self.assertIn(f'"{f}"', handler, f"the server never reads {f!r}")
+
+    def test_the_contract_box_is_free_text_with_the_known_codes_offered(self):
+        """The old shape: a <select> built from listed.UNDERLYINGS, so a
+        contract missing from that table could only be entered as CUSTOM --
+        and two CUSTOM panels on one screen cannot be told apart, which made a
+        position line naming either one refused as ambiguous with nothing left
+        to settle it.  The box is now an input; the known codes are offered
+        through a datalist rather than imposed, and the datalist it names has
+        to be one the markup actually holds.
+        """
+        import re as _re
+        html = _source("volkit", "web", "index.html")
+        js = html.split("<script>")[1].split("</script>")[0]
+        block = js.split("const EF=[")[1].split("];")[0]
+        kind = dict(_re.findall(r"\['([a-z_]+)','[^']*','([a-z]+)'", block))
+        self.assertEqual(kind.get("underlying"), "code")
+        field = js.split("function efield(")[1].split("\nfunction ")[0]
+        branch = field.split("if(kind==='code'){")[1].split("}else")[0]
+        self.assertIn("<input ", branch)
+        self.assertNotIn("<select", branch)
+        listname = _re.search(r'list="([a-zA-Z0-9_-]+)"', branch).group(1)
+        self.assertIn(f'<datalist id="{listname}">', html)
+        # And it is filled from the server's own list, so a code this build
+        # knows how to map is one keystroke away.
+        self.assertIn(f"$('#{listname}').innerHTML", js)
 
     def test_the_positions_panel_fields_are_all_understood_by_the_server(self):
         """Same guard as the listed fit panel, for the same reason.
@@ -3621,18 +4329,85 @@ class TestWebAssets(unittest.TestCase):
         A field the browser sends and the server ignores is a setting that
         silently does nothing, which is the failure mode this project exists
         to remove.
+
+        Two lists and two readers, because the screen is two stages: the fit
+        panel and the quote panel post different payloads to different routes.
+        Checking them against one reader would let a field the fit sends and
+        only the quote reads pass, and that field would sit on the fit's own
+        toolbar doing nothing.
         """
         import re as _re
         html = _source("volkit", "web", "index.html")
         js = html.split("<script>")[1].split("</script>")[0]
-        block = js.split("const MF=[")[1].split("];")[0]
+        src = _source("volkit", "marketmaker.py")
+
+        fit = set(_re.findall(r"\['([a-z_]+)'", js.split("const MF=[")[1].split("];")[0]))
+        self.assertIn("text", fit)
+        self.assertIn("target_source", fit)
+        handler = src.split("def panel_from_request")[1].split("def quote_panel_from_request")[0]
+        common = src.split("def _common")[1].split("def panel_from_request")[0]
+        for f in fit | {"free", "smile_free", "fit_curve", "tune_wings"}:
+            self.assertIn(f'"{f}"', handler + common, f"the fit reader never reads {f!r}")
+
+        quote = set(_re.findall(r"\['([a-z_]+)'", js.split("const MQF=[")[1].split("];")[0]))
+        self.assertIn("request_text", quote)
+        self.assertIn("fallback_spread", quote)
+        handler = src.split("def quote_panel_from_request")[1]
+        for f in quote | {"marks"}:
+            self.assertIn(f'"{f}"', handler + common, f"the quote reader never reads {f!r}")
+
+    def test_the_desk_agent_fields_are_all_understood_by_the_server(self):
+        """Same guard again, for the agent card inside the market-maker tab.
+
+        The card posts its own payload rather than the panel's, so it needs
+        its own list checked against its own reader; sharing the market
+        maker's would let a field the agent sends go unread by either.
+        """
+        import re as _re
+        html = _source("volkit", "web", "index.html")
+        js = html.split("<script>")[1].split("</script>")[0]
+        block = js.split("const AF=[")[1].split("];")[0]
         fields = set(_re.findall(r"\['([a-z_]+)'", block))
         self.assertIn("text", fields)
-        self.assertIn("fallback_spread", fields)
-        src = _source("volkit", "marketmaker.py")
-        handler = src.split("def panel_from_request")[1]
-        for f in fields | {"free", "smile_free", "fit_curve", "tune_wings"}:
+        self.assertIn("half_life", fields)
+        handler = _source("volkit", "agent.py").split("def panel_from_request")[1]
+        for f in fields - {"counterparty"}:
             self.assertIn(f'"{f}"', handler, f"the server never reads {f!r}")
+        # The one field the panel reader does not take: it says who showed the
+        # market, which only matters when the run is filed to the archive.
+        filer = _source("volkit", "webapp.py").split("def mm_agent_file")[1]
+        self.assertIn('"counterparty"', filer)
+
+    def test_the_agent_card_never_names_a_folder_the_browser_chose(self):
+        """A path a page can post is a path anything reaching the page can read.
+
+        The folders the ingest route scans come from the command line and are
+        held on the service; the browser chooses *when*, not *where*.
+        """
+        src = _source("volkit", "webapp.py")
+        handler = src.split("def mm_agent_ingest")[1].split("def _agent_model")[0]
+        self.assertIn("self.agent_chats", handler)
+        self.assertIn("self.agent_sdr", handler)
+        for named in ("payload.get(\"chats\")", "payload.get(\"sdr\")",
+                      "payload.get(\"folders\")"):
+            self.assertNotIn(named, handler)
+
+    def test_a_folder_scan_does_not_hold_the_book_lock(self):
+        """A minute of reading is a minute the pricing screen does not answer.
+
+        Reading a folder can take one -- a large dissemination file, or a
+        language model working through prose the grammar refused -- so the
+        archive has a lock of its own and the book's is borrowed only long
+        enough to read the pair list.
+        """
+        src = _source("volkit", "webapp.py")
+        handler = src.split("def mm_agent_ingest")[1].split("def _agent_model")[0]
+        self.assertIn("self._archive_lock", handler)
+        before_scan = handler.split("ingest_mod.scan")[0]
+        # the last lock taken before the scan must be the archive's
+        self.assertGreater(before_scan.rindex("self._archive_lock"),
+                           before_scan.rindex("self._lock"),
+                           "the scan runs under the book's lock")
 
     def test_the_comparison_panel_fields_are_all_understood_by_the_server(self):
         """Same guard as the listed and market-maker panels.
@@ -3963,9 +4738,34 @@ class TestFeedRefresh(unittest.TestCase):
                                            {"pair": "USDJPY", "expiry": "not a date"}]})
         self.assertEqual(len(r["legs"]), 3)
         self.assertEqual(r["legs"][0]["error"], "")
-        self.assertIn("no feed for", r["legs"][1]["error"])
+        # Half a triangle is still a refusal: the file has GBPUSD and no
+        # NZDUSD.  The reason names the pair and says both halves were tried.
+        self.assertIn("GBPNZD", r["legs"][1]["error"])
+        self.assertIn("legs", r["legs"][1]["error"])
+        self.assertIsNone(r["legs"][1]["spot"])
+        # The expiry is a separate failure and does not take the market with
+        # it -- and the row still holds its place either way.
         self.assertTrue(r["legs"][2]["error"])
+        self.assertEqual(r["legs"][2]["expiry"], "")
         self.assertEqual([q["index"] for q in r["legs"]], [0, 1, 2])
+
+    def test_a_cross_is_filled_from_the_legs_the_file_does_quote(self):
+        """The old bug: this route asked the feed for the pair *by name*.
+
+        The file quotes EURUSD and USDJPY and not EURJPY, so Fill refused the
+        cross while the pricing grid underneath it priced the very same leg
+        off the very same file -- ``Book.market_level`` composes it.  One
+        place reads a level, and this is now that place too.
+        """
+        service = self.service(FEED)
+        r = service.refresh_feed({"legs": [{"pair": "EURJPY", "expiry": "3M"}]})
+        q = r["legs"][0]
+        self.assertEqual(q["error"], "")
+        self.assertTrue(q["derived"])
+        self.assertEqual(q["via"], "EURUSD and USDJPY")
+        priced = service.price({"legs": [{"pair": "EURJPY", "expiry": "3M",
+                                          "strike": "ATM", "type": "C"}]})["legs"][0]
+        self.assertAlmostEqual(priced["forward"], q["forward"], places=9)
 
     def test_the_points_are_the_ones_the_pricer_would_use(self):
         """Filling a leg must not put a different market in front of it."""
@@ -3983,6 +4783,178 @@ class TestFeedRefresh(unittest.TestCase):
         service = BookService(str(WORKBOOK), ASOF)
         with self.assertRaises(FeedError):
             service.refresh_feed({"legs": []})
+
+
+class TestTheThreeMarketBoxes(unittest.TestCase):
+    """The pricing screen shows one box each for spot, the forward and the expiry.
+
+    The forward box is the **outright**, not points over a pip divisor, and
+    both level boxes are filled from the feed at the leg's own expiry and are
+    then editable.  ``pricing.resolve_legs`` is what fills them, and it is the
+    same reading the pricer does -- one place for the calendar and one place
+    for the level.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from volkit.webapp import BookService
+        cls.service = BookService(str(WORKBOOK), ASOF, feed_path=str(FEED))
+
+    def rows(self, *legs):
+        return self.service.legs({"legs": list(legs)})["legs"]
+
+    def test_every_spelling_of_a_date_comes_back_as_the_one_standard_date(self):
+        """Whatever is typed, the box ends up holding ``YYYY-MM-DD``.
+
+        A desk writes a date half a dozen ways and none of them is worth
+        making somebody translate by hand -- ``28May24`` least of all, since
+        that is the form this package prints in a leg's own label.
+        """
+        for text in ("2024-05-28", "28May24", "28May2024", "28 May 24", "28 May 2024",
+                     "May 28 2024", "May 28, 2024", "28-May-2024", "28-May-24",
+                     "2024/05/28", "5/28/2024", "20240528", "2024.05.28"):
+            with self.subTest(text):
+                row = self.rows({"pair": "USDJPY", "expiry": text})[0]
+                self.assertEqual(row["error"], "")
+                self.assertEqual(row["expiry"], "2024-05-28")
+
+    def test_a_tenor_is_resolved_once_on_the_pair_s_own_calendar(self):
+        for tenor in ("1W", "8d", "3M", "2y"):
+            with self.subTest(tenor):
+                row = self.rows({"pair": "USDJPY", "expiry": tenor})[0]
+                self.assertEqual(row["error"], "")
+                self.assertTrue(self.service.book.calendars.is_business_day(
+                    "USDJPY", date.fromisoformat(row["expiry"])))
+        # "8d" is eight days and not the eighth of something: the tenor is
+        # tried first, exactly as `resolve_expiry` has always done it.  The
+        # roll through spot and the delivery date moves it by a day or two,
+        # which is the point of resolving it on the calendar at all.
+        self.assertLess(abs(self.rows({"pair": "USDJPY", "expiry": "8d"})[0]["days"] - 8), 3)
+
+    def test_the_level_is_the_feed_s_at_that_leg_s_own_expiry(self):
+        one, three = self.rows({"pair": "USDJPY", "expiry": "1M"},
+                               {"pair": "USDJPY", "expiry": "3M"})
+        self.assertTrue(one["feed"] and three["feed"])
+        # One spot, two forwards: the points are interpolated at each expiry,
+        # which is the whole reason the box is refilled when the expiry moves.
+        self.assertAlmostEqual(one["spot"], three["spot"], places=12)
+        self.assertNotAlmostEqual(one["forward"], three["forward"], places=6)
+
+    def test_a_row_that_cannot_be_read_keeps_its_place_and_its_reason(self):
+        rows = self.rows({"pair": "USDJPY", "expiry": "1M"},
+                         {"pair": "USDJPY", "expiry": "not a date"},
+                         {"pair": "", "expiry": "1M"})
+        self.assertEqual([r["index"] for r in rows], [0, 1, 2])
+        self.assertEqual(rows[0]["error"], "")
+        self.assertTrue(rows[1]["error"])
+        self.assertEqual(rows[1]["expiry"], "")
+        self.assertIn("currency pair", rows[2]["error"])
+
+    def test_typing_does_not_re_read_the_feed_file(self):
+        """The box is refilled on a keystroke; the file is read on a button.
+
+        Going to disk every time somebody paused in the expiry box would make
+        an editor's hesitation a file read, and would pick a republished feed
+        up underneath a price being looked at -- which is what the auto-load
+        switch exists to make a deliberate choice.
+        """
+        import shutil, tempfile, os, time
+        from volkit.webapp import BookService
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "feed.csv"
+            shutil.copy(FEED, path)
+            service = BookService(str(WORKBOOK), ASOF, feed_path=str(path))
+            was = service.legs({"legs": [{"pair": "USDJPY", "expiry": "3M"}]})["legs"][0]
+            path.write_text(path.read_text(encoding="utf-8").replace(
+                "USDJPY,SPOT,150.25", "USDJPY,SPOT,151.25"), encoding="utf-8")
+            os.utime(path, (time.time() + 5, time.time() + 5))
+            still = service.legs({"legs": [{"pair": "USDJPY", "expiry": "3M"}]})["legs"][0]
+            self.assertAlmostEqual(still["spot"], was["spot"], places=12)
+            now = service.refresh_feed(
+                {"legs": [{"pair": "USDJPY", "expiry": "3M"}]})["legs"][0]
+            self.assertAlmostEqual(now["spot"], 151.25, places=12)
+
+
+class TestLegMarketOverrides(unittest.TestCase):
+    """Two boxes, either of which may be typed over, and the feed fills the rest.
+
+    The screen sends both, so the ordinary case is that both are typed and
+    what is priced is what is on the screen.  The interesting cases are the
+    partial ones.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.book = Book.from_excel(WORKBOOK, ASOF).load_all(["USDJPY"])
+        cls.book.feed = MarketFeed.load(FEED)
+
+    def one(self, **kw):
+        return price_strip(self.book, [OptionLeg("USDJPY", "3M", "ATM", **kw)])["legs"][0]
+
+    def test_the_feed_fills_both_boxes_when_neither_is_typed(self):
+        r = self.one()
+        self.assertEqual(r["market_source"], "feed")
+        self.assertTrue(r["feed_used"])
+        self.assertAlmostEqual(r["spot"], 150.25, places=10)
+        self.assertNotAlmostEqual(r["forward"], r["spot"], places=6)
+
+    def test_a_typed_forward_is_the_forward_and_spot_stays_the_feed_s(self):
+        r = self.one(forward=155.0)
+        self.assertAlmostEqual(r["forward"], 155.0, places=12)
+        self.assertAlmostEqual(r["spot"], 150.25, places=10)
+        self.assertEqual(r["market_source"], "spot from the feed")
+
+    def test_a_typed_spot_leaves_the_forward_to_the_feed(self):
+        """Each box falls back on its own.
+
+        Clearing one of two boxes is an ordinary thing to do to one leg of a
+        strip, and it must not need the other cleared as well.  The old
+        screen had no forward box at all -- points on top of spot -- so a
+        typed spot took the whole market with it.
+        """
+        fed = self.one()
+        r = self.one(spot=160.0)
+        self.assertAlmostEqual(r["spot"], 160.0, places=12)
+        self.assertAlmostEqual(r["forward"], fed["forward"], places=12)
+        self.assertEqual(r["market_source"], "forward from the feed")
+
+    def test_both_boxes_typed_are_priced_exactly_as_they_stand(self):
+        r = self.one(spot=160.0, forward=159.4)
+        self.assertAlmostEqual(r["spot"], 160.0, places=12)
+        self.assertAlmostEqual(r["forward"], 159.4, places=12)
+        self.assertEqual(r["market_source"], "typed")
+        self.assertFalse(r["feed_used"])
+
+    def test_the_points_spelling_still_says_where_the_forward_is(self):
+        """``forward_points`` defaults to None and not to zero.
+
+        Nothing else can tell "said nothing about points" from "said the
+        forward is at spot" -- and the two want opposite things from the
+        feed.  Defaulting to 0.0, as this did while the screen sent points,
+        made every leg the second kind the moment the screen stopped sending
+        them.
+        """
+        r = self.one(spot=160.0, forward_points=0.0, pip=100.0)
+        self.assertAlmostEqual(r["forward"], 160.0, places=12)
+        self.assertEqual(r["market_source"], "typed")
+        r = self.one(spot=160.0, forward_points=-45.0, pip=100.0)
+        self.assertAlmostEqual(r["forward"], 160.0 - 0.45, places=10)
+        # And a forward given outright wins over both of them.
+        r = self.one(spot=160.0, forward=159.0, forward_points=-45.0, pip=100.0)
+        self.assertAlmostEqual(r["forward"], 159.0, places=12)
+
+    def test_a_forward_on_its_own_with_no_feed_is_a_whole_market(self):
+        """This model carries no discount curve, so spot has nothing to add.
+
+        The alternative was the old fallback, spot = 1.0, which would price a
+        yen option 150 times away from the level in the box beside it.
+        """
+        book = Book.from_excel(WORKBOOK, ASOF).load_all(["USDJPY"])
+        r = price_strip(book, [OptionLeg("USDJPY", "3M", "ATM", forward=155.0)])["legs"][0]
+        self.assertTrue(r["ok"], r["error"])
+        self.assertAlmostEqual(r["spot"], 155.0, places=12)
+        self.assertAlmostEqual(r["forward"], 155.0, places=12)
+        self.assertEqual(r["market_source"], "typed")
 
 
 class TestWorkbooksAreNotHeldOpen(unittest.TestCase):
@@ -4115,6 +5087,10 @@ class TestTextFilesAreUtf8(unittest.TestCase):
                 bad = None
                 if fn.attr in ("read_text", "write_text") and "encoding" not in kw:
                     bad = fn.attr
+                elif fn.attr == "open" and "timeout" in kw:
+                    bad = None      # a network opener (urllib), not a file: it
+                                    # returns bytes and has no encoding to get
+                                    # wrong.  A file open has no timeout.
                 elif fn.attr == "open" and "encoding" not in kw and "b" not in "".join(
                         a.value for a in node.args if isinstance(a, ast.Constant)
                         and isinstance(a.value, str)):
@@ -4463,7 +5439,69 @@ class TestListedPositions(unittest.TestCase):
         self.assertAlmostEqual(
             r["totals"]["bs"]["vega"],
             sum(g["bs"]["vega"] for g in r["groups"]), places=6)
-        self.assertTrue(any("not, because a future" in n for n in r["notes"]))
+        self.assertTrue(any("not a future of another" in n for n in r["notes"]))
+        # Both settle in US dollars, so there is one money total and it is the
+        # all-in one.
+        self.assertEqual([c["ccy"] for c in r["currencies"]], ["USD"])
+        self.assertAlmostEqual(r["currencies"][0]["bs"]["vega"],
+                               r["totals"]["bs"]["vega"], places=12)
+
+    def test_every_column_adds_within_one_contract_across_its_expiries(self):
+        """The screen aggregated per *panel* and then jumped to money-only,
+        so a book of one contract over four expiries had no futures-equivalent
+        delta anywhere -- the one number a desk asks for when it asks how much
+        6E it is running.  §8 said "totalled per contract"; the code totalled
+        per panel, and the two only coincide with one panel per contract."""
+        panels = [self.panel(), self.panel(expiry=self.LATER, forward=1.10)]
+        r = self.agg(f"6E, {self.EXPIRY}, 1.09, C, 25\n6E, {self.LATER}, 1.09, P, -10\n",
+                     panels)
+        self.assertEqual([p["error"] for p in r["positions"]], ["", ""])
+        self.assertEqual(len(r["contracts"]), 1)
+        con = r["contracts"][0]
+        self.assertEqual((con["underlying"], con["panels"], con["n"]), ("6E", 2, 2))
+        self.assertEqual(len(con["expiries"]), 2)
+        for which in ("bs", "smile"):
+            for key in ("delta_futures", "gamma_futures", "vega", "theta", "premium"):
+                got = con[which][key] if key != "premium" else con["premium"]
+                want = sum((g[which][key] if key != "premium" else g["premium"])
+                           for g in r["groups"])
+                self.assertAlmostEqual(got, want, places=9, msg=f"{which}.{key}")
+        # And the note says what that futures total is and is not.
+        self.assertTrue(any("not the same future" in n for n in r["notes"]))
+
+    def test_money_is_not_totalled_across_two_settlement_currencies(self):
+        """A sum of euros and dollars is not a number.  It was unreachable
+        while the contract came off a list of CME codes, every one of which
+        settles in dollars; a typed contract makes it reachable."""
+        panels = [self.panel(code="XA", pair="EURUSD", contract_size=125_000),
+                  self.panel(code="XB", pair="EURGBP", contract_size=125_000)]
+        r = self.agg("XA, , 1.09, C, 25\nXB, , 1.09, P, -10\n", panels)
+        self.assertEqual([p["error"] for p in r["positions"]], ["", ""])
+        self.assertEqual([c["ccy"] for c in r["currencies"]], ["GBP", "USD"])
+        self.assertIsNone(r["totals"]["premium"])
+        self.assertIsNone(r["totals"]["bs"]["vega"])
+        self.assertTrue(any("no all-in money total" in w for w in r["warnings"]))
+        # The per-currency rows still hold every figure.
+        byccy = {c["ccy"]: c for c in r["currencies"]}
+        self.assertAlmostEqual(byccy["USD"]["premium"], r["groups"][0]["premium"], places=9)
+        self.assertAlmostEqual(byccy["GBP"]["premium"], r["groups"][1]["premium"], places=9)
+
+    def test_two_typed_contracts_on_one_screen_can_be_told_apart(self):
+        """The old bug, and the reason the contract box is free text: with a
+        dropdown, every contract missing from it was CUSTOM, both panels were
+        called CUSTOM, and a position line naming one was refused as matching
+        two panels -- with no field left that could settle it."""
+        panels = [self.panel(code="XA", pair="EURUSD", contract_size=125_000),
+                  self.panel(code="XB", pair="EURUSD", contract_size=125_000)]
+        r = self.agg("XA, , 1.09, C, 25\nXB, , 1.09, P, -10\n", panels)
+        self.assertEqual([p["error"] for p in r["positions"]], ["", ""])
+        self.assertEqual([g["underlying"] for g in r["groups"]], ["XA", "XB"])
+        self.assertEqual(sorted(c["underlying"] for c in r["contracts"]), ["XA", "XB"])
+        self.assertFalse(any(c["known"] for c in r["contracts"]))
+        # Two panels that really are the same thing are still refused, and the
+        # refusal now names the one field that is always free to differ.
+        same = self.agg("1.09 C 25\n", [self.panel(), self.panel()])
+        self.assertIn("label", same["positions"][0]["error"])
 
     def test_a_custom_contract_with_no_size_says_so_rather_than_using_one(self):
         """The money columns are then per one unit of the base currency, which
@@ -4694,6 +5732,11 @@ class TestScreens(unittest.TestCase):
         msg = self.screens.route_refusal("/api/mm/fit")
         self.assertIsNotNone(msg)
         self.assertIn("Market maker", msg)
+        # Both agents live on this tab and leave with it: the desk agent's
+        # card and the marking agent's, routes and command alike.
+        self.assertIsNotNone(self.screens.route_refusal("/api/mm/mark"))
+        self.assertIsNotNone(self.screens.route_refusal("/api/mm/mark/record"))
+        self.assertEqual(self.screens.command_screen("mark"), "mm")
         # The shell and the screens that stayed are untouched.
         self.assertIsNone(self.screens.route_refusal("/api/price"))
         self.assertIsNone(self.screens.route_refusal("/api/state"))
@@ -5280,6 +6323,81 @@ class TestQuoteParsing(unittest.TestCase):
         self.assertTrue(any("more than once" in n for n in notes))
 
 
+class TestRequestParsing(unittest.TestCase):
+    """Reading the other box: what is being asked for, with no price on it.
+
+    Same grammar as a broker run with one thing taken out, read by the same
+    tokeniser -- and the absence of the price is *enforced*, which is the
+    whole difference between the two boxes.
+    """
+
+    def parse(self, text, **kw):
+        kw.setdefault("pair", "EURUSD")
+        return quotes.parse_requests(text, **kw)
+
+    def test_reads_the_instruments_a_desk_is_asked_for(self):
+        asked = self.parse(
+            "1M ATM in 100mm vega\n"
+            "3M 25d RR\n"
+            "2M 25d fly\n"
+            "6M 1.1000 call\n"
+            "1M/3M ATM spread\n")
+        self.assertEqual([q.instrument for q in asked.requests],
+                         ["atm", "rr", "fly", "outright", "spread"])
+        self.assertEqual(asked.skipped, ())
+        self.assertEqual(asked.requests[0].size, 100.0)
+        self.assertEqual(asked.requests[0].size_basis, "vega")
+        self.assertAlmostEqual(asked.requests[1].delta, 0.25)
+        self.assertAlmostEqual(asked.requests[3].strike, 1.10)
+        self.assertTrue(asked.requests[3].is_call)
+
+    def test_a_price_in_the_request_box_is_refused_not_read_as_a_strike(self):
+        """A broker run pasted into the wrong box would otherwise be quoted at
+        levels nobody asked about, which is the silent wrong answer this
+        project exists to remove."""
+        asked = self.parse("1M ATM 8.20/8.60\n3M 25d RR 0.35/0.55\n")
+        self.assertEqual(asked.requests, ())
+        self.assertEqual(len(asked.skipped), 2)
+        for _, _, why in asked.skipped:
+            self.assertIn("reads as a price", why)
+            self.assertIn("market box", why)
+
+    def test_one_number_on_a_line_that_has_not_said_what_it_is_struck_at(self):
+        """'6M 1.1000' is a strike; '1M ATM 8.5' is a price on an instrument
+        that already said what it is."""
+        got = self.parse("6M 1.1000\n").requests[0]
+        self.assertEqual(got.instrument, "outright")
+        self.assertAlmostEqual(got.strike, 1.10)
+        self.assertEqual(self.parse("1M ATM 8.5\n").requests, ())
+
+    def test_a_direction_word_is_resolved_against_the_pair(self):
+        """The sign lives on the request and is applied once, where the row is
+        built.  §5's first entry is what a second place for a sign costs."""
+        plain = self.parse("3M 25d rr\n", pair="USDJPY").requests[0]
+        asked = self.parse("3M 25d rr jpy call over\n", pair="USDJPY").requests[0]
+        self.assertEqual(plain.sign, 1.0)
+        self.assertEqual(asked.sign, -1.0)
+        self.assertEqual(asked.direction, "jpy")
+        self.assertIn("JPY call over", asked.describe())
+        # And a currency that is not a leg is a refusal, not a guess.
+        self.assertIn("not a leg", self.parse("3M 25d rr chf call over\n",
+                                              pair="USDJPY").skipped[0][2])
+
+    def test_the_same_instrument_asked_for_twice_is_two_questions(self):
+        """Unlike the market box, where a run is a conversation and a later
+        quote of one thing replaces the earlier one.  Two sizes of the same
+        tenor are two prices to make."""
+        asked = self.parse("1M ATM in 50mm\n1M ATM in 500mm\n")
+        self.assertEqual(len(asked.requests), 2)
+        self.assertEqual([q.size for q in asked.requests], [50.0, 500.0])
+
+    def test_an_instrument_that_cannot_be_read_keeps_its_reason(self):
+        asked = self.parse("3M rr\n1M ATM\nnonsense\n")
+        self.assertEqual(len(asked.requests), 1)
+        self.assertEqual([n for n, _, _ in asked.skipped], [1, 3])
+        self.assertIn("needs a delta", asked.skipped[0][2])
+
+
 class TestColumnQuotes(unittest.TestCase):
     """A run written as ``expiry, strike, bid/offer`` columns.
 
@@ -5484,10 +6602,10 @@ class TestQuoteTimestamps(unittest.TestCase):
             "pair": "EURUSD", "cut": "NY", "method": "SVI",
             "text": ("09:15, 1M, ATM, 8.20/8.60\n09:41, 1M, ATM, 8.25/8.65\n"
                      "09:20, 2M, 25d, 8.00/8.40\n"),
-            "fit_curve": False, "tune_wings": False, "fallback_spread": 0.3,
+            "fit_curve": False, "tune_wings": False,
         })
         book = Book.from_excel(WORKBOOK, ASOF).load_all(["EURUSD"])
-        sheet = panel.run(book)["sheet"]
+        sheet = panel.run(book)["market"]
         self.assertEqual([r["timestamp"] for r in sheet["rows"]], ["09:41", "09:20"])
         self.assertEqual(len(sheet["superseded"]), 1)
         self.assertEqual(sheet["superseded"][0]["replaced_by"], 2)
@@ -5853,11 +6971,14 @@ class TestMarketMakerModel(unittest.TestCase):
 
 
 class TestMarketMakerPanel(unittest.TestCase):
-    """The screen as a whole: what it reports and what it leaves behind.
+    """The screen as a whole: what each of its two stages reports, and what
+    they leave behind.
 
-    Most of these switch the wing fine tune off.  It is exercised properly in
-    ``TestMarketMakerModel`` and in the two tests here that need it; running a
-    full one in every case would spend a minute of the suite re-proving it.
+    Fitting and quoting are two panels and two routes, so they are two sets of
+    tests here.  Most of these switch the wing fine tune off; it is exercised
+    properly in ``TestMarketMakerModel`` and in the tests here that need it,
+    and running a full one in every case would spend a minute of the suite
+    re-proving it.
     """
 
     TEXT = ("1M ATM 6.05/6.35 in 100mm vega\n"
@@ -5866,18 +6987,26 @@ class TestMarketMakerPanel(unittest.TestCase):
             "1Y atm 7.00/7.30\n"
             "1M 25d rr -0.30/-0.10 eur call over\n"
             "3M 25d fly 0.12/0.20\n")
+    ASKED = ("1M ATM in 100mm\n"
+             "1M 25d rr\n"
+             "3M 25d fly\n")
 
     @classmethod
     def setUpClass(cls):
-        # Shared by everything that only reports: Panel.run puts the book back,
-        # which is itself one of the tests below.
+        # Shared by everything that only reports: both panels put the book
+        # back, which is itself two of the tests below.
         cls.book = Book.from_excel(WORKBOOK, ASOF).load_all(["EURUSD"])
 
     def panel(self, **kw):
         payload = {"pair": "EURUSD", "text": self.TEXT, "target_source": "quotes",
-                   "fallback_spread": "0.30", "tune_wings": False}
+                   "tune_wings": False}
         payload.update(kw)
         return marketmaker.panel_from_request(payload)
+
+    def quote(self, **kw):
+        payload = {"pair": "EURUSD", "request_text": self.ASKED, "fallback_spread": "0.30"}
+        payload.update(kw)
+        return marketmaker.quote_panel_from_request(payload)
 
     def bank(self):
         bank = KnowledgeBank()
@@ -5885,6 +7014,7 @@ class TestMarketMakerPanel(unittest.TestCase):
                                  Rule("spread", 0.12, "fly")], ASOF.now)
         return bank
 
+    # -- the fit ----------------------------------------------------------
     def test_reporting_puts_the_book_back_exactly(self):
         """The default is to report.  A screen that quietly re-marked the book
         every time somebody typed in it would be unusable.  This runs the wing
@@ -5893,7 +7023,7 @@ class TestMarketMakerPanel(unittest.TestCase):
         surface = book["EURUSD"]
         before = list(surface.atm.tenor_table())
         shifts = dict(surface.param_shifts)
-        out = self.panel(tune_wings=True).run(book, bank=self.bank())
+        out = self.panel(tune_wings=True).run(book)
         self.assertFalse(out["applied"])
         self.assertIsNotNone(out["wings"])
         self.assertNotEqual(out["wings"]["after"], out["wings"]["before"])
@@ -5904,32 +7034,128 @@ class TestMarketMakerPanel(unittest.TestCase):
         book = Book.from_excel(WORKBOOK, ASOF).load_all(["EURUSD"])
         surface = book["EURUSD"]
         before = surface.atm.term_vol(tenor_to_years("1m"))
-        out = self.panel(apply=True).run(book, bank=self.bank())
+        out = self.panel(apply=True).run(book)
         self.assertTrue(out["applied"])
         self.assertAlmostEqual(surface.atm.term_vol(tenor_to_years("1m")), 0.062, places=5)
         self.assertNotAlmostEqual(surface.atm.term_vol(tenor_to_years("1m")), before)
         self.assertTrue(any("in memory only" in w for w in out["warnings"]))
 
+    def test_the_fit_puts_a_price_on_nothing(self):
+        """The whole point of the split.  A fit that also quoted the run it was
+        fitted to made a price in every instrument a broker happened to show,
+        which is not what anybody asked for -- and it meant a request could
+        only be priced by re-running a fit against a market that had nothing
+        to do with it."""
+        out = self.panel().run(self.book)
+        self.assertNotIn("sheet", out)
+        for row in out["market"]["rows"]:
+            self.assertNotIn("our_bid", row)
+            self.assertNotIn("width", row)
+
+    def test_a_section_that_cannot_run_empties_only_itself(self):
+        """No pinned tenor means no target curve.  The market table is still
+        built, the same way the analysis screen keeps its sections apart."""
+        out = self.panel(target_source="overwrites").run(self.book)
+        self.assertIsNone(out["curve"])
+        self.assertIn("no tenor is pinned", out["unavailable"]["curve"])
+        self.assertIsNotNone(out["market"])
+        self.assertEqual(out["market"]["n_quotes"], 6)
+
+    def test_the_market_table_reports_where_the_model_sits_against_theirs(self):
+        out = self.panel().run(self.book)
+        for row in out["market"]["rows"]:
+            self.assertIn(row["position"], ("inside", "below", "above"))
+            if row["position"] == "inside":
+                self.assertEqual(row["edge"], 0.0)
+            else:
+                self.assertNotEqual(row["edge"], 0.0)
+        self.assertEqual(out["market"]["n_quotes"], 6)
+
+    def test_a_paste_the_reader_cannot_use_is_listed_not_silently_shortened(self):
+        out = self.panel(text=self.TEXT + "3M 25d rr 0.4/0.6 jpy call over\n").run(self.book)
+        self.assertEqual(out["market"]["n_quotes"], 6)
+        self.assertEqual(len(out["market"]["skipped"]), 1)
+        self.assertIn("not a leg of EURUSD", out["market"]["skipped"][0]["why"])
+
+    # -- the hand-off -----------------------------------------------------
+    def test_the_handoff_reproduces_the_fit_exactly(self):
+        """The two halves of the split have to meet at the same numbers.
+
+        Quoting off the marks a fit handed back must give what quoting off a
+        book the same fit was *applied* to gives.  Anything less and the
+        screen's price would depend on whether somebody ticked "keep the
+        marks", which is a decision about the book and not about the price.
+        """
+        applied_book = Book.from_excel(WORKBOOK, ASOF).load_all(["EURUSD"])
+        fit = self.panel(apply=True, tune_wings=True).run(applied_book)
+        on_book = self.quote().run(applied_book, bank=self.bank())
+
+        reported_book = Book.from_excel(WORKBOOK, ASOF).load_all(["EURUSD"])
+        reported = self.panel(tune_wings=True).run(reported_book)
+        handed = self.quote(marks=reported["marks"]).run(reported_book, bank=self.bank())
+
+        self.assertEqual([r["our_bid"] for r in handed["sheet"]["rows"]],
+                         [r["our_bid"] for r in on_book["sheet"]["rows"]])
+        self.assertEqual([r["our_ask"] for r in handed["sheet"]["rows"]],
+                         [r["our_ask"] for r in on_book["sheet"]["rows"]])
+        self.assertEqual(fit["marks"]["knobs"], reported["marks"]["knobs"])
+
+    def test_a_quote_standing_on_a_fit_puts_the_book_back(self):
+        """The marks go on for the length of one call and come off again.  A
+        surface left half-marked by a price nobody kept, priced off all
+        morning, is the worst outcome available to this tool."""
+        book = Book.from_excel(WORKBOOK, ASOF).load_all(["EURUSD"])
+        before = marketmaker.capture_marks(book["EURUSD"])
+        fit = self.panel(tune_wings=True).run(book)
+        self.assertNotEqual(fit["marks"]["knobs"], before["knobs"])
+        out = self.quote(marks=fit["marks"]).run(book, bank=self.bank())
+        self.assertEqual(marketmaker.capture_marks(book["EURUSD"]), before)
+        self.assertEqual([w for w in out["warnings"] if "put back" in w], [])
+
+    def test_a_quote_says_which_marks_it_stood_on(self):
+        """A price made on this morning's fit and one made on last night's
+        marks must never read the same."""
+        fit = self.panel().run(self.book)
+        handed = self.quote(marks=fit["marks"]).run(self.book, bank=self.bank())
+        self.assertTrue(handed["marks"]["on_the_fit"])
+        self.assertIn("handed", handed["marks"]["note"])
+        plain = self.quote().run(self.book, bank=self.bank())
+        self.assertFalse(plain["marks"]["on_the_fit"])
+        self.assertIn("as they stand", plain["marks"]["note"])
+        # And they are different prices, which is the point of saying which.
+        self.assertNotEqual([r["our_bid"] for r in handed["sheet"]["rows"]],
+                            [r["our_bid"] for r in plain["sheet"]["rows"]])
+
+    def test_marks_fitted_on_another_pair_are_refused(self):
+        """The browser holds the fit and the pair selector apart, and the two
+        can be moved apart.  Quoting EURUSD off a USDJPY fit is a wrong answer
+        that reads perfectly well."""
+        fit = self.panel().run(self.book)
+        marks = dict(fit["marks"], pair="USDJPY")
+        with self.assertRaises(ValueError) as got:
+            marketmaker.quote_panel_from_request(
+                {"pair": "EURUSD", "request_text": self.ASKED, "marks": marks})
+        self.assertIn("fitted on USDJPY", str(got.exception))
+
+    def test_a_knob_the_curve_does_not_have_is_refused_rather_than_skipped(self):
+        marks = marketmaker.capture_marks(self.book["EURUSD"])
+        marks["knobs"]["corr_initial"] = 0.5
+        with self.assertRaises(ValueError) as got:
+            marketmaker.apply_marks(self.book["EURUSD"], marks)
+        self.assertIn("corr_initial", str(got.exception))
+
+    # -- the quote --------------------------------------------------------
     def test_the_width_a_rule_states_is_the_width_that_comes_out(self):
         """The bank is written in volatility points and the model in decimals.
         Reading a 0.28 rule as a decimal produced a 28 vol point market."""
-        out = self.panel().run(self.book, bank=self.bank())
+        out = self.quote().run(self.book, bank=self.bank())
         atm = next(r for r in out["sheet"]["rows"] if r["instrument"] == "atm")
         self.assertAlmostEqual(atm["width"], 0.28)
         self.assertAlmostEqual(atm["our_ask"] - atm["our_bid"], 0.28, places=9)
         self.assertIn("ATM", atm["width_source"])
 
-    def test_a_section_that_cannot_run_empties_only_itself(self):
-        """No pinned tenor means no target curve.  The sheet is still built,
-        the same way the analysis screen keeps its sections apart."""
-        out = self.panel(target_source="overwrites").run(self.book, bank=self.bank())
-        self.assertIsNone(out["curve"])
-        self.assertIn("no tenor is pinned", out["unavailable"]["curve"])
-        self.assertIsNotNone(out["sheet"])
-        self.assertEqual(out["sheet"]["n_quotes"], 6)
-
-    def test_a_quote_with_no_rule_and_no_fallback_gets_no_price(self):
-        out = self.panel(fallback_spread="").run(self.book, bank=KnowledgeBank())
+    def test_a_request_with_no_rule_and_no_fallback_gets_no_price(self):
+        out = self.quote(fallback_spread="").run(self.book, bank=KnowledgeBank())
         for row in out["sheet"]["rows"]:
             self.assertIsNone(row["our_bid"])
             self.assertEqual(row["verdict"], "no width")
@@ -5938,40 +7164,66 @@ class TestMarketMakerPanel(unittest.TestCase):
     def test_an_absolute_strike_without_a_feed_is_reported_not_priced_at_one(self):
         """Without a forward there is no moneyness, and pricing it at a forward
         of 1 would be a silent, badly wrong answer."""
-        out = self.panel(text=self.TEXT + "6M 1.1000 call 7.90/8.40\n").run(
-            self.book, bank=self.bank())
-        row = out["sheet"]["rows"][-1]
+        out = self.quote(request_text="6M 1.1000 call\n").run(self.book, bank=self.bank())
+        row = out["sheet"]["rows"][0]
         self.assertEqual(row["verdict"], "not priced")
-        self.assertIsNone(row["model_after"])
+        self.assertIsNone(row["model"])
         self.assertTrue(any("forward feed" in w for w in row["warnings"]))
 
-    def test_the_sheet_reports_where_our_price_sits_against_theirs(self):
-        out = self.panel().run(self.book, bank=self.bank())
-        rows = {r["describe"]: r for r in out["sheet"]["rows"]}
-        for row in rows.values():
-            self.assertIn(row["position"], ("inside", "below", "above"))
-            if row["position"] == "inside":
-                self.assertEqual(row["edge"], 0.0)
-            else:
-                self.assertNotEqual(row["edge"], 0.0)
-        self.assertEqual(out["sheet"]["n_quotes"], 6)
-        self.assertEqual(out["sheet"]["priced"], 6)
+    def test_a_quote_needs_no_market_at_all(self):
+        """The reason the request box exists.  A request does not arrive with a
+        broker run attached to it, and the price is a property of the marks and
+        the bank rather than of what somebody happened to show."""
+        out = self.quote(text="").run(self.book, bank=self.bank())
+        self.assertEqual(out["sheet"]["n_quotes"], 3)
+        self.assertEqual(out["sheet"]["priced"], 3)
+        self.assertEqual(out["sheet"]["matched"], 0)
+        for row in out["sheet"]["rows"]:
+            self.assertIsNone(row["market_mid"])
+            self.assertEqual(row["verdict"], "quoted")
 
-    def test_a_paste_the_reader_cannot_use_is_listed_not_silently_shortened(self):
-        out = self.panel(text=self.TEXT + "3M 25d rr 0.4/0.6 jpy call over\n").run(
-            self.book, bank=self.bank())
-        self.assertEqual(out["sheet"]["n_quotes"], 6)
-        self.assertEqual(len(out["sheet"]["skipped"]), 1)
-        self.assertIn("not a leg of EURUSD", out["sheet"]["skipped"][0]["why"])
+    def test_a_request_the_market_also_quoted_carries_their_market(self):
+        """So "inside their market" survives the split.  The match is on the
+        instrument, which is what makes two lines the same quote -- not on the
+        text, which is written differently in the two boxes."""
+        out = self.quote(text=self.TEXT).run(self.book, bank=self.bank())
+        rows = {r["describe"]: r for r in out["sheet"]["rows"]}
+        atm = rows["1M ATM"]
+        self.assertAlmostEqual(atm["market_bid"], 6.05)
+        self.assertAlmostEqual(atm["market_ask"], 6.35)
+        self.assertIn(atm["position"], ("inside", "below", "above"))
+        self.assertNotEqual(atm["verdict"], "quoted")
+        self.assertEqual(out["sheet"]["matched"], 3)
+
+    def test_a_risk_reversal_is_quoted_in_the_convention_it_was_asked_in(self):
+        """Asked as 'JPY call over', answered as 'JPY call over'.  Quoting a
+        skew back in the opposite sign is the §5 class of error, so the flip is
+        applied once, at the row, and every number on the row turns with it."""
+        book = Book.from_excel(WORKBOOK, ASOF).load_all(["USDJPY"])
+        bank = KnowledgeBank()
+        bank.set_pair("USDJPY", [Rule("spread", 0.20, "rr")], ASOF.now)
+        ours = marketmaker.quote_panel_from_request(
+            {"pair": "USDJPY", "request_text": "3M 25d rr\n"}).run(book, bank=bank)
+        theirs = marketmaker.quote_panel_from_request(
+            {"pair": "USDJPY", "request_text": "3M 25d rr jpy call over\n"}).run(book, bank=bank)
+        a, b = ours["sheet"]["rows"][0], theirs["sheet"]["rows"][0]
+        self.assertEqual(a["sign"], 1.0)
+        self.assertEqual(b["sign"], -1.0)
+        self.assertAlmostEqual(b["model"], -a["model"], places=12)
+        # A bid is still the low side of what we show, in whichever convention.
+        self.assertLess(b["our_bid"], b["our_ask"])
+        self.assertAlmostEqual(b["our_bid"], -a["our_ask"], places=12)
+        self.assertIn("JPY call over", b["describe"])
 
     def test_the_panel_and_the_command_line_share_one_entry_point(self):
         """A panel set up in the browser and the same panel run from a shell
         must produce the same numbers, which is only guaranteed if there is one
-        function."""
+        function -- and now two stages, so two of them."""
         import inspect
         from volkit import cli
         source = inspect.getsource(cli.cmd_mm)
         self.assertIn("panel_from_request", source)
+        self.assertIn("quote_panel_from_request", source)
 
 
 class TestCurveInvalidation(unittest.TestCase):

@@ -16,8 +16,14 @@ broken. Read it before changing anything.
 A rebuild of a legacy tool (`vol.py`, `cvol.py`, `ssabr.py`, `vols.py`,
 `common_functions.py`, `__main__.py`, `rv.py`), which is **still present in the
 repo root, untouched, for comparison**. Nothing in `volkit/` imports it.
+`vols.py` reads the workbook's CONFIG sheet by its old column names, so the
+sheet it was written against is kept as `files/vol_marks_legacy_format.xlsx`
+-- same marks, old layout -- and the comparison still runs. volkit reads
+either (§4).
 
-- ~16,800 lines across 36 modules, 431 tests, `unittest` only (no pytest).
+- ~28,000 lines across 47 modules, 707 tests, `unittest` only (no pytest).
+  Tests live in `tests/test_volkit.py`, `tests/test_agent.py` (the desk
+  agent, §17) and `tests/test_marking.py` (the marking agent, §18).
 - Runtime deps: numpy, scipy, pandas, openpyxl. Plus `tzdata` on Windows.
 - Deliberately no `pysabr`, `xlrd`, `tkcalendar`, and no web framework.
 - **Six screens**, each with a command-line equivalent, in the order a desk
@@ -61,7 +67,8 @@ cross      cross pairs from two legs and a correlation
 surface    ATM + smile, greeks, delta strikes, RR / fly
 exotics    digitals, one-touch / no-touch, overhedge buffers
 pricing    multi-leg strips, strike/expiry specs, per-leg error isolation
-marketdata validated Excel reader
+marketdata validated Excel reader; CONFIG is two columns and a cross
+           names its own dollar legs
 feed       spot / forward points from file, interpolated
 econ       scheduled economic events (rules + dated table)
 book       all pairs, built in dependency order
@@ -77,9 +84,32 @@ relvalue   one score per expiry and strike: implied against realized in level
 curves     several vol curves side by side, and the same curve on other dates
 monitor    small panels: what has moved between two points in time, per pair
 quotes     a broker run, in English or in columns: outrights, RR, fly, spreads,
-           timestamps and which of two quotes for one thing is live
+           timestamps and which of two quotes for one thing is live. And the
+           same grammar with the price taken out: what is being asked for
 knowledge  the per-pair knowledge bank: widths, floors, shifts, notes
-marketmaker  fit the curve to a target, fine tune the wings to a market, quote it
+marketmaker  two panels: the fit (curve to a target, wings to a market) and the
+           quote (a two-way in each instrument asked for). They meet at the
+           marks the fit hands back
+archive    every observation the desk has kept: quotes shown, trades printed,
+           prices we made and what became of them. Append-only, content-addressed
+dtcc       fetching the public dissemination files from DTCC: which URL, whether
+           a 200 is really a file, and what a 404 on a Saturday means
+sdr        the public dissemination file, both layouts, zipped or not, without
+           guessing
+llm        a local model on a short leash: prose into the house grammar, and the
+           finished decision into English. Every number it returns is checked
+           against the text it was given
+ingest     the watched folders, read once each by content
+synthesis  the archive worked out: age-weighted widths, where the market has
+           been, what became of our prices, what printed
+agent      request in, price out, with the ordered list of ingredients that
+           sum to it
+remarks    every time somebody moved a mark, and what from: a re-mark is a diff
+           of two snapshots, so nothing has to be instrumented
+marking    the marking agent: how to run the fit, and what this desk does after
+           it -- tendencies with counts on them, never a policy
+consult    what the two agents say to each other: a finding, a proposal, and a
+           scored critique of what it broke
 webapp     JSON API + stdlib server;  web/index.html is the whole front end
 cli        every screen has a command-line equivalent
 screens    which screens a build has, shown or hidden; the one reader of the
@@ -113,6 +143,39 @@ preflight  startup checks (tzdata above all)
   axis, the point table and the density by it; without a feed it stays in K/F
   and says so. The slice itself is always built in moneyness. `volkit smile`
   prints the same two ways, off the same call.
+- **One place reads a level, and a cross it does not hold it builds.**
+  `Book.market_level` is that place: spot, the outright forward, the points
+  and the pip, for the band model, the strike axis, the carry table, the
+  relative-value grid, a pricing leg with a blank spot and the market-maker
+  sheet's absolute strikes. When the feed does not quote the pair itself but
+  quotes both of its legs, the level is **composed from them** -- EURJPY is
+  EURUSD x USDJPY, EURGBP is EURUSD / GBPUSD, by `cross.infer_leg_signs` read
+  as quotation rather than as correlation. That is triangular arbitrage and
+  not a model, and it is why a loaded feed is no longer invisible to a cross:
+  every screen used to ask the feed for the pair *by name*, so the
+  market-maker screen refused a strike quote on EURJPY while the pricing
+  screen quoted both its legs off the same file. `derived` and `via` travel
+  with the level and every screen shows them, because a level that came out
+  of an identity and one that was published must not read the same. Half a
+  triangle is still a refusal -- no NZDUSD in the file, no GBPNZD forward --
+  and the points are the cross's own in the cross's own pips, never the legs'
+  points added.
+- **The workbook's CONFIG sheet is two columns: the pairs and the tenors.**
+  A pair with the dollar on one side is marked on its own backbone; a pair
+  without one is a **cross**, is never marked directly, and is broken into the
+  two dollar pairs the market quotes by `cross.dollar_legs` -- EURJPY into
+  EURUSD and USDJPY, EURGBP into EURUSD and GBPUSD. What is marked for it is
+  the **correlation** between those legs, which is what a cross's
+  `initial` / `long term` / `MR` cells have always meant. A leg nothing listed
+  is added, because a cross cannot be built without both of them. None of this
+  was ever a decision -- EURGBP has one sensible pair of legs -- and writing
+  them out per cross was a chance to write one upside down, which flips the
+  triangle's sign (§5 item 1). The old `BASE` / `COR` / column-per-cross layout
+  still loads and **explicitly named legs win**: a sheet that says something is
+  not second-guessed by a convention. Every derivation travels in
+  `MarketData.notes` and is shown, for the same reason `derived` and `via`
+  travel with a market level -- a pair that came out of a convention and one
+  that was written down must not read the same.
 - **The server holds no screen state.** The browser owns the pricing legs, the
   listed panels and the analysis query, and posts each one whole. That is what
   makes `volkit listed` and `volkit analysis` reproduce a screen exactly, and
@@ -154,6 +217,55 @@ preflight  startup checks (tzdata above all)
   *dropped* it and stamped the result UTC, reading `19:00+09:00` as 19:00Z.
   An offset is converted here, never discarded. Do not re-add a local
   `.replace("T", " ")`.
+- **A pricing leg's market is spot, the swap and the outright, and they hold
+  one identity: `forward = spot + swap / pip`.** Two of the three are free
+  and the third is arithmetic; `fwdsrc` says which of the swap and the
+  outright the leg is holding, and `syncMarket` in the page is the one place
+  the other is worked out. The feed fills all three -- and while it is still
+  filling them the outright box takes the feed's **own** published outright
+  rather than the sum of the two rounded boxes above it, because the boxes
+  carry different precisions (a yen spot shows a tenth of a pip, the swap
+  four decimals of one) and adding them up lands a digit off a published
+  cross: EURJPY 1M off the sample file reads 162.864 that way and 162.865 as
+  published. Only the outright is ever posted, so what is priced is the box
+  that is on the screen and the server never has to choose between two
+  spellings of one number. Beside them is the expiry, which takes a tenor
+  (`1W`, `8d`) or a date in any of the spellings `timeutil.parse_datetime`
+  reads and comes back holding the one standard date, so what is priced is
+  what can be read on the screen. `pricing.resolve_legs` is that place: the expiry through the pair's own
+  calendar, the level through `Book.market_level`, and the *same* reading the
+  pricer does -- so what `Fill legs` writes into a row cannot differ from what
+  the row is then priced at, and a cross the feed quotes only through its legs
+  fills its boxes rather than being refused, which is what asking the feed for
+  the pair *by name* used to do here. `/api/legs` answers while somebody is
+  typing and re-reads no file; `/api/feed/refresh` is the same reading after
+  the file has been read again. A box the feed filled is refilled when the
+  pair or the expiry moves -- the points are interpolated to the expiry, so a
+  forward left behind is the wrong forward -- and a box somebody typed is not;
+  the browser owns that distinction, as it owns the panel. Emptying a box
+  hands it back to the feed, which is the only way back and so is the
+  documented one, and moving a leg to another pair hands both back on its
+  own -- a level somebody marked by hand belongs to the pair they marked it
+  for, and 150.25 carried onto EURUSD is a silent zero with a decimal point
+  in it. `OptionLeg.forward_points` is the other spelling, for a
+  caller holding points rather than an outright, and it defaults to `None` and
+  not to zero: nothing else can tell "said nothing about the forward" from
+  "the forward is at spot", and those two want opposite things from the feed.
+  The screen does not use it -- the swap box is converted where it is typed,
+  the way every other edge of this tool converts once -- and a test pins that
+  a leg never posts `points`.
+- **The Results rows repeat no input box, because what was resolved is
+  written back into the box it was asked in.** The expiry already worked that
+  way; the strike and the option type now do too. `ATM` and `25d` are ways of
+  *asking for* a strike, and once one has been solved on the marks the box
+  holds that strike and the next price uses it -- so a delta strike does not
+  quietly re-solve under a mark that has moved, exactly as a tenor does not
+  re-read on a later morning. The box says what it was asked as (`strikeask`,
+  shown as its tooltip), typing in it asks again, and moving the leg to
+  another pair puts the **request** back rather than carrying 150.446 onto
+  EURUSD. Showing the same number as an input above and an answer below was
+  two places for one number to disagree, and for spot and the forward it was
+  worse: the box was the input and the row read like a result.
 - **A screen shows a field only where the model reads it.** The pricing grid's
   rows carry the products they belong to: no barrier on a vanilla, no strike
   or ramp on a touch, no overhedge outside one. A box that can be filled in
@@ -161,6 +273,15 @@ preflight  startup checks (tzdata above all)
   needs keeps its place and shows a dot, so two legs never look like the same
   instrument, and the columns are a fixed width so a long premium cannot
   widen the leg beside it.
+- **A panel is read before it is repainted.** Every screen here owns its own
+  state and posts it whole (§4, the server holds none), so the fields *are*
+  the payload: a spinner written into the div that holds them removes them,
+  and the payload function then reads `.value` off `null`. The managed-band
+  card did exactly that and no Apply ever reached the server. Build the body
+  first, put progress somewhere that is not the form, and report a failure
+  **beside** the form rather than over it -- a number with a typo in it is the
+  ordinary way to reach the error path, and the box the typo is in has to stay
+  on screen to be corrected.
 - **A reload does not move the screen.** `boot()` runs again after every
   workbook reload, so every select is rebuilt with `fillSel`, which keeps what
   was chosen; the marking screen's pair, cut, interpolation and chart expiry
@@ -180,6 +301,12 @@ preflight  startup checks (tzdata above all)
   redirected monitor table carries an arrow, and cp1252 has no room for it.
   A test walks the source for the default spellings, so this cannot come back
   one call at a time.
+- **A fit and a quote are two calls, and the marks travel between them.**
+  The market-maker screen's fit hands back `capture_marks` and the browser
+  posts it with the request; `applied_marks` puts it on the surface for that
+  one call and verifies the restore. The server still holds no screen state --
+  the marks are the browser's, like the panel -- and a quote given none prices
+  the surface as it stands and says so. See §11.
 - **Volatility points at the edges, decimals in the middle.** Everything a
   human types or reads -- a pasted quote, a knowledge-bank width, a curve
   parameter on screen -- is in volatility points; everything inside a model is
@@ -231,9 +358,18 @@ per pair and living on the surface beside `param_shifts`:
   `off` (a deliberate marking that the range is not defended), `mixture`.
 - the jump spec, an override of the band edges, and a `blend` against the
   lognormal smile.
-- **The treatment is part of the smile cache key.** Two hazards are two smiles;
-  a cache that could not tell them apart would serve the first answer for the
-  rest of the session.
+- **The treatment is part of the smile cache key, and so is the level the
+  feed puts the band at.** Two hazards are two smiles; a cache that could not
+  tell them apart would serve the first answer for the rest of the session.
+  The same is true of the forward, because a band is absolute and is placed
+  against whatever the feed says *now* -- and the feed is re-read all morning
+  (§15). With only the treatment in the key, a republished spot moved the
+  forward column on the band card and left every probability beside it
+  calibrated against the old one. `VolSurface._band_placement` is that half of
+  the key; it is read for every band slice rather than only for the moneyness
+  ones `band_for_slice` actually looks the feed up for, because a key that has
+  to reproduce a decision made further down is a second place for that
+  decision to live.
 - **A blend strictly between 0 and 1 is a weighted average of two implied
   volatilities.** It is a marking convenience, is arbitrage free in neither
   model's sense, and warns.
@@ -296,7 +432,8 @@ per pair and living on the surface beside `param_shifts`:
   into the wings.** The gamma against theta is read as `(h/T) * vega *
   (sigma_R - sigma_I)`, which is first order at the at-the-money and rougher
   at a 10 delta strike, where the option's gamma over the horizon is not that
-  share of its whole life. Stated in `relvalue.py`, not corrected for.
+  share of its whole life. Stated in `relvalue.py`, not corrected for. What
+  *is* corrected for is the option's own delta: see §9's `carry_hedged`.
 - **The relative-value shape signal inherits SABR's lack of mean reversion.**
   The comparison smile is built from the *measured* `(rho, nu)`, and a measured
   `nu` falls away at long tenors because real volatility mean-reverts and SABR
@@ -338,6 +475,18 @@ the server keeps no panel state and `volkit listed` reproduces a screen exactly.
   search inside a bracket from `alpha_roots_at_forward`, keeping the outer
   problem two-dimensional so the whole box can be swept before polishing. Same
   no-starting-guess discipline as `sabr.calibrate`.
+- **The contract is free text, and a typed one says so.** A desk trades more
+  listed contracts than any table shipped here will hold, so `UNDERLYINGS` is
+  a set of *suggestions* offered by the box, not the set of legal answers. A
+  code it does not hold is taken as typed and carries `known=False`: its pair,
+  strike direction, scale and contract size are the panel's own, nothing is
+  inferred from the name, and every screen marks it *typed* — a typo (`6R` for
+  `6E`) must not read as a contract that merely has no mapping. What is still
+  refused is a code with no shape, so a mis-pasted quote row cannot become the
+  name of a contract. The dropdown it replaced is why: every contract missing
+  from it had to be entered as `CUSTOM`, two `CUSTOM` panels on one screen
+  cannot be told apart, and a position line naming either was refused as
+  matching two panels with no field left that could settle it.
 - **Inversion is the trap.** `6J` is USD per JPY. Strikes reciprocate onto
   USDJPY and the wings swap sides; lognormal vol itself is invariant. All
   comparison is done at **matched physical strikes** — never by matching
@@ -389,15 +538,32 @@ fit panel it names. Posted whole like everything else here, so
   is divided by it -- no solve, and the number is per one point of
   at-the-money volatility however alpha happens to map onto it. At `K = F` it
   is therefore exactly the Black-Scholes vega, and a test pins that.
-- **Money adds across contracts; a futures equivalent does not.** Every CME FX
-  option settles in US dollars, so premium, vega, theta, the 1% delta and
-  gamma money and volga are totalled. A euro future is not a yen future, so
-  futures-equivalent delta and gamma are totalled *per contract only* and the
-  grand-total row says a dash there rather than printing a sum of unlike
-  things. `ADDITIVE_GREEKS` is the one declaration of which is which.
+- **Three aggregates, because three different things add.** *Per panel*,
+  every column adds. *Per contract*, every column still adds — the panels
+  under one code are the same contract at different expiries, and that is the
+  number a desk means when it asks how much `6E` it is running. This is what
+  §8 always said and what the code did not do: it aggregated per *panel* and
+  jumped straight to money, so a book of one contract over four expiries had a
+  futures-equivalent delta nowhere. Two delivery months are not the same
+  future, so the row says that total is a net position and not a hedge ratio.
+  *Across contracts*, only money adds. `ADDITIVE_GREEKS` is the one
+  declaration of which columns those are.
+- **Money adds only within one settlement currency.** The premium comes out of
+  Black-76 in the currency the *listed strike axis* is quoted in, which
+  `ListedUnderlying.premium_ccy` derives from the pair and the inversion —
+  the term currency as the pair is written, the base currency when the
+  contract is the reciprocal. Every CME contract works out as USD, which is
+  why this was a single total for as long as the contract came off a list; a
+  typed contract need not, so the totals are struck per currency and the
+  all-in row is *blanked* rather than left showing a sum of euros and dollars.
+  A panel with no pair has no derivable currency: it joins the total and the
+  screen says it was assumed to match.
 - **A line that matches no panel, or two, keeps its place and says which.** A
   position priced against the wrong month's curve looks perfectly ordinary,
-  which is the one thing that may never be guessed at. A panel that will not
+  which is the one thing that may never be guessed at. The refusal offers the
+  **label** as well as the contract and the expiry, because two panels may
+  legitimately agree on both of those and the label is the one field that is
+  always free to differ. A panel that will not
   fit reports its own message on the lines that name it and takes none of the
   others down.
 - **A comma is a column boundary**, as in a broker run (§11), so
@@ -469,7 +635,7 @@ is built out of them.
   declines to divide by that vega. No feed means every carry figure is `None`,
   not zero.
 - **Fair value** is
-  `fair = realized + (T/h)*[roll*vega(T-h) + carry_pnl]/vega(T)`, derived in
+  `fair = realized + (T/h)*[roll*vega(T-h) + carry_hedged]/vega(T)`, derived in
   the docstring. The roll is **always the ATM roll**, built inside the
   function -- an earlier cut took it from whatever target the carry screen was
   showing, which mixed a risk-reversal roll into an ATM break-even. The
@@ -477,6 +643,23 @@ is built out of them.
   there and `forward_value` carries the curve's first-order effect; it is
   computed anyway, because a number reported as an exact zero should have been
   measured.
+- **A break-even reads the forward's carry delta hedged; a position reads it
+  whole.** `carry_pnl` is the entire revaluation at the rolled forward and is
+  the right number for the carry table, where a spot-hedged book keeps all of
+  it. It is the wrong one for anything asking what the forward's roll is worth
+  to the *mark*, because a break-even volatility is a property of the strike
+  and put-call parity puts the whole difference between writing that strike as
+  a call and as a put into `delta * (F2 - F1)` -- a direction, not a
+  volatility. `CarryRow.carry_hedged` is `carry_pnl` with that term removed,
+  which leaves the gamma over the move: **non-negative** whichever side the
+  option is written as, by convexity, and a test pins that across every single
+  option column. Fair value and the relative-value carry signal both read it.
+  Unhedged, the relative-value score changed sign across the strike axis with
+  the option's own delta -- a USDJPY one-year 25 delta put at `+13.8` against
+  the call's `-0.46` on the sample marks, 30 basis points of forward carry
+  being the whole of it -- and the at-the-money column barely showed it,
+  because a delta-neutral straddle has almost no first-order term. That is why
+  the flip looked like it belonged to the wings.
 - **Realized is measured on the forward, not on spot** (`basis="auto"`,
   `history.realized`). A quoted volatility is the volatility of the forward the
   option is struck against. With `F = S exp(c tau)`,
@@ -507,6 +690,17 @@ is built out of them.
   is never blended across them; `nu*sqrt(t)` is the scale-free number. The fit
   reports its own residual, because a smile SABR cannot reach must say so
   rather than return the nearest thing. Off by default (`--sabr`).
+  **The measured half has its own window** (`history.DYNAMICS_DAYS`, never
+  shorter than the realized lookback) and every row names it: `rho` and `nu`
+  are properties of the process rather than forecasts over a horizon, and they
+  need more paired observations than a realized volatility needs returns. Read
+  off the lookback, the whole measured half of the card -- and with it both
+  `diff` columns, which are the only reason the card exists -- was blank at
+  every tenor whenever the lookback was under about a month, and blank at the
+  short tenors always. **The marked half needs no history at all**, so it is
+  built before the realized statistics rather than after them: a one-week row
+  can never hold a week of returns in a seven-day window, and it was losing
+  the whole column group to a failure that had nothing to do with it.
 - **The cross vega split** differentiates the same variance triangle instead
   of integrating it, so it is exact where the RR and fly are not: one unit of
   at-the-money vega on the cross is `(sigma_a + x*sigma_b)/sigma_c` units in
@@ -548,7 +742,26 @@ is built out of them.
     cross against its legs) answer different questions and are kept out of
     that sum.
   - **The at-the-money carries no shape by statement**, not by two near-equal
-    numbers cancelling: the at-the-money *is* the level.
+    numbers cancelling: the at-the-money *is* the level. And a statement is
+    not a measurement, so it is **shown and not scored** (`Signal.scorable`).
+    Averaged in, that structural zero pulled every at-the-money cell a fifth
+    of the way to the middle -- the very thing the renormalisation rule below
+    exists to prevent, arriving through the one signal that was present rather
+    than through a missing one. The value stays `0.0` so the additive identity
+    is untouched; the at-the-money is simply scored on less of the declared
+    weight than the wings beside it, and `confidence` says so.
+  - **The comparison smile's `(rho, nu)` are measured over their own window**
+    (`history.DYNAMICS_DAYS`), never over the realized lookback, and never
+    shorter than it. Same argument as the scale below and a worse failure: a
+    spot/volatility correlation and a vol of vol need *more* paired
+    observations than a realized volatility needs returns, so on the lookback
+    the shape signal was blank at every short tenor and blank at **every**
+    tenor at once whenever the lookback was set under about a month -- an
+    at-the-money reading `0.000` beside four wings reading nothing, which is a
+    signal that looks broken rather than a window that was too short. It is a
+    separate constant from `HISTORY_DAYS` on purpose: that one is the
+    denominator, and a knob that also moved the numerator would change the
+    volatility-point column as a side effect of rescaling the z-scores.
   - **One scale, and it is the cell's own historical standard deviation.**
     Half a volatility point is a great deal on a one-year at-the-money and
     nothing on a one-week wing, and only the history knows which. **The scale
@@ -628,7 +841,7 @@ is built out of them.
 ## 10. Working on this
 
 ```
-python -m unittest discover -s tests        # 431 tests, ~4.3m
+python -m unittest discover -s tests        # 697 tests, ~7m
 PYTHONUTF8=0 LC_ALL=C python -m unittest discover -s tests   # as a cp1252 Windows
                                            # box sees it: an ASCII locale is the
                                            # only way to catch an encoding bug
@@ -643,8 +856,13 @@ python -m volkit analysis USDJPY --history files/history_sample.xlsx --sabr \
     --realized-basis forward          # wings as (rho, nu), realized on the forward
 python -m volkit analysis EURJPY --history files/history_sample.xlsx --horizon 7 \
     --relative-value --weight carry=0.4   # score the whole expiry / strike grid
-python -m volkit mm EURUSD --target-source quotes --fallback-spread 0.3 < run.txt
+python -m volkit mm EURUSD --target-source quotes < run.txt   # the fit, on its own
+python -m volkit mm EURUSD --file run.txt --request ask.txt --fallback-spread 0.3
+python -m volkit mm EURUSD --request ask.txt --target-source none   # the quote, on its own
 python -m volkit mm EURUSD --learn < run.txt          # propose widths, --save writes them
+python -m volkit mm EURUSD --request ask.txt --archive-width   # the archive on the width ladder
+python -m volkit mark propose EURUSD --file run.txt --out p.json   # the marking-agent card's path
+python -m volkit serve --journal mm_remarks.jsonl     # where the card's verdicts go
 python3 files/make_history_sample.py        # regenerate the example history
 python3 build_exe.py --host-check           # validate the packaging (Windows exe: on Windows)
 python3 build_exe.py --only-tabs pricing,marking   # a build without the other three
@@ -654,6 +872,8 @@ python3 build_exe.py --hidden-tab mm        # built, off until --enable-tab mm
 python -m volkit listed 6E --expiry "2026-09-11 19:00" --forward 1.085 --rho -0.2
 python -m volkit listed 6E --expiry "2026-09-11 19:00" --forward 1.085 \
     --file quotes.txt --positions book.txt        # aggregated greeks, BS and smile
+python -m volkit listed 6E --expiry "2026-09-11 19:00" --forward 1.085 \
+    --file quotes.txt --panels more.json --positions book.txt   # several contracts at once
 python -m volkit band USDHKD --feed files/market_feed.csv --hazard 3
 python -m volkit monitor EURUSD --history files/history_sample.xlsx \
     --watch EURUSD --watch USDJPY:history@-1m \
@@ -714,6 +934,52 @@ python -m volkit --session marks.json vol USDJPY 2024-05-28   # price against th
 A fifth UI tab. The other screens answer "what is this worth"; this one answers
 "what do I show", which has three stages, kept apart because they fail for
 different reasons and the screen has to say which one broke.
+
+**Those three stages are two panels, two routes and two buttons.**
+`marketmaker.Panel` (`/api/mm/fit`) reads the market paste and does stages 1
+and 2; `marketmaker.QuotePanel` (`/api/mm/quote`) reads the **request box** and
+does stage 3. The fit puts a price on nothing and the quote fits nothing.
+
+- A fit is a morning's decision, taken against a run that has just arrived; a
+  quote is answered in seconds, over and over, against whatever was fitted. A
+  request does not arrive with a market on it (§17 says the same thing about
+  the desk agent), so tying the two together meant a request could only be
+  priced by re-running a fit against a market that had nothing to do with it,
+  and a market could not be fitted without also producing prices in
+  instruments nobody had asked for.
+- **They meet at `capture_marks`, and the browser carries it.** The fit hands
+  back the parameters it arrived at -- volatility knobs in points, like every
+  other number crossing this boundary -- and the quote posts them back and
+  puts them on the surface for the length of one call, under `applied_marks`,
+  which restores and *verifies* the restore the way `marking.marked` does. The
+  server holds no screen state (§4) and this does not change that: the marks
+  are panel state and the browser owns them. A quote given no marks prices the
+  surface as it stands, and `sheet.marks.note` says which of the two it was --
+  a price made on this morning's fit and one made on last night's marks must
+  never read the same. Marks naming another pair are refused: the browser
+  holds the fit and the pair selector apart and they can be moved apart.
+- **The request box takes no prices** (`quotes.parse_requests`). One number on
+  a line that has not already said what it is struck at is a strike; anything
+  else is refused with the line. A broker run pasted into the wrong box would
+  otherwise be quoted at levels nobody asked about.
+- **A request is quoted in the convention it was asked in.** `JPY call over`
+  on USDJPY carries `sign = -1` on the request, and the sign is applied
+  **once**, where the row is built -- to the model value and to the bank's
+  shift, before anything else reads them, so the bid is still the low side of
+  what we show and no second place exists for a sign to live. §5's first entry
+  is what a second place for a sign costs.
+- **A request the market paste also quoted carries that market beside it**,
+  matched on `quotes.instrument_key` -- what makes two lines the same quote --
+  so "inside their market" survives the split. The paste is read here for that
+  and nothing else: it is never fitted to on this route, and its own parse
+  notes are not repeated beside a price, because the fit that read it already
+  reported them.
+- **The fair value is measured inside the marks**, not before them. It is the
+  mark against realized volatility, and the mark being shaded is the one being
+  quoted; measured outside, a fit that moved the at-the-money half a point
+  would have its price shaded by the richness of the level it had just left.
+  This moves quote numbers against the single-panel version, and it is the
+  only thing that does.
 
 - **The curve.** `fit_atm_curve` puts the backbone through a target term
   structure -- the tenors pinned on the marking screen, a pasted curve, or the
@@ -985,3 +1251,435 @@ becomes a bare flag or nothing, keys may repeat, `#` comments.
   it, where argparse cannot place them.
 - The value is the rest of the line, so a Windows path with spaces needs no
   quoting. Only the `command` line is split, on shell rules.
+
+---
+
+## 17. The desk agent (`archive.py`, `sdr.py`, `llm.py`, `ingest.py`, `synthesis.py`, `agent.py`)
+
+The market-maker screen answers "what do I show against *this* market" and
+needs a paste to fit to. A request does not arrive with a market on it, so the
+agent answers "where are you on the 1 month at-the-money in a hundred million"
+out of four sources: the marked surface, the knowledge bank, an archive of what
+has been seen, and the same two leans (fair value, position) the market-maker
+screen uses with the same caps.
+
+Two ways in. `volkit agent <action>` on the command line, with `quote`,
+`ingest`, `watch`, `evidence`, `learn`, `shown`, `outcome` and `archive`; and
+a **card inside the market-maker tab** — not a seventh screen.
+
+That is deliberate. The card answers a question *about the market on that
+tab*, and a build without the market-maker screen has nothing for it to
+answer, so it is three more routes on `mm` (`/api/mm/agent`,
+`/api/mm/agent/ingest`, `/api/mm/agent/file`) and `agent` is one of `mm`'s
+commands. `screens.SCREENS` keeps six entries, the nav and panel-map tests are
+untouched, and excluding the market-maker tab takes the agent with it.
+
+The card is `agent.SuggestPanel` and it **fits nothing**. A width comparison
+needs the paste, the bank and the archive and no surface at all, so it answers
+without touching the curve, the wings or the marks — which is what lets it sit
+on its own button beside a fit that takes a second and a half. It posts its
+own payload (`const AF=[…]` in the page) rather than the market maker's, read
+by `agent.panel_from_request`, with a test pinning the two lists against each
+other exactly as `MF` is pinned against `marketmaker.panel_from_request`.
+
+Things the card decides once:
+
+- **It compares widths and proposes nothing else.** Per quoted row: what the
+  market showed, what we would show (the bank rule, or the panel fallback),
+  and what the archive says this has actually been shown at. The verdict is
+  `agrees`, `tight`, `wide`, `no rule`, `thin` or `not read`, and the quote
+  sheet's width does not move until a rule is written in the bank below it.
+- **Agreement is the quiet case.** A gap has to clear both a fraction of the
+  archived width (`tolerance`, 10% by default) *and* an absolute floor
+  (`MIN_GAP`, 0.02) before it is worth saying. Without the floor a 0.08
+  butterfly "disagrees" over four thousandths and every wing row carries a
+  flag forever, which is a screen nobody reads.
+- **Its columns only appear beside the quotes they were computed from.** The
+  page keeps the paste the last run saw (`agentFresh()`), and the two extra
+  quote-sheet columns are omitted when the textarea has moved on. A stale
+  width sitting next to a fresh quote is worse than no width at all.
+- **The browser chooses when to scan, never where.** The watched folders come
+  from `serve --chats` / `--sdr` and live on the service; the ingest route
+  reads no path out of the payload, and a test pins that. A path a page can
+  post is a path anything that reaches the page can read.
+- **Filing the pasted run stamps it at the start of the valuation day**, not
+  at the instant the button was pressed — the id is a hash of the content, so
+  "now" would give a double-clicked morning a new id and count it twice in
+  every width it touches. The same run under a *different* broker name is a
+  genuinely new record (three brokers showing one width is stronger evidence
+  than one broker three times) and is also the obvious way to double a width
+  by accident, so `under_another_name` counts it and the card says so.
+
+Things decided once, which must not be re-derived per row:
+
+- **The output is a list of ingredients that sums to the price, and the prose
+  is generated from the list.** Not the other way round. `Decision.trace` is
+  the record, `Decision.facts()` renders it, `explain()` prints it and
+  `llm.narrate` writes the paragraph *from it*. A story written first and
+  reconciled to the numbers afterwards is a story that stays plausible when
+  the numbers are wrong.
+- **The archive is never quoted back at the market.** The recent market level
+  is computed, shown beside the mark, and applied to nothing. A market maker
+  whose mid follows the last thing it was shown is being led by the party it
+  is about to trade with. A gap is a *flag*; the answer to a flag is to
+  re-mark on the marking screen, deliberately.
+- **The width ladder is bank, then archive, then a typed fallback, then no
+  price.** Every row names the rung it stood on. A row that reaches the bottom
+  shows no bid and no offer — §11's rule, unchanged, and the archive is a new
+  rung on that ladder rather than a new default. The quote panel has the same
+  ladder behind `QuotePanel.use_archive_width` (§18 says how it is switched
+  on), and the order matters there: the bank overlay folds the typed fallback
+  in when no rule matches, so the archive is tested against `spread_rule`
+  and not against `spread`, or the fallback would beat it.
+- **What became of our prices moves nothing.** Hit rate and adverse selection
+  are the most interesting thing in the archive and the easiest to over-read:
+  a run of lifted offers is sometimes a mid that is too low and sometimes a
+  week of being the only one showing. `OutcomeEvidence.lean()` returns
+  *words*, and the row says "shown here, and applied to nothing".
+- **Thin evidence produces no number.** Weights sum to an effective count and
+  below the floor (default 2.0) the answer is "not enough", named, with what
+  there is. Same rule as the bank, same reason.
+- **Age is a weight, not a cutoff.** `0.5 ** (age / half_life)`, default five
+  days. A cutoff would make a width jump the day one observation crossed a
+  line, for a reason nobody could point at. An observation with no readable
+  time counts as one half-life old — treating it as current and dropping it
+  are both wrong in a way that surfaces later as a width nobody can explain.
+- **Nothing after the valuation time is used.** `--asof` a past date and the
+  archive is read to that instant, and says how many observations it left out.
+  Without this every backward-looking check on this tool flatters it.
+
+The model, specifically:
+
+- **It never produces a number that reaches anything.** Extraction returns
+  candidate lines that `quotes.parse_quotes` must then accept; a line the
+  grammar refuses is refused, reported with its text, and never repaired.
+  Narration is generated from an already-computed record.
+- **The numeric guard is a set membership test, not a similarity score.**
+  Every number in what the model returns must already be in what the model was
+  given. `8.60` against a chat that said `8.6` passes because both canonicalise
+  the same way; `8.65` does not, and the whole line goes — a line with one
+  invented figure was being reasoned about rather than transcribed, and the
+  rest of it is not more trustworthy for being arithmetically unremarkable.
+  It is strict and it does produce false refusals; a refused line is shown so
+  it can be typed by hand, which is the right trade against a fabricated level
+  nobody notices for a month.
+- **Everything works without it.** No model configured or none running: files
+  are still ingested by the grammar, the archive still fills, the statistics
+  still compute, the price is still made and the explanation is the itemised
+  one. What degrades is that prose the grammar cannot read stays unread. Every
+  action prints one line saying which of the two it was — a build that quietly
+  used a model and one that quietly did not must never look the same.
+- Transport is `urllib` and nothing else, against Ollama's `/api/chat` or any
+  OpenAI-compatible `/v1/chat/completions`. No SDK: this ships as one
+  executable to a desk machine that may have nothing installed. Configured
+  through `VOLKIT_LLM_BACKEND` / `_URL` / `_MODEL` / `_TIMEOUT`, or the
+  `--llm-*` flags.
+
+The archive, specifically:
+
+- **Append-only, and content-addressed.** A record is never edited and never
+  deleted; a correction *supersedes* one and both stay in the file, exactly as
+  `quotes.ParsedRun` keeps a superseded quote. `Archive.live()` is the view,
+  `Archive.records` is the file.
+- **The id is a hash of the content**, so re-reading yesterday's chat does not
+  double the evidence behind a width. That is the likeliest way for this thing
+  to lie — a folder rescanned nightly, every width slowly gaining confidence it
+  never earned — so the fallback timestamp for a line with no clock on it is
+  **the source file's** modification time and never `now`; `from_quotes`
+  refuses to run without one. Levels are rounded to 6dp before hashing, because
+  `8.2 * 100` is not `8.2` in binary and the same quote reached two ways hashed
+  two ways.
+- **Four kinds, because they are evidence of different things**: `quote` (where
+  the market was shown), `trade` (where business got done, which is one side of
+  somebody's market), `shown` (what we made — evidence about us, not the
+  market), `outcome` (whether we were right).
+- **`delta` is a fraction on the record**, 0.25 for a 25 delta — the spelling
+  `quotes.py` parses into and `knowledge.Rule.delta` matches on. Points are a
+  display convention and `describe()` is the one converter. Storing points
+  would mean a rule lookup silently missing and the quote falling through to
+  the fallback.
+- Volatility is in **points** throughout the file, like the bank.
+
+The dissemination reader, specifically:
+
+- **Headers are matched by meaning, both layouts**, pre- and post-2022-rewrite;
+  a column that cannot be placed is reported with the header that confused it.
+- **A capped notional is not a notional.** Kept, flagged, and treated as a
+  lower bound; never used as an equality, and `implied_from_trade` refuses to
+  invert a premium against one.
+- **A cancel is not a trade and a correction is not two.** Each carries the
+  dissemination id it names and `Archive.resolve` ties it to the record it
+  supersedes, or reports that it could not — publishers cancel prints from
+  before the file existed, and a cancel silently matching nothing looks exactly
+  like one that worked.
+- **A premium is not a volatility.** Inverting one needs a forward, a discount
+  factor and a model, all of which can be re-marked, so the economics are
+  stored as published and `synthesis.implied_from_trade` does the inversion
+  with its inputs named on the result.
+- **The pair regex needs both legs to stand alone.** Without the boundary
+  look-arounds it found `COM` + `MOD` inside `COMMODITY` and filed a crude oil
+  trade under the pair COMMOD.
+
+### Getting the trades (`dtcc.py`)
+
+`volkit agent fetch --sdr sdr/ --since 2025-09-01` downloads DTCC's public
+price dissemination files; `serve --sdr DIR` puts a **Fetch from DTCC** button
+on the agent card for the last few days. What arrives is read immediately,
+because a file downloaded and not ingested is a file somebody has to remember
+to come back for.
+
+Verified live from this repo: `https://pddata.dtcc.com/ppd/api/report/`
+`cumulative/cftc/CFTC_CUMULATIVE_FOREX_YYYY_MM_DD.zip` answers with a zip.
+DTCC keeps **366 days** and publishes nothing before **2023-12-29**.
+
+- **Fetching and reading are two modules.** `sdr.py` must keep working on a
+  desk with no route out, which is most desks this is built for, and a reader
+  that could not be exercised without a network is a reader nobody can test.
+- **The network is injected** (`Downloader.opener`), like the clock is
+  everywhere else. That is what lets all of `dtcc.py` be tested offline -- and
+  it had better be, because the machine this is developed on has no route to
+  DTCC either.
+- **A 200 is not a file until it has been checked.** A proxy, a captive portal
+  or an outage answers every request with HTML and status 200; trusting the
+  status writes that HTML into the SDR folder, where the reader meets it
+  tomorrow and reports a header it cannot place. Every body is checked for
+  being a zip holding a CSV, and one that is not is refused with the first
+  line of whatever came back -- usually the whole diagnosis.
+- **Nothing published is not a failure.** Two days in seven have no session. A
+  404 on a date DTCC keeps is reported as "nothing published"; a run that
+  shouts every weekend is a run nobody reads. But "nothing published" needs
+  *every* candidate URL to have said 404 -- reporting the last status instead
+  called a 500 followed by a 404 on an older spelling a quiet weekend, which
+  is a server falling over in disguise.
+- **A date outside the window is refused before any request**, by name, rather
+  than becoming a 404 the caller has to interpret.
+- **The folder is the cache.** A date already on disk is not fetched again.
+  One mechanism, and it is the same folder `sdr.py` reads and a person can
+  open; two would be two places for it to go stale.
+- **The URL is probed, not assumed.** The path has changed once. An ordered
+  list of candidates is tried, the one that answered is reused for the rest of
+  the run, and when none answers the error names every URL it tried -- which
+  is a thing a person can paste into a browser.
+- **The page chooses when, never where.** The folder and the proxy come from
+  the command line; the browser sends only how many days back, capped at 30. A
+  year's backfill is a command with somebody watching it, not a button that can
+  be leaned on.
+- One request at a time, a pause between them, a named `User-Agent`, and a
+  retry with backoff on a 429 or 5xx -- a 404 is never retried, because asking
+  again more slowly does not create a file. A desk that gets itself blocked
+  from a public utility has broken something it cannot fix from here.
+
+### What a printed trade teaches (`synthesis.invert_trades`)
+
+Off by default; `agent trades PAIR --invert --history vol_history.xlsx` turns
+each premium into the volatility it implies. Verified: a premium built from a
+known volatility comes back as that volatility to 1e-11.
+
+- **The forward comes from the trade's own date**, out of the historical
+  workbook, interpolated across pillars by `history.forward_series`. The live
+  feed is deliberately *not* a fallback for a trade that printed three weeks
+  ago: inverting last month's premium against this morning's forward is wrong
+  by the whole of the carry since, and wrong silently.
+- **"Last row on or before" is bounded** (`MAX_STALE_DAYS`, 7). Friday's row
+  is a fine forward for a Monday trade; the rule without a bound reached back
+  two years for a trade the sheet did not cover, and said nothing.
+- **The currency the size is in decides whether the arithmetic is well posed.**
+  `premium / notional` is a price per unit of the *notional* currency; Black-76
+  here wants domestic per unit of base. Notional in the base with premium in
+  the quote is the straightforward case; a premium in the base is multiplied by
+  the forward first; a notional on the quote leg is **refused**, because
+  recovering the base amount needs the convention the trade was struck under
+  and that is not published.
+- **There is no discount curve, here or anywhere in this package** (§ `pricing`
+  says so). Undiscounted, the volatility reads *low* by roughly the discount
+  over the option's life -- about 4% of the volatility on a one-year option at
+  4% rates, negligible inside a month. It is said on every row, and
+  `--discount-rate` removes it.
+- **Expiries are taken at midnight UTC**, because the file publishes a date and
+  no cut, so a short-dated reading is a touch high. Said once per run.
+- A capped notional is never inverted, and a cancelled print is not business
+  that got done.
+- Refusals are counted **by reason**, not listed one by one: a day of
+  dissemination is thousands of rows and "1,180 had a capped notional" is the
+  useful shape of that.
+
+Files, all beside the workbook like the bank: `mm_archive.jsonl` (the
+observations), `mm_ingest.json` (what has been read). Tests are in
+`tests/test_agent.py` — the one test module outside `tests/test_volkit.py`,
+because most of it needs no numeric stack and runs on stdlib plus the package.
+
+---
+
+## 18. The marking agent (`remarks.py`, `marking.py`, `consult.py`)
+
+A second agent, and a different problem from §17's. The desk agent answers
+*what do I show*; this one answers *where should the surface be*, which is the
+question the marking screen's two fitters leave to a person.
+
+**The fitters do not change.** `fit_atm_curve` stays a cold fit,
+`tune_smile_shifts` stays a curve-wide additive shift under a hinge, and every
+rule in §11 stands. What a marker actually agonises over is the judgement
+*around* the fit -- which knobs to free this morning, whether four targets can
+determine four parameters, whether to touch the wings when only the
+at-the-money was quoted -- and then whether to take what came out. That
+judgement is what this agent makes, and the last part of it is what it learns.
+
+Two ways in, like the desk agent. `volkit mark propose|confer|learn|journal|
+record` on the command line, and a **card inside the market-maker tab**,
+beside the fit it plans. Both belong to the **mm** screen: the fit this agent
+runs is `marketmaker.fit_atm_curve` and `tune_smile_shifts`, the fit panel's
+own, so a build without that tab has nothing for it to plan -- and the command
+moved there with the card (it was listed under marking, which was the wrong
+screen for the same reason). Excluding the market-maker tab takes both agents.
+
+### The card, and how the two agents are tied to the two buttons
+
+The tab has two buttons because it has two jobs (§11), and each agent is
+wired to one of them:
+
+- **The marking agent is on the fit.** `marking.MarkPanel` (`/api/mm/mark`)
+  reads the *fit panel's own fields* -- the paste, the target source and
+  text, the conventions -- through the same `marketmaker.panel_from_request`
+  the Fit button uses, and answers how it would run that fit and what came
+  out. It has no market of its own on purpose: a proposal about some other
+  fit is not an answer to the question on the screen. What it adds is the
+  marker's judgement -- `choose_knobs` lets it pick the free set (a rule from
+  the target count and what the quotes inform, a learned pin from the
+  journal), or it takes the panel's ticks as the caller's -- and the learned
+  nudge. Its answer carries `marks` in exactly the shape `Panel.run` hands
+  back, so **Accept** puts the proposal where a fit's answer goes: the
+  browser's one holder for the marks the quote stands on (`HELD`, filled by
+  the fit or by an accepted proposal, never both at once), and the quote
+  sheet's note names which. **Take the plan onto the fit** writes the plan
+  into the fit panel's knob boxes and runs Fit, so the desk can adjust and
+  press Fit again; **Record my fit as the edit** then journals the fit's marks
+  beside the proposal, which is the row §18 says is worth the most. The
+  verdict buttons vanish when the paste has moved on since the proposal,
+  for the same reason the desk agent's columns do.
+- **The desk agent is on the quote.** Its card compares widths and proposes
+  nothing, as before; the link is the **widths from the archive** switch on
+  the toolbar, which puts the archive on the quote panel's width ladder --
+  **bank, then archive, then the typed fallback, then no price**, the same
+  ladder and order as `agent.run` -- and every row names the rung. Off by
+  default: the archive is evidence about the market, and a desk that has not
+  yet convinced itself of it should not find it under its prices. The
+  evidence settings are the desk agent card's own boxes (half-life, minimum
+  evidence, lookback) read by both, so the card and the quote never disagree
+  about what the archive holds. The archive's *level* rides on the row as a
+  flag and is applied to nothing (§17's rule). `volkit mm --archive-width`
+  is the same switch.
+- **`/api/mm/mark/record` is the only route on the card that writes**, and it
+  writes to the journal. `accepted` records the proposal as the outcome,
+  `rejected` records the start, `edited` needs the marks the desk ended on
+  and refuses without them -- an edit recorded as the proposal would be the
+  agent agreeing with itself. `apply` puts the recorded marks on the loaded
+  book, the fit panel's *keep the marks* decision made here, and it reads
+  that same checkbox. Answering the same proposal twice is one instance,
+  said rather than raised: the journal is content-addressed.
+- **Wing parameters are freed only where a quote reaches them.** The plan
+  runs `marketmaker.informative_params` over the wing quotes before it counts
+  them: a single 25-delta risk reversal frees `slog25`, not `slog10`, because
+  the ten-delta parameters do not enter the 25-delta anchor and the tune
+  refuses a parameter nothing informs. Found by the CLI smoke of the card,
+  which had freed the first name on the list.
+
+### What it learns from (`remarks.py`)
+
+- **An instance is a diff of two snapshots, not an instrumented control.**
+  `session.capture_pair` already photographs every knob, so a re-marking
+  instance is a before, an after and a subtraction. Nothing in the marking
+  screen reports anything, nothing is forgotten when a control is added, and a
+  session file from last month can be turned into instances retroactively.
+- **A verdict is worth more than a diff.** `unprompted` is somebody marking;
+  `accepted` / `edited` / `rejected` answer a proposal and carry the one thing
+  a diff cannot -- what the tool would have done, beside what the desk did, on
+  the same morning. An **edited** proposal is the most valuable row in the
+  file, and it is the whole reason the agent asks rather than only watching.
+- **An absent smile shift is a zero; an absent tenor overwrite is not.** One is
+  "they moved it", the other is "they left the curve to speak", and counting
+  them alike loses exactly the decisions a marker thinks hardest about.
+- Append-only and content-addressed, like the quote archive: a morning
+  re-marked twice must not become two instances of a desk that likes moving
+  that knob.
+
+### What "learned" means (`marking.py`)
+
+A desk re-marks a curve a few times a day. Over a month that is a few dozen
+instances -- enough for a handful of scalars with error bars, nowhere near
+enough for a function. So:
+
+- **Tendencies, not a policy.** Per knob: has this desk been given the chance
+  to move it and declined every time (`MIN_INSTANCES`, 5); how far does it
+  typically move it; how often is a proposal taken as it stood; and does the
+  desk land systematically off the fit. Every one carries its count and
+  refuses to say anything below the floor.
+- **A correction must be a tendency and not a scatter.** The median of six
+  corrections is a number whatever those six were; it is evidence only when
+  they agree. So a bias is applied only when `|median| > BIAS_SIGNAL x spread`
+  (spread being half the interquartile range, which one outlier cannot set),
+  and otherwise the row says *this desk lands on both sides of the fit here*
+  and nothing moves. That single test is what stops the agent learning the
+  desk's noise and quoting it back with confidence.
+- **A correction is capped at `CORRECTION_CAP` of what the fit itself moved**
+  (half). A nudge on a fitted number is a nudge; a nudge that can exceed the
+  fit is a second, unexamined fit with a smaller sample behind it. Where the
+  fit barely moved a knob, the correction is skipped and says so.
+- **Age is not a weight here**, unlike the quote archive. A width is a fact
+  about a market that moves; how a desk marks is a fact about the desk, and a
+  habit from three months ago is still that desk's habit. What ages out is the
+  window (a year).
+- **A rule and a learned reason are labelled apart** in the trace. A rule is
+  true of the model -- four targets cannot determine five parameters. A
+  learned reason is true of this desk and always carries the instance count.
+  Somebody disagreeing with the second must see immediately that it is the
+  second.
+- **Every proposal says how much it learned from, including none.** A proposal
+  that quietly had nothing behind it and one built on a year of instances must
+  not read the same.
+- **`marked()` is the context manager everything runs inside**, and the
+  restore is *verified* rather than assumed -- a surface left half-marked by a
+  proposal nobody accepted, priced off all morning, is the worst possible
+  outcome of a tool whose whole job is marking. A fault-injection test pins
+  the guard.
+
+### What the two agents exchange (`consult.py`)
+
+The quoting agent's most interesting output is a flag it is forbidden to apply
+(*the mark is 0.45 below where this has been quoted*); the marking agent's
+hardest input is what that flag contains. So they confer, in numbers:
+
+1. **A finding** goes quote-side to mark-side: this instrument at this tenor is
+   marked here and has been quoted there, over this many observations from
+   this many brokers, this recently.
+2. The mark side turns findings into what the existing fitters already take --
+   a `CurveTarget` for the at-the-money, a two-way `MarketQuote` built from the
+   *observed range* for a wing -- and proposes. Only the at-the-money becomes a
+   curve target: a risk reversal is a statement about shape, and feeding one to
+   a fit that can only move the level asks a level to explain a skew.
+3. **A critique** comes back: with that proposal on the book, how many observed
+   markets does the surface sit inside, what improved, and **what it broke**.
+4. The mark side weights what it broke by `REWEIGHT` and tries again, at most
+   `MAX_ROUNDS` times, and the best round goes to a person.
+
+Two things stop this being circular -- fit to the archive, score against the
+archive, of course it improved:
+
+- **The score counts *inside the observed two-way*, not distance to its mid.**
+  Anywhere sensible scores the same, so the loop cannot improve its score by
+  walking the surface onto the middle of every market it has ever seen. Only
+  leaving a market scores worse.
+- **Every finding is scored, including the ones no target was built from.**
+  The tenors the fit was not aimed at are exactly where a re-mark gets caught
+  doing damage.
+
+**No language model is anywhere near this.** Both sides produce numbers; a
+model between them could only paraphrase, and `llm.py`'s numeric guard cannot
+check a negotiation. What a model may do, at the very end, is describe the
+round that won.
+
+A worked consequence worth knowing: with learned pins in force the fit has
+fewer free parameters, so its RMSE gets *worse* while matching what the desk
+actually does. The critique reports that numerically rather than hiding it,
+and adjudicating it is the person's job.
+
+Files, beside the workbook: `mm_remarks.jsonl` (the journal).

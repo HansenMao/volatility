@@ -24,12 +24,23 @@ extended from the at-the-money to a strike, and they **add**:
   SABR smile built from the *measured* ``(rho, nu)`` would show.  The realized
   volatility fixes the level of that comparison smile and the measured
   dynamics fix its wings, so what is left is the marked wing against the wing
-  history actually delivered.  Zero at the at-the-money by definition -- the
-  at-the-money *is* the level -- rather than by a near-cancellation.
+  history actually delivered.  Those dynamics are measured over the
+  **history** window and not over the realized lookback -- see the note at the
+  ``vol_dynamics`` call in :func:`build`.  Zero at the at-the-money by
+  definition -- the at-the-money *is* the level -- rather than by a
+  near-cancellation, and *shown but not scored* there for that reason: a zero
+  that is a statement rather than a measurement drags the cell toward the
+  middle exactly as a counted absence would.
 * ``carry``  -- minus the roll and the forward carry, valued as the
   volatility they are worth: ``-(roll_value + carry_value)``.  Minus, because
   an option that rolls *down* has to be cheaper to break even, so a mark that
-  did not fall is rich by that much.
+  did not fall is rich by that much.  The forward's half is read **delta
+  hedged**: a break-even volatility belongs to the strike, and the whole
+  difference between writing that strike as a call and as a put is the
+  first-order ``delta * (F2 - F1)``, which is a direction and not a
+  volatility.  Left in, it pushed the put columns and the call columns of one
+  row in opposite directions and the score changed sign across the strike
+  axis for a reason that was not a mark.
 
 ``level + shape + carry`` is exactly ``implied(K) - fair(K)``, and at the
 at-the-money column it is exactly ``fair_value_table``'s ``richness``.  A test
@@ -94,7 +105,7 @@ import numpy as np
 
 from . import black, sabr
 from .analytics import MIN_ROLLED_DAYS, carry_table, triangle_table
-from .history import realized as measure_realized, vol_dynamics
+from .history import DYNAMICS_DAYS, realized as measure_realized, vol_dynamics
 from .numerics import ConvergenceError
 from .timeutil import tenor_to_years
 
@@ -235,6 +246,15 @@ class Signal:
     because a number on the screen that is silently ignored by the number
     beside it is the same failure as a box that is filled in and read by
     nobody.
+
+    ``scorable`` is the other half of that: a value that is zero *by
+    construction* rather than by measurement.  The at-the-money's shape is the
+    one of those -- the at-the-money is the level, so it has no shape to be
+    rich or cheap in -- and averaging it into the score is the very thing the
+    module refuses to do with a missing signal, since a structural zero drags
+    the cell toward the middle just as hard as a counted absence would.  It is
+    still reported, with its value and its reason, because "zero" and "not
+    measured" are different answers.
     """
 
     name: str
@@ -248,6 +268,8 @@ class Signal:
     #: one per strike -- see :data:`SHARED`.  The z is still per cell, because
     #: each cell divides by its own scale.
     shared: bool = False
+    #: False where the value is zero by construction; see above.
+    scorable: bool = True
 
 
 @dataclass(frozen=True)
@@ -300,6 +322,9 @@ class TenorRow:
     realized_rho: float | None
     realized_nu: float | None
     dynamics_source: str | None
+    #: The window the dynamics were measured over.  Not ``window_days``: see
+    #: the note beside the ``vol_dynamics`` call in :func:`build`.
+    dynamics_days: float | None = None
     #: What the realized number is made of.  ``history.realized`` measures all
     #: of this and the grid used to keep only ``vol``, which left a cell scored
     #: rich on ``level`` with no way to say whether the richness is genuine
@@ -389,18 +414,19 @@ def resolve_weights(given=None) -> dict[str, float]:
 def _spot_and_forward(book, pair: str, t: float):
     """Spot and the outright forward to ``t``, or ``(None, None)``.
 
-    Straight off the feed rather than out of the carry table: that table
-    reports ``1.0`` and a warning when there is no feed, which is right for a
-    strike held in moneyness and useless for a ratio of two prices.
+    Straight off the level lookup rather than out of the carry table: that
+    table reports ``1.0`` and a warning when there is no feed, which is right
+    for a strike held in moneyness and useless for a ratio of two prices.
+    ``Book.market_level`` is that lookup, so a cross the feed builds from its
+    legs is read here too.
     """
-    feed = getattr(book, "feed", None)
-    if feed is None or pair.upper() not in getattr(feed, "pairs", {}):
-        return None, None
     try:
-        q = feed.quote(pair, t)
+        level = book.market_level(pair, t)
     except Exception:  # noqa: BLE001 - the row says so and carries on
         return None, None
-    spot, forward = float(q["spot"]), float(q["forward"])
+    if not level["feed"]:
+        return None, None
+    spot, forward = float(level["spot"]), float(level["forward"])
     if not (math.isfinite(spot) and math.isfinite(forward)) or spot <= 0 or forward <= 0:
         return None, None
     return spot, forward
@@ -678,14 +704,20 @@ def relative_value(book, pair: str, hist=None, *, horizon_days: float = 30.0,
             "no historical sheet for this pair, so there is no realized volatility to "
             "compare against and no scale to score on. The carry is still measured")
 
-    has_feed = bool(getattr(book, "feed", None) is not None
-                    and pair.upper() in getattr(getattr(book, "feed", None), "pairs", {}))
+    has_feed = bool(book.market_level(pair, 1.0)["feed"])
     if not has_feed:
         warnings.append(
             f"no forward feed for {pair}: the strike is held in moneyness rather than in "
             f"price, so the roll carries the term structure alone and the forward curve's "
             f"own carry is missing from every carry signal")
     if hist is not None:
+        warnings.append(
+            f"the shape signal's (rho, nu) are measured over their own {DYNAMICS_DAYS:.0f}-day "
+            f"window rather than over each tenor's realized lookback, for the same "
+            f"reason the scale is: how a volatility moves with spot and how much it moves "
+            f"are properties of the process and need more paired observations than a "
+            f"realized volatility needs returns. On the lookback they were blank at every "
+            f"short tenor, and at every tenor at once on a lookback under about a month")
         warnings.append(
             "the shape signal compares your smile against a SABR smile built from the "
             "measured (rho, nu). SABR has no mean reversion and real volatility has, so "
@@ -728,15 +760,37 @@ def relative_value(book, pair: str, hist=None, *, horizon_days: float = 30.0,
             except Exception as exc:  # noqa: BLE001 - one row, reported in place
                 warn.append(f"{tenor}: no realized volatility over {window:.0f} days ({exc})")
 
+        # The shape signal's comparison smile is built from measured dynamics,
+        # and those are read over their own window rather than over the
+        # realized lookback -- the same distinction, and for the same reason,
+        # as the scale above.  A spot/volatility correlation and a vol of vol
+        # are properties of the process, not forecasts over a horizon, and
+        # they need *more* paired observations than a realized volatility
+        # needs returns.  Measured on the lookback they were therefore blank
+        # at every short tenor, and on a lookback under about thirty days they
+        # were blank at every tenor at once: the at-the-money reported a shape
+        # of zero (it has none by statement) and all four wings reported no
+        # shape at all, which reads as a signal that does not work rather than
+        # as a window that was too short.  Never *shorter* than the lookback,
+        # so asking for two years of realized data does not quietly measure
+        # the dynamics on one.
+        #
+        # Its own constant and not ``history_days``, close as the two
+        # arguments are: ``history_days`` is the denominator every score is
+        # divided by, and a knob that also moved the *numerator* would change
+        # the volatility-point column as a side effect of rescaling the
+        # z-scores.  A test pins that column against it.
+        dyn_window = max(window, float(DYNAMICS_DAYS))
         rho = nu = None
         source = None
         if hist is not None:
             try:
-                dyn = vol_dynamics(hist, window, tenor)
+                dyn = vol_dynamics(hist, dyn_window, tenor)
                 rho, nu, source = dyn.rho, dyn.nu, dyn.source
                 warn.extend(dyn.warnings)
             except Exception as exc:  # noqa: BLE001 - one signal, reported in place
-                warn.append(f"{tenor}: no measured volatility dynamics ({exc})")
+                warn.append(f"{tenor}: no measured volatility dynamics over "
+                            f"{dyn_window:.0f} days ({exc})")
 
         # The feed first, the carry table second.  Reading it only off the
         # carry table left a tenor that could not be rolled -- every short one
@@ -770,6 +824,7 @@ def relative_value(book, pair: str, hist=None, *, horizon_days: float = 30.0,
             tenor=tenor, t=t, expiry=expiry.isoformat(), forward=forward, atm=atm,
             realized=rv, realized_basis=basis, window_days=window if hist is not None else None,
             observations=obs, realized_rho=rho, realized_nu=nu, dynamics_source=source,
+            dynamics_days=dyn_window if hist is not None else None,
             cells=tuple(cells), warnings=tuple(dict.fromkeys(warn)), **parts, **regime,
         ))
 
@@ -820,11 +875,11 @@ def _cell(surface, hist, tri_row, tri_note, carry, col: GridColumn, tenor: str, 
 
     signals: list[Signal] = []
 
-    def add(name: str, value=None, message: str = "") -> None:
+    def add(name: str, value=None, message: str = "", *, scorable: bool = True) -> None:
         label = dict(SIGNALS)[name]
         signals.append(Signal(name=name, label=label, value=value,
                               weight=weights[name], message=message,
-                              shared=name in SHARED))
+                              shared=name in SHARED, scorable=scorable))
 
     # -- implied against realized: the level, and then the shape -------------
     if rv is None:
@@ -834,8 +889,16 @@ def _cell(surface, hist, tri_row, tri_note, carry, col: GridColumn, tenor: str, 
         add("level", atm - rv)
         if col.name == "atm":
             # The at-the-money *is* the level.  Saying its shape is zero is a
-            # statement, not a cancellation that happens to come out small.
-            add("shape", 0.0, "the at-the-money is the level, so it carries no shape")
+            # statement, not a cancellation that happens to come out small --
+            # and a statement is not a measurement, so it is shown and not
+            # scored.  Averaged in, this zero pulled every at-the-money score
+            # a fifth of the way to the middle for no reason anybody could
+            # point at, which is exactly what the module refuses to do with a
+            # signal that is missing.  The value stays 0.0 so that
+            # ``level + shape + carry`` is still the richness exactly.
+            add("shape", 0.0, "the at-the-money is the level, so it carries no shape "
+                              "to be rich or cheap in, and none is scored here",
+                scorable=False)
         elif rho is None or nu is None:
             add("shape", message="no measured volatility dynamics to imply a smile shape")
         else:
@@ -930,6 +993,9 @@ def _cell(surface, hist, tri_row, tri_note, carry, col: GridColumn, tenor: str, 
         if s.value is None or s.weight <= 0:
             scored.append(s)
             continue
+        if not s.scorable:
+            scored.append(s)          # zero by construction: shown, not counted
+            continue
         if s.name == "triangle" and s.message:
             scored.append(s)          # inside the noise floor: shown, not counted
             continue
@@ -968,6 +1034,23 @@ def _carry_signal(row, t: float, h: float):
     from the two forwards.  The sign is the one that makes this a *richness*:
     an option that rolls down has to be cheaper to break even, so a mark that
     did not fall by the roll is rich by the difference.
+
+    The forward's own carry is read **delta hedged** (``carry_hedged``, not
+    ``carry_pnl``), and that is the whole of what this grid asks of it.  A
+    break-even volatility is a property of the strike: the same strike written
+    as a call and as a put is one mark, and put-call parity puts the entire
+    difference between the two revaluations in the first-order term
+    ``delta * (F2 - F1)``, which a hedge removes and which has nothing to say
+    about volatility.  Read unhedged, this signal carried that term with the
+    option's own direction on it -- around a quarter of the forward move at a
+    25 delta strike, worth a volatility point a year on a carried pair -- so
+    the put columns and the call columns of one row were pushed in *opposite*
+    directions and the composite score changed sign across the strike axis for
+    a reason that was not a mark.  The at-the-money column barely showed it,
+    because a delta-neutral straddle has almost no first-order term, which is
+    what made the flip look like it belonged to the wings.  What is left is
+    the gamma over the move, which is what ``fair_value_table`` always meant
+    by this term and is now computed the same way there.
     """
     if not math.isfinite(row.roll) or row.vega is None or row.vega <= 0:
         return None, f"{row.tenor} has no vega to value its roll against"
@@ -981,11 +1064,11 @@ def _carry_signal(row, t: float, h: float):
     roll_value = row.roll * multiplier
     carry_value = 0.0
     note = ""
-    if row.carry_pnl is None:
+    if row.carry_hedged is None:
         note = ("without a forward feed only the term structure rolls, so this is the "
                 "roll alone and the forward curve's own carry is missing from it")
     else:
-        carry_value = row.carry_pnl * (t / h) / row.vega
+        carry_value = row.carry_hedged * (t / h) / row.vega
     if multiplier > 20.0:
         note = (note + "; " if note else "") + (
             f"the roll is multiplied by {multiplier:.0f} to reach this tenor's break-even, "

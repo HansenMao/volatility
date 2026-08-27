@@ -254,6 +254,44 @@ Two changes to how files are read. Neither touches a number.
   performs is reported on the page. With it off, nothing about the tool's
   behaviour differs from before.
 
+## 4b-iii. The CONFIG sheet is two columns, and moves nothing
+
+The workbook's `CONFIG` sheet used to carry a `BASE` column of dollar pairs, a
+`COR` column naming the crosses, and one further column per cross naming its
+two legs — nine columns to describe thirteen pairs. It is now **two**: `PAIRS`
+and `TENORS`.
+
+A pair with the dollar on one side is marked on its own backbone. A pair
+without one is a cross, and its two dollar legs are worked out from the name by
+`cross.dollar_legs` — `AUDJPY` into `AUDUSD` and `USDJPY`, `EURGBP` into
+`EURUSD` and `GBPUSD`, `EURCNH` into `EURUSD` and `USDCNH`. What is marked for
+a cross is, as before, the **correlation** between its legs: `CrossAtmCurve`,
+and the `initial` / `long term` / `MR` cells of its `PARAMS` column read as
+correlation initial / final / decay. A leg nothing listed is added, because a
+cross cannot be built without both of them.
+
+Nothing about this was ever a decision. `EURGBP` has exactly one sensible pair
+of legs, and writing them down thirteen times was thirteen chances to write one
+upside down — which is not cosmetic, because a leg written the wrong way up
+enters the triangle with the other sign, and that is §1.1 above. The derivation
+is pinned by a test against the legs the shipped sheet used to name by hand,
+and the whole book was rebuilt off both layouts at the same valuation time:
+every ATM and every smile point agrees to **0.0**.
+
+The old layout still loads, unchanged. A `COR` column is read as more pairs,
+and a column named after a cross still names that cross's legs and **wins** over
+the derived ones — a sheet that says something explicitly is not second-guessed
+by a convention, and a desk that goes through sterling for `EURJPY` keeps doing
+so. Anything the reader worked out rather than read is reported: `data.notes`,
+shown in the page's message box and by `volkit check`.
+
+One check was tightened on the way through. `cross.infer_leg_signs` asked only
+that two legs share a third currency, so a mistyped column naming `EURUSD`
+twice built `EURJPY` out of nothing and said so nowhere. Each side of the pair
+now has to come from a different leg, and a column that cannot build its cross
+is reported by name with the rest of the workbook's problems rather than
+raising on the first bad cell.
+
 ## 4c. Analysis — new; two of its columns moved when the forward curve went in
 
 The analysis tab is new. The legacy tool had `rv.py`, whose `RV.calc` wrote
@@ -331,6 +369,42 @@ The conventions in it worth knowing before reading a number off it:
   move and lands around 0.003 volatility points on EURUSD at a 30-day horizon
   -- visible in the fourth decimal, not in a mark. Set `carry_value` aside (it
   is reported on its own column) to recover the old figure exactly.
+
+  **And a break-even reads that carry delta hedged.** The carry column stays
+  the whole revaluation -- that is the position's carry and the panel's
+  subject. A break-even is a different question: a fair volatility belongs to
+  the *strike*, and put-call parity puts the entire difference between writing
+  that strike as a call and as a put into `delta * (F2 - F1)`, which is a
+  direction rather than a volatility. `CarryRow.carry_hedged` is the carry
+  with that term removed and is what fair value and the relative-value grid
+  read; what is left is the gamma over the move, non-negative on either side
+  by convexity.
+
+  This moves two things and leaves the carry table alone.
+
+  * *Fair value*, on a **premium-adjusted** pair only. The at-the-money
+    straddle is delta neutral in the pair's own quoted convention; on an
+    unadjusted one its `dV/dF` is exactly zero and no number moves at all
+    (EURUSD is unchanged to the last bit). On USDJPY the delta-neutral strike
+    is neutral in the *premium-adjusted* sense and carries a small `dV/dF`, so
+    the old `carry_value` held a residual first-order term. The tell is that
+    it grew with the tenor -- a delta term is linear in the forward move --
+    from 0.0035 volatility points at 2w to 0.068 at 1y, where the gamma it was
+    standing in for is flat at 0.0014. Richness moves by up to 0.067
+    volatility points at the long end. Add `delta * (F2 - F1) * (T/h) /
+    (2*vega)` back to `carry_value` to recover the old figure.
+  * *The relative-value grid's carry signal*, on every pair with a forward
+    feed, and this one was a real defect rather than a refinement. Read
+    unhedged at a 25 delta strike the signal carried a quarter of the forward
+    move with the option's own sign, so the put columns and the call columns of
+    one row were pushed in opposite directions: on the sample marks a USDJPY
+    one-year 25 delta put scored `+13.8` against the call's `-0.46`, and the
+    grid's score changed sign across the strike axis for a reason that was not
+    a mark. The at-the-money column showed almost none of it, being
+    delta-neutral, which is what made the flip look like a property of the
+    wings. Tests pin the call/put symmetry at one strike, the sign of the
+    hedged term across every column, and the ATM column against
+    `fair_value_table` as before.
 
 * **Realized volatility is measured on the forward, not on spot.** A quoted
   volatility is the volatility of the forward the option is struck against.
@@ -671,6 +745,40 @@ workbook is empty when what is actually wrong is that it does not carry this
 pair. A pair the workbook has never heard of is now told what the workbook
 holds; a pair it has, but which this book was not asked to build, is told
 that instead.
+
+### F12. A loaded feed was invisible to every cross
+
+Every level lookup asked the feed for the pair **by name**. A feed carrying
+EURUSD and USDJPY therefore had no EURJPY in it, and the market-maker screen
+answered a quote written against an absolute strike with *"there is no forward
+feed for EURJPY"* while the pricing screen was quoting both of its legs off
+the same file. The same silence sat under the carry table (no forward carry,
+no smile slide), the relative-value grid (no absolute strikes, no regime z),
+the strike axis of the marking screen's chart, and a pricing leg left with a
+blank spot.
+
+`Book.market_level` now composes a cross from its legs when the feed does not
+quote it directly, and every other lookup goes through it -- `analytics
+._forward_at`, `relvalue._spot_and_forward`, `pricing._resolve_market` and the
+`has_feed` flags on the analysis and band routes each had their own copy of
+the by-name test. The composition is the triangle and not a model: EURJPY is
+EURUSD x USDJPY, EURGBP is EURUSD / GBPUSD, with the orientation taken from
+`cross.infer_leg_signs` -- the same signs the variance triangle uses, read as
+quotation rather than as correlation. The points that come back are the
+cross's own, in the cross's own pips, and never the legs' points added: a
+point of EURUSD and a point of USDJPY are different amounts of money.
+
+**What moves.** Nothing on a pair the feed quotes itself, and nothing at all
+without a feed. On a cross whose legs the feed carries, figures that were
+previously unavailable now have values: the forward carry columns, the smile
+slide, the relative-value carry signal and its `regime_z`, the chart's strike
+axis, and an absolute-strike row on the market-maker sheet. A leg with a blank
+spot is now filled from the triangle instead of falling back to a spot of 1.0.
+Every one of them says which two legs it was built from; `derived` and `via`
+travel with the level. Half a triangle is still a refusal -- no NZDUSD in the
+file, no GBPNZD forward -- and a pair with no legs at all (USDCNY) is
+unchanged. To get the old behaviour back, remove the legs' rows from the feed
+file: the tool never invents a level it was not given one way or the other.
 
 ## Verified correct
 

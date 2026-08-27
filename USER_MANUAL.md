@@ -126,11 +126,11 @@ are remembered between sessions. Prices refresh as you type unless you untick
 | Field | Accepts |
 |---|---|
 | Product | `vanilla`, `digital`, `one_touch`, `no_touch` |
-| Expiry | a date, or a tenor (`1M`, `3M`) resolved through spot and delivery on the pair's holiday calendar |
-| Strike | a number, `ATM`, or a delta — `25d`, `10dp`, `-25d`. A bare `25d` takes its wing from the option Type |
+| Expiry | a tenor — `1W`, `8d`, `3M` — resolved through spot and delivery on the pair's holiday calendar, or a date written any of the usual ways: `2026-09-15`, `15Sep26`, `15 Sep 2026`, `September 15, 2026`, `2026/09/15`, `9/15/2026`, `20260915`. However you type it, the box comes back holding the one standard date, so what is priced is what you can read |
+| Strike | a number, `ATM`, or a delta — `25d`, `10dp`, `-25d`. A bare `25d` takes its wing from the option Type. Once the marks have solved it the box holds that absolute strike and its tooltip says what you asked for; type the request in again to solve it afresh |
 | Barrier | level for touch products; the volatility is read *at the barrier* |
-| Type | `C`, `P`, or `Auto` (call if the strike is above the forward) |
-| Spot / Fwd pts / Pip | forward is `spot + points / pip`. **Leave Spot blank to take both from the feed**, with points interpolated to your exact expiry |
+| Type | `C`, `P`, or `Auto` (call if the strike is above the forward). `Auto` comes back as the `C` or `P` it resolved to |
+| Spot / Swap / Forward | three boxes holding one identity: `forward = spot + swap / pip`. All three are filled from the feed at this leg's own expiry, all three are yours to type over, and typing in any of them moves the third. The **outright** is what is priced |
 | Notional / Side | millions of base (payout, for touch products). Buy or sell flips the signed amounts *and* which way an overhedge buffer is applied |
 | Digital ramp % | width of the call spread replicating a digital, as % of strike |
 | Overhedge / Buffer % | barrier shift: `extend`, `bend_front`, `bend_back` |
@@ -149,13 +149,49 @@ Every column is the **same fixed width** whatever is in it, so a long premium
 in one leg cannot widen the leg beside it and shift the whole grid under your
 cursor.
 
+**The market boxes fill themselves.** Spot, the swap points and the outright
+forward all come from the feed at the leg's own expiry, and they are shown
+*greyed* while they are still the feed's numbers. Change the pair or the
+expiry and they are re-read — the swap points are interpolated to the expiry,
+so a forward left behind from the old one is simply the wrong forward. Type
+over any of them and it turns black: it is yours from then on, it is priced
+exactly as it stands, and nothing refills it except **Fill legs**. Empty the
+box to hand it back to the feed — and moving the leg to another pair hands
+all of them back on its own, because a level you marked by hand belongs to
+the pair you marked it for.
+
+The three are one identity, `forward = spot + swap / pip`, so two of them are
+yours and the third follows: type a swap and the forward moves, type an
+outright and the swap moves to match. While every box is still the feed's,
+the forward shown is the feed's *own* published outright rather than the two
+rounded boxes above it added up — they carry different precisions, and on a
+cross the file quotes only through its legs the sum lands a digit off what
+was published.
+
+**The Results rows repeat none of the inputs.** What the pricer works out
+goes back into the box you asked in, and it is then what is priced: the
+expiry as the one standard date, `ATM` or `25d` as the absolute strike it
+solved to on the marks, `Auto` as the `C` or `P` it turned out to be. There
+is no second copy underneath, because one number in two places on one screen
+is two places for it to disagree — and for spot and the forward it is worse,
+since the box is the input and a row beneath it reads like an answer. The
+consequence worth knowing: a delta strike does not quietly re-solve under a
+mark that has moved, exactly as a tenor does not re-read on a later morning.
+The strike box's tooltip says what it was asked as; type `25d` in again to
+solve it against the marks as they now stand, and moving the leg to another
+pair puts the request back for you.
+
+A cross the file quotes only through its legs is filled from them — EURJPY
+off EURUSD and USDJPY — by the same triangle that prices it, so a pair the
+feed covers indirectly is no longer a pair you have to type a level into.
+
 **Keeping spot current.** The feed is read from a file, and the file is
-rewritten during the day. Three controls in the toolbar:
+rewritten during the day. Four controls in the toolbar:
 
 | Control | What it does |
 |---|---|
-| **Refresh spot** | re-reads the feed file and re-prices. Every leg with a blank **Spot** picks up whatever has just been published |
-| **Fill legs** | the same, and then *writes* the spot and the interpolated points into every leg, at that leg's own expiry — this is what a leg with a hand-typed spot that has gone stale needs |
+| **Refresh spot** | re-reads the feed file and re-prices. Every box still holding the feed's number picks up whatever has just been published |
+| **Fill legs** | the same, and then writes the feed over the levels you typed as well, at each leg's own expiry — this is what a leg with a hand-marked spot that has gone stale needs |
 | **watch file** | checks every fifteen seconds whether the file has been rewritten, and marks the feed pill when it has. It only *tells* you; nothing is re-read |
 | **auto-load** | re-reads the feed for you whenever it changes. Only the feed — the workbook stays on its button, because reloading it discards this session's marks (§1). Greyed out when no feed file is loaded |
 
@@ -293,7 +329,7 @@ the chart and the tables appear on the right.
 
 | Field | What it is |
 |---|---|
-| Contract | the listed contract. Picking one sets the FX pair and whether its strikes are the reciprocal of that pair's. `custom` for anything not in the list |
+| Contract | the listed contract, **typed**. The codes volkit knows are offered as you type and bring their FX pair, their strike direction and their standard contract size with them; anything else is accepted as typed, is marked *typed* wherever it is shown, and takes those three from the boxes beside it. Nothing is guessed from the name. Two panels may share a code — the same contract at two expiries — and a position line then names the expiry too |
 | FX pair | override the pair the contract maps to. Leave blank to take the contract's |
 | Strikes | *as quoted* or *reciprocal*. Leave on *(from contract)* unless you know better |
 | Strike scale | multiplies pasted strikes before anything else. Use `1e-6` if your yen strikes come through as `6850` rather than `0.006850` |
@@ -403,15 +439,40 @@ both, by construction.
 | vanna $ | how much *Δ 1% $* changes per vol bump |
 | volga $ | how much *vega $* changes per vol bump |
 
-**What adds up.** Money adds across contracts — every CME FX option settles in
-US dollars — so premium, vega, theta and the 1% columns are totalled at the
-bottom. *Δ fut* and *Γ fut* are **not**: a euro future is not a yen future, so
-those are totalled per contract only and the *all* row leaves them blank.
+**What adds up**, and it is three rows because three different things add.
+
+* **Per panel** — every column adds. One row per panel that has a position on
+  it.
+* **Per contract** — every column still adds, including *Δ fut* and *Γ fut*:
+  the panels under one code are the same contract at different expiries. Shown
+  only where a contract has more than one panel, so it never repeats the row
+  above it. Two delivery months are not literally the same future, so that
+  futures total is a **net position, not a hedge ratio** — September euro
+  against December euro is a calendar spread.
+* **Across contracts** — only money adds: premium, vega, theta and the 1%
+  columns, and only across contracts settling in the **same currency**. Every
+  CME FX option settles in US dollars, so on an ordinary screen that is one
+  *all · USD* row. A contract you typed need not, and its settlement currency
+  is derived from its pair and its strike direction; when two differ there is
+  no all-in row, only one row per currency, and the screen says so. *Δ fut*
+  and *Γ fut* are never totalled across contracts — a euro future is not a yen
+  future — so the *all* row leaves them blank.
+
 Premiums and theta are undiscounted forward values, as everywhere else here.
 
 ```
 volkit listed 6E --expiry "2026-09-11 19:00" --forward 1.085 \
     --file quotes.txt --positions book.txt --theta-days 3
+```
+
+The command has one panel, which is enough for a book on one contract. To
+reproduce a screen holding several, save the other panels as a JSON list in
+the shape the screen posts and pass `--panels`; the panel built from the
+arguments is the first of them.
+
+```
+volkit listed 6E --expiry "2026-09-11 19:00" --forward 1.085 \
+    --file quotes.txt --panels other_panels.json --positions book.txt
 ```
 
 ### Analysis
@@ -473,6 +534,21 @@ nothing on a one-week 10 delta wing. That measurement has its own window
 which is matched to each tenor: a month of a smooth one-month series is far too
 short to say how much anything moves.
 
+The ρ and ν behind **shape** are measured on their own window too, and for the
+same reason — they are properties of the market's behaviour, not a forecast
+over your horizon, and they need more paired days than a realized volatility
+needs returns. Set the lookback to three weeks and they used to have nothing to
+say at any tenor at all: the ATM showed a shape of `0.000` and all four wings
+showed a dash, which looks like a signal that does not work rather than a
+window that is too short. It no longer moves with the lookback.
+
+**Shape at the at-the-money is `0.000` and does not count.** The at-the-money
+*is* the level, so there is no shape there to be rich or cheap in. That zero is
+a statement, not a measurement, so it is shown with its reason and left out of
+the average — averaging it in dragged every ATM cell a fifth of the way toward
+zero. It is why an ATM cell reads a lower **confidence** than the wings beside
+it: it has one fewer signal available, and the number says so.
+
 Three columns and a tag you will notice on the grid:
 
 - The column between **Tenor** and the strikes is **level**, printed once
@@ -526,7 +602,9 @@ the term structure at the same moneyness) and **smile** (the extra from the
 forward moving under the strike). **Per yr** annualises the roll; **/atm** is
 that as a fraction of the ATM level, which is the carry-to-vol ratio. Without a
 forward feed for the pair the strike can only be held in moneyness, the smile
-slide is zero by construction, and the row says so.
+slide is zero by construction, and the row says so. A cross whose **legs** the
+feed quotes has a forward either way — EURJPY out of EURUSD and USDJPY — and
+the row names the two it was built from.
 
 The forward curve pays twice, and the last five columns are the second time.
 **Smile** above is the curve reaching your *mark*. **Carry** is the curve
@@ -630,9 +708,19 @@ vol a butterfly is paid for. Tick *wings as ρ / ν* and the card fills in:
   ρ inside one of them is not a ρ. **Measured on** says `quoted` when it used
   your at-the-money column and `rolling` when the sheet had none and it fell
   back to a rolling realized volatility — an average moves less than what it
-  averages, so that ν is a floor.
+  averages, so that ν is a floor. Beside it is the **window** it was measured
+  over, which is deliberately not the realized lookback above: ρ and ν are
+  properties of the market's behaviour, not a forecast over your horizon, and
+  they need more paired days than a realized volatility needs returns. Read off
+  a three-week lookback, this whole half of the card — and both **diff**
+  columns with it — was blank at every tenor.
 * **diff** is marked less measured: what you are charging for the wing against
   what the market delivered.
+
+The marked half needs no history at all, so a tenor whose realized window is too
+short to measure anything — the one week row always is, on a lookback matched
+to the tenor — still shows its own ρ, ν and both differences. Its realized
+columns above stay blank, with the reason.
 
 SABR has no mean reversion and real volatility does, so **ν rises at short
 tenors on both sides** — do not read the term structure of ν as a signal, and
@@ -753,7 +841,23 @@ reminds you; it cannot check it for you.
 
 The other tabs tell you what something is worth. This one tells you what to
 show. It runs in three stages and each reports separately, so one that cannot
-run leaves the others alone.
+run leaves the others alone — and behind **two buttons**, because fitting and
+quoting are two different jobs.
+
+**Fit** reads the market box, moves the curve and the wings to it, and prices
+nothing. **Quote** reads the box below it, where you write what you are being
+*asked* for, and makes a two-way in each line — and fits nothing, so it comes
+back instantly and you can press it as often as the phone rings. A request does
+not arrive with a broker run attached to it, which is why the two are separate:
+you should not have to re-fit to a market that has nothing to do with the price
+you are being asked to make.
+
+**Which marks the price stands on.** With **quote on the fit** ticked, the
+parameters the last fit arrived at go with the request and are used for that
+one price. Untick it, or fit nothing at all, and the price stands on the marks
+as they are. The line above the quote sheet says which of the two it was, every
+time. Either way nothing is left on the book — that is **keep the marks**, on
+the fit, and it is a separate decision.
 
 **Paste the market** into the left-hand box, one quote a line, in the shorthand
 it arrives in:
@@ -806,7 +910,7 @@ header pasted along with the run is recognised as one and passed over.
 | Strike column | What it means |
 |---|---|
 | `ATM` | the at-the-money |
-| `1.0900` | the volatility at that strike. No `call` or `put` needed — the volatility at a strike is one number either way — but it needs a **forward feed**, because the surface works in strike over forward |
+| `1.0900` | the volatility at that strike. No `call` or `put` needed — the volatility at a strike is one number either way — but it needs a **forward feed**, because the surface works in strike over forward. A cross the feed does not quote counts as covered when it quotes **both legs**: EURUSD and USDJPY in the file are an EURJPY forward, and the sheet says once which triangle it used |
 | `25d` | the 25 delta **call**. A bare delta names two strikes, one on each wing, so it takes the call and the row says so |
 | `25dp`, `-25d` | the 25 delta put |
 
@@ -861,18 +965,45 @@ Only parameters the paste can actually inform are moved: a 25-delta quote reads
 the 25-delta anchor, and freeing the 10-delta pair as well would not inform
 them. The panel says which it left alone and why.
 
-**Stage 3 — the quote sheet.** For every line:
+Stages 1 and 2 are the **Fit** button, and what it produces is the *market
+against the surface* table on the right: their bid and offer, where the model
+was, where it is now, and how far it moved. There is no price in it. Whether
+the fit reached the market is the fit's own question.
+
+**Stage 3 — the quote.** Write what you are being asked for into **What we are
+asked for**, one instrument a line, with **no prices on them**:
+
+```
+1M ATM in 100mm
+3M 25d RR
+2M 25d fly
+6M 1.1000 call
+1M/3M ATM spread
+3M 25d RR jpy call over
+```
+
+The same words as the market box with the price left off. A number that reads
+as a market is refused with the line rather than taken as a strike — pasting a
+broker run in here would otherwise quote you levels nobody asked about. A risk
+reversal asked for as `JPY call over` is answered in **that** convention, sign
+and sides both, and the row says so.
+
+Press **Quote**, and for every line:
 
 | Column | What it is |
 |---|---|
-| Their bid / ask | what you pasted |
-| Model | where the surface is after the fit |
-| Moved | how far the fit moved it |
+| Model | the surface's own mid, on whichever marks the price is standing on |
 | Fair / Axe / Bank | the three things shading the mid, each separately |
 | Skew | their total, capped; a `*` means the cap bound |
 | Our bid / ask | the mid plus the shading, with the bank's width round it |
 | Width | the width, and underneath, the rule that set it |
-| Verdict | in line, our mid above or below theirs, or through their price |
+| Their market | what the market box quoted for this same instrument, if it did |
+| Verdict | quoted; or, when the market box has it too, in line, our mid above or below theirs, or through their price |
+
+**If the market box quoted the same instrument, it appears beside our price**
+and the verdict compares the two, so *inside their market* still works. If it
+did not, the line is priced just the same — which is the whole reason for
+asking separately.
 
 **Shading the mid.** Two things lean it, and both lean the same way. A market
 that is **rich** against the fair-value screen and a **long vega position** are
@@ -888,8 +1019,9 @@ realized volatility and a vega position are both statements about the *level*;
 neither says where the skew should be marked, and those rows say so.
 
 **Nothing here touches the workbook.** The fit reports and then puts the marks
-back. Tick **keep the marks** to leave them on the loaded book — still in
-memory only, and **Reload workbook** discards them.
+back, and so does a quote made on them. Tick **keep the marks** to leave the
+fit on the loaded book — still in memory only, and **Reload workbook** discards
+them.
 
 ### The knowledge bank
 
@@ -991,13 +1123,39 @@ Warnings you may see, and what they mean:
 
 ## 4. Data files
 
-**`vol_marks.xlsx`** — the workbook, unchanged from before.
-`CONFIG` lists base pairs, crosses and their legs, and the tenor points.
+**`vol_marks.xlsx`** — the workbook.
+
+`CONFIG` is **two columns**: `PAIRS`, one pair a row, and `TENORS`, the tenor
+points. Nothing else.
+
+```
+PAIRS    TENORS
+USDJPY   1w
+EURUSD   2w
+EURJPY   1m
+EURGBP   3m
+```
+
+A pair with the dollar on one side is marked on its own backbone. A pair
+without one is a **cross**, and a cross is never marked directly: it is broken
+into the two dollar pairs the market quotes — `EURJPY` into `EURUSD` and
+`USDJPY`, `EURGBP` into `EURUSD` and `GBPUSD`, `EURCNH` into `EURUSD` and
+`USDCNH` — and what you mark for it is the **correlation** between them. A leg
+you did not list is added, because a cross cannot be built without both of
+them. Everything that was worked out rather than read is reported: in the
+message box at the top of the page, and by `volkit check`.
+
+The old layout still loads. A `COR` column is read as more pairs, and a column
+named after a cross still names that cross's two legs and wins over the derived
+ones — a sheet that says something explicitly is not second-guessed by a
+convention.
+
 `PARAMS` holds one column per pair: `initial`, `long term`, `ratevol`,
 `addon`, `MR`, `rate corr`, `short decay`, then one row per event date.
 One sheet per pair holds `expiry, ST 10D, ST 25D, RR 25D, RR 10D`.
 Everything is in **vol points**. For a **cross**, the `initial` / `long term` /
-`MR` cells mean correlation initial / final / decay.
+`MR` cells mean correlation initial / final / decay — that is what "marked by
+correlation" means, and it is unchanged.
 
 **`market_feed.csv`** — `pair,tenor,value`, where tenor `SPOT` is the spot rate
 and anything else is the forward points at that pillar:
@@ -1088,15 +1246,41 @@ volkit monitor EURUSD --history vol_history.xlsx
 volkit monitor --watch EURUSD --watch USDJPY:history@-1m --history vol_history.xlsx
                                           two panels, the second against a month ago
 volkit monitor EURUSD --compare surface --compare history:-30d
+volkit mark propose EURUSD --target curve.txt --out p.json
+                                          plan and run the marking fit, and save what it proposes
+volkit mark record EURUSD --proposal p.json --verdict edited
+                                          tell it what you did to that proposal
+volkit mark learn EURUSD                  what it has worked out about how you mark
+volkit mark confer EURUSD --archive mm_archive.jsonl
+                                          let the two agents settle on a re-mark
+volkit agent fetch --sdr sdr/ --days 5    download DTCC's public dissemination files
+volkit agent fetch --sdr sdr/ --since 2025-09-01
+                                          ... or backfill the 366 days DTCC keeps
+volkit agent trades EURUSD --invert --history vol_history.xlsx
+                                          what printed, and the volatility each premium implies
+volkit agent ingest --chats chats/ --sdr sdr/
+                                          read today's broker chats and SDR files into the archive
+volkit agent watch --chats chats/ --every 30
+                                          ... and keep reading them while you work
+volkit agent evidence EURUSD              how wide this pair has been shown, and where
+volkit agent learn EURUSD --save          turn that into knowledge-bank widths
+volkit agent quote EURUSD --record        make a two-way and keep a record of it
+volkit agent outcome EURUSD --ref ID --result traded_ask
+                                          say what happened to a price you showed
                                           the curve comparison panel, as a table
 volkit session marks.json                 save every mark on the book to a file
 volkit session marks.json --load          put a saved file back
 volkit session marks.json --show          print what a saved file holds
 volkit band USDHKD --feed market_feed.csv --hazard 3
                                           the managed-band read-out for a pegged pair
-volkit mm EURUSD --target-source quotes --fallback-spread 0.3 < run.txt
-                                          fit the curve, tune the wings, print the quote sheet
-volkit mm EURUSD --vega position.txt --axe-scale 500 --history vol_history.xlsx < run.txt
+volkit mm EURUSD --target-source quotes < run.txt
+                                          fit the curve and the wings, and report
+volkit mm EURUSD --file run.txt --request ask.txt --fallback-spread 0.3
+                                          fit, then quote what is asked for off it
+volkit mm EURUSD --request ask.txt --target-source none --fallback-spread 0.3
+                                          quote off the marks as they stand, no fit
+volkit mm EURUSD --request ask.txt --target-source none --vega position.txt \
+    --axe-scale 500 --history vol_history.xlsx
                                           the same, with both leans on
 volkit mm EURUSD --learn < run.txt        propose bank widths from the paste; --save writes them
 ```
@@ -1123,6 +1307,417 @@ volkit serve --session marks.json
 ```
 
 ---
+
+## 5a. The desk agent
+
+The agent is in two places: a **card inside the Market maker tab**, and a
+command. The card answers one question about the market you have pasted --
+*is the width I am about to show the width this thing actually trades at* --
+and the command does everything else, including making a price when nobody
+has shown you anything at all.
+
+### The card in the Market maker tab
+
+It sits under the quote sheet, and it runs only when you press **Suggest** --
+it never moves on its own, and it fits nothing, so it answers in a moment
+without touching your curve, your wings or your marks.
+
+What it gives you, per quoted row: what the market showed, what you would
+show, and what the archive says this has actually been shown at recently --
+with two extra columns on the quote sheet itself so each suggestion sits
+beside the quote it is about. The verdict on each row is one of:
+
+| verdict | what it means |
+|---|---|
+| agrees | your width and the market's are the same thing |
+| tight | you would show tighter than this has been shown |
+| wide | you would show wider |
+| no rule | nothing in the bank matches, and here is what the archive supports |
+| thin | not enough in the archive to have an opinion |
+
+**Nothing moves.** A row marked `tight` still quotes at your bank's width; the
+card is telling you a rule is out of date, and the rule changes in the
+Knowledge bank card below it, by you. The two extra quote-sheet columns
+disappear the moment you edit the paste, because a suggestion computed from an
+older market has no business sitting beside a newer quote.
+
+Three buttons:
+
+- **Suggest** -- run it against what is pasted above.
+- **Fetch from DTCC** -- download the last few days of public dissemination
+  files straight from DTCC into your SDR folder, and read them. The box beside
+  it is how many days back; the screen is capped at 30, because a long
+  backfill is a command with somebody watching it (`volkit agent fetch --since
+  2025-09-01`). Start the server with `--sdr DIR` to say where they go, and
+  `--proxy` if your desk sits behind one.
+- **Scan folders** -- read whatever is new in the chat and SDR folders this
+  server was started with (`volkit serve --chats chats/ --sdr sdr/`). If none
+  were named, it says so; the folders are a command-line setting and not a box
+  on the page, because a path a web page can name is a path anything reaching
+  that page can read.
+- **File this run** -- put the market you are looking at into the archive, so
+  the next morning's comparison knows about it. Put the broker's name in the
+  Broker box first: filing the same run twice under one name files it once,
+  and under two names it counts twice, which is right when two brokers really
+  showed it and is worth knowing when they did not. The card says which
+  happened.
+
+The four settings are the same ones the command line takes: **Half-life** (how
+fast an observation stops counting -- five days means a quote is worth half
+after a working week), **Min evidence** (how many age-weighted observations
+before it will state a width at all), **Lookback**, and **Tolerance** (how far
+apart your width and the market's have to be before it says anything, as a
+fraction; there is also a floor of 0.02 so a narrow butterfly is not flagged
+over four thousandths).
+
+### Putting the archive under the quote
+
+The card only compares. To let the archive *make* a width, tick **widths
+from the archive** on the toolbar. The quote's width ladder is then: a bank
+rule if one matches, else the width the archive has seen this shown at (when
+it holds enough), else the fallback typed on the panel, else no price -- and
+every row says which rung it stood on. The first three settings above are
+what the quote reads too, so the card and the quote agree about what the
+archive holds. It is off until you tick it, because a width the market showed
+is evidence and not a rule; when you are happy with one, **Learn widths**
+writes it into the bank and it stops needing the switch. The archive's
+*level* -- where this has recently been quoted against where your mark is --
+appears on the row as a flag and moves nothing.
+
+### Trades that printed
+
+```
+volkit agent fetch --sdr sdr/ --days 5
+```
+
+That is DTCC's public price dissemination -- the anonymised FX option trades
+the CFTC requires to be published. It is free and public. DTCC keeps **366
+days** and has nothing before **29 December 2023**; a date outside that is
+refused with the reason before anything is asked for, and there is no file for
+a Saturday, which is reported as "nothing published" rather than as an error.
+A date already in your folder is not downloaded again.
+
+If your desk has no route to the internet, run the fetch on a machine that
+does and drop the files in the folder -- reading them has never needed a
+network. If it goes out through a proxy, `--proxy http://host:port`, or just
+let it read `https_proxy` from your environment.
+
+```
+volkit agent trades EURUSD --invert --history vol_history.xlsx
+```
+
+This is the part worth having. Each printed premium becomes the volatility it
+implies:
+
+```
+2024-02-26T14:05  87D 1.1 call traded at 7.050 (K/F 1.0299, 250mm)
+     inverted from a premium of 1,018,517 USD on a notional of 250,000,000 EUR
+     (premium in USD per unit of EUR), against a forward of 1.06804 from the
+     2024-02-26 row of the historical sheet, the sheet quotes no forward at 87D;
+     the carry was interpolated between the 1M and 3M pillars, undiscounted --
+     this package carries no rate curve, so the volatility is a touch low
+```
+
+Every row says what it used, because unlike everything else in the archive
+this number is *derived*: the premium is a fact, the volatility is a fact
+about the premium **and** the forward it was inverted against.
+
+Three things it will not do, and you should know why:
+
+- **It will not use today's forward for a trade from three weeks ago.** The
+  forward comes from that date's row of your historical workbook. No workbook,
+  or no row within a week of the trade, and the trade is refused by name --
+  inverting last month's premium against this morning's forward is wrong by
+  the whole of the carry since, and wrong quietly.
+- **It will not invert a capped notional.** DTCC publishes large sizes as the
+  cap, so the premium per unit would be wrong by however much the cap hid.
+- **It does not discount.** This tool has never carried a rate curve.
+  Undiscounted, the volatility reads *low* -- about 4% of it on a one-year
+  option at 4% rates, and nothing worth mentioning inside a month. Add
+  `--discount-rate 0.04` to remove it.
+
+One more: expiries are taken at midnight UTC, because the file publishes a
+date and no cut. On a one-week trade that reads a touch high.
+
+### The rest of the command
+
+Making a price with no market in front of you, the record of what you showed,
+and what became of it.
+
+It keeps a file beside your workbook, `mm_archive.jsonl`, holding four kinds of
+thing:
+
+| kind | what it is | what it is evidence of |
+|---|---|---|
+| quote | a market somebody showed | where the market is, and how wide it is shown |
+| trade | a print out of an SDR file | where business actually got done |
+| shown | a price **you** made | nothing about the market -- the record of what you did |
+| outcome | what became of one of your prices | whether your market was right |
+
+**Filling it.** Drop broker chats into a folder and dissemination files into
+another, then:
+
+```
+volkit agent ingest --chats chats/ --sdr sdr/
+```
+
+Every file is read once, by content -- copying a log to a new name does not
+import it twice, and a folder scanned every thirty seconds all day does not
+slowly invent confidence in a width. A chat has to say which pair it is: the
+file name (`EURUSD_2026-08-20.txt`), or a line in the file that is nothing but
+a pair name, which is also how a chat covering three pairs gets split into
+three. A file naming none is skipped with that reason and is not retried until
+you change it. `volkit agent watch --chats chats/ --every 30` does the same
+thing on a loop.
+
+**Chats that are not in the house format.** Lines the quote parser already
+reads go straight in. What is left -- "eurusd 1m running 8.2 at 8.6, 100 vega a
+side" -- is handed to a local model if you have one, which rewrites it into the
+same format, which the parser then has to accept. Anything it writes that the
+parser refuses is refused and shown to you. Anything it writes containing a
+number that was not in the chat is refused whole, and shown to you. Records
+that came in this way are marked, and `--no-model-read` recomputes everything
+without them, so you can compare the two before you trust it.
+
+If you have no model running, nothing breaks: the house-format lines are still
+read, everything downstream still works, and each command prints one line
+saying there was no model.
+
+**What it makes of it.**
+
+```
+volkit agent evidence EURUSD
+```
+
+Widths, ages, sources and where the market has been, per instrument and tenor
+bucket. Two rules to know: a quote counts half after five days (`--half-life`),
+and below two age-weighted observations (`--min-evidence`) you get "not enough"
+rather than a number.
+
+```
+volkit agent learn EURUSD --save
+```
+
+Turns the widths with enough behind them into knowledge-bank rules, each
+carrying the evidence in its text. Without `--save` it only proposes.
+
+**The price.**
+
+```
+echo "1M ATM in 100mm vega
+3M 25d RR
+2M 25d fly" | volkit agent quote EURUSD --record
+```
+
+One instrument a line, no prices on them -- a line with a two-way on it is a
+market somebody showed and belongs on the market-maker tab. What comes back,
+for each:
+
+```
+EURUSD 1M ATM in 100mm vega: showing 5.525/6.075
+  model mid: 5.887 vol points, the marked surface (SVI, NY cut) -- 1M is 30.4 days
+  market level: 5.900 vol points, the archive -- last quoted 5.900 (today) ...  (not applied)
+  width: 0.550 vol points, the bank: spread 0.550 on 31d ATM <=150mm vega
+  floor: 0.300 vol points, the bank: floor 0.300 on anything -- already above it  (not applied)
+  beaten rule: spread 0.350 on 31d ATM  (not applied)
+  shading, fair value: +0.000 -- nothing shades this row
+  shading, position: -0.138 -- the position at this tenor is +1.25 of a full axe
+  shift, bank: +0.050 -- the bank: shift +0.050 on ATM
+  our record: 5 price(s) shown, 5 answered, 100% traded, 0 on the bid, 5 on the offer  (not applied)
+  mid: 5.800 -- 5.887 -0.088
+  bid / offer: 5.525 / 6.075
+  flag: 5 of 5 answered prices were lifted against 0 hit; the offer may be the
+        cheap side -- shown here, and applied to nothing
+  advice: check the ECB date before showing anything past it
+```
+
+The list is the explanation. The lines marked `(not applied)` are things you
+should see that changed nothing, and they are there deliberately: a floor that
+did not bind, a rule a more specific one beat, where the market has been, and
+your own hit rate. If a local model is running it also writes two or three
+sentences under the list -- and if that paragraph contains a number the list
+does not, it is thrown away and you get the list, which is the worst that
+happens.
+
+**Where the width comes from**, in order: a rule in your knowledge bank; then
+the archive, if enough recent quotes support one, and the row says so and
+offers to write it in; then `--fallback-spread` if you typed one; then **no
+price at all**, and the reason. There is no built-in default width anywhere in
+this tool.
+
+**What the agent will not do.** It will not move the mid onto the level the
+archive has seen. Where the market has been is shown beside your mark and, when
+the two disagree by enough to matter, flagged -- but a mid that follows the last
+thing you were shown is a mid being led by whoever is about to trade with you.
+If the flag is right, re-mark the surface on the marking tab. It also will not
+turn your hit rate into a shift: a run of lifted offers is sometimes a mid
+that is too low and sometimes a week of being the only one showing, and the
+tool cannot tell those apart. It tells you which run you are having.
+
+**Closing the loop.** `--record` writes the prices a run made into the archive
+with the mid the model had at the time. When you find out what happened:
+
+```
+volkit agent archive EURUSD --kind shown        # find the id
+volkit agent outcome EURUSD --ref 04d9d74f78596569 --result traded_ask
+```
+
+Results are `traded_bid`, `traded_ask`, `passed`, `missed`, `pulled` and
+`done_away` (add `--away 8.35` when you know the level it went at). That is
+what feeds the "our record" line and its flag next time.
+
+**Pricing a past morning.** `--asof "2026-08-20 09:00"` values everything at
+that instant *and* reads the archive only up to it, saying how many later
+observations it left out. Nothing the agent shows you for a past date can have
+been computed from what happened afterwards.
+
+## 5b. The marking agent
+
+A second agent, answering a different question. The desk agent asks *what do I
+show*; this one asks *where should the surface be*.
+
+It does **not** replace the fit on the marking tab. That fit is fine. What it
+does is the judgement around it -- the part you currently do by hand every
+morning:
+
+- which knobs to leave free and which to pin;
+- whether the targets you have can actually determine that many parameters;
+- whether anything you were shown constrains the wings at all;
+- and then, once the fit has run, whether to take the number or nudge it.
+
+The last one is what it learns.
+
+### Proposing
+
+```
+volkit mark propose EURUSD --target curve.txt --out proposal.json
+```
+
+`curve.txt` is `tenor vol` lines. What comes back is the plan, the fit, and
+every knob that moved:
+
+```
+EURUSD: 1 knob(s)
+  plan   pin initial_vol: pinned  [learned] this desk has not moved it in 11 instance(s)
+  plan   pin mean_reversion: pinned  [learned] this desk has not moved it in 11 instance(s)
+  plan   free knobs: long_term_vol  [rule] the screen's default set for this curve
+  plan   wings: left alone  [rule] nothing quoted constrains the smile
+  fit    4 target(s), rmse 0.0373 vol points, worst -0.0529 at 1Y
+  learn  long_term_vol: fit said 8.665, this desk lands -0.13 from it -> 8.535
+         [learned] over 11 answered proposal(s) this desk landed -0.130, spread ±0.010
+  move   curve.long_term_vol: 6.95 -> 8.535
+```
+
+Every line is tagged `[rule]` or `[learned]`. A **rule** is something true of
+the model -- four targets cannot pin down five parameters. A **learned** reason
+is something true of *you*, and it always carries the number of instances
+behind it, so you can see at a glance which kind you are disagreeing with.
+
+Nothing is on the book. Nothing is written anywhere except the file `--out`
+names.
+
+### The card in the Market maker tab
+
+The agent also sits on the Market maker tab as a card, under *The market
+against the surface*, because the fit it plans is that tab's **Fit** button.
+It reads exactly what Fit reads -- the market paste, the target curve and its
+source, the conventions -- so **Propose** answers *how would you run the fit
+that is on this screen, and what would come out*. There is no separate
+market box on the card on purpose.
+
+Two switches. **Agent chooses the knobs** lets it pick which parameters to
+free, from what the targets can determine, what the quotes actually reach,
+and what the journal says you never touch; untick it and it runs with the
+boxes ticked under *What the fit may move*, and says the choice was yours.
+**Score against the archive** asks the desk agent to judge the proposal at
+every archived market -- what it fixed and what it broke -- before you see it.
+
+Then you answer it, and the answer is what it learns from:
+
+- **Accept** -- the proposal becomes the marks the quote stands on, the same
+  way a fit's answer does; the quote sheet says so. With **keep the marks**
+  ticked it also goes on the loaded book.
+- **Take the plan onto the fit** -- the agent's knob choices are written into
+  the fit panel's boxes and Fit runs. Adjust whatever you disagree with, press
+  Fit again, and when you are done press **Record my fit as the edit**: the
+  journal then holds your fit beside the agent's proposal on the same
+  morning, which is the row it learns most from.
+- **Reject** -- recorded as such; nothing moves.
+
+The buttons disappear if you edit the paste after proposing -- a verdict on a
+proposal about a market that is no longer on the screen is not a verdict.
+Answering the same proposal twice is one line in the journal, not two. The
+journal file is `mm_remarks.jsonl` beside the workbook; `volkit serve
+--journal PATH` names another.
+
+### Teaching it
+
+```
+volkit mark record EURUSD --proposal proposal.json --verdict edited \
+    --session marks.json --note "long end always feels rich here"
+```
+
+That is the loop. Accept it, edit it on the marking tab and save your marks,
+or reject it -- and say which. An **edited** proposal is the most useful thing
+you can give it: it is the only place its number and yours sit side by side on
+the same morning.
+
+It also learns from re-marks you make without being asked, by comparing two
+saved sessions, so it is not starting from nothing. But a verdict is worth
+many diffs.
+
+### What it will and will not conclude
+
+```
+volkit mark learn EURUSD
+```
+
+Under **five instances** for a knob it says nothing at all about it. Above
+that it will tell you things like *not moved once in eleven instances -- this
+desk leaves it alone*, and pin that knob next time.
+
+It will only apply a correction when your answers **agree with each other**.
+Land 0.12 below the fit every time and it learns that. Land 0.12 either side
+of it and it says *this desk lands on both sides of the fit here* and changes
+nothing -- because the median of six numbers is a number whatever those six
+were, and it is only evidence when they point the same way.
+
+A correction is capped at **half of whatever the fit itself moved**. A nudge on
+a fitted number is a nudge; a nudge that can exceed the fit is a second fit
+with much less behind it.
+
+One thing to expect: once it starts pinning knobs, the fit's RMSE gets
+*worse*. That is not a bug — fewer free parameters cannot fit as tightly. It
+means the fit is now doing what you do rather than what the optimiser likes,
+and the numbers are all there so you can decide whether you agree.
+
+### The two agents together
+
+```
+volkit mark confer EURUSD --archive mm_archive.jsonl
+```
+
+The desk agent's flag — *the mark is 0.45 below where this has been quoted* —
+is evidence the marking agent can use, and this is where it gets handed over.
+The desk agent turns the archive into targets; the marking agent proposes; the
+desk agent then scores the proposal at **every** archived point, including the
+tenors the fit was not aimed at, and reports what it fixed and **what it
+broke**:
+
+```
+critique: mixed: fixes 3, breaks 1; 2 -> 4 inside
+  atm.1Y: 6.066 -> 7.249, -0.141 outside fixed
+  atm.1W: 7.900 -> 8.402, +0.202 outside broke
+```
+
+If something broke, it weights that point up and tries again — at most three
+rounds, then the best one comes to you. That last step is not automation
+being polite: three rounds is enough to back off something that broke a
+tenor, and past that it is fitting the archive's noise with extra steps.
+
+It scores *inside the two-way the market actually showed*, not distance to the
+middle of it — so it cannot make itself look good by walking your surface onto
+the average of every market it has ever seen.
 
 ## 6. Troubleshooting
 
