@@ -32,7 +32,7 @@ from datetime import datetime, timedelta
 
 import numpy as np
 
-from .events import EventSchedule
+from .events import EventSchedule, coerce_entry
 from .numerics import ConvergenceError, integrate_piecewise, safe_sqrt
 from zoneinfo import ZoneInfo
 
@@ -516,19 +516,27 @@ class AtmCurve(VolCurve):
                 )
         return out
 
-    def set_events(self, entries: list[tuple[datetime, float, str]]) -> list[str]:
-        """Replace the event schedule and re-solve every height."""
+    def set_events(self, entries) -> list[str]:
+        """Replace the event schedule and re-solve every height.
+
+        An entry is an ``events.EventEntry`` or a ``(when, bump, label)``
+        tuple.  Each is resolved for this pair: the bump the curve is
+        calibrated to is the two legs' weights superposed plus the pair's
+        adjustment, and an entry typed as one number is that number.
+        """
         self.events.clear()
         problems = []
-        for when, bump, label in entries:
-            when = as_utc(when)
+        for item in entries:
+            entry = coerce_entry(item).resolve(self.pair)
+            when = as_utc(entry.when)
+            label = entry.label
             if when <= self.clock.now:
                 problems.append(
                     f"event {label or when.strftime('%Y-%m-%d %H:%M')} is at or before the "
                     f"valuation time and was skipped"
                 )
                 continue
-            self.events.add(when, bump, label)
+            self.events.add(when, entry.bump, label, weights=entry.weights, adjust=entry.adjust)
         self.invalidate()
         problems.extend(self.calibrate_events())
         problems.extend(self.event_leakage_warnings())

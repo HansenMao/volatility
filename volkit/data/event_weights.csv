@@ -1,0 +1,14 @@
+# The weight an event puts on each currency, in vol points. A pair's bump is
+# its two legs' weights added together (volkit.events.superpose), plus whatever
+# the pair marks on top in its own events table.
+#
+# Format: EVENT,CCY,WEIGHT   -- EVENT is a name RELEASE_TIMES in econ.py knows,
+# CCY a three-letter currency, WEIGHT in vol points. A row overrides the
+# default for that event and currency; a weight of 0 removes one. Without a
+# row an event weighs its default on the currency that releases it and nothing
+# on any other, so this file as shipped changes no bump.
+#
+# Examples (uncomment and mark):
+# FOMC,JPY,0.3      the Fed moves USDJPY more than the dollar leg alone
+# US CPI,CAD,0.5    Canada trades on US data
+# BOJ,USD,0.0       (a zero on a releasing currency switches the event off)

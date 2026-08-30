@@ -251,7 +251,11 @@ Two columns.
   `bands.csv`. See below.
 * **Events** — dated volatility bumps. **Auto-load** pulls scheduled economic
   releases for the pair's currencies; edit, add or delete rows, then **Apply**
-  to re-solve the heights.
+  to re-solve the heights. Each row shows the event's weight on **each leg**
+  and the pair's **Adj** on top; the **Bump** beside them is the three added
+  and is what the curve takes. The **When** column is in **Hong Kong time**
+  (UTC+8, no daylight saving); the model works in UTC and converts at the
+  edge, so the day the bump prices into is still the UTC volatility day.
 
 Everything here feeds the pricing tab immediately.
 
@@ -306,11 +310,24 @@ Two things it will refuse to do:
   is an absolute range (7.75–7.85) and the surface works in strike over
   forward, so it needs today's outright to place one. It says so rather than
   guessing.
-* It will not work out the break risk for you from the quotes. A wider band
+* It will not work out the break risk from the at-the-money. A wider band
   body and a bigger break risk both raise the at-the-money by the same amount,
-  so no quote can separate them. You mark it. (`volkit band PAIR
-  --solve-hazard` will invert it from the wings if you want that, and tells you
-  what the answer depended on.)
+  so that one quote cannot separate them. You mark it — but the wings can
+  propose it. **Fit from the wings** on the band card reads the 10 and 25
+  delta risk reversals and flies at every tenor at once, holds what you did
+  not free (the jump sizes, by default: where the peg would go is your view,
+  how likely it is to go is what the market prices), and fills the boxes with
+  what it found. Nothing moves until you press Apply. It tells you the residual
+  of every quote, which parameters the quotes actually informed (a box marked
+  *not informed* is the number you started with in disguise — hold it), and
+  each tenor's own implied hazard beside the shared one: a flat column means
+  the regime is consistent across the curve, a sloping one means the jump
+  sizes or the band are wrong, not the hazard. The `free` box beside the
+  button names what to fit: `hazard,weak_share` by default; any of
+  `weak_jump`, `strong_jump`, `weak_vol`, `strong_vol` may be added.
+  `volkit band PAIR --fit [hazard,weak_share,...]` prints the same proposal.
+  (`--solve-hazard` is the older one-number version: the hazard alone from
+  one delta's strangle, and it still gives the number it always gave.)
 
 A band weight strictly between 0 and 100 averages two implied volatilities.
 That is a marking convenience, not a model, and the screen says so every time.
@@ -891,6 +908,44 @@ nothing is dropped quietly, and nothing ambiguous is guessed:
   says. The default is the **market strangle**, which is what the workbook
   marks. Write `strangle` or `smile fly` to pin it on the line itself.
 
+The reader is forgiving about how a line is put together, and where a line
+says two things it takes the more exact one and tells you:
+
+* **a strike beats a delta.** `6M 25d 1.1200 call` is the 1.12 strike; the
+  delta is dropped and the row says so;
+* **a date beats a tenor.** `1M 30sep26 ATM` is the 30 September expiry.
+  Dates can be written `30sep26`, `30-Sep-2026`, `2026-09-30` or `2026/09/30`;
+* **call or put matters only where it changes the number.** At an absolute
+  strike the volatility is one number either way, so `6M 1.10 call` and `6M
+  1.10 put` are the same quote and the later one wins. With a delta it picks
+  the wing (`25d call`, `25dp`, `-25d`). On a **premium** it is required;
+* **a premium is read as a premium.** Write `prem`, `live`, `pips`, `%` or the
+  currency after the price — `3M 1.0900 call 125/135 pips`, `1.25%/1.35%
+  prem`, `0.0125/0.0135 usd` — and the line is a price on that option, not a
+  volatility. It never takes part in the unit decision. The fit turns it into
+  the volatility two-way it implies against the feed's forward and works with
+  that; without a feed the row stays, with the reason. A premium needs a
+  strike and a side;
+* **another pair's lines are passed over.** `USDJPY 1M ATM 9.0/9.4` in a
+  EURUSD paste, or everything under a heading that is just `GBPUSD`, is
+  listed as passed over with the pair it named. It is not an error, and it
+  does not go into the fit;
+* **structures of more than one leg.** Separate legs with `vs` (or `buy` /
+  `sell`); a leg that leaves out its tenor or instrument takes it from the leg
+  beside it:
+
+  ```
+  1M vs 3M 25d RR 0.10/0.20            the calendar spread of the risk reversal
+  6M 1.10 call vs 1.15 call 0.35/0.55  a call spread, second leg less the first
+  +1M ATM vs -2x 3M ATM vs +6M ATM 0.05/0.15
+  buy 1M ATM sell 3M ATM 0.30/0.55
+  ```
+
+  Two legs with no signs are read as the second less the first and say so.
+  Three or more legs need a sign (`+`/`-`, `buy`/`sell`) and a weight (`2x`)
+  on each, because nothing else says which legs are bought. The structure is
+  valued as the signed sum of its legs and priced as one line.
+
 **Or paste it as columns**, which is how a run out of a chat window or a
 spreadsheet usually arrives — `expiry, strike, bid/offer`, with a timestamp in
 front if you have one:
@@ -986,7 +1041,11 @@ The same words as the market box with the price left off. A number that reads
 as a market is refused with the line rather than taken as a strike — pasting a
 broker run in here would otherwise quote you levels nobody asked about. A risk
 reversal asked for as `JPY call over` is answered in **that** convention, sign
-and sides both, and the row says so.
+and sides both, and the row says so. Structures (`6M 1.10 call vs 1.15 call`)
+are quoted as one line, another pair's lines are passed over, and a request
+asked **live** — `3M 1.0900 put live in pips`, `... prem in %` — is answered as
+a **premium** two-way off the feed's forward, with the volatility two-way it
+came from in small type beneath it.
 
 Press **Quote**, and for every line:
 
@@ -1090,6 +1149,15 @@ To start with a file already on: `volkit.exe --session marks.json`, or an
 The file is plain JSON and readable. Volatility numbers in it are in
 **volatility points**, exactly as the screen shows them.
 
+**Write to workbook copy** goes one step further: it saves the marks and then
+writes them into a *copy* of the workbook beside it (`_marked` added to the
+name) -- curve parameters and events into PARAMS, and the overwrites, wing
+shifts, anchor switch and band treatment into rows and a `BANDS` sheet the tool
+reads back. Open the copy in Excel, check it, and adopt it as the book of
+record when you are happy; the loaded workbook is not touched. From a shell,
+`volkit session marks.json --to-workbook --in-place` writes into the workbook
+itself. The message lists every pair written and anything it could not write.
+
 ---
 
 ## 3. Events
@@ -1098,6 +1166,23 @@ A bump is quoted in **vol points over the 24 hours following the release** —
 what you mean by "FOMC adds two vols". The **Vol day** column shows which
 volatility day the effect mostly lands in; the day rolls at the NY cut, so a
 late release straddles two.
+
+**An event is weighted per currency, and a pair adds its two legs.** FOMC is
+worth so much on the dollar; a desk may also give it something on the yen.
+USDJPY then takes the two added, EURUSD takes only the dollar's, and the
+**Adj** box on the row is the pair's own view on top — a release that is the
+same news to both legs and should not count twice, a pegged pair that takes a
+fraction of everything. The table of weights is
+`volkit/data/event_weights.csv` (`EVENT,CCY,WEIGHT`; a weight of 0 switches an
+event off for that currency); in the workbook, a `PARAMS` column headed by a
+currency does the same job and the pair's cell on the row is its adjustment.
+The row shows the parts and the total; type the parts.
+
+The **Weights** button on the Events card opens the table itself — one row per
+release, one column per currency, **Add column** for a currency it does not
+show yet. **Apply** keeps it for the session (a saved session keeps it too;
+no file is written) and changes what **Auto-load** suggests from then on;
+rows already on a pair's events table are not touched.
 
 Auto-loaded dates come from two places, neither needing a network:
 
@@ -1151,7 +1236,10 @@ ones — a sheet that says something explicitly is not second-guessed by a
 convention.
 
 `PARAMS` holds one column per pair: `initial`, `long term`, `ratevol`,
-`addon`, `MR`, `rate corr`, `short decay`, then one row per event date.
+`addon`, `MR`, `rate corr`, `short decay`, then one row per event date. A
+column headed by a **currency** rather than a pair is that currency's weight on
+each event row, and a pair's cell on the row is then its adjustment on top of
+its two legs; without currency columns the cell is the whole bump, as before.
 One sheet per pair holds `expiry, ST 10D, ST 25D, RR 25D, RR 10D`.
 Everything is in **vol points**. For a **cross**, the `initial` / `long term` /
 `MR` cells mean correlation initial / final / decay — that is what "marked by
@@ -1231,7 +1319,9 @@ volkit tenors USDJPY --cut TK             ATM term structure
 volkit smile  USDJPY 2026-11-23           the smile at one expiry
 volkit vol    USDJPY 2026-11-23 --strike 152 --forward 149.9
 volkit daily  USDJPY --horizon 1 --out USDJPY_daily_vol
-volkit events USDJPY --horizon 1          what auto-load would pull in
+volkit events USDJPY --horizon 1          what auto-load would pull in, leg by leg
+volkit events USDJPY --weights            ... and every event's weight on every currency
+volkit events USDJPY --set FOMC:JPY=0.3   mark a weight for this run (the Weights card)
 volkit validate USDJPY                    hunt for competing smile calibrations
 volkit listed 6J --expiry "2026-09-11 19:00" --forward 0.0068 --file quotes.txt
                                           fit a listed strike/vol table and compare it
@@ -1251,6 +1341,7 @@ volkit mark propose EURUSD --target curve.txt --out p.json
 volkit mark record EURUSD --proposal p.json --verdict edited
                                           tell it what you did to that proposal
 volkit mark learn EURUSD                  what it has worked out about how you mark
+volkit mark rules EURUSD                  your rules of thumb, each against what you did
 volkit mark confer EURUSD --archive mm_archive.jsonl
                                           let the two agents settle on a re-mark
 volkit agent fetch --sdr sdr/ --days 5    download DTCC's public dissemination files
@@ -1403,6 +1494,32 @@ If your desk has no route to the internet, run the fetch on a machine that
 does and drop the files in the folder -- reading them has never needed a
 network. If it goes out through a proxy, `--proxy http://host:port`, or just
 let it read `https_proxy` from your environment.
+
+**"The target machine actively refused it" (WinError 10061).** Something
+answered the connection and said no, which is a different fault from a
+blocked one (that is a timeout, 10060) and has two cures. Whatever carried
+the request is named on the failure, including a proxy set in Windows itself
+that nothing here was told about -- so read the message first:
+
+- *Through a proxy.* That address is named and nothing is listening there.
+  Correct it with `--proxy`, or, if the route out is really direct, get past
+  it with `--no-proxy`, which ignores every proxy including the system one.
+- *Directly.* Egress goes through a proxy this build was not told about. A
+  proxy configured by an **autoconfig (PAC) script** is not read
+  automatically -- your browser follows it and this tool does not -- so open
+  the PAC file, read the real `host:port` out of it, and pass it to
+  `--proxy`.
+
+Neither works? Download the day in a browser, which will follow whatever your
+desk is configured with:
+
+```
+https://pddata.dtcc.com/ppd/api/report/cumulative/cftc/CFTC_CUMULATIVE_FOREX_2026_08_28.zip
+```
+
+Save it into the SDR folder as `CFTC_CUMULATIVE_FOREX_2026_08_28.zip` and
+press **Scan folders**. The folder is the cache, so that name also stops a
+later fetch downloading it again; the archive fills exactly as it would have.
 
 ```
 volkit agent trades EURUSD --invert --history vol_history.xlsx
@@ -1692,6 +1809,51 @@ One thing to expect: once it starts pinning knobs, the fit's RMSE gets
 *worse*. That is not a bug — fewer free parameters cannot fit as tightly. It
 means the fit is now doing what you do rather than what the optimiser likes,
 and the numbers are all there so you can decide whether you agree.
+
+### Rules of thumb: telling it what you believe before it has seen you mark
+
+For the first month the journal is thin and the agent says little. If you
+already know how you mark -- *the back end lags broker moves, I mark it up
+before the fit does* -- write it down in `mm_rules.toml` beside the workbook
+(copy `files/mm_rules_sample.toml` and edit it):
+
+```
+[[nudge_rule]]
+section = "curve"
+knob    = "long_term_vol"
+scope   = { pair = "EURUSD" }
+value   = 0.10          # where you land relative to the fit, in the knob's units
+spread  = 0.06          # how sure you are
+weight  = 4             # worth this many answered proposals; 2 to 5
+why     = "back end lags broker moves"
+```
+
+Three things to know about what it does with that:
+
+- **A rule is worth what its weight says and no more.** It goes into the same
+  pile as your real answers, so a fortnight of you landing somewhere else
+  outvotes it. A weight above five is refused, not trimmed.
+- **A rule can shape a nudge but never start one.** Until at least three of
+  your own answers land on the rule's side of the fit, the rule is printed
+  and nothing is applied. On the card and in the trace it is labelled *rule
+  of thumb* -- neither a rule of the model nor something it learned from you
+  -- and a nudge that has a rule in it says how much was the rule and how
+  much was you: `+0.15 = +0.10 rule of thumb, +0.05 desk (n=7)`.
+- **A rule you keep editing away is flagged, not removed.** `volkit mark
+  rules EURUSD` shows each rule against your real answers and prints
+  **contested** once eight of them have landed on the other side. Nothing
+  changes on its own; you edit the file. And editing is free -- the
+  tendencies are re-derived from the journal every time, so change a number
+  and see what the same journal now says.
+
+`--no-rules` on `mark learn` and `mark propose`, or unticking **rules of
+thumb** on the card, gives the answer from the journal alone. The two side by
+side are how you judge whether the rules are helping or just talking.
+
+A `[[plan_rule]]` with a `free_order` list sets the order the curve's knobs
+are freed in when there are fewer targets than knobs. It cannot free more
+than the targets determine -- that is a rule of the model, and the file
+cannot weaken it.
 
 ### The two agents together
 

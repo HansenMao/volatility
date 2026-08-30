@@ -251,7 +251,8 @@ class Book:
             raise MarketDataError(f"no parameters loaded for {name!r}")
         weighting = TimeWeighting(name, calendars=self.calendars)
         events = EventSchedule()
-        for when, bump in params.events:
+        for entry in params.events:
+            when = entry.when
             if when <= self.clock.now:
                 # A past event cannot be calibrated: its volatility day has
                 # already elapsed, so the inversion would integrate the
@@ -261,7 +262,8 @@ class Book:
                     f"{self.clock.now:%Y-%m-%d %H:%M}Z and was skipped"
                 )
                 continue
-            events.add(when, bump, label=when.strftime("%d%b %H:%M"))
+            events.add(when, entry.bump, label=entry.label or when.strftime("%d%b %H:%M"),
+                       weights=entry.weights, adjust=entry.adjust)
 
         common = dict(
             pair=name, clock=self.clock, weighting=weighting, events=events,
@@ -305,6 +307,16 @@ class Book:
             conv=DeltaConvention(spec.resolved_premium_adjusted()),
         )
         self._attach_band(name, surface)
+        # The marks a session wrote into the workbook (the ``atm 1m`` /
+        # ``shift rho25`` rows and the BANDS sheet) go on through the same
+        # function that puts a session file on, so the two cannot disagree
+        # about what a cell means.  The band is attached first because the
+        # treatment is about it.
+        block = self.data.overlays.get(name)
+        if block:
+            from .session import apply_block
+            self.warnings.extend(f"{name}: workbook session mark: {p}"
+                                 for p in apply_block(surface, block))
         return surface
 
     # -- calibration ------------------------------------------------------

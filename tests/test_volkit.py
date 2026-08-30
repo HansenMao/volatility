@@ -363,6 +363,65 @@ class TestEvents(unittest.TestCase):
         far = datetime(2024, 3, 25, 12, tzinfo=UTC)
         self.assertAlmostEqual(curve.daily_vol(far), base.daily_vol(far), places=12)
 
+    def test_two_legs_weights_add_and_the_adjustment_sits_on_top(self):
+        """An event is weighted per currency; a pair's bump is its two legs
+        superposed plus the pair's own adjustment.  They add: a bump is a
+        variance increment over twice the volatility, so two bumps add to
+        first order, and a root-sum-square would be the rule for two event
+        volatilities, which a bump is not."""
+        from volkit.events import EventEntry, leg_weights, pair_bump, superpose
+        self.assertEqual(superpose(0.015, 0.003), 0.018)
+        self.assertAlmostEqual(pair_bump({"USD": 0.015, "JPY": 0.003}, "USDJPY", 0.002), 0.020)
+        # A leg the table does not name weighs nothing; EURUSD sees only USD.
+        self.assertAlmostEqual(pair_bump({"USD": 0.015, "JPY": 0.003}, "EURUSD"), 0.015)
+        # CNH and CNY are one market for this purpose, unless CNY was named.
+        self.assertEqual(leg_weights({"CNH": 0.02}, "USDCNY"), {"USD": 0.0, "CNY": 0.02})
+        self.assertEqual(leg_weights({"CNH": 0.02, "CNY": 0.01}, "USDCNY"), {"USD": 0.0, "CNY": 0.01})
+        # An entry typed as one number is that number, carried as the
+        # adjustment, so ``bump == legs + adjust`` holds for every event.
+        one = EventEntry(datetime(2026, 9, 1, tzinfo=UTC), 0.02, "x").resolve("EURUSD")
+        self.assertEqual((one.bump, one.adjust, one.weights), (0.02, 0.02, {"EUR": 0.0, "USD": 0.0}))
+        parts = EventEntry(datetime(2026, 9, 1, tzinfo=UTC), None, "x",
+                           {"USD": 0.015}, 0.002).resolve("USDJPY")
+        self.assertAlmostEqual(parts.bump, 0.017)
+        self.assertEqual(parts.weights, {"USD": 0.015, "JPY": 0.0})
+        # A total that disagrees with its parts is refused, not averaged.
+        with self.assertRaises(ValueError):
+            EventEntry(datetime(2026, 9, 1, tzinfo=UTC), 0.05, "x", {"USD": 0.015}, 0.002).resolve("USDJPY")
+
+    def test_weighted_event_calibrates_to_the_superposed_bump(self):
+        from volkit.events import EventEntry
+        curve = AtmCurve("USDJPY", BackboneParams(0.0605, 0.0765, 5.0, 0.007, 50.0), ASOF,
+                         events=EventSchedule())
+        when = datetime(2024, 3, 20, 18, 0, tzinfo=UTC)
+        problems = curve.set_events([EventEntry(when, None, "FOMC", {"USD": 0.015, "JPY": 0.003}, 0.002)])
+        self.assertEqual(problems, [])
+        ev = curve.events.events[0]
+        self.assertAlmostEqual(ev.bump, 0.020)
+        self.assertAlmostEqual(ev.adjust, 0.002)
+        self.assertAlmostEqual(curve.achieved_bump(ev), 0.020, places=9)
+        # The old three-tuple spelling still works and reads as an adjustment.
+        curve.set_events([(when, 0.01, "T")])
+        self.assertEqual(curve.events.events[0].adjust, 0.01)
+
+    def test_event_rows_in_points_are_read_once(self):
+        """The panel and the session file post the parts; a row may carry the
+        total too when it agrees, and a bad row is named rather than fatal."""
+        from volkit.events import event_entries
+        rows = [{"when": "2026-09-16T18:00", "weights": {"USD": 1.5, "JPY": 0.3}, "adjust": 0.2,
+                 "label": "FOMC"},
+                {"when": "2026-09-16T18:00", "weights": {"USD": 1.5}, "adjust": 0.0, "bump": 1.5},
+                {"when": "2026-10-01T12:00", "bump": 0.75},
+                {"when": "2026-10-01T12:00", "weights": {"USD": 1.5}, "adjust": 0.0, "bump": 2.0},
+                {"when": "", "bump": 1.0}]
+        entries, problems = event_entries(rows)
+        self.assertEqual(len(entries), 3)
+        self.assertAlmostEqual(entries[0].resolve("USDJPY").bump, 0.020)
+        self.assertAlmostEqual(entries[2].resolve("USDJPY").adjust, 0.0075)
+        self.assertEqual(len(problems), 2)
+        self.assertTrue(any("not the weights" in p for p in problems), problems)
+        self.assertTrue(any("no date/time" in p for p in problems), problems)
+
     def test_addon_is_vectorised(self):
         sched = EventSchedule()
         ev = sched.add(datetime(2024, 3, 1, 12, tzinfo=UTC), 0.02, "x")
@@ -529,6 +588,44 @@ class TestMarketData(unittest.TestCase):
             params.to_excel(xw, sheet_name="PARAMS")
         return path
 
+    def test_a_currency_column_in_params_weights_every_pair_with_that_leg(self):
+        """A PARAMS column headed USD is the dollar's weight on each event
+        row; a pair's cell on that row is its adjustment on top.  A workbook
+        with no currency column reads exactly as it always did: the cell is
+        the whole bump."""
+        import tempfile
+        d = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d, True)
+        path = d / "book.xlsx"
+        idx = ["initial", "long term", "ratevol", "addon", "MR", "rate corr", "short decay",
+               "2026-09-16 22:00", "2026-10-30 11:00"]
+        params = pd.DataFrame({
+            "USDJPY": [8.0, 9.0, 0, 0, 5.0, 0, 50.0, 0.2, 0.0],
+            "EURUSD": [8.0, 9.0, 0, 0, 5.0, 0, 50.0, 0.0, 0.0],
+            "USD":    [None] * 7 + [1.5, 0.0],
+            "JPY":    [None] * 7 + [0.3, 1.5],
+        }, index=idx)
+        with pd.ExcelWriter(path) as xw:
+            pd.DataFrame({"PAIRS": ["USDJPY", "EURUSD"], "TENORS": ["1m", "3m"]}).to_excel(
+                xw, sheet_name="CONFIG", index=False)
+            params.to_excel(xw, sheet_name="PARAMS")
+        data = ExcelSource(path).load()
+        self.assertEqual(data.problems, [], data.problems)
+        uj = {e.when.strftime("%d%b"): e for e in data.params["USDJPY"].events}
+        self.assertAlmostEqual(uj["16Sep"].bump, 0.020)          # 1.5 + 0.3 + 0.2
+        self.assertEqual(uj["16Sep"].weights, {"USD": 0.015, "JPY": 0.003})
+        self.assertAlmostEqual(uj["16Sep"].adjust, 0.002)
+        self.assertAlmostEqual(uj["30Oct"].bump, 0.015)          # the JPY leg alone
+        eu = {e.when.strftime("%d%b"): e for e in data.params["EURUSD"].events}
+        self.assertAlmostEqual(eu["16Sep"].bump, 0.015)          # no JPY leg, no cell
+        self.assertNotIn("30Oct", eu)                            # nothing on either leg
+        self.assertTrue(any("event weights per currency" in n for n in data.notes), data.notes)
+        # The shipped workbook has no currency columns and its bumps are its cells.
+        real = ExcelSource(WORKBOOK).load()
+        self.assertFalse(any("event weights" in n for n in real.notes))
+        for e in real.params["USDCNH"].events:
+            self.assertEqual(e.adjust, e.bump)
+
     def test_real_workbook_loads_without_problems(self):
         data = ExcelSource(WORKBOOK).load()
         self.assertEqual(data.problems, [], data.problems)
@@ -664,12 +761,15 @@ class TestMarketData(unittest.TestCase):
     def test_a_derivation_reaches_the_page(self):
         """A pair that came out of a convention must not read like one that
         was written down, so the note travels with the state and the page
-        shows it -- muted, beside the workbook's real problems."""
+        shows it -- on the meta line's tooltip, not in the message box, which
+        holds errors and warnings only."""
         from volkit.webapp import BookService
         state = BookService(str(WORKBOOK), ASOF).state()
         self.assertTrue(any("EURGBP = EURUSD x GBPUSD" in n for n in state["notes"]),
                         state["notes"])
-        self.assertIn("STATE.notes", _source("volkit", "web", "index.html"))
+        page = _source("volkit", "web", "index.html")
+        self.assertIn("STATE.notes", page)
+        self.assertNotIn("nts.map(x=>`<li", page)
 
     def test_a_config_with_no_pairs_column_says_what_it_wants(self):
         path = self._workbook({"THINGS": ["EURUSD"], "TENORS": ["1m"]}, ["EURUSD"])
@@ -1010,6 +1110,53 @@ class TestEconCalendar(unittest.TestCase):
         self.assertTrue(all(e.approximate for e in generate_us_cpi(2026)))
         self.assertNotIn("US CPI", self.cal.rules)
 
+    def test_a_weight_on_the_other_currency_reaches_the_pair(self):
+        """FOMC weighted 1.5 on USD and 0.3 on JPY is 1.8 on USDJPY and still
+        1.5 on EURUSD; an ECB weighted on JPY is on the USDJPY schedule the
+        day it is given the weight, and nowhere before."""
+        start = datetime(2026, 8, 23, tzinfo=UTC)
+        end = datetime(2026, 12, 31, tzinfo=UTC)
+        before = {e.name: e.bump for e in self.cal.for_pair("USDJPY", start, end)}
+        self.assertEqual(before["FOMC"], 1.5)
+        self.assertNotIn("ECB", before)
+        self.cal.set_weight("FOMC", "JPY", 0.3)
+        self.cal.set_weight("ECB", "JPY", 0.2)
+        after = {e.name: e for e in self.cal.for_pair("USDJPY", start, end)}
+        self.assertAlmostEqual(after["FOMC"].bump, 1.8)
+        self.assertEqual(after["FOMC"].weights, {"USD": 1.5, "JPY": 0.3})
+        self.assertAlmostEqual(after["ECB"].bump, 0.2)
+        self.assertEqual(after["ECB"].weights, {"USD": 0.0, "JPY": 0.2})
+        eur = {e.name: e.bump for e in self.cal.for_pair("EURUSD", start, end)}
+        self.assertEqual(eur["FOMC"], 1.5)
+        # A rule-generated event reads the same table as a dated one.
+        self.cal.set_weight("NFP", "JPY", 0.5)
+        nfp = [e for e in self.cal.for_pair("USDJPY", start, end) if e.name == "NFP"]
+        self.assertTrue(nfp and all(e.bump == 2.0 for e in nfp))
+        with self.assertRaises(ValueError):
+            self.cal.set_weight("NOTATHING", "USD", 1.0)
+
+    def test_weights_file_overrides_and_zero_removes(self):
+        import tempfile
+        from volkit.econ import load_weights
+        d = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d, True)
+        good = d / "event_weights.csv"
+        good.write_text("# c\nFOMC,JPY,0.3\nBOJ,JPY,0\nfomc,usd,2\n", encoding="utf-8")
+        table = load_weights(good)
+        self.assertEqual(table["FOMC"], {"USD": 2.0, "JPY": 0.3})
+        self.assertEqual(table["BOJ"], {"JPY": 0.0})
+        cal = EconCalendar.load(weights=good)
+        start, end = datetime(2026, 8, 23, tzinfo=UTC), datetime(2026, 12, 31, tzinfo=UTC)
+        names = {e.name for e in cal.for_pair("USDJPY", start, end)}
+        self.assertNotIn("BOJ", names)          # weight zero: switched off
+        self.assertEqual(cal.weights_source, str(good))
+        for bad in ("NOTATHING,USD,1\n", "FOMC,USDX,1\n", "FOMC,USD,much\n", "FOMC,USD\n"):
+            (d / "bad.csv").write_text(bad, encoding="utf-8")
+            with self.assertRaises(ValueError, msg=bad):
+                load_weights(d / "bad.csv")
+        # The shipped file changes nothing: it is examples, all commented out.
+        self.assertEqual(EconCalendar.load().weights, load_weights(d / "nothing.csv"))
+
     def test_unknown_event_name_in_csv_raises(self):
         import tempfile
         with tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False) as fh:
@@ -1042,6 +1189,64 @@ class TestCurveMarking(unittest.TestCase):
         self.assertEqual(atm.set_correlation(0.1, 0.1, 1.0), [])
         self.assertNotAlmostEqual(atm.term_vol(1.0), before, places=6)
         self.assertTrue(atm.set_correlation(1.5, 0.1, 1.0))
+
+    def test_the_events_route_takes_parts_and_returns_the_total(self):
+        """The panel posts each leg's weight and the adjustment; the rows
+        that come back carry both and their total, and the suggestions carry
+        the legs' weights so the boxes can be filled rather than a total
+        typed over."""
+        from volkit.webapp import BookService
+        service = BookService(str(WORKBOOK), ASOF)
+        when = (ASOF.now + timedelta(days=30)).replace(hour=16, minute=0, second=0, microsecond=0)
+        r = service.set_events({"pair": "USDJPY", "events": [
+            {"when": when.strftime("%Y-%m-%dT%H:%M"), "weights": {"USD": 1.5, "JPY": 0.3},
+             "adjust": 0.2, "label": "FOMC"}]})
+        self.assertEqual(r["problems"], [])
+        row = r["events"][0]
+        self.assertAlmostEqual(row["bump"], 2.0)
+        self.assertEqual(set(row["weights"]), {"USD", "JPY"})
+        self.assertAlmostEqual(row["weights"]["JPY"], 0.3)
+        self.assertAlmostEqual(row["adjust"], 0.2)
+        self.assertEqual(service.curve({"pair": "USDJPY"})["legs_ccy"], ["USD", "JPY"])
+        with self.assertRaises(ValueError):
+            service.set_events({"pair": "USDJPY", "events": [
+                {"when": when.strftime("%Y-%m-%dT%H:%M"), "weights": {"USD": 1.5}, "adjust": 0,
+                 "bump": 3.0}]})
+        # The valuation date is 2024, before the shipped calendar's dated
+        # rows; the NFP rule generates for any year.
+        sug = service.suggest_events({"pair": "USDJPY", "horizon": 0.5})
+        self.assertEqual(sug["legs_ccy"], ["USD", "JPY"])
+        nfp = next(e for e in sug["events"] if e["name"] == "NFP")
+        self.assertEqual(nfp["weights"], {"USD": 1.5, "JPY": 0.0})
+        self.assertEqual(nfp["adjust"], 0.0)
+
+    def test_the_weights_card_is_a_whole_table_and_touches_no_existing_event(self):
+        """The optional card posts the table whole; applying it changes what
+        Auto-load suggests and nothing already on a pair.  A bad cell leaves
+        the whole table untouched."""
+        from volkit.webapp import BookService
+        service = BookService(str(WORKBOOK), ASOF)
+        when = (ASOF.now + timedelta(days=30)).replace(hour=16, minute=0, second=0, microsecond=0)
+        service.set_events({"pair": "USDJPY", "events": [
+            {"when": when.strftime("%Y-%m-%dT%H:%M"), "weights": {"USD": 1.5}, "adjust": 0, "label": "X"}]})
+        table = service.event_weights()
+        self.assertIn("USD", table["currencies"])
+        fomc = next(e for e in table["events"] if e["name"] == "FOMC")
+        self.assertEqual((fomc["currency"], fomc["weights"]), ("USD", {"USD": 1.5}))
+        weights = {e["name"]: dict(e["weights"]) for e in table["events"]}
+        weights["NFP"]["JPY"] = 0.5
+        r = service.set_event_weights({"weights": weights})
+        self.assertIn("JPY", r["currencies"])
+        nfp = next(e for e in service.suggest_events({"pair": "USDJPY", "horizon": 0.5})["events"]
+                   if e["name"] == "NFP")
+        self.assertEqual(nfp["weights"], {"USD": 1.5, "JPY": 0.5})
+        self.assertAlmostEqual(nfp["bump"], 2.0)
+        # The event already on the pair kept its parts.
+        self.assertEqual(service.curve({"pair": "USDJPY"})["events"][0]["weights"], {"USD": 1.5, "JPY": 0.0})
+        weights["NFP"]["JPY"] = "much"
+        with self.assertRaises(ValueError):
+            service.set_event_weights({"weights": weights})
+        self.assertEqual(service.book.econ.weights["NFP"], {"USD": 1.5, "JPY": 0.5})
 
     def test_events_can_be_set_and_reprice_their_bump(self):
         atm = self.book["USDJPY"].atm
@@ -1434,6 +1639,215 @@ class TestBandedSmile(unittest.TestCase):
         bands = load_bands(Path(__file__).resolve().parents[1] / "files" / "bands.csv")
         self.assertIn("USDHKD", bands)
         self.assertEqual(bands["USDHKD"].lower, 7.75)
+
+
+class TestBreakRegimeFit(unittest.TestCase):
+    """Stage B of the band calibration: the break regime from the wings.
+
+    The body is exact from the ATM and the forward, as it always was; what is
+    new is that the hazard and the share of breaks (and any other break
+    parameter somebody frees) come out of both wings at both deltas by least
+    squares, per tenor or across the whole curve, with the residual of every
+    quote reported and the identifiability *measured* at the answer.
+    """
+
+    BAND = Band("USDHKD", 7.75, 7.85)
+    F = 7.8020
+    TRUTH = JumpSpec(hazard=0.03, weak_share=0.7)
+    START = JumpSpec(hazard=0.01, weak_share=0.85)
+
+    def quotes(self, t, atm, deltas=(0.25, 0.10), truth=None):
+        """Wings a surface under ``truth`` would quote: the model's own implied
+        volatility at the model's own delta strikes, iterated to a fixed point."""
+        from volkit.banded import WingQuote
+        conv = DeltaConvention(True)
+        sm, _ = calibrate_band_smile(self.BAND, self.F, t, atm, jump=truth or self.TRUTH, conv=conv)
+        out = []
+        for d in deltas:
+            vc = vp = atm
+            for _ in range(40):
+                kc = black.strike_from_delta(d, self.F, vc, t, True, conv)
+                kp = black.strike_from_delta(-d, self.F, vp, t, False, conv)
+                vc, vp = sm.implied_vol(kc), sm.implied_vol(kp)
+            out.append(WingQuote(d, vc - vp, 0.5 * (vc + vp) - atm))
+        return tuple(out)
+
+    def test_solve_hazard_is_the_one_parameter_one_instrument_case(self):
+        """The wrapper: hazard alone against the strangle premium, bracketed,
+        and the number it gives is the number it gave before the refit."""
+        _, rep = calibrate_band_smile(self.BAND, self.F, 0.25, 0.004424, risk_reversal=0.0022,
+                                      strangle=0.0014, solve_hazard=True,
+                                      conv=DeltaConvention(True))
+        # The number the pre-refit solver gave for this case, to the last digit.
+        self.assertAlmostEqual(rep["hazard"], 0.05006201744360903, places=12)
+        self.assertEqual(rep["fit"]["method"], "bracketed solve")
+        self.assertEqual(rep["fit"]["free"], ["hazard"])
+        self.assertTrue(rep["fit"]["converged"])
+        self.assertEqual(len(rep["fit"]["residuals"]), 1)
+        self.assertLess(abs(rep["fit"]["residuals"][0]["residual"]), 1e-10)
+
+    def test_a_planted_regime_is_recovered_from_one_tenors_wings(self):
+        from volkit.banded import calibrate_band_wings
+        t, atm = 0.25, 0.0044
+        _, rep = calibrate_band_wings(self.BAND, self.F, t, atm, self.quotes(t, atm),
+                                      conv=DeltaConvention(True), jump=self.START)
+        fit = rep["fit"]
+        self.assertAlmostEqual(fit["fitted"]["hazard"], 0.03, places=6)
+        self.assertAlmostEqual(fit["fitted"]["weak_share"], 0.7, places=5)
+        self.assertLess(fit["rmse"], 1e-7)
+        self.assertTrue(fit["converged"], fit["notes"])
+        self.assertEqual(fit["n_quotes"], 4)
+        self.assertEqual(fit["held"]["weak_jump"], self.START.weak_jump)
+        # Every quote reports its own residual, and the strikes their placement.
+        self.assertEqual({r["instrument"] for r in fit["residuals"]}, {"rr", "fly"})
+        self.assertEqual({w["delta"] for w in rep["wings"]}, {0.25, 0.10})
+        self.assertIn("call_in_band", rep["wings"][0])
+        # The ATM and the forward are still exact: the body was profiled out.
+        self.assertTrue(rep["converged"])
+
+    def test_the_term_structure_shares_one_regime_and_reports_each_tenors_own(self):
+        from volkit.banded import TenorQuotes, calibrate_band_term_structure
+        curve = (("1M", 1 / 12, 0.0035), ("3M", 0.25, 0.0044), ("6M", 0.5, 0.0055),
+                 ("1Y", 1.0, 0.0075))
+        tenors = [TenorQuotes(t, self.F, atm, self.quotes(t, atm), name) for name, t, atm in curve]
+        out = calibrate_band_term_structure(self.BAND, tenors, conv=DeltaConvention(True),
+                                            jump=self.START)
+        self.assertAlmostEqual(out["jump"].hazard, 0.03, places=6)
+        self.assertAlmostEqual(out["jump"].weak_share, 0.7, places=5)
+        self.assertEqual(out["fit"]["n_quotes"], 16)
+        self.assertEqual(out["n_tenors"], 4)
+        own = [h["hazard"] for h in out["hazard_by_tenor"]]
+        self.assertEqual(len(own), 4)
+        for h in own:
+            self.assertAlmostEqual(h, 0.03, places=5)
+        self.assertEqual(out["hazard_slope_note"], "")
+        for row in out["rows"]:
+            self.assertTrue(row["used"], row)
+            self.assertTrue(row["converged"])
+
+    def test_a_tenor_no_hazard_can_fit_sits_out_with_its_reason(self):
+        """A band too narrow for a long tenor's ATM would have made the
+        shared hazard ceiling zero and taken every other tenor down with it."""
+        from volkit.banded import TenorQuotes, calibrate_band_term_structure
+        band = Band("X", 0.97, 1.03)
+        conv = DeltaConvention(True)
+        good = TenorQuotes(0.25, 1.0, 0.03, self.quotes_for(band, 1.0, 0.25, 0.03, conv), "3M")
+        bad = TenorQuotes(2.0, 1.0, 0.20, self.quotes_for(band, 1.0, 0.25, 0.03, conv), "2Y")
+        out = calibrate_band_term_structure(band, [good, bad], conv=conv, jump=self.START)
+        self.assertEqual(out["n_tenors"], 1)
+        self.assertTrue(out["rows"][0]["used"])
+        self.assertFalse(out["rows"][1]["used"])
+        self.assertIn("band", out["rows"][1]["message"])
+
+    def quotes_for(self, band, F, t, atm, conv):
+        from volkit.banded import WingQuote
+        sm, _ = calibrate_band_smile(band, F, t, atm, jump=self.TRUTH, conv=conv)
+        out = []
+        for d in (0.25, 0.10):
+            vc = vp = atm
+            for _ in range(40):
+                kc = black.strike_from_delta(d, F, vc, t, True, conv)
+                kp = black.strike_from_delta(-d, F, vp, t, False, conv)
+                vc, vp = sm.implied_vol(kc), sm.implied_vol(kp)
+            out.append(WingQuote(d, vc - vp, 0.5 * (vc + vp) - atm))
+        return tuple(out)
+
+    def test_identifiability_is_measured_not_assumed(self):
+        """Free more than the wings can see and the Jacobian says so: the
+        condition number blows up, the near-degenerate pair is named, and a
+        parameter the quotes do not move is marked as not informed."""
+        from volkit.banded import DEGENERATE_CONDITION, calibrate_band_wings
+        t, atm = 0.25, 0.003
+        quotes = self.quotes(t, atm, truth=JumpSpec(hazard=0.02, weak_share=0.7))
+        _, rep = calibrate_band_wings(self.BAND, self.F, t, atm, quotes,
+                                      conv=DeltaConvention(True),
+                                      jump=JumpSpec(hazard=0.01, weak_share=0.7),
+                                      free=("hazard", "weak_share", "weak_vol", "strong_vol"))
+        fit = rep["fit"]
+        cond = fit["condition"]
+        self.assertTrue(cond != cond or cond > DEGENERATE_CONDITION, cond)
+        self.assertIsNotNone(fit["degenerate"])
+        self.assertTrue(any("degenerate" in n for n in fit["notes"]))
+        self.assertFalse(all(v["informed"] for v in fit["sensitivity"].values()))
+        # And the hazard against the jump size, from strikes inside the band,
+        # is *not* degenerate -- the forward constraint moves the body with
+        # the jump, and that is visible from inside.  Measured, not argued.
+        _, rep = calibrate_band_wings(self.BAND, self.F, t, atm, quotes,
+                                      conv=DeltaConvention(True),
+                                      jump=JumpSpec(hazard=0.01, weak_share=0.7),
+                                      free=("hazard", "weak_jump"))
+        self.assertLess(rep["fit"]["condition"], DEGENERATE_CONDITION)
+        self.assertIsNone(rep["fit"]["degenerate"])
+
+    def test_more_parameters_than_quotes_is_said(self):
+        from volkit.banded import calibrate_band_wings
+        t, atm = 0.25, 0.0044
+        _, rep = calibrate_band_wings(self.BAND, self.F, t, atm, self.quotes(t, atm, (0.25,)),
+                                      conv=DeltaConvention(True), jump=self.START,
+                                      free=("hazard", "weak_share", "weak_jump"))
+        self.assertTrue(any("underdetermined" in n for n in rep["fit"]["notes"]))
+
+    def test_a_free_name_that_is_not_a_break_parameter_is_refused(self):
+        from volkit.banded import WingQuote, calibrate_band_wings
+        t, atm = 0.25, 0.0044
+        for free in (("hazard", "beta"), (), ("hazard", "hazard")):
+            with self.assertRaises(ValueError):
+                calibrate_band_wings(self.BAND, self.F, t, atm, self.quotes(t, atm),
+                                     conv=DeltaConvention(True), free=free)
+        with self.assertRaises(ValueError):
+            WingQuote(0.25, 0.001, 0.001, fit=("strangle",))
+
+    def test_the_surface_level_fit_proposes_and_marks_nothing(self):
+        """The card's *Fit from the wings*: the proposal is in the card's own
+        units, the surface's treatment is untouched, and a tenor the band
+        cannot hold keeps its row and its reason."""
+        from volkit.banded import BandTreatment, fit_band_treatment
+        from volkit.feed import MarketFeed
+        book = Book.from_excel(WORKBOOK, ASOF).load_all(["EURUSD"])
+        book.feed = MarketFeed.load(FEED)
+        surface = book["EURUSD"]
+        surface.band = Band("EURUSD", 1.05, 1.12, "synthetic, for the test only")
+        surface.forward_lookup = lambda t: book.forward_at("EURUSD", t)
+        before = surface.band_treatment
+        out = fit_band_treatment(surface, ["1M", "3M", "1Y"], cut="NY",
+                                 treatment=BandTreatment(mode="mixture", jump=JumpSpec(weak_jump=0.05)))
+        self.assertIs(surface.band_treatment, before)
+        self.assertEqual(out["free"], ["hazard", "weak_share"])
+        prop = out["proposal"]
+        self.assertEqual(prop["weak_jump"], 5.0)              # held, in percent
+        self.assertEqual(prop["mode"], "mixture")
+        self.assertFalse(prop["solve_hazard"])
+        self.assertGreater(prop["hazard"], 0.0)
+        self.assertEqual([r["tenor"] for r in out["rows"]], ["1M", "3M", "1Y"])
+        self.assertFalse(out["rows"][2]["used"])
+        self.assertIn("band", out["rows"][2]["message"])
+        self.assertEqual(len(out["hazard_by_tenor"]), 2)
+        # The proposal round-trips through the same reader Apply uses.
+        again = BandTreatment.from_request(prop)
+        self.assertAlmostEqual(again.jump.hazard, out["jump"].hazard if "jump" in out
+                               else prop["hazard"] / 100.0)
+
+    def test_the_cli_prints_the_same_proposal(self):
+        import argparse
+        import io
+        from contextlib import redirect_stdout
+        from volkit.cli import _print_band_fit
+        from volkit.feed import MarketFeed
+        book = Book.from_excel(WORKBOOK, ASOF).load_all(["EURUSD"])
+        book.feed = MarketFeed.load(FEED)
+        surface = book["EURUSD"]
+        surface.band = Band("EURUSD", 1.05, 1.12, "synthetic, for the test only")
+        surface.forward_lookup = lambda t: book.forward_at("EURUSD", t)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = _print_band_fit(argparse.Namespace(fit="hazard,weak_share", cut="NY"),
+                                 surface, ["1M", "3M", "1Y"])
+        text = buf.getvalue()
+        self.assertEqual(rc, 1)                                # the 1Y row failed, in place
+        self.assertIn("free: hazard, weak_share", text)
+        self.assertIn("own hazard", text)
+        self.assertIn("nothing was marked", text)
+        self.assertIn("1Y", text)
 
 
 class TestBandGuard(unittest.TestCase):
@@ -4542,6 +4956,14 @@ class TestWebAssets(unittest.TestCase):
         handler = src.split("def from_request")[1]
         for f in fields | {"mode", "solve_hazard"}:
             self.assertIn(f'"{f}"', handler, f"the server never reads {f!r}")
+        # The card's *Fit from the wings* posts the same fields plus `free`,
+        # and the fit route reads that one itself.
+        self.assertIn("body.free=", js)
+        fit = _source("volkit", "webapp.py").split("def fit_band")[1].split("def set_band")[0]
+        self.assertIn('"free"', fit)
+        from volkit import screens
+        owner = {r: s.name for s in screens.SCREENS for r in s.routes}
+        self.assertEqual(owner["/api/band/fit"], "marking")
 
     def test_every_element_id_referenced_by_the_script_exists(self):
         import re as _re
@@ -4623,6 +5045,49 @@ class TestSessionFile(unittest.TestCase):
         # The rest of USDJPY still went on.
         self.assertEqual(book["USDJPY"].param_shifts, {"rho25": 0.05})
 
+    def test_event_weights_and_adjustment_survive_the_round_trip(self):
+        """The file holds the parts and the total in points, so a file
+        written before events had parts -- a bump alone -- still loads, as an
+        adjustment."""
+        from volkit import session
+        from volkit.events import EventEntry
+        book = Book.from_excel(WORKBOOK, ASOF).load_all(["USDJPY"])
+        when = (ASOF.now + timedelta(days=13)).replace(hour=16, minute=0, second=0, microsecond=0)
+        book["USDJPY"].atm.set_events([EventEntry(when, None, "FOMC", {"USD": 0.015, "JPY": 0.003}, 0.002)])
+        doc = session.capture(book, ["USDJPY"])
+        row = doc["pairs"]["USDJPY"]["events"][0]
+        self.assertAlmostEqual(row["bump"], 2.0)
+        self.assertAlmostEqual(row["weights"]["JPY"], 0.3)
+        self.assertAlmostEqual(row["adjust"], 0.2)
+        fresh = Book.from_excel(WORKBOOK, ASOF).load_all(["USDJPY"])
+        out = session.apply_document(fresh, doc)
+        self.assertEqual(out["problems"], [])
+        ev = fresh["USDJPY"].atm.events.events[0]
+        self.assertAlmostEqual(ev.bump, 0.020)
+        self.assertAlmostEqual(ev.weights["JPY"], 0.003)
+        self.assertAlmostEqual(ev.adjust, 0.002)
+        old = {"pairs": {"USDJPY": {"events": [{"when": when.strftime("%Y-%m-%dT%H:%M"),
+                                                "bump": 1.25, "label": "OLD"}]}}}
+        session.apply_document(fresh, old)
+        ev = fresh["USDJPY"].atm.events.events[0]
+        self.assertAlmostEqual(ev.bump, 0.0125)
+        self.assertAlmostEqual(ev.adjust, 0.0125)
+
+    def test_the_weight_table_is_saved_with_the_session(self):
+        from volkit import session
+        book = Book.from_excel(WORKBOOK, ASOF).load_all(["USDJPY"])
+        book.econ.set_weight("FOMC", "JPY", 0.3)
+        doc = session.capture(book, ["USDJPY"])
+        self.assertEqual(doc["event_weights"]["FOMC"], {"USD": 1.5, "JPY": 0.3})
+        fresh = Book.from_excel(WORKBOOK, ASOF).load_all(["USDJPY"])
+        out = session.apply_document(fresh, doc)
+        self.assertEqual(out["problems"], [])
+        self.assertEqual(fresh.econ.weights["FOMC"], {"USD": 1.5, "JPY": 0.3})
+        # A file from before the table existed leaves the defaults alone.
+        older = Book.from_excel(WORKBOOK, ASOF).load_all(["USDJPY"])
+        session.apply_document(older, {"pairs": {}})
+        self.assertEqual(older.econ.weights["FOMC"], {"USD": 1.5})
+
     def test_events_are_replaced_and_not_merged(self):
         """A saved schedule is the whole schedule.
 
@@ -4677,6 +5142,198 @@ class TestSessionFile(unittest.TestCase):
             out = service.session_load({"path": path})
             self.assertTrue(out["ok"], out["problems"])
             self.assertAlmostEqual(service.book["USDJPY"].atm.tenor_overwrites["1m"], 0.0925)
+
+
+class TestSessionIntoWorkbook(unittest.TestCase):
+    """A session file written into a workbook's own cells.
+
+    The one deliberate exception to "nothing writes to the workbook", so
+    what is pinned is what makes it safe: it writes a copy unless told
+    otherwise, the original's bytes do not move, and the copy loads as the
+    session it came from -- every kind of mark, to the last digit, through
+    the ordinary reader.  Cells the tool would not read back would be the
+    silent zero this project exists to remove.
+    """
+
+    PAIRS = ["USDJPY", "EURUSD", "EURJPY"]
+
+    def marked_session(self, tmp: Path):
+        from volkit import session
+        from volkit.banded import BandTreatment
+        from volkit.events import EventEntry
+        book = Book.from_excel(WORKBOOK, ASOF).load_all(self.PAIRS)
+        s = book["USDJPY"]
+        s.atm.overwrite_tenor("1m", 0.0925)
+        s.overwrite_param("slog25", "3M", 0.61)
+        s.set_param_shifts({"rho25": 0.05})
+        s.anchor_tenors = True
+        s.atm.set_params(long_term_vol=0.081)
+        # A Tuesday release, with weights on both legs and an adjustment.
+        when = (ASOF.now + timedelta(days=13)).replace(hour=13, minute=30)
+        s.atm.set_events([EventEntry(when, None, "NFP", {"USD": 0.004, "JPY": 0.001},
+                                     0.002).resolve("USDJPY")])
+        s.set_band_treatment(BandTreatment.from_request({"mode": "warn", "hazard": 3}))
+        book["EURJPY"].atm.correlation  # a cross: its curve is a correlation
+        path = tmp / "marks.json"
+        session.save(book, path)
+        return book, session.load(path)
+
+    def test_the_copy_loads_as_the_session_and_the_original_does_not_move(self):
+        import hashlib
+        import shutil
+        import tempfile
+        from volkit import session
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            wb = tmp / "vol_marks.xlsx"
+            shutil.copy(WORKBOOK, wb)
+            before = hashlib.md5(wb.read_bytes()).hexdigest()
+            book, doc = self.marked_session(tmp)
+            out = session.export_workbook(doc, wb)
+            self.assertEqual(out["problems"], [])
+            self.assertEqual(Path(out["written"]), tmp / "vol_marks_marked.xlsx")
+            self.assertEqual(hashlib.md5(wb.read_bytes()).hexdigest(), before)
+
+            # The reference is the session put on a fresh book *and the smiles
+            # recalibrated against it*, which is what a workbook load does.
+            ref = Book.from_excel(WORKBOOK, ASOF).load_all(self.PAIRS)
+            session.apply_document(ref, doc)
+            ref.calibrate_smiles()
+            copy = Book.from_excel(out["written"], ASOF).load_all(self.PAIRS)
+            self.assertEqual(copy.data.problems, [])
+            self.assertFalse([w for w in copy.warnings if "session mark" in w], copy.warnings)
+            for pair in self.PAIRS:
+                for t in (0.02, 0.08, 0.25, 1.0):
+                    expiry = ASOF.datetime_from_years(t)
+                    for k in (0.97, 1.0, 1.03):
+                        self.assertAlmostEqual(float(ref[pair].vol(k, expiry)),
+                                               float(copy[pair].vol(k, expiry)), places=9,
+                                               msg=(pair, t, k))
+            # Every kind of mark came back through the reader, not just the vols.
+            s = copy["USDJPY"]
+            self.assertAlmostEqual(s.atm.tenor_overwrites["1m"], 0.0925)
+            self.assertEqual(s.param_overwrites, {"slog25": {"3M": 0.61}})
+            self.assertEqual(s.param_shifts, {"rho25": 0.05})
+            self.assertTrue(s.anchor_tenors)
+            self.assertAlmostEqual(s.band_treatment.jump.hazard, 0.03)
+            ev = s.atm.events.events[-1]
+            self.assertAlmostEqual(ev.bump, 0.007)
+            self.assertEqual(ev.weights, {"USD": 0.004, "JPY": 0.001})
+            self.assertAlmostEqual(ev.adjust, 0.002)
+            # ...and the sheet's formulas are still formulas, with their values.
+            import openpyxl
+            ws = openpyxl.load_workbook(out["written"])["USDJPY"]
+            self.assertTrue(str(ws["B2"].value).startswith("="))
+            self.assertIsNotNone(openpyxl.load_workbook(out["written"], data_only=True)
+                                 ["USDJPY"]["B2"].value)
+
+    def test_a_shared_weight_does_not_reach_a_pair_whose_file_has_no_event(self):
+        """USD 0.4 on the NFP row belongs to every pair with a dollar in it.
+        EURUSD's saved schedule is empty, so its own cell cancels the legs --
+        the weight itself is not zeroed, because it is USDJPY's too."""
+        import shutil
+        import tempfile
+        from volkit import session
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            wb = tmp / "vol_marks.xlsx"
+            shutil.copy(WORKBOOK, wb)
+            _, doc = self.marked_session(tmp)
+            out = session.export_workbook(doc, wb)
+            self.assertTrue(any("EURUSD: the file has no event" in n for n in out["notes"]))
+            copy = Book.from_excel(out["written"], ASOF).load_all(["EURUSD", "USDJPY"])
+            live = [e for e in copy["EURUSD"].atm.events.events if e.when > ASOF.now]
+            self.assertEqual([e.bump for e in live], [0.0])
+            self.assertAlmostEqual(live[0].adjust, -0.004)
+            self.assertEqual(copy["USDJPY"].atm.events.events[-1].weights,
+                             {"USD": 0.004, "JPY": 0.001})
+
+    def test_writing_over_the_workbook_itself_needs_in_place(self):
+        import shutil
+        import tempfile
+        from volkit import session
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            wb = tmp / "vol_marks.xlsx"
+            shutil.copy(WORKBOOK, wb)
+            _, doc = self.marked_session(tmp)
+            with self.assertRaises(session.SessionError):
+                session.export_workbook(doc, wb, wb)
+            out = session.export_workbook(doc, wb, wb, in_place=True)
+            self.assertEqual(Path(out["written"]), wb)
+            copy = Book.from_excel(wb, ASOF).load_all(["USDJPY"])
+            self.assertAlmostEqual(copy["USDJPY"].atm.tenor_overwrites["1m"], 0.0925)
+            # A second export onto the same file reuses its rows rather than
+            # adding another 'atm 1m' under the first.
+            session.export_workbook(doc, wb, wb, in_place=True)
+            import openpyxl
+            labels = [r[0] for r in openpyxl.load_workbook(wb)["PARAMS"]
+                      .iter_rows(min_row=2, values_only=True) if r[0] is not None]
+            self.assertEqual(labels.count("atm 1m"), 1)
+            self.assertEqual(labels.count("slog25 3m"), 1)
+            self.assertEqual(labels.count("shift rho25"), 1)
+            self.assertEqual(labels.count("anchor"), 1)
+
+    def test_a_pair_the_workbook_has_no_column_for_is_reported_not_added(self):
+        import shutil
+        import tempfile
+        from volkit import session
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            wb = tmp / "vol_marks.xlsx"
+            shutil.copy(WORKBOOK, wb)
+            doc = {"pairs": {"USDTRY": {"curve": {"initial_vol": 20.0}}}, "version": 1}
+            out = session.export_workbook(doc, wb)
+            self.assertEqual(out["written"], "")
+            self.assertTrue(any("USDTRY" in p and "no PARAMS column" in p
+                                for p in out["problems"]), out["problems"])
+            self.assertFalse((tmp / "vol_marks_marked.xlsx").exists())
+
+    def test_the_reader_reads_the_rows_the_export_writes(self):
+        """The vocabulary, pinned on its own: a label the reader does not
+        know is still reported, and a blank row is not a label."""
+        from volkit.marketdata import overlay_label
+        self.assertEqual(overlay_label("atm 1m"), ("atm", "1m"))
+        self.assertEqual(overlay_label("ATM 1M"), ("atm", "1m"))
+        self.assertEqual(overlay_label("slog25 3m"), ("smile", "slog25", "3m"))
+        self.assertEqual(overlay_label("shift rho25"), ("shift", "rho25"))
+        self.assertEqual(overlay_label("Anchor"), ("anchor",))
+        self.assertIsNone(overlay_label("shift nothing"))
+        self.assertIsNone(overlay_label("atm soon"))
+        self.assertIsNone(overlay_label("initial"))
+
+    def test_the_cli_and_the_route_write_a_copy_and_never_the_workbook(self):
+        import hashlib
+        import io
+        import shutil
+        import tempfile
+        from contextlib import redirect_stdout
+        from volkit import cli
+        from volkit.webapp import BookService
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            wb = tmp / "vol_marks.xlsx"
+            shutil.copy(WORKBOOK, wb)
+            before = hashlib.md5(wb.read_bytes()).hexdigest()
+            _, doc = self.marked_session(tmp)
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = cli.main(["-w", str(wb), "session", str(tmp / "marks.json"),
+                               "--to-workbook", "--pair", "USDJPY"])
+            self.assertEqual(rc, 0, buf.getvalue())
+            self.assertIn("vol_marks_marked.xlsx", buf.getvalue())
+            self.assertIn("is unchanged", buf.getvalue())
+            self.assertEqual(hashlib.md5(wb.read_bytes()).hexdigest(), before)
+
+            service = BookService(str(wb), ASOF)
+            out = service.session_export({"path": str(tmp / "marks.json"),
+                                          "out": str(tmp / "via_route.xlsx")})
+            self.assertTrue(out["ok"], out["problems"])
+            self.assertEqual(Path(out["written"]), tmp / "via_route.xlsx")
+            self.assertEqual(hashlib.md5(wb.read_bytes()).hexdigest(), before)
+            # The route has no in-place spelling at all.
+            with self.assertRaises(Exception):
+                service.session_export({"path": str(tmp / "marks.json"), "out": str(wb)})
 
 
 class TestMonitorScreen(unittest.TestCase):
@@ -6283,7 +6940,9 @@ class TestQuoteParsing(unittest.TestCase):
         self.assertEqual(atm.size_basis, "vega")
         self.assertAlmostEqual(run.quotes[1].delta, 0.25)
         self.assertAlmostEqual(run.quotes[3].strike, 1.10)
-        self.assertTrue(run.quotes[3].is_call)
+        # A volatility at an absolute strike is one number whichever side it
+        # is quoted from, so the side is dropped and the two lines are one quote.
+        self.assertIsNone(run.quotes[3].is_call)
 
     def test_the_unit_is_decided_once_from_the_level_quotes(self):
         """Per-line sniffing reads a small risk reversal as a decimal.
@@ -6404,7 +7063,7 @@ class TestRequestParsing(unittest.TestCase):
         self.assertEqual(asked.requests[0].size_basis, "vega")
         self.assertAlmostEqual(asked.requests[1].delta, 0.25)
         self.assertAlmostEqual(asked.requests[3].strike, 1.10)
-        self.assertTrue(asked.requests[3].is_call)
+        self.assertIsNone(asked.requests[3].is_call)   # a strike quote carries no side
 
     def test_a_price_in_the_request_box_is_refused_not_read_as_a_strike(self):
         """A broker run pasted into the wrong box would otherwise be quoted at
@@ -6554,7 +7213,9 @@ class TestColumnQuotes(unittest.TestCase):
         self.assertEqual([q.instrument for q in run.quotes],
                          ["atm", "rr", "fly", "outright", "spread"])
         self.assertAlmostEqual(run.quotes[3].strike, 1.1000)
-        self.assertTrue(run.quotes[3].is_call)
+        # A volatility at an absolute strike is one number whichever side it
+        # is quoted from, so the side is dropped and the two lines are one quote.
+        self.assertIsNone(run.quotes[3].is_call)
 
 
 class TestQuoteTimestamps(unittest.TestCase):
@@ -6665,6 +7326,189 @@ class TestQuoteTimestamps(unittest.TestCase):
         self.assertEqual(len(sheet["superseded"]), 1)
         self.assertEqual(sheet["superseded"][0]["replaced_by"], 2)
         self.assertAlmostEqual(sheet["superseded"][0]["bid"], 8.20)
+
+
+class TestQuoteGrammar(unittest.TestCase):
+    """The looser reading of a run: what wins when a line says two things,
+    which lines are somebody else's, and structures of more than two legs.
+
+    Every rule here is a precedence stated once: a strike over a delta, a
+    date over a tenor, the side only where the side changes the number.
+    """
+
+    def parse(self, text, **kw):
+        kw.setdefault("pair", "EURUSD")
+        return quotes.parse_quotes(text, **kw)
+
+    def test_a_strike_beats_a_delta_and_says_so(self):
+        q = self.parse("6M 25d 1.1200 call 7.8/8.3\n").quotes[0]
+        self.assertEqual(q.instrument, "outright")
+        self.assertAlmostEqual(q.strike, 1.12)
+        self.assertIsNone(q.delta)
+        self.assertTrue(any("the strike is used" in n for n in q.notes))
+        # And in columns, where this used to be a refusal.
+        col = self.parse("3M, 25d 1.0900, 8.10/8.50\n")
+        self.assertEqual(col.skipped, ())
+        self.assertAlmostEqual(col.quotes[0].strike, 1.09)
+        self.assertIsNone(col.quotes[0].delta)
+
+    def test_a_date_beats_a_tenor(self):
+        q = self.parse("1M 2026-09-30 atm 8.1/8.5\n").quotes[0]
+        self.assertEqual(str(q.expiry)[:10], "2026-09-30")
+        self.assertTrue(any("the date is used" in n for n in q.notes))
+        # Dates in the spellings a desk types, not only ISO.
+        for spelt in ("30sep26", "30-Sep-2026", "2026/09/30", "09/30/2026"):
+            got = self.parse(f"{spelt} atm 8.1/8.5\n")
+            self.assertEqual(got.skipped, (), spelt)
+            self.assertEqual(str(got.quotes[0].expiry)[:10], "2026-09-30", spelt)
+        # Two tenors on a line that is not a spread stay a refusal.
+        self.assertIn("2 tenors", self.parse("1M 3M atm 8.1/8.5\n").skipped[0][2])
+
+    def test_the_side_matters_only_with_a_delta_or_on_a_premium(self):
+        """'6M 1.10 call' and '6M 1.10 put' are one volatility, so they are one
+        quote and the later one supersedes the earlier.  '25d call' and
+        '25d put' are two strikes.  A premium at a strike needs the side,
+        because a call and a put there are two different prices."""
+        run = self.parse("6M 1.10 call 7.9/8.4\n6M 1.10 put 7.95/8.45\n")
+        self.assertEqual(len(run.quotes), 1)
+        self.assertIsNone(run.quotes[0].is_call)
+        self.assertEqual(len(run.superseded), 1)
+        wings = self.parse("1M 25d call 8.9/9.3\n1M -25d 8.9/9.3\n1M 25dp 8.9/9.3\n")
+        self.assertEqual([q.is_call for q in wings.quotes], [True, False])
+        self.assertEqual(len(wings.superseded), 1)
+        live = self.parse("6M 1.10 live 0.0125/0.0135\n")
+        self.assertEqual(live.quotes, ())
+        self.assertIn("needs the side", live.skipped[0][2])
+
+    def test_a_premium_is_read_in_its_unit_and_never_scaled(self):
+        run = self.parse("1M atm 8.2/8.6\n"
+                         "6M 1.10 call 125/135 pips\n"
+                         "6M 1.10 put 1.25%/1.35% prem\n"
+                         "3M 1.10 call 0.0125/0.0135 usd\n"
+                         "3M 1.10 put 0.0125/0.0135 eur\n")
+        self.assertEqual(run.skipped, ())
+        self.assertEqual(run.vol_unit, "percent")
+        kinds = [(q.quote_kind, q.premium_unit) for q in run.quotes]
+        self.assertEqual(kinds, [("vol", None), ("premium", "pips"), ("premium", "pct"),
+                                 ("premium", "price"), ("premium", "pct")])
+        self.assertAlmostEqual(run.quotes[1].bid, 125.0)       # not 1.25
+        self.assertAlmostEqual(run.quotes[2].ask, 1.35)
+        self.assertAlmostEqual(run.quotes[3].bid, 0.0125)
+        self.assertAlmostEqual(run.quotes[4].bid, 1.25)        # a fraction of base, as a per cent
+        self.assertTrue(all(q.is_call is not None for q in run.quotes[1:]))
+        self.assertIn("premium", run.quotes[1].describe())
+        # A premium on something that is not an option is refused.
+        self.assertIn("premium", self.parse("1M atm 0.5/0.6 prem\n").skipped[0][2])
+        # A currency that is neither leg is refused rather than guessed.
+        self.assertIn("not a leg", self.parse("3M 1.10 call 0.01/0.02 chf\n").skipped[0][2])
+
+    def test_lines_for_another_pair_are_passed_over_not_refused(self):
+        run = self.parse("1M atm 8.2/8.6\n"
+                         "USDJPY 1M atm 9/9.4\n"
+                         "GBPUSD\n"
+                         "1M atm 7/7.4\n"
+                         "eur/usd:\n"
+                         "3M atm 8.1/8.5\n")
+        self.assertEqual([q.describe() for q in run.quotes], ["1M ATM", "3M ATM"])
+        self.assertEqual(run.skipped, ())
+        self.assertEqual([(n, why) for n, _, why in run.ignored],
+                         [(2, "quotes USDJPY, not EURUSD"), (4, "quotes GBPUSD, not EURUSD")])
+        self.assertTrue(any("passed over" in n for n in run.notes))
+        self.assertEqual(run.quotes[1].pair, "EURUSD")
+        # With no pair given nothing is filtered and every line carries its pair.
+        every = quotes.parse_quotes("USDJPY 1M atm 9/9.4\nGBPUSD\n1M atm 7/7.4\n")
+        self.assertEqual([q.pair for q in every.quotes], ["USDJPY", "GBPUSD"])
+        # The same on the request box.
+        asked = quotes.parse_requests("1M atm\nUSDJPY 1M atm\n", pair="EURUSD")
+        self.assertEqual(len(asked.requests), 1)
+        self.assertEqual(asked.ignored[0][0], 2)
+
+    def test_two_legs_of_one_instrument_are_the_calendar_spread_as_before(self):
+        run = self.parse("1M/3M atm spread 0.30/0.55\n"
+                         "1M vs 3M 25d rr 0.10/0.20\n"
+                         "1M atm vs 3M atm 0.30/0.55\n"
+                         "buy 1M atm sell 3M atm 0.30/0.55\n")
+        self.assertEqual(run.skipped, ())
+        # Line 3 is the same quote as line 1 and supersedes it; line 4 is a
+        # structure because it carries signs.
+        self.assertEqual([q.instrument for q in run.quotes], ["spread", "spread", "structure"])
+        rr = run.quotes[1]
+        self.assertEqual((str(rr.expiry), str(rr.expiry_far), rr.leg, rr.delta),
+                         ("1M", "3M", "rr", 0.25))
+        self.assertTrue(any("took" in n or "same instrument" in n for n in rr.notes))
+        self.assertEqual(quotes.instrument_key(run.superseded[0]),
+                         quotes.instrument_key(run.quotes[0]))
+        self.assertEqual([leg.weight for leg in run.quotes[2].legs], [1.0, -1.0])
+
+    def test_a_structure_is_the_signed_sum_of_its_legs(self):
+        run = self.parse("6M 1.10 call vs 1.15 call 0.35/0.55\n"
+                         "+1M atm vs -2x 3M atm vs +6M atm 0.05/0.15\n"
+                         "1M vs 3M vs 6M atm 0.1/0.2\n"
+                         "sell 3M 25d rr jpy call over buy 6M 25d rr 0.1/0.2\n", pair="USDJPY")
+        self.assertEqual([n for n, _, _ in run.skipped], [3])
+        self.assertIn("needs a sign on each", run.skipped[0][2])
+        cs, fly, rr = run.quotes
+        self.assertEqual(cs.instrument, "structure")
+        self.assertEqual([(str(l.expiry), l.strike, l.weight) for l in cs.legs],
+                         [("6M", 1.10, -1.0), ("6M", 1.15, 1.0)])
+        self.assertIsNone(cs.expiry_far)                  # one tenor, so one expiry
+        self.assertEqual([str(x) for x in cs.expiries()], ["6M"])
+        self.assertEqual([l.weight for l in fly.legs], [1.0, -2.0, 1.0])
+        self.assertEqual((str(fly.expiry), str(fly.expiry_far)), ("1M", "6M"))
+        self.assertEqual([str(x) for x in fly.expiries()], ["1M", "3M", "6M"])
+        # A direction word on a leg is folded into that leg's weight.
+        self.assertEqual([l.weight for l in rr.legs], [1.0, 1.0])
+        self.assertEqual(rr.describe(), "-3M 25d RR (JPY call over) +6M 25d RR")
+        self.assertAlmostEqual(cs.bid, 0.0035)
+        # The request box reads the same structures with no price.
+        asked = quotes.parse_requests("6M 1.10 call vs 1.15 call\n", pair="EURUSD")
+        self.assertEqual(asked.requests[0].instrument, "structure")
+        self.assertEqual(len(asked.requests[0].legs), 2)
+
+
+class TestQuoteGrammarOnTheBook(unittest.TestCase):
+    """The new grammar through the fit and the quote."""
+
+    @classmethod
+    def setUpClass(cls):
+        from volkit.book import Book
+        from volkit.feed import MarketFeed
+        cls.book = Book.from_excel(WORKBOOK, ASOF).build(["EURUSD"])
+        cls.book.feed = MarketFeed.load(FEED)
+
+    def test_a_premium_becomes_the_volatility_that_reprices_it(self):
+        from volkit import marketmaker as mm
+        run = quotes.parse_quotes("3M 1.0900 call 125/135 pips\n3M 1.0900 put 0.9%/1.0% prem\n",
+                                  pair="EURUSD")
+        expiries = mm.resolve_expiries(self.book.clock, run.quotes)
+        levels = mm._levels_for(self.book, "EURUSD", expiries)
+        out, errors = mm.premiums_as_vols(list(run.quotes), expiries, levels, "EURUSD")
+        self.assertEqual(errors, ["", ""])
+        F, spot, pip = (levels["3M"][k] for k in ("forward", "spot", "pip"))
+        _, t = expiries["3M"]
+        for q, px, factor in ((out[0], (125.0, 135.0), 1.0 / pip),
+                              (out[1], (0.9, 1.0), spot / 100.0)):
+            self.assertEqual(q.quote_kind, "vol")
+            for v, p in zip((q.bid, q.ask), px):
+                self.assertAlmostEqual(float(black.price(F, 1.09, v, t, bool(q.is_call))),
+                                       p * factor, places=12)
+        # No feed, no conversion -- and a reason rather than a forward of 1.
+        bare, why = mm.premiums_as_vols(list(run.quotes), expiries, {}, "EURUSD")
+        self.assertEqual(bare[0].quote_kind, "premium")
+        self.assertIn("no forward feed", why[0])
+
+    def test_a_structure_values_as_the_signed_sum_of_its_legs(self):
+        from volkit import marketmaker as mm
+        run = quotes.parse_quotes("+1M atm vs -2x 3M atm vs +6M atm 0.05/0.15\n"
+                                  "1M atm 8/8.4\n3M atm 8/8.4\n6M atm 8/8.4\n", pair="EURUSD")
+        surface = self.book["EURUSD"]
+        ev = mm.Evaluator(surface, "SVI", "NY")
+        expiries = mm.resolve_expiries(self.book.clock, run.quotes)
+        got = ev.value(run.quotes[0], expiries, {})
+        legs = [ev.value(q, expiries, {}) for q in run.quotes[1:]]
+        self.assertAlmostEqual(got, legs[0] - 2 * legs[1] + legs[2], places=14)
+        # Every expiry a structure names is resolved, not only its two ends.
+        self.assertEqual(sorted(expiries), ["1M", "3M", "6M"])
 
 
 class TestKnowledgeBank(unittest.TestCase):

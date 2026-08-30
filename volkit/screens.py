@@ -102,8 +102,8 @@ SCREENS: tuple[Screen, ...] = (
     Screen(
         name="marking", label="Vol marking", panel="p-marking",
         routes=("/api/marks", "/api/overwrite", "/api/smile", "/api/term",
-                "/api/daily", "/api/curve", "/api/events", "/api/events/suggest",
-                "/api/rrfly", "/api/export/daily", "/api/band"),
+                "/api/daily", "/api/curve", "/api/events", "/api/events/suggest", "/api/events/weights",
+                "/api/rrfly", "/api/export/daily", "/api/band", "/api/band/fit"),
         commands=("tenors", "daily", "events", "validate", "band"),
     ),
     Screen(

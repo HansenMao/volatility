@@ -511,18 +511,26 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
           <button id="sesssave">Save marks</button>
           <button class="ghost" id="sessload">Load marks</button>
           <button class="ghost" id="sesssavepair">Save this pair</button>
+          <button class="ghost" id="sessexport"
+            title="save the marks, then write the session file into a copy of the workbook beside it: PARAMS cells, event rows and weights, 'atm 1m' / 'slog25 3m' / 'shift rho25' / 'anchor' rows and a BANDS sheet. The loaded workbook is not touched; 'volkit session --to-workbook --in-place' is the command that does that">Write to workbook copy</button>
         </div>
         <div class="msg" id="sessmsg"></div>
         <div class="hint">Everything this session has marked — curve parameters, the correlation
           term structure, events, ATM and smile overwrites, the market maker's wing shifts, the
           anchor switch and the band treatment — written to a file <b>beside</b> the workbook.
-          The workbook itself is never written to. Start volkit with
+          The workbook itself is never written to by a screen. Start volkit with
           <code>--session &lt;file&gt;</code>, or press <b>Load marks</b>, to put them back;
-          <b>Reload workbook</b> still discards everything and returns to the quotes on disk.</div>
+          <b>Reload workbook</b> still discards everything and returns to the quotes on disk.
+          <b>Write to workbook copy</b> saves the marks and then writes them into a copy of the
+          workbook (<code>_marked</code> added to its name) in the cells the tool reads them
+          back from, so that copy can be opened in Excel, checked, and adopted as the book of
+          record — or overwritten in place from a shell with
+          <code>volkit session --to-workbook --in-place</code>.</div>
       </section>
 
       <section class="card">
         <h2>Events <span class="grow"></span>
+          <button class="ghost" id="ewtoggle" title="the weight each release puts on each currency" style="font-size:11px;padding:2px 7px">Weights</button>
           <select id="ehorizon" style="width:auto;padding:2px 5px;font-size:11px">
             <option value="0.25">3m</option><option value="0.5">6m</option>
             <option value="1" selected>1y</option><option value="2">2y</option>
@@ -534,11 +542,35 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
         </div>
         <div class="scroll" style="margin-top:9px"><table class="ev" id="etable"></table></div>
         <div class="msg" id="emsg"></div>
-        <div class="hint">Bumps are vol points over the <b>24 hours following the release</b>.
+        <div class="hint">Times are <b>Hong Kong time</b> (UTC+8); the model works in UTC and converts.
+          Bumps are vol points over the <b>24 hours following the release</b>. A bump is
+          the pair's two legs' <b>weights added</b> -- each event is weighted per currency in
+          <code>volkit/data/event_weights.csv</code> -- plus the pair's own <b>Adj</b> on top;
+          only the parts are typed, the total is shown.
           The <b>day</b> column shows which volatility day the effect mostly lands in.
           Auto-loaded dates come from the published central-bank calendars shipped with
           volkit plus the NFP rule; verify them, and edit
           <code>volkit/data/econ_events.csv</code> to extend.</div>
+      </section>
+
+      <!-- Optional: the per-currency weight table behind Auto-load.  Off until
+           asked for; the browser owns it and posts it whole.  Nothing here
+           touches an event already on a pair. -->
+      <section class="card hide" id="ewcard">
+        <h2>Event weights <span class="grow"></span>
+          <input id="ewccy" placeholder="+ CCY" maxlength="3" style="width:56px;font-size:11px;padding:2px 5px;text-transform:uppercase">
+          <button class="ghost" id="ewadd" style="font-size:11px;padding:2px 7px">Add column</button></h2>
+        <div class="row">
+          <button class="ghost" id="ewreload">Reload</button>
+          <button id="ewapply">Apply</button>
+        </div>
+        <div class="scroll" style="margin-top:9px"><table class="ev" id="ewtable"></table></div>
+        <div class="msg" id="ewmsg"></div>
+        <div class="hint">What each release is worth on each <b>currency</b>, in vol points; the
+          releasing currency is marked <b>·</b>. A pair's bump is its two legs added plus its own
+          adjustment. Applying changes what <b>Auto-load</b> suggests from now on and nothing already
+          on a pair's events table; a saved session keeps the table, the shipped
+          <code>volkit/data/event_weights.csv</code> is the default.</div>
       </section>
     </div>
   </div>
@@ -953,12 +985,12 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
     <div class="mmleft">
       <section class="card"><h2>The market <small>paste the run, one quote a line</small></h2>
         <textarea id="mmtext" spellcheck="false" style="height:250px"
-          placeholder="1M ATM 8.20/8.60 in 100mm vega&#10;3M 25d RR 0.35/0.55 eur call over&#10;2M 25d fly 0.20/0.28&#10;6M 1.1000 call 7.90/8.40&#10;1M/3M ATM spread 0.30/0.55&#10;&#10;or as columns — time, expiry, strike, bid/offer:&#10;09:15, 1M, ATM,  8.20/8.60&#10;09:15, 3M, 1.0900, 8.10/8.50&#10;09:41, 1M, ATM,  8.25/8.65"></textarea>
+          placeholder="1M ATM 8.20/8.60 in 100mm vega&#10;3M 25d RR 0.35/0.55 eur call over&#10;2M 25d fly 0.20/0.28&#10;6M 1.1000 call 7.90/8.40&#10;1M/3M ATM spread 0.30/0.55&#10;6M 1.10 call vs 1.15 call 0.35/0.55&#10;30sep26 1.1000 call 125/135 pips live&#10;USDJPY 1M ATM 9.0/9.4   (another pair: passed over)&#10;&#10;or as columns — time, expiry, strike, bid/offer:&#10;09:15, 1M, ATM,  8.20/8.60&#10;09:15, 3M, 1.0900, 8.10/8.50&#10;09:41, 1M, ATM,  8.25/8.65"></textarea>
         <div class="msg" id="mmparse"></div></section>
 
       <section class="card"><h2>What we are asked for <small>one instrument a line, no prices</small></h2>
         <textarea id="mqtext" spellcheck="false" style="height:150px"
-          placeholder="1M ATM in 100mm&#10;3M 25d RR&#10;2M 25d fly&#10;6M 1.1000 call&#10;1M/3M ATM spread&#10;&#10;the same words as the market box, with the price left off"></textarea>
+          placeholder="1M ATM in 100mm&#10;3M 25d RR&#10;2M 25d fly&#10;6M 1.1000 call&#10;1M/3M ATM spread&#10;6M 1.10 call vs 1.15 call&#10;3M 1.0900 put live in pips&#10;&#10;the same words as the market box, with the price left off"></textarea>
         <div class="msg" id="mqparse"></div></section>
 
       <section class="card hide" id="mmtargetcard">
@@ -992,6 +1024,9 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
               <input type="checkbox" id="markchoose" checked style="width:auto"> agent chooses the knobs</label>
             <label style="margin:0;display:flex;align-items:center;gap:6px;width:auto;color:var(--muted);font-size:11px">
               <input type="checkbox" id="markarchive" checked style="width:auto"> score against the archive</label>
+            <label style="margin:0;display:flex;align-items:center;gap:6px;width:auto;color:var(--muted);font-size:11px"
+                   title="untick for the desk-only answer: the journal alone, no rule of thumb seeded in">
+              <input type="checkbox" id="markrules" checked style="width:auto"> rules of thumb</label>
           </div>
         </div>
         <div class="meta" id="markstatus"></div>
@@ -1037,9 +1072,12 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
         <div id="agentrows"></div>
         <div id="agentwidths"></div>
         <div class="msg" id="agentmsg"></div>
-        <div class="hint" id="agenthint">The agent proposes and changes nothing. A width it
-          disagrees with stays on the quote sheet until you write a rule for it in the
-          knowledge bank below.</div></section>
+        <div class="hint" id="agenthint">The agent proposes and changes nothing. It reads the
+          request box: for each instrument asked for, the width we would show against the
+          width the archive has seen it shown at, with the market paste's own width beside
+          it where the paste quoted the same thing. With the request box empty it reads
+          the paste. A width it disagrees with stays on the quote sheet until you write a
+          rule for it in the knowledge bank below.</div></section>
       <section class="card"><h2>Ask the record <small id="askhead"></small></h2>
         <div id="askchat" class="askchat"></div>
         <div class="mmbar" style="margin:10px 0 0">
@@ -1847,8 +1885,8 @@ async function drawTerm(){
   const o=mq(),d=await api('/api/term?'+qs({pair:o.pair,cut:o.cut}));
   p.innerHTML=`<div id="c1"></div><div class="legend"><span><i style="background:${C1}"></i>marked ATM vol (%)</span>
       <span><i style="background:${C2}"></i>${esc(o.cut)} cut vol (%)</span></div>
-    ${d.events.length?`<h2 style="margin-top:16px">Events</h2><table style="width:100%"><thead><tr><th>When (UTC)</th><th>Quoted bump %</th><th>Solved height</th></tr></thead>
-      <tbody>${d.events.map(e=>`<tr><td>${esc(e.when.replace('T',' ').slice(0,16))}</td><td>${num(e.bump,3)}</td>
+    ${d.events.length?`<h2 style="margin-top:16px">Events</h2><table style="width:100%"><thead><tr><th>When (${EVTZ.label})</th><th>Quoted bump %</th><th>Solved height</th></tr></thead>
+      <tbody>${d.events.map(e=>`<tr><td>${esc(evLocal(e.when).replace('T',' '))}</td><td>${num(e.bump,3)}</td>
       <td>${e.height==null?'—':num(e.height,6)}</td></tr>`).join('')}</tbody></table>`:''}`;
   chart($('#c1'),[{pts:d.curve.map(r=>[r.t,r.vol]),color:C1},
     {pts:d.curve.map(r=>[r.t,r.cut]),color:C2,dash:1,w:1.5},
@@ -1906,8 +1944,8 @@ async function loadCurve(){
   $('#ckind').textContent=CURVE.is_cross?`cross of ${CURVE.legs.join(' / ')} · signs ${CURVE.leg_signs.join(',')}`:'backbone';
   $('#cparams').innerHTML=PORDER.filter(k=>k in CURVE.params).map(k=>
     `<div><label>${PLABEL[k]}</label><input data-cp="${k}" value="${(+CURVE.params[k]).toFixed(4)}"></div>`).join('');
-  EVENTS=CURVE.events.map(e=>({when:e.when,bump:(+e.bump).toFixed(3),label:e.label,
-    vol_day:e.vol_day,rolls_over:e.rolls_over,height:e.height}));
+  EVLEGS=CURVE.legs_ccy||[mq().pair.slice(0,3),mq().pair.slice(3,6)];
+  EVENTS=CURVE.events.map(evRow);
   renderEvents();
 }
 $('#capply').onclick=async()=>{
@@ -1920,36 +1958,65 @@ $('#capply').onclick=async()=>{
     await loadCurve(); await loadMarks(); await redraw(); schedulePrice();
   }catch(e){m.className='msg bad';m.textContent=e.message}
 };
-$('#creset').onclick=async()=>{$('#cmsg').textContent='reloading workbook…';
-  await post('/api/reload',{}); await boot();};
+/* The status is written before the reload and rewritten after it: boot()
+   rebuilds the card but leaves this box alone, so "reloading workbook…"
+   used to stay on screen after the reload had finished. */
+$('#creset').onclick=async()=>{const m=$('#cmsg');m.className='msg';m.textContent='reloading workbook…';
+  try{await post('/api/reload',{}); await boot();
+    m.className='msg ok';m.textContent='workbook reloaded; marks discarded';}
+  catch(e){m.className='msg bad';m.textContent=e.message}};
 
 /* ---------------------- events ---------------------- */
+/* The events panel is typed and read in Hong Kong time.  The model has one
+   time zone inside it (UTC) and that does not change: every `when` the
+   server hands back is UTC and is converted here, once, on the way in, and
+   every `when` posted carries the HKT offset so parse_datetime converts it
+   back.  HKT is a fixed +08:00 with no DST, which is why a pure arithmetic
+   shift is exact.  EVTZ is the one declaration. */
+const EVTZ={label:'HKT',offset:'+08:00',minutes:480};
+/* An event's bump on a pair is its two legs' weights (per currency, from the
+   weight table or typed) added, plus the pair's own adjustment on top.  The
+   row holds the parts and shows the total; only the parts are posted, so the
+   server never has to choose between a total and parts that disagree. */
+let EVLEGS=['','']; 
+function evRow(e){const w={};EVLEGS.forEach(c=>{w[c]=(+((e.weights||{})[c]||0)).toFixed(3)});
+  return {when:evLocal(e.when),weights:w,adjust:(+(e.adjust||0)).toFixed(3),label:e.label||'',
+    vol_day:e.vol_day,rolls_over:e.rolls_over,height:e.height,approximate:e.approximate}}
+function evTotal(e){return EVLEGS.reduce((t,c)=>t+(+e.weights[c]||0),0)+(+e.adjust||0)}
+function evLocal(utc){const d=new Date(utc.length>16?utc:utc+'Z');
+  return new Date(d.getTime()+EVTZ.minutes*6e4).toISOString().slice(0,16)}
+function evPost(local){return /[Zz]|[+-]\d\d:?\d\d$/.test(local)?local:local+EVTZ.offset}
 function renderEvents(){
   const t=$('#etable');
   if(!EVENTS.length){t.innerHTML='<tr><td class="meta" style="padding:8px">No events. Auto-load or add a row.</td></tr>';return}
-  t.innerHTML='<thead><tr><th>When (UTC)</th><th>Bump %</th><th>Label</th><th>Vol day</th><th></th></tr></thead><tbody>'+
+  t.innerHTML=`<thead><tr><th>When (${EVTZ.label})</th>${EVLEGS.map(c=>`<th title="weight on ${c}, vol points">${esc(c)}</th>`).join('')}<th title="the pair's adjustment on top of its legs, vol points">Adj</th><th title="the bump the curve is calibrated to: both legs added, plus the adjustment">Bump %</th><th>Label</th><th>Vol day</th><th></th></tr></thead><tbody>`+
     EVENTS.map((e,i)=>`<tr>
       <td><input data-ev="${i}" data-f="when" value="${esc(e.when)}" style="width:132px"></td>
-      <td><input class="n" data-ev="${i}" data-f="bump" value="${esc(e.bump)}" style="width:54px"></td>
+      ${EVLEGS.map(c=>`<td><input class="n" data-ev="${i}" data-f="w:${esc(c)}" value="${esc(e.weights[c])}" style="width:48px"></td>`).join('')}
+      <td><input class="n" data-ev="${i}" data-f="adjust" value="${esc(e.adjust)}" style="width:48px"></td>
+      <td class="n" data-evtotal="${i}" style="padding:0 6px;text-align:right">${evTotal(e).toFixed(3)}</td>
       <td><input data-ev="${i}" data-f="label" value="${esc(e.label)}" style="width:84px"></td>
       <td class="day">${e.vol_day?(e.rolls_over?'<b>'+esc(e.vol_day)+'</b>':esc(e.vol_day)):'—'}</td>
       <td><span class="rm" data-rm="${i}">✕</span></td></tr>`).join('')+'</tbody>';
 }
 $('#etable').addEventListener('change',e=>{const i=e.target.dataset.ev;
-  if(i!==undefined)EVENTS[+i][e.target.dataset.f]=e.target.value;});
+  if(i===undefined)return;
+  const f=e.target.dataset.f;
+  if(f.slice(0,2)==='w:')EVENTS[+i].weights[f.slice(2)]=e.target.value; else EVENTS[+i][f]=e.target.value;
+  const tot=$('#etable').querySelector(`[data-evtotal="${i}"]`); if(tot)tot.textContent=evTotal(EVENTS[+i]).toFixed(3);});
 $('#etable').addEventListener('click',e=>{const i=e.target.dataset.rm;
   if(i!==undefined){EVENTS.splice(+i,1);renderEvents()}});
 $('#eadd').onclick=()=>{const d=new Date((STATE.valuationMs||Date.now())+7*864e5);
-  EVENTS.push({when:d.toISOString().slice(0,16),bump:'1.000',label:'',vol_day:null});renderEvents()};
+  EVENTS.push(evRow({when:d.toISOString(),adjust:1.0,label:'',vol_day:null}));renderEvents()};
 $('#eload').onclick=async()=>{
   const m=$('#emsg');m.className='msg';m.innerHTML='<span class="spin"></span> loading calendar…';
   try{
     const d=await api('/api/events/suggest?'+qs({pair:mq().pair,horizon:$('#ehorizon').value}));
     const have=new Set(EVENTS.map(e=>e.when));
     let added=0, approx=0;
-    d.events.forEach(e=>{ if(have.has(e.when))return;
-      EVENTS.push({when:e.when,bump:(+e.bump).toFixed(3),label:e.name,vol_day:e.vol_day,
-        rolls_over:false,approximate:e.approximate});
+    d.events.forEach(e=>{ const when=evLocal(e.when); if(have.has(when))return;
+      EVENTS.push(evRow({when:e.when,weights:e.weights,adjust:0,label:e.name,vol_day:e.vol_day,
+        rolls_over:false,approximate:e.approximate}));
       added++; if(e.approximate)approx++;});
     EVENTS.sort((a,b)=>a.when<b.when?-1:1); renderEvents();
     m.className='msg ok';
@@ -1960,9 +2027,8 @@ $('#eapply').onclick=async()=>{
   const m=$('#emsg');m.className='msg';m.innerHTML='<span class="spin"></span> solving event heights…';
   try{
     const r=await post('/api/events',{pair:mq().pair,events:EVENTS.map(e=>
-      ({when:e.when,bump:e.bump,label:e.label}))});
-    EVENTS=r.events.map(e=>({when:e.when,bump:(+e.bump).toFixed(3),label:e.label,
-      vol_day:e.vol_day,rolls_over:e.rolls_over,height:e.height}));
+      ({when:evPost(e.when),weights:e.weights,adjust:e.adjust,label:e.label}))});
+    EVENTS=r.events.map(evRow);
     renderEvents();
     m.className=r.problems.length?'msg warn':'msg ok';
     m.textContent=r.problems.length?r.problems.join('; '):`${EVENTS.length} event heights solved`;
@@ -1970,6 +2036,36 @@ $('#eapply').onclick=async()=>{
   }catch(e){m.className='msg bad';m.textContent=e.message}
 };
 
+
+/* ---------------------- event weights (optional card) ---------------------- */
+let EW=null;   /* {events:[{name,currency,weights}], currencies:[...]} -- the browser's */
+function renderWeights(){
+  const t=$('#ewtable'); if(!EW)return;
+  t.innerHTML=`<thead><tr><th>Event</th>${EW.currencies.map(c=>`<th>${esc(c)}</th>`).join('')}</tr></thead><tbody>`+
+    EW.events.map((e,i)=>`<tr><td>${esc(e.name)}</td>${EW.currencies.map(c=>
+      `<td><input class="n" data-ew="${i}" data-c="${esc(c)}" value="${(+(e.weights[c]||0)).toFixed(2)}" style="width:48px"${c===e.currency?' title="releasing currency"':''}>${c===e.currency?'<span class="meta"> ·</span>':''}</td>`).join('')}</tr>`).join('')+'</tbody>';
+}
+async function loadWeights(){
+  const m=$('#ewmsg');m.className='msg';
+  try{EW=await api('/api/events/weights');renderWeights();
+    m.textContent=EW.source?`from ${EW.source}`:'defaults (no event_weights.csv)';}
+  catch(e){m.className='msg bad';m.textContent=e.message}
+}
+$('#ewtoggle').onclick=async()=>{const c=$('#ewcard');c.classList.toggle('hide');
+  if(!c.classList.contains('hide')&&!EW)await loadWeights()};
+$('#ewreload').onclick=loadWeights;
+$('#ewtable').addEventListener('change',e=>{const i=e.target.dataset.ew;
+  if(i!==undefined)EW.events[+i].weights[e.target.dataset.c]=e.target.value});
+$('#ewadd').onclick=()=>{const c=$('#ewccy').value.trim().toUpperCase();
+  if(!EW||c.length!==3||!/^[A-Z]{3}$/.test(c)){$('#ewmsg').className='msg bad';$('#ewmsg').textContent='a currency is three letters';return}
+  if(EW.currencies.indexOf(c)<0)EW.currencies.push(c); $('#ewccy').value='';renderWeights()};
+$('#ewapply').onclick=async()=>{
+  const m=$('#ewmsg');m.className='msg';m.innerHTML='<span class="spin"></span> applying…';
+  const weights={}; EW.events.forEach(e=>{weights[e.name]={};EW.currencies.forEach(c=>{weights[e.name][c]=+(e.weights[c]||0)})});
+  try{EW=await post('/api/events/weights',{weights});renderWeights();
+    m.className='msg ok';m.textContent='applied — Auto-load now uses these; rows already on the events table are unchanged';}
+  catch(e){m.className='msg bad';m.textContent=e.message}
+};
 
 /* ====================== EXCHANGE TRADED OPTIONS ====================== */
 /* One panel is one expiry/underlying combination.  The server keeps no
@@ -3096,10 +3192,19 @@ async function applyBand(){
   const body=bandPayload();
   $('#banderr').innerHTML='';
   $('#bandstatus').innerHTML='<span class="spin"></span> recalibrating…';
-  try{ BAND=await post('/api/band',body); renderBand(); }
+  let applied=false;
+  try{ BAND=await post('/api/band',body); renderBand(); applied=true; }
   catch(e){ $('#banderr').innerHTML='<div class="out err"><div class="v">'+
     esc(e.message)+'</div></div>'; }
   $('#bandstatus').innerHTML='';
+  /* Apply is the one button here that moves the surface: the treatment is
+     part of the smile cache key, so a chart drawn with BAND is now a chart
+     of the old hazard.  Repaint it (and the RR / fly table under it) rather
+     than leave the desk to press the method select to see what it applied.
+     Fit from the wings does *not* do this -- it fills the boxes and marks
+     nothing, so the chart it would repaint has not changed.  Any other
+     method never reads the treatment, so nothing to redraw. */
+  if(applied&&$('#mmethod').value==='BAND')await redraw();
 }
 function renderBand(){
   const d=BAND; if(!d)return;
@@ -3124,7 +3229,13 @@ function renderBand(){
       '<label style="display:flex;align-items:center;gap:6px;margin:0;width:auto;'+
         'color:var(--muted);font-size:11px"><input type="checkbox" id="bandsolve"'+
         (t.solve_hazard?' checked':'')+' style="width:auto"> solve the hazard from the wings</label>'+
+      '<button id="bandfit" class="ghost" title="Every tenor at once, both wings at both deltas; '+
+        'fills the boxes above and marks nothing until Apply">Fit from the wings</button>'+
+      '<input id="bandfree" value="'+esc(BANDFREE)+'" style="width:170px" '+
+        'title="which break parameters to free: hazard, weak_share, weak_jump, strong_jump, '+
+        'weak_vol, strong_vol">'+
     '</div>'+
+    '<div id="bandfitout"></div>'+
     '<div class="meta" style="margin-top:8px">'+esc(d.describe||'')+'</div>';
   if(!d.has_feed)
     f+='<div class="etowarn">! no spot / forward feed for '+esc(d.pair)+'. A band is an '+
@@ -3151,6 +3262,53 @@ function renderBand(){
     '0 and 100 blends the two, which is a marking convenience and not a model.</div>';
   $('#bandbody').innerHTML=f;
   $('#bandapply').onclick=applyBand;
+  $('#bandfit').onclick=fitBand;
+}
+let BANDFREE='hazard,weak_share';
+async function fitBand(){
+  /* Propose, do not mark.  The card's own boxes are the given part of the
+     fit (the jump sizes, the post-break vols, the edges); the answer is
+     written back into the boxes and the report goes beside them, and the
+     surface does not move until Apply -- break risk is a marked input. */
+  const body=bandPayload(); body.free=$('#bandfree').value; BANDFREE=body.free;
+  $('#banderr').innerHTML='';
+  $('#bandstatus').innerHTML='<span class="spin"></span> fitting every tenor…';
+  try{
+    const d=await post('/api/band/fit',body);
+    if(!d.proposal){throw new Error(d.message||'nothing could be fitted')}
+    BFIELDS.forEach(x=>{const el=$('#bf-'+x[0]); if(el&&d.proposal[x[0]]!=null)el.value=d.proposal[x[0]]});
+    const fit=d.fit||{};
+    let h='<div class="meta" style="margin-top:8px">'+esc(fit.method||'')+
+      '; rmse '+num((fit.rmse||0)*100,4)+' vol pts, worst '+num((fit.max_abs_residual||0)*100,4)+
+      '; hazard ceiling '+anPct(fit.hazard_ceiling,3)+'</div>';
+    h+='<div class="meta">'+Object.keys(fit.sensitivity||{}).map(k=>{const s=fit.sensitivity[k];
+      return esc(k)+' '+num(s.value,5)+' (moves the wings '+num(s.over_range*100,4)+' vol pts over its range'+
+        (s.informed?'':', <b>not informed</b>')+')'}).join('; ')+
+      (fit.condition==fit.condition&&fit.condition!=null?'; condition '+num(fit.condition,1):'')+'</div>';
+    h+=(d.warnings||[]).map(w=>'<div class="etowarn">! '+esc(w)+'</div>').join('');
+    const hz=(d.hazard_by_tenor||[]).map(x=>'<tr><td>'+esc(x.tenor)+'</td><td>'+
+      (x.hazard==null?'—':anPct(x.hazard,4))+'</td><td>'+(x.rmse==null?'':num(x.rmse*100,4))+
+      '</td><td style="text-align:left;color:var(--muted);white-space:normal">'+esc(x.note||'')+'</td></tr>').join('');
+    const res=[];
+    (d.rows||[]).forEach(r=>{
+      if(r.message){res.push('<tr><td>'+esc(r.tenor)+'</td><td colspan="6" style="text-align:left;'+
+        'color:var(--muted);white-space:normal">'+esc(r.message)+'</td></tr>');return}
+      (r.wings||[]).forEach(w=>{
+        [['rr',w.quoted_rr,w.model_rr],['fly',w.quoted_fly,w.model_fly]].forEach(z=>{
+          res.push('<tr><td>'+esc(r.tenor)+'</td><td>'+num(w.delta*100,0)+'d '+z[0]+'</td><td>'+
+            anSgn(z[1])+'</td><td>'+anSgn(z[2])+'</td><td'+cls(z[2]-z[1])+'>'+anSgn(z[2]-z[1])+
+            '</td><td>'+num(w.K_put,5)+(w.put_in_band?' in':' OUT')+'</td><td>'+num(w.K_call,5)+
+            (w.call_in_band?' in':' OUT')+'</td></tr>')})})});
+    h+='<div class="anwide" style="margin-top:9px">'+tblHtml(
+      '<th>Tenor</th><th>Own hazard %</th><th>rmse</th><th>Note</th>',hz)+'</div>';
+    h+='<div class="anwide" style="margin-top:9px">'+tblHtml(
+      '<th>Tenor</th><th>Quote</th><th>Quoted</th><th>Model</th><th>Resid</th><th>Put K</th>'+
+      '<th>Call K</th>',res.join(''))+'</div>';
+    h+='<div class="hint">Proposed from the marked wings, holding what was not freed. The boxes '+
+      'above now hold the proposal; <b>Apply</b> marks it, and until then nothing has moved.</div>';
+    $('#bandfitout').innerHTML=h;
+  }catch(e){ $('#banderr').innerHTML='<div class="out err"><div class="v">'+esc(e.message)+'</div></div>'; }
+  $('#bandstatus').innerHTML='';
 }
 
 /* ========================== CURVE COMPARISON ==========================
@@ -3353,6 +3511,22 @@ async function sessLoad(){
 $('#sesssave').onclick=()=>sessSave(false);
 $('#sesssavepair').onclick=()=>sessSave(true);
 $('#sessload').onclick=sessLoad;
+/* Save first, then export the file: what lands in the copy is what the
+   session file says, so the two cannot disagree. The route writes a copy
+   only; in-place is a typed command. */
+async function sessExport(){
+  $('#sessmsg').className='msg';
+  $('#sessmsg').innerHTML='<span class="spin"></span> writing the marks, then the workbook copy…';
+  try{
+    const saved=await post('/api/session/save',{path:sessPath()});
+    const r=await post('/api/session/export',{path:saved.written});
+    const bits=['written into '+r.written+' — '+r.workbook+' is unchanged'];
+    (r.notes||[]).forEach(n=>bits.push(n));
+    (r.problems||[]).forEach(n=>bits.push('! '+n));
+    sessShow(saved,bits.join(' · '),!!(r.problems&&r.problems.length));
+  }catch(e){sessShow(null,e.message,true)}
+}
+$('#sessexport').onclick=sessExport;
 
 /* ============================== MONITOR ==============================
    Small panels, one per pair, each showing what has moved between two points
@@ -3556,7 +3730,7 @@ const MKF=[
  ['pair','#mmpair'],['cut','#mmcut'],['method','#mmmethod'],
  ['target_source','#mmsource'],['fly_convention','#mmfly'],['vol_unit','#mmunit'],
  ['text','#mmtext'],['target_text','#mmtarget'],
- ['choose_knobs','#markchoose'],['use_archive','#markarchive'],
+ ['choose_knobs','#markchoose'],['use_archive','#markarchive'],['use_rules','#markrules'],
  ['lookback_days','#marklook'],['min_instances','#markmin'],
  ['half_life','#agenthalf'],['min_effective','#agentmin'],['evidence_lookback','#agentlook'],
 ];
@@ -3684,6 +3858,10 @@ function paintMM(){
   $('#mmparse').innerHTML=(sh.notes||[]).map(n=>'<div class="etonote">· '+esc(n)+'</div>').join('')+
     (sh.skipped||[]).map(x=>'<div class="etowarn">! line '+x.line+' skipped ('+esc(x.why)+'): '+
       esc(String(x.text).slice(0,70))+'</div>').join('')+
+    /* Another pair's lines: not wrong, just not this pair's.  Said, so a
+       paste that was mostly somebody else's market does not read as empty. */
+    (sh.ignored||[]).map(x=>'<div class="etonote">· line '+x.line+' passed over ('+esc(x.why)+'): '+
+      esc(String(x.text).slice(0,70))+'</div>').join('')+
     /* Read, understood, and then replaced by a later quote of the same thing.
        Shown, not dropped: a line that went missing between the paste and the
        screen is a silent zero with better manners. */
@@ -3699,6 +3877,8 @@ function paintMQ(){
   const sh=d.sheet||{};
   $('#mqparse').innerHTML=(sh.notes||[]).map(n=>'<div class="etonote">· '+esc(n)+'</div>').join('')+
     (sh.skipped||[]).map(x=>'<div class="etowarn">! line '+x.line+' skipped ('+esc(x.why)+'): '+
+      esc(String(x.text).slice(0,70))+'</div>').join('')+
+    (sh.ignored||[]).map(x=>'<div class="etonote">· line '+x.line+' passed over ('+esc(x.why)+'): '+
       esc(String(x.text).slice(0,70))+'</div>').join('');
 }
 
@@ -3749,7 +3929,7 @@ function paintMarket(d){
   /* The agent's two columns appear only when its last run was against this
      exact paste. Suggestions computed from an older market sitting beside a
      newer quote is the one way this card could mislead. */
-  const ag=agentFresh()?new Map((AGR.rows||[]).map(r=>[r.line,r])):null;
+  const ag=agentRowsFor('market');
   const ncol=(timed?9:8)+(ag?2:0);
   let h='<div class="mmwide"><table><thead><tr>'+
     '<th>Quote</th>'+(timed?'<th>Time</th>':'')+
@@ -3788,11 +3968,15 @@ function paintQuote(d){
     (m.stamp?' ('+esc(m.stamp.replace('T',' ').slice(0,16))+')':'')+'</span>';
   if(!sh.rows.length){host.innerHTML='<div class="annone">Nothing could be read from the '+
     'request box.</div>';return}
-  const ncol=12;
+  /* The quoting agent's two columns sit beside the requests it read, and
+     only while both boxes still hold what it read. */
+  const ag=agentRowsFor('request');
+  const ncol=12+(ag?2:0);
   let h='<div class="mmwide"><table><thead><tr>'+
     '<th>Instrument</th><th>Size</th><th>Model</th>'+
     '<th>Fair</th><th>Axe</th><th>Bank</th><th>Skew</th>'+
     '<th>Our bid</th><th>Our ask</th><th>Width</th>'+
+    (ag?'<th>Archive</th><th>Agent</th>':'')+
     '<th>Their market</th><th>Verdict</th></tr></thead><tbody>';
   sh.rows.forEach(r=>{
     const theirs=(r.market_bid==null)?'—':(num(r.market_bid,4)+' / '+num(r.market_ask,4));
@@ -3803,12 +3987,20 @@ function paintQuote(d){
        '<td class="mmv">'+sgn(r.skew_axe,3)+'</td>'+
        '<td class="mmv">'+sgn(r.skew_bank,3)+'</td>'+
        '<td class="mmv"'+cls(r.skew_total)+'>'+sgn(r.skew_total,3)+(r.skew_capped?' *':'')+'</td>'+
-       '<td class="mmv"><b>'+num(r.our_bid,4)+'</b></td>'+
-       '<td class="mmv"><b>'+num(r.our_ask,4)+'</b></td>'+
+       /* Asked live: the premium two-way is the answer and the volatility
+          two-way it came off sits under it in small type. */
+       '<td class="mmv"><b>'+(r.premium_bid!=null?num(r.premium_bid,4):num(r.our_bid,4))+'</b>'+
+         (r.premium_bid!=null?'<br><small>'+num(r.our_bid,4)+' vol</small>':'')+'</td>'+
+       '<td class="mmv"><b>'+(r.premium_ask!=null?num(r.premium_ask,4):num(r.our_ask,4))+'</b>'+
+         (r.premium_ask!=null?'<br><small>'+num(r.our_ask,4)+' vol · '+esc(r.premium_label)+'</small>':'')+'</td>'+
        '<td class="mmv">'+num(r.width,3)+'</td>'+
+       (ag?('<td class="mmv">'+num((ag.get(r.line)||{}).archive_width,3)+'</td>'+
+            '<td>'+(ag.has(r.line)?agentTag(ag.get(r.line)):'—')+'</td>'):'')+
        '<td class="mmv">'+theirs+'</td>'+
        '<td>'+mmVerdictTag(r)+'</td></tr>';
-    const why=mmWhy(r);
+    const suggestion=ag&&ag.has(r.line)&&['tight','wide','no rule'].indexOf(
+      ag.get(r.line).verdict)>=0?['agent: '+ag.get(r.line).note]:[];
+    const why=mmWhy(r,suggestion);
     if(why)h+='<tr><td class="mmwhy" colspan="'+ncol+'">'+why+'</td></tr>';
   });
   h+='</tbody></table></div>';
@@ -3985,7 +4177,8 @@ function mmTargetVisible(){
    It proposes and it changes nothing -- the quote sheet's width moves when a
    rule is written for it in the bank below, and not before. */
 const AF=[
- ['pair','#mmpair'],['text','#mmtext'],['fly_convention','#mmfly'],['vol_unit','#mmunit'],
+ ['pair','#mmpair'],['text','#mmtext'],['request_text','#mqtext'],
+ ['fly_convention','#mmfly'],['vol_unit','#mmunit'],
  ['fallback_spread','#mmfallback'],['half_life','#agenthalf'],['min_effective','#agentmin'],
  ['lookback_days','#agentlook'],['tolerance','#agenttol'],
  ['include_model_read','#agentmodel'],['counterparty','#agentcpty'],
@@ -3998,7 +4191,19 @@ function agentPayload(){
 /* The suggestions are only allowed beside the quotes they were computed from.
    A paste edited after a run leaves a sheet whose rows no longer match, and a
    stale width sitting next to a fresh quote is worse than no width at all. */
-function agentFresh(){return AGR&&AGR.text_key===$('#mmtext').value}
+/* The rows come from the request box when it holds anything, else from the
+   market paste; the server says which (`source`), and freshness is judged
+   against that box.  The market paste feeds "their width" beside a request,
+   so a request-sourced run is also stale once the paste has moved. */
+function agentFresh(){
+  if(!AGR)return false;
+  if(AGR.source==='request')
+    return AGR.text_key===$('#mqtext').value&&AGR.market_key===$('#mmtext').value;
+  return AGR.text_key===$('#mmtext').value;
+}
+function agentRowsFor(source){
+  return agentFresh()&&AGR.source===source?new Map((AGR.rows||[]).map(r=>[r.line,r])):null;
+}
 const AGTAG={'agrees':'in','tight':'thru','wide':'out','no rule':'out','thin':'none',
              'not read':'none'};
 
@@ -4008,9 +4213,11 @@ async function runAgent(){
   try{
     const body=agentPayload();
     AGR=await post('/api/mm/agent',body);
-    AGR.text_key=body.text;
+    AGR.text_key=AGR.source==='request'?body.request_text:body.text;
+    AGR.market_key=body.text;
     paintAgent();
     if(MMR)paintMarket(MMR);
+    if(MQR)paintQuote(MQR);
     const n=(AGR.rows||[]).filter(r=>r.verdict==='tight'||r.verdict==='wide').length;
     $('#agentstatus').textContent=n?(n+' row(s) the archive does not support'):'nothing to flag';
   }catch(e){
@@ -4042,7 +4249,10 @@ async function scanAgent(){
 /* Downloading is a *when*, not a *where*: the folder and the proxy are the
    server's, named on its command line, and the page chooses only how many
    days back. The server caps that -- a year's backfill is a command with
-   somebody watching it, not a button that can be leaned on. */
+   somebody watching it, not a button that can be leaned on.
+   The route is shown rather than the named proxy: a system proxy nobody named
+   still carries the request, and a fetch that went through one must not read
+   like one that went straight out. */
 async function fetchAgent(){
   const days=parseInt($('#agentdays').value,10);
   if(!(days>=1)){
@@ -4060,7 +4270,8 @@ async function fetchAgent(){
       (d.status==='failed'?'! ':'· ')+esc(d.line)+'</div>').join('');
     $('#agentmsg').className=r.written?'msg ok':'msg warn';
     $('#agentmsg').innerHTML=esc(r.reason||r.summary||'')+
-      (r.proxy?' <span class="etonote">through '+esc(r.proxy)+'</span>':'')+lines+
+      (r.route?' <span class="etonote">'+esc(r.route)+'</span>':
+        (r.proxy?' <span class="etonote">through '+esc(r.proxy)+'</span>':''))+lines+
       (r.read?'<div class="etonote">· '+esc(r.read.summary)+'</div>'+
         (r.read.files||[]).map(f=>'<div class="etonote">· '+esc(f)+'</div>').join(''):'')+
       (r.notes||[]).map(n=>'<div class="etonote">· '+esc(n)+'</div>').join('');
@@ -4103,10 +4314,13 @@ function paintAgent(){
   let h='';
   if(!rows.length){
     h='<div class="annone">'+esc(d.text_key&&d.text_key.trim()?
-      'No quote could be read from the paste.':'Paste a market above, then press Suggest.')+
+      (d.source==='request'?'Nothing could be read from the request box.':
+       'No quote could be read from the paste.'):
+      'Ask for something in the request box (or paste a market above), then press Suggest.')+
       '</div>';
   }else{
-    h='<div class="mmwide"><table><thead><tr><th>Quote</th><th>Their width</th>'+
+    h='<div class="mmwide"><table><thead><tr><th>'+(d.source==='request'?'Asked for':'Quote')+
+      '</th><th>Their width</th>'+
       '<th>We would show</th><th>Archive</th><th>Seen</th><th>Verdict</th></tr></thead><tbody>';
     rows.forEach(r=>{
       h+='<tr><td>'+esc(r.describe)+(r.superseded?' <small>superseded</small>':'')+'</td>'+
@@ -4174,7 +4388,7 @@ function markKey(b){return [b.pair,b.text,b.target_source,b.target_text].join('\
    verdict buttons go away when the market box has moved on, for the same
    reason the quoting agent's columns do. */
 function markFresh(){return !!(MKR&&MKR.key===markKey(markPayload()))}
-const SRC={rule:'in',learned:'thru',caller:'none'};
+const SRC={rule:'in',learned:'thru',caller:'none','rule of thumb':'out'};
 function markTag(src){return '<span class="mmtag '+(SRC[src]||'none')+'">'+esc(src)+'</span>'}
 
 async function runMark(){
@@ -4199,9 +4413,9 @@ async function runMark(){
 function paintMark(){
   const d=MKR; if(!d)return;
   const p=d.proposal||{}, t=d.tendencies||{}, c=d.critique;
-  $('#markhead').textContent=(t.path||'no journal yet')+' · '+(t.instances||0)+' instance(s) for '+
-    d.pair+', '+(t.answered||0)+' answering a proposal · '+
-    (d.choose_knobs?'agent chose the knobs':'knobs as ticked on the fit panel');
+  $('#markhead').textContent=(t.path||'no journal yet')+' · '+(t.learned_from||((t.instances||0)+' instance(s)'))+
+    ' for '+d.pair+' · '+(d.choose_knobs?'agent chose the knobs':'knobs as ticked on the fit panel')+
+    (d.use_rules?'':' · desk only, no rule of thumb');
   let h='';
   /* the plan: what was decided and by what kind of reason */
   h+='<table><thead><tr><th>Decision</th><th>Value</th><th>By</th><th>Why</th></tr></thead><tbody>'+
@@ -4230,7 +4444,8 @@ function paintMark(){
       const k=x.key.split('.').pop(), cr=corr.get(k);
       return '<tr><td>'+esc(x.key)+'</td><td class="mmv">'+num(x.before,4)+'</td><td class="mmv"><b>'+
         num(x.after,4)+'</b></td><td class="mmv"'+cls(x.move)+'>'+sgn(x.move,4)+'</td><td class="mmwhy">'+
-        (cr?(sgn(cr.applied-cr.fitted,4)+(cr.capped?' (capped)':'')+' · '+esc(cr.why)):'—')+'</td></tr>'}).join('')+
+        (cr?(sgn(cr.applied-cr.fitted,4)+(cr.capped?' (capped)':'')+' '+markTag(cr.prior?'rule of thumb':'learned')+
+          ' · '+esc(cr.prior||cr.why)):'—')+'</td></tr>'}).join('')+
       '</tbody></table>';
   }else h+='<div class="annone">The fit landed where the surface already is; there is nothing to propose.</div>';
   /* the quoting agent's critique */
@@ -4246,6 +4461,20 @@ function paintMark(){
       '</tbody></table>';
     (c.notes||[]).forEach(n=>{h+='<div class="etonote">· '+esc(n)+'</div>'});
   }
+  /* the rules of thumb, each against the real corrections; a contested one
+     is flagged and nothing else -- retiring it is a person's job */
+  const rr=d.rules;
+  if(rr&&(rr.rows||[]).length){
+    h+='<table style="margin-top:10px"><thead><tr><th>Rule of thumb</th><th>Value</th><th>Weight</th>'+
+      '<th>Real corrections</th><th>Desk median</th><th></th></tr></thead><tbody>'+rr.rows.map(r=>
+      '<tr><td>'+esc(r.key)+'<div class="mmwhy">'+esc(r.why||'')+'</div></td><td class="mmv">'+sgn(r.value,3)+' ±'+num(r.spread,3)+
+      '</td><td class="mmv">'+r.weight+'</td><td class="mmv">'+r.real_n+(r.real_n?' ('+r.far_side+' on the far side)':'')+
+      '</td><td class="mmv">'+(r.real_median==null?'—':sgn(r.real_median,3))+'</td><td>'+
+      (r.contested?'<span class="mmtag thru">contested</span>':r.real_n?'':'<span class="mmtag none">untested</span>')+
+      '</td></tr>').join('')+'</tbody></table>';
+  }
+  if(rr&&rr.problems)rr.problems.forEach(n=>{h+='<div class="etonote">· '+esc(n)+'</div>'});
+  if(d.rules_error)h+='<div class="etowarn">! rules of thumb: '+esc(d.rules_error)+'</div>';
   /* what it learned from */
   const rows=t.rows||[];
   if(rows.length)h+='<details style="margin-top:8px"><summary class="etonote">what the journal says about this desk ('+
@@ -4379,7 +4608,7 @@ $('#markaccept').onclick=()=>recordMark('accepted');
 $('#markedited').onclick=()=>recordMark('edited');
 $('#markreject').onclick=()=>recordMark('rejected');
 $('#marktake').onclick=takeMarkPlan;
-['#markchoose','#markarchive'].forEach(id=>{$(id).onchange=saveMM});
+['#markchoose','#markarchive','#markrules'].forEach(id=>{$(id).onchange=saveMM});
 ['#marklook','#markmin'].forEach(id=>{$(id).oninput=saveMM});
 
 $('#mmrun').onclick=runMM;
@@ -4517,15 +4746,16 @@ async function boot(){
   if(has('marking')&&!$('#chartexpiry').value)
     $('#chartexpiry').value=new Date(STATE.valuationMs+90*864e5).toISOString().slice(0,10);
   const w=(STATE.warnings||[]).slice(); if(STATE.error)w.unshift(STATE.error);
-  // Notes are not warnings: they are what the reader worked out rather than
-  // read -- a cross broken into its dollar legs, a leg added because a cross
-  // needs it.  Shown in the same box, because there is only one place the
-  // workbook speaks, and muted so a derivation never reads as a problem.
-  const nts=(STATE.notes||[]), n=w.length+nts.length;
+  // The box holds errors and warnings only.  Notes -- what the reader worked
+  // out rather than read: a cross broken into its dollar legs, a leg added
+  // because a cross needs it -- are not problems and must not count as
+  // messages, so they sit on the meta line's tooltip (and `volkit check`
+  // prints them) rather than in the box.
+  const n=w.length;
   $('#warnbox').style.display=n?'block':'none';
   $('#warnhead').textContent=`${n} message${n===1?'':'s'} from the workbook`;
-  $('#warnlist').innerHTML=nts.map(x=>`<li class="etonote">${esc(x)}</li>`).join('')
-    +w.slice(0,60).map(x=>`<li>${esc(x)}</li>`).join('');
+  $('#warnlist').innerHTML=w.slice(0,60).map(x=>`<li>${esc(x)}</li>`).join('');
+  $('#meta').title=(STATE.notes||[]).join('\n');
   showFeed(STATE.feed);
   showAuto(STATE.auto);
   if(AUTOSEQ<0)AUTOSEQ=(STATE.auto||{}).seq||0;

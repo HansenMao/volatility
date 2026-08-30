@@ -44,10 +44,12 @@ build is tested on a machine that has none.
 
 from __future__ import annotations
 
+import errno
 import io
 import os
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import zipfile
 from dataclasses import dataclass, field
@@ -110,17 +112,90 @@ class Response:
         return 200 <= self.status < 300
 
 
+def effective_proxy(url: str, proxy: str | None = None, *, direct: bool = False) -> str | None:
+    """The proxy this connection will *actually* go through, named.
+
+    Not the same question as ``default_proxy``. That one reads the environment
+    variables; this one reads what ``urllib`` itself will do, which on Windows
+    includes the system proxy in the registry -- so a connection can go through
+    a proxy nothing in this tool ever named. A desk hitting ``WinError 10061``
+    (the connection actively refused) then reads a message saying the tool
+    could not reach DTCC, when what refused was a proxy at ``127.0.0.1:8080``
+    that is not running. Whatever ends up carrying the request is named on the
+    failure, wherever it was configured.
+
+    ``getproxies`` reads a **static** proxy only: an autoconfig (PAC) script is
+    not executed by ``urllib``, so a desk configured that way goes direct here
+    while its browser does not -- which is the other half of the same
+    diagnosis, and is said in ``_refusal_hint``.
+    """
+    if direct:
+        return None
+    if proxy:
+        return proxy
+    scheme = urllib.parse.urlsplit(url).scheme or "https"
+    host = urllib.parse.urlsplit(url).hostname or ""
+    try:
+        if host and urllib.request.proxy_bypass(host):
+            return None
+    except Exception:                       # the registry reader may raise; not fatal
+        pass
+    try:
+        found = urllib.request.getproxies()
+    except Exception:
+        return None
+    return found.get(scheme) or found.get("https") or found.get("http") or None
+
+
+def _was_refused(reason) -> bool:
+    """Did something answer the connection with a refusal?
+
+    A refusal (``ECONNREFUSED``, ``WinError 10061``) is a different diagnosis
+    from a drop (a timeout, ``WinError 10060``): a refusal means a host was
+    reached and said no, so the address is wrong rather than blocked.
+    """
+    if isinstance(reason, ConnectionRefusedError):
+        return True
+    for attr in ("errno", "winerror"):
+        code = getattr(reason, attr, None)
+        if code in (errno.ECONNREFUSED, 10061):
+            return True
+    return False
+
+
+def _refusal_hint(reason, used: str | None) -> str:
+    """What to do about it, when the failure is one with a known cure."""
+    if not _was_refused(reason):
+        return ""
+    if used:
+        return (f"; the connection to {used} was refused, so that proxy is named but nothing "
+                f"is listening there -- correct it, or go straight out with --no-proxy")
+    return ("; the connection was refused before it reached DTCC, which on a desk network "
+            "usually means egress goes through a proxy this build was not told about. An "
+            "autoconfig (PAC) proxy is not read automatically: name it with --proxy "
+            "HOST:PORT, or download the file in a browser into the SDR folder and press "
+            "Scan folders")
+
+
 def urllib_opener(url: str, *, timeout: float, proxy: str | None,
-                  user_agent: str = USER_AGENT) -> Response:
+                  user_agent: str = USER_AGENT, direct: bool = False) -> Response:
     """The real network. Replaced wholesale in tests.
 
     ``proxy`` is honoured explicitly rather than left to urllib's environment
     handling, because a desk behind a corporate proxy needs the failure to say
     *which* proxy refused -- and an environment variable that is set but wrong
-    is otherwise indistinguishable from no network at all.
+    is otherwise indistinguishable from no network at all. ``direct`` is the
+    third state: no proxy at all, whatever the environment or the registry
+    says, which is the way past a stale system proxy on a machine whose route
+    out is direct.
     """
     handlers = []
-    if proxy:
+    if direct:
+        # An empty map is not "no handler": it is a handler that proxies
+        # nothing, which is what stops urllib installing its own from the
+        # environment and the registry.
+        handlers.append(urllib.request.ProxyHandler({}))
+    elif proxy:
         handlers.append(urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
     opener = urllib.request.build_opener(*handlers)
     request = urllib.request.Request(url, headers={"User-Agent": user_agent})
@@ -133,10 +208,16 @@ def urllib_opener(url: str, *, timeout: float, proxy: str | None,
         return Response(url=url, status=exc.code, body=exc.read()[:4096],
                         content_type=exc.headers.get("Content-Type", "") if exc.headers else "")
     except urllib.error.URLError as exc:
-        where = f" through the proxy {proxy}" if proxy else ""
-        raise DtccError(f"could not reach {url}{where}: {exc.reason}") from None
+        used = effective_proxy(url, proxy, direct=direct)
+        where = (f" through the proxy {used}" if used
+                 else " directly, through no proxy")
+        raise DtccError(f"could not reach {url}{where}: "
+                        f"{exc.reason}{_refusal_hint(exc.reason, used)}") from None
     except OSError as exc:
-        raise DtccError(f"could not reach {url}: {exc}") from None
+        used = effective_proxy(url, proxy, direct=direct)
+        where = f" through the proxy {used}" if used else ""
+        raise DtccError(f"could not reach {url}{where}: "
+                        f"{exc}{_refusal_hint(exc, used)}") from None
 
 
 def default_proxy() -> str | None:
@@ -288,6 +369,11 @@ class Downloader:
     asset_class: str = "FOREX"
     report: str = "cumulative"
     proxy: str | None = None
+    #: Ignore every proxy -- the environment's, and the system one urllib reads
+    #: out of the Windows registry -- and go straight out. The way past a
+    #: system proxy that is named and not running, which is what a refused
+    #: connection (``WinError 10061``) usually is.
+    direct: bool = False
     timeout: float = 120.0
     pause: float = PAUSE
     retries: int = RETRIES
@@ -320,7 +406,7 @@ class Downloader:
             for attempt in range(1, max(1, self.retries) + 1):
                 tried.append(url)
                 reply = self.opener(url, timeout=self.timeout, proxy=self.proxy,
-                                    user_agent=self.user_agent)
+                                    user_agent=self.user_agent, direct=self.direct)
                 if reply.ok:
                     self._working = url.rsplit("_", 1)[-1]      # the extension that worked
                     return reply, tried, ""
@@ -423,6 +509,19 @@ class Downloader:
                 "nothing new was written; every date was already held, had no session, or "
                 "was refused for the reason shown against it")
         return out
+
+    @property
+    def route(self) -> str:
+        """How this downloader is reaching the network, in a phrase.
+
+        Read off ``effective_proxy`` rather than off ``self.proxy``, so a
+        system proxy nobody named is still named here -- the same reason the
+        failure names it.
+        """
+        if self.direct:
+            return "directly (--no-proxy)"
+        used = effective_proxy(f"{self.base}/", self.proxy)
+        return f"through {used}" if used else "directly"
 
     def _filename(self, day: date) -> str:
         return (f"{self.jurisdiction.upper()}_{self.report.upper()}_"

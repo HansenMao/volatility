@@ -48,6 +48,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
 from . import remarks as rem
+from . import rules as rot
 from . import session
 from .numerics import ConvergenceError
 from .marketmaker import (BACKBONE_KNOBS, CROSS_KNOBS, DEFAULT_BACKBONE_FREE,
@@ -78,6 +79,13 @@ BIAS_SIGNAL = 1.0
 #: nudge that can exceed the fit is not a nudge -- it is a second, unexamined
 #: fit with a smaller sample behind it.
 CORRECTION_CAP = 0.5
+
+#: Real corrections -- the desk's own, not a rule of thumb's pseudo-instances
+#: -- that must lie on the median's side of zero before a correction is
+#: applied.  A prior shapes the size of a nudge and never authorises one: with
+#: no real correction behind it a rule is printed and nothing moves, however
+#: confident the rule.
+MIN_REAL_CORRECTIONS = 3
 
 
 class MarkingError(Exception):
@@ -129,6 +137,32 @@ class Tendency:
     correction_spread: float | None = None
     enough: bool = False
     why_not: str = ""
+    # the desk's own corrections, apart from a rule of thumb's pseudo-instances
+    real_corrections: tuple = ()
+    prior: rot.NudgeRule | None = None
+
+    @property
+    def correction_real_n(self) -> int:
+        return len(self.real_corrections)
+
+    @property
+    def correction_real(self) -> float | None:
+        return _median(list(self.real_corrections))
+
+    def decompose(self) -> str:
+        """``+0.15 = +0.10 rule of thumb, +0.05 desk (n=7)``, or nothing.
+
+        Two medians and a subtraction: the seeded list's and the real-only
+        list's.  No new arithmetic, so nothing here can drift from ``bias``.
+        """
+        if self.prior is None or self.correction is None:
+            return ""
+        desk = self.correction_real
+        if desk is None:
+            return (f"{self.correction:+.3f} = {self.correction:+.3f} {rot.LABEL}, "
+                    f"no desk correction yet")
+        return (f"{self.correction:+.3f} = {self.correction - desk:+.3f} {rot.LABEL}, "
+                f"{desk:+.3f} desk (n={self.correction_real_n})")
 
     @property
     def moved_fraction(self) -> float:
@@ -142,8 +176,10 @@ class Tendency:
     def bias(self) -> tuple[float | None, str]:
         """The correction worth applying, and why it is or is not one."""
         if self.correction_n < MIN_CORRECTIONS:
-            return None, (f"only {self.correction_n} answered proposal(s) here; "
-                          f"{MIN_CORRECTIONS} is the floor before a correction is a tendency")
+            pseudo = self.correction_n - self.correction_real_n
+            return None, (f"only {self.correction_n} correction(s) here"
+                          + (f" ({pseudo} of them {rot.LABEL})" if pseudo else "")
+                          + f"; {MIN_CORRECTIONS} is the floor before a correction is a tendency")
         if self.correction is None:
             return None, "no correction could be measured"
         spread = self.correction_spread
@@ -153,13 +189,35 @@ class Tendency:
             return None, (f"the corrections are {self.correction:+.3f} on average but spread "
                           f"±{spread:.3f}; this desk lands on both sides of the fit here, "
                           f"which is not a bias")
-        return self.correction, (
-            f"over {self.correction_n} answered proposal(s) this desk landed "
-            f"{self.correction:+.3f} from the fit, spread ±{spread:.3f}")
+        # The third test, and the one a prior cannot pass on its own: real
+        # corrections on the median's side of zero.  A rule of thumb with
+        # weight 4 clears MIN_CORRECTIONS by itself; it must not clear this.
+        sign = 1.0 if self.correction > 0 else -1.0
+        agreeing = sum(1 for c in self.real_corrections if c * sign > 0)
+        if agreeing < MIN_REAL_CORRECTIONS:
+            what = (f"a {rot.LABEL} says {self.correction:+.3f} here" if self.prior is not None
+                    else f"the corrections say {self.correction:+.3f} here")
+            return None, (f"{what}, but only {agreeing} real correction(s) lie on that "
+                          f"side of the fit; {MIN_REAL_CORRECTIONS} is the floor before a "
+                          f"correction is applied" + ("" if self.prior is None else
+                          ", and a rule of thumb may shape a nudge but never authorise one"))
+        n = self.correction_real_n
+        why = (f"over {n} answered proposal(s) this desk landed "
+               f"{self.correction:+.3f} from the fit, spread ±{spread:.3f}")
+        if self.prior is not None:
+            why = (f"over {n} answered proposal(s) plus a {rot.LABEL} of weight "
+                   f"{self.prior.weight}, {self.decompose()}, spread ±{spread:.3f}")
+        return self.correction, why
 
     def describe(self) -> str:
         if not self.enough:
-            return f"{self.key}: {self.why_not}"
+            body = f"{self.key}: {self.why_not}"
+            if self.prior is not None:
+                value, why = self.bias()
+                body += (f"; {rot.LABEL} {self.prior.value:+.3f} ±{self.prior.spread:.3f} "
+                         f"(weight {self.prior.weight}): "
+                         + (why if value is None else f"correction {value:+.3f} ({why})"))
+            return body
         if self.reluctant:
             return (f"{self.key}: not moved once in {self.seen} instance(s) -- this desk "
                     f"leaves it alone")
@@ -182,40 +240,63 @@ class Tendencies:
     answered: int = 0
     by_key: dict = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
+    # the rules of thumb seeded in, and what the real corrections make of them
+    rules: rot.RuleBook | None = None
+    prior_n: int = 0                # pseudo-instances seeded, across every rule
+    rule_reports: list = field(default_factory=list)
 
     def get(self, section: str, knob: str) -> Tendency | None:
         return self.by_key.get(f"{section}.{knob}")
+
+    @property
+    def contested(self) -> list[rot.RuleReport]:
+        return [r for r in self.rule_reports if r.contested]
+
+    def learned_from(self) -> str:
+        """One sentence, never one blended count."""
+        body = (f"{self.instances} re-marking instance(s), {self.answered} of them "
+                f"answering a proposal")
+        if self.prior_n:
+            body += (f", plus {self.prior_n} {rot.LABEL} pseudo-instance(s) from "
+                     f"{len(self.rule_reports)} rule(s)")
+        return body
 
     def reluctant_knobs(self) -> list[str]:
         return sorted(t.knob for t in self.by_key.values()
                       if t.section == "curve" and t.reluctant)
 
     def lines(self) -> list[str]:
-        out = [f"{self.pair}: {self.instances} re-marking instance(s), "
-               f"{self.answered} of them answering a proposal"]
+        out = [f"{self.pair}: {self.learned_from()}"]
         out += ["  " + t.describe() for t in
                 sorted(self.by_key.values(), key=lambda t: (t.section, t.knob))]
+        out += [f"  {rot.LABEL}: " + r.line() for r in self.rule_reports]
         out += ["  note: " + n for n in self.notes]
         return out
 
 
 def learn(journal: rem.Journal, pair: str, *, asof: datetime | None = None,
-          lookback_days: float = 365.0, min_instances: int = MIN_INSTANCES) -> Tendencies:
+          lookback_days: float = 365.0, min_instances: int = MIN_INSTANCES,
+          rules: rot.RuleBook | None = None) -> Tendencies:
     """Work the journal into tendencies for one pair.
 
     Age is *not* a weight here, unlike the quote archive.  A width is a fact
     about a market that moves; how a desk marks is a fact about the desk, and
     a habit from three months ago is still that desk's habit.  What ages out
     is the window, and it is a year by default.
+
+    ``rules`` seeds each nudge rule's pseudo-corrections into the sample
+    before the tendencies are built (:mod:`rules` says why the sample and
+    not the statistic).  Everything after that point is untouched, and the
+    real corrections are kept apart on the tendency so that ``bias`` can
+    refuse a nudge no real correction supports.
     """
     now = asof or datetime.now(timezone.utc)
     rows = journal.query(pair=pair, since=now - timedelta(days=lookback_days), until=now)
     out = Tendencies(pair=pair.upper(), asof=now, instances=len(rows),
-                     answered=sum(1 for e in rows if e.answered))
+                     answered=sum(1 for e in rows if e.answered), rules=rules)
     if not rows:
         out.notes.append(f"the journal holds no re-marking instance for {pair.upper()}; "
                          f"the agent will run the fit the way the screen's defaults would")
-        return out
 
     seen: dict[str, int] = {}
     moves: dict[str, list[float]] = {}
@@ -246,6 +327,28 @@ def learn(journal: rem.Journal, pair: str, *, asof: datetime | None = None,
                 if change.correction is not None:
                     corrections.setdefault(key, []).append(change.correction)
 
+    # -- the rules of thumb, seeded into the sample --------------------------
+    # Kept apart first, because the real corrections are what the third test
+    # in ``bias`` and the contradiction register both read.
+    real = {k: list(v) for k, v in corrections.items()}
+    priors: dict[str, rot.NudgeRule] = {}
+    for rule in (rules.nudges_for(pair) if rules is not None else []):
+        key = rule.key
+        if key in priors:
+            out.notes.append(f"a second {rot.LABEL} for {key} was passed over; one rule "
+                             f"per knob per pair")
+            continue
+        priors[key] = rule
+        where.setdefault(key, (rule.section, rule.knob))
+        seen.setdefault(key, 0)
+        corrections.setdefault(key, []).extend(rule.pseudo())
+        out.prior_n += rule.weight
+        out.rule_reports.append(rot.report(rule, real.get(key, []), _median))
+    for r in out.contested:
+        out.notes.append(f"{rot.LABEL} on {r.rule.key} is contested: {r.real_n} real "
+                         f"correction(s) with median {r.real_median:+.3f} against a rule of "
+                         f"{r.rule.value:+.3f}; nothing is retired here, edit the file")
+
     for key in sorted(set(seen) | set(moves) | set(answered)):
         section, knob = where.get(key, ("curve", key))
         n = max(seen.get(key, 0), len(moves.get(key, [])))
@@ -259,7 +362,8 @@ def learn(journal: rem.Journal, pair: str, *, asof: datetime | None = None,
             correction_n=len(corr), correction=_median(corr),
             correction_spread=_spread(corr), enough=enough,
             why_not="" if enough else (
-                f"{n} instance(s) is under the floor of {min_instances}; nothing is claimed"))
+                f"{n} instance(s) is under the floor of {min_instances}; nothing is claimed"),
+            real_corrections=tuple(real.get(key, [])), prior=priors.get(key))
     return out
 
 
@@ -272,7 +376,7 @@ class Choice:
 
     what: str
     value: str
-    source: str             # "rule" | "learned" | "caller"
+    source: str             # "rule" | "learned" | "caller" | rules.LABEL
     why: str = ""
 
     def line(self) -> str:
@@ -328,6 +432,7 @@ def plan_fit(book, pair: str, *, tendencies: Tendencies | None = None,
         plan.pinned = tuple(k for k in available if k not in wanted)
         return _plan_wings(plan, wing_quotes, tendencies, smile_free, method)
 
+    default = _free_order(default, available, tendencies, plan)
     wanted = [k for k in default if k in available]
     pinned_why: dict[str, str] = {}
     for knob in available:
@@ -369,6 +474,48 @@ def plan_fit(book, pair: str, *, tendencies: Tendencies | None = None,
     for knob in plan.pinned:
         plan.notes.append(f"{knob} pinned -- {pinned_why.get(knob, 'not freed')}")
     return _plan_wings(plan, wing_quotes, tendencies, smile_free, method)
+
+
+def _free_order(default, available, tendencies: Tendencies | None, plan: Plan):
+    """The order knobs are freed in, and so which are kept when targets are few.
+
+    A plan rule of thumb may replace the screen's default order; the journal
+    then reorders whichever order is in force by how often this desk has
+    actually moved each knob -- a discrete choice reordered by observed
+    frequency, not a number blended with a prior.  What neither may do is
+    free more knobs than the targets determine; that rule is applied after
+    this and is not expressible in a rules file.
+    """
+    order = list(default)
+    rules = tendencies.rules if tendencies is not None else None
+    if rules is not None:
+        rule, named = rules.free_order(tendencies.pair)
+        if rule is not None:
+            known = [k for k in named if k in available]
+            unknown = [k for k in named if k not in available]
+            if unknown:
+                plan.notes.append(f"{rot.LABEL} names {', '.join(unknown)}, which this "
+                                  f"curve does not have; passed over")
+            if known:
+                order = known + [k for k in order if k not in known]
+                plan.choices.append(Choice(
+                    "free order", ", ".join(known), rot.LABEL,
+                    rule.why or "the order the rules file frees curve knobs in"))
+    if tendencies is not None:
+        moved = {}
+        for knob in order:
+            t = tendencies.get("curve", knob)
+            if t is not None and t.enough and t.moved:
+                moved[knob] = t.moved
+        if moved:
+            ranked = sorted(order, key=lambda k: -moved.get(k, 0))
+            if ranked != order:
+                plan.choices.append(Choice(
+                    "free order", ", ".join(ranked), "learned",
+                    "reordered by how often this desk has moved each knob: "
+                    + ", ".join(f"{k} {moved[k]}x" for k in ranked if k in moved)))
+                order = ranked
+    return tuple(order)
 
 
 def _plan_wings(plan: Plan, wing_quotes, tendencies: Tendencies | None,
@@ -444,11 +591,11 @@ def marked(book, pair: str, snapshot: dict):
     surface = book[pair]
     before = session.capture_pair(book, pair)
     try:
-        problems = session._apply_pair(surface, snapshot)
+        problems = session.apply_block(surface, snapshot)
         surface.invalidate()
         yield problems
     finally:
-        session._apply_pair(surface, before)
+        session.apply_block(surface, before)
         surface.invalidate()
         back = session.capture_pair(book, pair)
         if back != before:
@@ -467,11 +614,16 @@ class Correction:
     wanted: float
     capped: bool
     why: str
+    prior: str = ""            # the decomposition, when a rule of thumb is in it
+
+    @property
+    def source(self) -> str:
+        return f"learned + {rot.LABEL}" if self.prior else "learned"
 
     def line(self) -> str:
         body = (f"{self.knob}: fit said {self.fitted:.4g}, this desk lands "
                 f"{self.wanted:+.4g} from it -> {self.applied:.4g}")
-        return body + ("  (capped)" if self.capped else "") + f"  [learned] {self.why}"
+        return body + ("  (capped)" if self.capped else "") + f"  [{self.source}] {self.why}"
 
 
 @dataclass
@@ -527,6 +679,7 @@ class Proposal:
                          "move": c.move, "describe": c.describe()} for c in self.changes],
             "corrections": [{"knob": c.knob, "fitted": c.fitted, "applied": c.applied,
                              "wanted": c.wanted, "capped": c.capped, "why": c.why,
+                             "prior": c.prior, "source": c.source,
                              "line": c.line()} for c in self.corrections],
             "fit": None if self.fit is None else {
                 "rmse": self.fit.rmse * 100.0, "max_error": self.fit.max_error * 100.0,
@@ -575,10 +728,12 @@ def propose(book, pair: str, *, targets: list[CurveTarget] | None = None,
                          "the screen's defaults would run")
     else:
         out.notes.append(
-            f"learned from {tendencies.instances} re-marking instance(s), "
-            f"{tendencies.answered} of them answering a proposal"
+            f"learned from {tendencies.learned_from()}"
             + ("" if tendencies.instances else
-               " -- which is none, so nothing here is learned yet"))
+               " -- which is no instance, so nothing here is learned from this desk yet"))
+        for r in tendencies.contested:
+            out.warnings.append(f"{rot.LABEL} on {r.rule.key} is contested by "
+                                f"{r.real_n} real correction(s)")
     after = {k: (dict(v) if isinstance(v, dict) else v) for k, v in out.before.items()}
 
     # -- the curve ---------------------------------------------------------
@@ -658,7 +813,8 @@ def _correct(out: Proposal, after: dict, tendencies: Tendencies | None) -> None:
             continue
         after["curve"][knob] = value + applied
         out.corrections.append(Correction(knob=knob, fitted=value, applied=value + applied,
-                                          wanted=wanted, capped=capped, why=why))
+                                          wanted=wanted, capped=capped, why=why,
+                                          prior=t.decompose()))
 
 
 # ==========================================================================
@@ -732,6 +888,7 @@ class MarkPanel:
 
     # the agent's own
     choose_knobs: bool = True
+    use_rules: bool = True
     lookback_days: float = 365.0
     min_instances: int = MIN_INSTANCES
     use_archive: bool = True
@@ -750,7 +907,7 @@ class MarkPanel:
             "mid_pull": self.mid_pull, "max_nfev": self.max_nfev, "apply": False,
         }
 
-    def run(self, book, journal: rem.Journal, archive=None) -> dict:
+    def run(self, book, journal: rem.Journal, archive=None, rules=None) -> dict:
         from . import marketmaker as mm
         from .quotes import parse_quotes
 
@@ -765,6 +922,7 @@ class MarkPanel:
             "notes": [], "warnings": [], "parse": {"notes": [], "skipped": []},
             "targets": {"n": 0, "evidence": ""}, "proposal": None, "lines": [],
             "plan": None, "marks": None, "tendencies": None, "critique": None,
+            "use_rules": bool(self.use_rules), "rules": None,
         }
 
         # -- the market, read exactly as the fit reads it -------------------
@@ -796,12 +954,24 @@ class MarkPanel:
                        or (q.instrument == "spread" and q.leg in ("rr", "fly"))]
 
         # -- the desk, then the proposal --------------------------------------
+        rules = rules if self.use_rules else None
         tendencies = learn(journal, self.pair, asof=clock.now,
                            lookback_days=self.lookback_days,
-                           min_instances=self.min_instances)
+                           min_instances=self.min_instances, rules=rules)
+        out["rules"] = None if rules is None else {
+            "path": rules.path, "problems": list(rules.problems),
+            "n": len(rules), "prior_n": tendencies.prior_n,
+            "rows": [{"key": r.rule.key, "value": r.rule.value, "spread": r.rule.spread,
+                      "weight": r.rule.weight, "why": r.rule.why,
+                      "real_n": r.real_n, "real_median": r.real_median,
+                      "far_side": r.far_side, "contested": r.contested,
+                      "line": r.line()} for r in tendencies.rule_reports],
+            "contested": [r.rule.key for r in tendencies.contested],
+        }
         out["tendencies"] = {
             "path": journal.path, "problems": list(journal.problems),
             "instances": tendencies.instances, "answered": tendencies.answered,
+            "prior_n": tendencies.prior_n, "learned_from": tendencies.learned_from(),
             "lookback_days": self.lookback_days, "min_instances": self.min_instances,
             "lines": tendencies.lines(),
             "rows": [{"section": t.section, "knob": t.knob, "seen": t.seen,
@@ -1007,7 +1177,7 @@ def answer_from_request(journal: rem.Journal, book, payload: dict, *, clock) -> 
         out["notes"].append("recorded: the desk left the surface where it was")
     if payload.get("apply") and verdict in ("accepted", "edited"):
         surface = book[pair]
-        problems = session._apply_pair(surface, after)
+        problems = session.apply_block(surface, after)
         surface.invalidate()
         out["applied"] = True
         out["warnings"].extend(problems)
@@ -1038,6 +1208,7 @@ def panel_from_request(payload: dict) -> MarkPanel:
         mid_pull=_opt_float(payload, "mid_pull", 0.05),
         max_nfev=int(_opt_float(payload, "max_nfev", 300)),
         choose_knobs=_opt_bool(payload, "choose_knobs", True),
+        use_rules=_opt_bool(payload, "use_rules", True),
         lookback_days=_opt_float(payload, "lookback_days", 365.0),
         min_instances=int(_opt_float(payload, "min_instances", MIN_INSTANCES)),
         use_archive=_opt_bool(payload, "use_archive", True),

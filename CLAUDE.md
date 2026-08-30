@@ -46,7 +46,7 @@ These were the user's explicit choices. Do not quietly reverse them.
 | **Implement fixes, don't just flag them** | When something is wrong, fix it and note what moves. Leave it switchable only when there is a real reason to reconcile against old marks. |
 | **Web UI, not Tkinter** | Stdlib `http.server` only. No Flask/FastAPI. The desk machine may have nothing installed. |
 | **Excel stays primary** | `vol_marks.xlsx` must keep working as-is. Abstract behind a data source; do not migrate to YAML. |
-| **Nothing writes to the workbook** | Every mark a screen makes lives on the loaded book. What a session wants to keep goes into `session.py`'s own file *beside* the workbook, never into it -- see §13. |
+| **Nothing writes to the workbook** | Every mark a screen makes lives on the loaded book. What a session wants to keep goes into `session.py`'s own file *beside* the workbook, never into it -- see §13. The one exception is the **export** in §13, asked for by name (`volkit session --to-workbook`), which writes a *copy* unless told `--in-place`. |
 | **Nothing fails silently** | The legacy `except: pass` returning `0.0000` is the anti-pattern this project exists to remove. Errors surface with the real message. |
 
 ## 3. Architecture
@@ -61,7 +61,8 @@ sabr       Hagan 2002 + calibration (closed-form alpha, global sweep)
 smile      arbitrage-constrained SVI, vanna-volga, cached slices
 banded     pegged pairs: Beta-on-band body + hazard-rate jump leg, and the
            marked treatment deciding how much the surface takes notice of it
-events     dated vol bumps, joint height calibration
+events     dated vol bumps, weighted per currency and superposed per pair,
+           joint height calibration
 atm        the ATM term structure
 cross      cross pairs from two legs and a correlation
 surface    ATM + smile, greeks, delta strikes, RR / fly
@@ -70,7 +71,8 @@ pricing    multi-leg strips, strike/expiry specs, per-leg error isolation
 marketdata validated Excel reader; CONFIG is two columns and a cross
            names its own dollar legs
 feed       spot / forward points from file, interpolated
-econ       scheduled economic events (rules + dated table)
+econ       scheduled economic events (rules + dated table), and the weight
+           each puts on each currency
 book       all pairs, built in dependency order
 listed     exchange traded options: paste parsing, least-squares SABR fit,
            comparison against the marked FX surface, and a position book with
@@ -108,6 +110,8 @@ remarks    every time somebody moved a mark, and what from: a re-mark is a diff
            of two snapshots, so nothing has to be instrumented
 marking    the marking agent: how to run the fit, and what this desk does after
            it -- tendencies with counts on them, never a policy
+rules      the marking agent's rules of thumb: what a desk believes before the
+           journal knows anything, seeded into the sample so it can be outvoted
 consult    what the two agents say to each other: a finding, a proposal, and a
            scored critique of what it broke
 ask        the third agent: a question in English about what the tool holds,
@@ -220,6 +224,12 @@ preflight  startup checks (tzdata above all)
   *dropped* it and stamped the result UTC, reading `19:00+09:00` as 19:00Z.
   An offset is converted here, never discarded. Do not re-add a local
   `.replace("T", " ")`.
+- **The events panel is typed in Hong Kong time; the model stays in UTC.**
+  `EVTZ` in the page is the one declaration (fixed `+08:00`, no DST). Every
+  `when` the server returns is UTC and is converted once on the way in
+  (`evLocal`); every `when` posted carries the offset (`evPost`) so
+  `parse_datetime` converts it back. No route, CLI command or session file
+  changed: the conversion lives at the one edge a person types at.
 - **A pricing leg's market is spot, the swap and the outright, and they hold
   one identity: `forward = spot + swap / pip`.** Two of the three are free
   and the third is arithmetic; `fwdsrc` says which of the swap and the
@@ -310,6 +320,27 @@ preflight  startup checks (tzdata above all)
   one call and verifies the restore. The server still holds no screen state --
   the marks are the browser's, like the panel -- and a quote given none prices
   the surface as it stands and says so. See §11.
+- **An event is weighted per currency; a pair adds its two legs and marks an
+  adjustment on top.** `bump = w[leg1] + w[leg2] + adjust`, with
+  `events.superpose` the one place the two legs meet (they add: a bump is a
+  variance increment over twice the volatility, so bumps add to first order;
+  root-sum-square is the rule for event *volatilities*, which a bump is not)
+  and `events.EventEntry.resolve` the one place a pair works its bump out.
+  Every `Event` carries the parts and the total and `bump == sum(weights) +
+  adjust` always holds; an event typed as one number carries it as the
+  adjustment, which is how a workbook without currency columns, an old session
+  file and a `(when, bump, label)` tuple all still mean what they meant. The
+  weight table is the calendar's (`EconCalendar.weights`, seeded from
+  `DEFAULT_WEIGHTS` and `volkit/data/event_weights.csv`) and a `PARAMS`
+  column headed by a currency is the workbook's spelling of the same thing;
+  the panel and the session file hold the parts in points and post the
+  parts, and `events.event_entries` is their one reader. A total that
+  disagrees with its parts is refused, never averaged. The table itself is
+  an **optional card** on the marking screen (`/api/events/weights`, GET and
+  POST, owned by marking; `volkit events --set EVENT:CCY=POINTS` is the CLI
+  spelling), posted whole like every other panel, kept in the session file
+  as a top-level `event_weights` block, and **it feeds Auto-load only**: an
+  event already on a pair keeps the parts it was given.
 - **Volatility points at the edges, decimals in the middle.** Everything a
   human types or reads -- a pasted quote, a knowledge-bank width, a curve
   parameter on screen -- is in volatility points; everything inside a model is
@@ -347,9 +378,33 @@ So the model is a **regime mixture**, not a bounded distribution:
 - Break leg: a **hazard rate** λ, two-sided and asymmetric, with marked jump
   sizes and post-break volatilities.
 - Breach probability is a calibrated **output**, and positive.
-- Break risk is a **marked input**, never inferred from a butterfly — a wider
-  body and a higher hazard both raise the ATM, so a joint fit is degenerate.
-  `solve_hazard=True` inverts it deliberately and reports the sensitivity.
+- Break risk is a **marked input**, never inferred from the at-the-money — a
+  wider body and a higher hazard both raise the ATM, so that quote cannot
+  separate them. **The wings can propose it**, and the calibration is two
+  stages kept apart because they are identified by different quotes
+  (`banded.py`, the section comment above `BREAK_PARAMS`): stage A
+  (`_BodyFit`) is the exact forward-and-ATM solve for the Beta body; stage B
+  (`_fit_break`) reads any subset of the break parameters off the 10d and 25d
+  RR and fly by least squares, sweep then polish, the body profiled out
+  exactly at every point. `calibrate_band_wings` is one tenor,
+  `calibrate_band_term_structure` the whole curve under one shared regime with
+  each tenor's own implied hazard reported beside it (flat: consistent;
+  sloping: the jump sizes or the band are wrong), `fit_band_treatment` the
+  surface-level entry behind the card's **Fit from the wings** and `volkit
+  band --fit`. It **proposes and marks nothing**: the boxes are filled and
+  Apply is the same Apply. `solve_hazard=True` is the one-parameter,
+  one-instrument case of the same machinery -- the hazard against the strangle
+  premium at one delta, bracketed -- and gives the number it always gave, to
+  5e-15; the fly residual is the strangle *premium* over the strangle's vega
+  for exactly that reason. **Identifiability is measured, not assumed**: a
+  finite-difference Jacobian at the answer marks a parameter these quotes did
+  not move as *not informed* and names a near-degenerate pair. Measured, the
+  hazard against the jump size is *not* degenerate from strikes inside the
+  band (the forward constraint moves the body with the jump) -- the jump sizes
+  are held by default because they are a policy view, not because the quotes
+  cannot see them. Residuals are in volatility (price gap over vega). A tenor
+  no hazard can fit sits out with its reason rather than zeroing the shared
+  ceiling.
 
 Useful finding: the band alone gives a *negative* USDHKD risk reversal against
 a quoted positive one. Most of the quoted skew is peg-break premium.
@@ -851,6 +906,7 @@ PYTHONUTF8=0 LC_ALL=C python -m unittest discover -s tests   # as a cp1252 Windo
                                            # from a Mac before CI does
 pip install esprima                         # enables the front-end JS syntax test
 python -m volkit check                      # validate the workbook
+python -m volkit events USDJPY --weights    # the pair's events leg by leg, and the weight table
 python -m volkit serve --feed files/market_feed.csv --history vol_history.xlsx
 python -m volkit serve --auto-reload 30     # re-read the market feed when it changes
                                            # (the pricing tab has the same switch)
@@ -865,6 +921,8 @@ python -m volkit mm EURUSD --request ask.txt --target-source none   # the quote,
 python -m volkit mm EURUSD --learn < run.txt          # propose widths, --save writes them
 python -m volkit mm EURUSD --request ask.txt --archive-width   # the archive on the width ladder
 python -m volkit mark propose EURUSD --file run.txt --out p.json   # the marking-agent card's path
+python -m volkit mark rules EURUSD                    # the rules of thumb, each against the desk
+python -m volkit mark learn EURUSD --no-rules         # the desk-only answer, beside the one above
 python -m volkit agent ask EURUSD "how wide has the 3M fly been shown this month, and by whom"
 python -m volkit agent ask EURUSD --journal mm_remarks.jsonl   # interactive: a question a line
 python -m volkit serve --journal mm_remarks.jsonl     # where the card's verdicts go
@@ -880,6 +938,8 @@ python -m volkit listed 6E --expiry "2026-09-11 19:00" --forward 1.085 \
 python -m volkit listed 6E --expiry "2026-09-11 19:00" --forward 1.085 \
     --file quotes.txt --panels more.json --positions book.txt   # several contracts at once
 python -m volkit band USDHKD --feed files/market_feed.csv --hazard 3
+python -m volkit band USDHKD --feed files/market_feed.csv --fit hazard,weak_share   # propose the
+                                           # break regime from both wings at every tenor; marks nothing
 python -m volkit monitor EURUSD --history files/history_sample.xlsx \
     --watch EURUSD --watch USDJPY:history@-1m \
     --compare surface --compare history:-30d --field rr25
@@ -1083,6 +1143,49 @@ line came first.
   time-only line takes the last date above it; a run with no date anywhere is
   ordered on a nominal day, says so, and never shows that day back.
 
+The looser reading (2026-08-28), each a precedence stated once and said on
+the row:
+
+- **A strike beats a delta, a date beats a tenor.** `6M 25d 1.12 call` is the
+  1.12 strike and `1M 30sep26 ATM` is the 30 September expiry; the other
+  name is dropped with a note. Both used to be refusals in columns. Dates
+  are read in the spellings `timeutil.parse_datetime` reads (`30sep26`,
+  `30-Sep-2026`, `2026/09/30`), gated by shape so a number is never one.
+- **The side matters only where it changes the number.** A volatility at an
+  absolute strike is one number for the call and the put, so `_settle_side`
+  drops it, `6M 1.10 call` and `6M 1.10 put` are one quote, and the later
+  supersedes the earlier. With a delta the side picks the wing (`-25d` and
+  `25dp` are the put). On a **premium** it is required, as is the strike.
+- **A premium is a price, not a volatility** (`quote_kind`): `prem`,
+  `premium`, `live`, `pips`, or a currency word right after the price make
+  it one; `pips`, `%`/`pct` and the currency word give the unit
+  (`premium_unit`: `pips`, `pct` of the base notional, or a `price` in the
+  term currency per unit of base). It never votes in `_decide_unit` and is
+  never scaled. `marketmaker.premiums_as_vols` turns it into a volatility
+  two-way **once**, against the feed's forward at its own expiry, so the fit,
+  the residuals and the market table read one unit; no feed is a row that
+  keeps its place with the reason. A request asked live is answered as a
+  premium beside the volatility two-way it came off (`_premium_row`). The
+  archive files a premium without a level. The feed's `pip` is a divisor.
+- **A line naming another pair is passed over, not refused.** `USDJPY 1M
+  ATM 9/9.4` under EURUSD, or a heading line that is nothing but a pair,
+  goes to `ParsedRun.ignored` with the pair it named (`quotes._Blocks`),
+  and the panels, the CLI and the page show it as passed over. Not in
+  `skipped`: nothing on it was wrong. Without a pair every line is read and
+  carries `pair`.
+- **Legs split on `vs` (or `buy`/`sell`), and what a leg does not say it
+  borrows** from the legs that did (`_merge_legs`): `1M vs 3M 25d RR`, `6M
+  1.10 call vs 1.15 call`. Two legs of one instrument at two tenors fold
+  back into the calendar `spread` the tool always read, keyed and priced
+  exactly as before (`_collapse_legs`). Anything else is a **`structure`**:
+  `legs` of `QuoteLeg` with signed weights (`+`, `-`, `buy`, `sell`, `2x`),
+  valued as `sum(weight * leg)` in `Evaluator.value`. Two unsigned legs are
+  the second less the first and say so; three or more with no signs are
+  refused -- a fly guessed one way is a fly priced upside down. A risk
+  reversal leg's direction word is folded into its weight. `expiries()` is
+  how every consumer walks a quote's tenors, so `resolve_expiries` sees the
+  middle leg; `_row_expiry` files a row under its last leg.
+
 ---
 
 ## 12. Monitor (`monitor.py`, `curves.py`)
@@ -1142,6 +1245,51 @@ the knowledge bank is.
 - `--session PATH` is a global option applied in `cli._book`, so every
   subcommand prices against the same marks the screen would show, and
   `volkit serve --session PATH` starts with them on.
+
+### Writing a session into the workbook (`session.export_workbook`)
+
+The one deliberate exception to "nothing writes to the workbook", asked for
+by name: `volkit session FILE --to-workbook [OUT]`, `/api/session/export`,
+and **Write to workbook copy** on the marking screen. It writes a **copy**
+(`<name>_marked.xlsx`) unless the command says `--in-place`; the route and
+the button have no in-place spelling at all, so a screen can never overwrite
+the book of record. It exports the *file*, not the book -- the button saves
+first -- so what lands in the copy is what a person can read in the JSON
+beside it.
+
+- **Every cell it writes is one the reader reads back.** Curve parameters
+  and events go into the PARAMS rows the workbook always had (a cross's
+  correlation into the same three cells). What the workbook had no cell for
+  goes into rows `marketdata.overlay_label` now reads -- `atm 1m` (ATM
+  overwrite, points), `slog25 3m` (smile overwrite, raw), `shift rho25`
+  (the market maker's wing shift), `anchor` -- and the band treatment into a
+  `BANDS` sheet in `BandTreatment.to_request`'s own spelling. The reader
+  puts them into `MarketData.overlays` in the session file's own shape and
+  `Book._build_surface` applies them with `session.apply_block`, the same
+  function that applies a session file. Writing a cell the tool would not
+  read is the silent zero this project exists to remove, and a workbook
+  written here loads as the session it came from: a test pins every kind of
+  mark to 1e-9 through the ordinary reader.
+- **openpyxl keeps a formula and drops its cached value**, and pandas reads
+  a formula with no value as a blank quote -- every smile sheet is `=C2*3`.
+  `_restore_formula_cache` reads the values from a `data_only` load and puts
+  them back into the saved file's `<v />` slots, so the copy is readable
+  before Excel has touched it. Images and charts do not survive openpyxl,
+  which is the other reason the default is a copy.
+- **A pair is replaced, never merged**, as on load. The one thing that cannot
+  be replaced per pair is an event's *currency* weight, which every pair with
+  that currency shares: the file's weights are written, none are removed, and
+  a pair whose saved schedule lacks an event the sheet's weights would give
+  it has its own cell set to cancel the legs -- said in the notes, because
+  zeroing the weight would take it off the other pairs too.
+- **Events go in in the sheet's own clock** (Hong Kong, the reader's
+  `event_tz_offset_hours`), a row or a currency column the sheet lacks is
+  added, and rows are appended after the last *labelled* row -- `max_row`
+  counts formatted-but-empty rows, and the reader now skips a blank label
+  rather than reporting `nan` as a parameter it cannot name.
+- A pair the workbook has no PARAMS column for is reported and not added:
+  CONFIG would need it too, and a pair that is half in a workbook is worse
+  than one that is not.
 
 ## 14. Building without some of the screens (`screens.py`)
 
@@ -1289,9 +1437,22 @@ other exactly as `MF` is pinned against `marketmaker.panel_from_request`.
 
 Things the card decides once:
 
-- **It compares widths and proposes nothing else.** Per quoted row: what the
-  market showed, what we would show (the bank rule, or the panel fallback),
-  and what the archive says this has actually been shown at. The verdict is
+- **It reads the request box, and the paste only stands beside it.** The
+  rows are the instruments asked for (`request_text`, the quote panel's own
+  box); a request the paste also quoted carries that market's width beside
+  it, matched on `quotes.instrument_key` the way the quote panel matches. It
+  read the market paste for its rows once, and a desk read that as the agent
+  answering about the wrong box -- the card sits beside the quote, and a
+  width proposal about a run nobody asked to be quoted was the fit's
+  question answered with the quote's tools. With the request box empty it
+  falls back to the paste's rows and says so; `source` on the answer names
+  which box the rows came from, and the page keys its two extra columns
+  (on the quote sheet for requests, on the market sheet for the paste) and
+  their freshness on that.
+- **It compares widths and proposes nothing else.** Per row: what the
+  market showed (blank for a request the paste did not quote), what we would
+  show (the bank rule, or the panel fallback), and what the archive says
+  this has actually been shown at. The verdict is
   `agrees`, `tight`, `wide`, `no rule`, `thin` or `not read`, and the quote
   sheet's width does not move until a rule is written in the bank below it.
 - **Agreement is the quiet case.** A gap has to clear both a fraction of the
@@ -1440,6 +1601,20 @@ DTCC keeps **366 days** and publishes nothing before **2023-12-29**.
 - **Fetching and reading are two modules.** `sdr.py` must keep working on a
   desk with no route out, which is most desks this is built for, and a reader
   that could not be exercised without a network is a reader nobody can test.
+- **Whatever carries the request is named on the failure, and there is a way
+  past it.** `default_proxy` reads the environment; `urllib` reads more than
+  that -- on Windows its default `ProxyHandler` takes the *registry's* proxy --
+  so a connection could go through a proxy nothing here had named. A desk
+  meeting `WinError 10061` (refused, which is not the same fault as a drop:
+  that is 10060) then read "could not reach pddata.dtcc.com" while what
+  refused was `127.0.0.1:8080`. `effective_proxy` is the one place that
+  question is answered, for the message, for `Downloader.route` and for the
+  card; `_refusal_hint` says the cure for the one failure that has a known
+  one, in both directions -- a named proxy that is not listening, and a direct
+  connection on a desk whose egress is a proxy urllib cannot see (it does not
+  execute a PAC script). `--no-proxy` / `Downloader.direct` is the way past a
+  system proxy, and it installs an empty `ProxyHandler` rather than no handler
+  at all, which is what stops urllib putting its own back.
 - **The network is injected** (`Downloader.opener`), like the clock is
   everywhere else. That is what lets all of `dtcc.py` be tested offline -- and
   it had better be, because the machine this is developed on has no route to
@@ -1647,6 +1822,161 @@ enough for a function. So:
   outcome of a tool whose whole job is marking. A fault-injection test pins
   the guard.
 
+### Rules of thumb as a prior (`rules.py`)
+
+Built 2026-08-28 to the specification below, which is kept as written. What
+the build settled that the specification left open:
+
+- **The third test lives in `Tendency.bias()`**, after the floor and the
+  spread test, and it applies whether or not a prior is present: at least
+  `MIN_REAL_CORRECTIONS` real corrections on the median's side of zero. The
+  real corrections travel on the tendency (`real_corrections`, with
+  `correction_real_n` and `correction_real` read off them) so nothing else
+  has to know which rows were seeded.
+- **The outvote boundary is 16, not 15, for a rule far off the desk.**
+  `_spread` reads its upper quartile at `ceil(0.75 (n - 1))`; with weight 5
+  and fifteen real corrections that row is the first pseudo-correction, so a
+  rule half a point away holds the spread open and `bias()` says *both
+  sides*. Fifteen outvote a rule inside the desk's own range; the sixteenth
+  outvotes any rule. A test pins both, and `MAX_PRIOR_WEIGHT`'s comment
+  carries the arithmetic. The cap stays at 5 as specified.
+- **`Tendencies.rules` carries the rule book**, so `plan_fit` reads the plan
+  rule off the tendencies it was already given and `consult.confer` needed no
+  new argument. `_free_order` applies the plan rule's order first and the
+  journal's observed move counts second, each as its own labelled `Choice`;
+  a knob the curve does not have is passed over with a note.
+- **One nudge rule per knob per pair.** A second is passed over and said.
+- **A file that is there and wrong is refused whole** (`RulesError`): the
+  CLI exits 2, the server starts with an empty book and prints why, and the
+  card shows it. A file that is not there is a note, not an error.
+- **Where it is switched.** `serve --rules PATH`, `mark --rules PATH`,
+  `mark --no-rules`, and the **rules of thumb** checkbox on the card
+  (`use_rules`, posted with the panel and read by `panel_from_request`).
+  `mark rules PAIR` prints the file, then each rule against the pair's real
+  corrections. `files/mm_rules_sample.toml` is the sample, never loaded.
+- **Labels.** `rules.LABEL` (`rule of thumb`) is the one spelling; the
+  page's tag map keys on it, a `Correction` built with a prior in it reports
+  `learned + rule of thumb` and carries the decomposition as `prior`.
+- `tomllib` is 3.11+; `requires-python` says 3.10 and the desk build is 3.12.
+  On 3.10 a rules file that exists is a load error naming the version.
+
+---
+
+Everything above learns from the journal and from nothing else, so the agent
+says nothing useful for the first month, and `MIN_INSTANCES`, `MIN_CORRECTIONS`
+and `BIAS_SIGNAL` are judgement calls no real journal has yet argued with. But
+a desk already knows things before the journal knows anything -- the back end
+lags broker moves, risk reversals are moved less often than the at-the-money,
+marks land on the quarter, a desk is readier to raise vol than to cut it into a
+bid. Writing those down turns the first month from *accumulating toward a
+floor* into *falsifying a stated belief*, which is both useful on day one and a
+far better test of the machinery than waiting.
+
+**A rule of thumb is a third kind of reason, and is labelled as one.** A trace
+line is currently a rule (true of the model) or a learned reason (true of this
+desk, with its count). A rule of thumb is neither -- true of markers generally,
+not yet true of this desk -- and gets its own label wherever those two are
+printed. Without the third label the agent either dresses a hunch up as a model
+constraint or quotes it back as though the desk had taught it, and the whole
+point of labelling the first two apart is lost.
+
+**It is seeded into the sample, not inferred beside it.** At `learn` time each
+rule is expanded into `weight` synthetic corrections placed symmetrically about
+its `value` so that `_median` returns `value` and `_spread` returns `spread`
+exactly -- for `weight = 4` that is `[v-s, v-s/2, v+s/2, v+s]`, and a test pins
+the placement for each allowed weight, because `_spread`'s quartile indices
+pick different rows at each `n`. They are appended to `corrections[key]` in
+`learn` before the `Tendency` is built. **Everything downstream is untouched**:
+`bias()`, `BIAS_SIGNAL`, `CORRECTION_CAP`, `describe()`. This is not only the
+cheap implementation -- medians and interquartile ranges do not compose
+analytically the way means and variances do, so seeding the sample is the one
+clean way to blend a prior into statistics of this shape, and it leaves no
+second code path to keep in agreement with the first.
+
+The failure mode is worse than the one `BIAS_SIGNAL` was built to stop: a prior
+that never gets falsified is the agent reciting the author's own hunch back at
+him with the desk's confidence attached, and it *looks* like evidence. Three
+guards:
+
+- **`weight` is clamped at `MAX_PRIOR_WEIGHT` (5) and floored at 2.** A rules
+  file asking for more is a load error and not a silent trim; below two there
+  is no spread and `bias()` refuses anyway. Ten to fifteen real corrections
+  must always be able to outvote a rule.
+- **A prior shapes the size of a nudge and never authorises one.** `Tendency`
+  carries `correction_real_n` beside `correction_n`, and `bias()` gains a test
+  after the existing two: at least `MIN_REAL_CORRECTIONS` (3) *real*
+  corrections must lie on the same side of zero as the median. Zero real
+  corrections means no correction is applied however confident the rule -- the
+  rule is still printed, as a rule of thumb the agent is not yet willing to act
+  on. This is also what stops a `weight` of 4 clearing `MIN_CORRECTIONS` on its
+  own, which it otherwise would.
+- **Every rule-shaped line decomposes**, e.g. `+0.15 = +0.10 rule of thumb,
+  +0.05 desk (n=7)`. Computed by calling `_median` twice, once on the seeded
+  list and once on the real-only one, and reporting the difference. No new
+  arithmetic. And "every proposal says how much it learned from" extends to
+  *from 7 instances, plus 3 rule-of-thumb pseudo-instances* -- never one
+  blended count.
+
+**The contradiction register.** The highest-information row in the file is a
+rule of thumb the desk edits away every single time. For each rule `mark learn`
+reports the real-only median and the count of real corrections on the far side
+of `value`, and prints the rule **contested** when the real-only median has the
+opposite sign with `CONTESTED_N` (8) or more real corrections behind it.
+Nothing happens automatically -- no auto-halved weight, no silent retirement.
+That would be a second unexamined mechanism with a smaller sample behind it,
+which is the mistake this section refuses to make everywhere else. It is
+flagged, and a person edits the file.
+
+**The file** is TOML read with stdlib `tomllib` -- hand-editable by a trader,
+no new dependency, and no write path is needed. `mm_rules.toml` beside the
+workbook, or in `config/` for a house default:
+
+```toml
+[[nudge_rule]]
+section = "curve"            # remarks.SECTIONS
+knob    = "long_term_vol"    # so key == "curve.long_term_vol"
+scope   = { pair = "EURUSD" }
+value   = 0.10               # signed, in the knob's own units
+spread  = 0.06               # prior half-IQR
+weight  = 4                  # pseudo-corrections; 2 <= weight <= 5
+why     = "back end lags broker moves; desk marks up before the fit does"
+added   = "2026-08-28"
+
+[[plan_rule]]
+free_order = ["initial_vol", "long_term_vol", "short_addon", "rate_vol"]
+why        = "default order in which curve knobs are freed as targets allow"
+```
+
+Two tables because they are two different objects. `nudge_rule` is the
+pseudo-correction story above and lands in `learn`. `plan_rule` is discrete --
+a default ordering for `plan_fit`/`choose_knobs` to free by, which instances
+reorder by observed frequency rather than by blending. **The hard constraints
+are not expressible here**: four targets cannot determine five parameters, and
+`informative_params` still governs the wings. A rules file must not be able to
+weaken a rule that is true of the model, only to seed a habit.
+
+**Editing is free.** Tendencies are re-derived from the journal at every
+`learn`, so the file is a hypothesis and not a commitment: change a value,
+re-run, and see what the same journal now says. That is what makes the first
+month cheap -- the belief is revisable and the evidence is fixed.
+
+**Where a rule of thumb must not go: `consult.py`'s score.** It counts inside
+the observed two-way and nothing else. Weight it by a prior and a belief starts
+improving its own score, which reopens exactly the circularity the score was
+built to close. Priors live in tendencies; the critique stays a fact about the
+archive.
+
+CLI: `volkit mark rules PAIR` prints the rules loaded, their weights and any
+contested flags; `--no-rules` on `mark learn` and `mark propose` prints the
+desk-only answer. The two side by side are how anyone judges whether the priors
+are helping or talking, and it is the reason the flag exists.
+
+Tests worth having: a rules file with a known answer; seeding is exact at each
+allowed weight; a prior alone cannot authorise a nudge (zero real corrections,
+no correction applied, whatever the rule says); fifteen real corrections
+overwhelm a weight-5 rule; a malformed or over-weighted rules file fails loudly
+rather than loading empty.
+
 ### What the two agents exchange (`consult.py`)
 
 The quoting agent's most interesting output is a flag it is forbidden to apply
@@ -1687,7 +2017,8 @@ fewer free parameters, so its RMSE gets *worse* while matching what the desk
 actually does. The critique reports that numerically rather than hiding it,
 and adjudicating it is the person's job.
 
-Files, beside the workbook: `mm_remarks.jsonl` (the journal).
+Files, beside the workbook: `mm_remarks.jsonl` (the journal), and
+`mm_rules.toml` (the rules of thumb).
 
 ---
 

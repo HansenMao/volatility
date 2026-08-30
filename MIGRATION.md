@@ -533,6 +533,38 @@ and its absence is not an error — an empty bank simply means no quote gets a
 width until a rule exists or a fallback is typed, which the panel says outright
 rather than filling in a plausible default.
 
+## 4e. Event weights per currency — new, and moves nothing
+
+An event used to be a bump on a pair: one cell per pair per event row, and one
+default per release for auto-load. It is now weighted **per currency**, and a
+pair's bump is its two legs' weights **added** plus an adjustment the pair
+marks on top: `bump = w[leg1] + w[leg2] + adjust`. The rule is one function,
+`events.superpose`, and it adds because a quoted bump is a variance increment
+over twice the day's volatility, so two of them add to first order; the exact
+variance rule reaches the sum for bumps small against the volatility, which is
+every real event on every real pair. Root-sum-square would be the rule for two
+event *volatilities*, and a bump is not one.
+
+Nothing moves:
+
+* A workbook with no currency column reads exactly as before: the pair's cell
+  is the whole bump (carried as the adjustment, with both legs at zero). The
+  shipped workbook's USDCNH rows are pinned that way.
+* The shipped `event_weights.csv` is examples, all commented out, and the
+  defaults weight each release on its releasing currency only, so auto-load
+  suggests the numbers it always did.
+* A session file written before this holds `bump` alone and loads as an
+  adjustment; a new one holds `weights`, `adjust` and `bump`.
+
+What changes is what can be marked. `FOMC,JPY,0.3` in the weights file (or a
+`JPY` column in `PARAMS`) puts the Fed at 1.8 on USDJPY and leaves it at 1.5
+on EURUSD; a weight on a currency that does not release the event puts the
+event on every pair with that leg. The events panel shows each leg's weight,
+the adjustment and their total, and posts the parts; a total that disagrees
+with its parts is refused rather than averaged. The weight table is an
+optional card behind the Events card's **Weights** button, saved with the
+session, and it feeds Auto-load only.
+
 ## 5. Things I did **not** change
 
 * The backbone model itself: mean-reverting instantaneous vol, short-end
@@ -957,6 +989,49 @@ infeasible bracket end was swallowed by a bare `except`):
 
 The implied hazard is only as good as the assumed jump size, which is why the
 table is reported alongside it rather than a single number.
+
+## Fitting the break regime from both wings at both deltas
+
+`solve_hazard` inverted one number from one instrument. The calibration is now
+two stages with the second generalised: stage A (`_BodyFit`) is the exact
+forward-and-ATM solve above, unchanged; stage B (`_fit_break`) reads any
+subset of the break parameters — `hazard`, `weak_share`, `weak_jump`,
+`strong_jump`, `weak_vol`, `strong_vol` — off the 10 and 25 delta risk
+reversals and butterflies by least squares, sweep then polish, with the body
+profiled out exactly at every point visited. `calibrate_band_wings` does one
+tenor; `calibrate_band_term_structure` does the whole curve under one shared
+regime, one body per tenor, and reports each tenor's own implied hazard beside
+the shared one. `fit_band_treatment` is the surface-level entry behind the
+band card's **Fit from the wings** and `volkit band --fit`; it proposes and
+marks nothing.
+
+**Nothing moves.** `solve_hazard=True` is now the one-parameter, one-instrument
+case of `_fit_break` — the hazard against the strangle premium at one delta,
+bracketed — and agrees with the old solver to 5e-15 across the table above
+and the "cannot reach" note. The fly residual is the strangle *premium* gap
+over the strangle's vega for exactly that reason: an average of the two legs'
+own vega-normalised gaps has a different root whenever the two vegas differ,
+and it did, by 5e-5 in the hazard, before the residual was changed.
+
+Residuals are in volatility (price gap over vega), so a one-week fly and a
+one-year risk reversal weigh the same. The identifiability is measured at the
+answer by a finite-difference Jacobian: per parameter, how far the residual
+vector moves over the parameter's whole admissible range (below 1e-4 vol it is
+reported *not informed*), and across parameters the condition number with the
+near-degenerate pair named above 1e3. Measured, this contradicts the argument
+§6 of `CLAUDE.md` used to make: the hazard against the jump size, from strikes
+all inside the band, conditions at about 15 on USDHKD quotes — the forward
+constraint moves the body with the jump and that is visible from inside. What
+is degenerate is freeing the post-break volatilities beside the hazard and the
+share on a low-volatility tenor. The jump sizes are held by default because
+they are a policy view, not because the quotes could not see them.
+
+On the synthetic marks a planted regime (3%/yr, 70% weak side) is recovered
+from one tenor's four quotes to 1e-6 and from four tenors' sixteen to the same,
+with every per-tenor hazard flat at 3%; a wrong given jump size shows as a
+0.014 vol-point residual and a per-tenor hazard that slopes. A tenor no hazard
+can fit inside its band sits out with its reason rather than zeroing the shared
+hazard ceiling and taking the curve down with it.
 
 ## What the band alone does and does not explain
 

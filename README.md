@@ -66,6 +66,12 @@ is reported — in the message box at the top of the page, and by
 per pair holds `expiry, ST 10D, ST 25D, RR 25D, RR 10D`. Everything in the
 workbook is in **vol points**. Nothing is ever written back to it.
 
+An event is weighted **per currency**: a `PARAMS` column headed by a currency
+(`USD`, `JPY`) holds that currency's weight on each event row, and a pair's
+bump is its two legs' weights added together plus the pair's own cell on that
+row -- the adjustment on top. A workbook with no currency columns reads
+exactly as it always did, the cell being the whole bump.
+
 ## The six panels
 
 The web interface separates the jobs the tool does. The tabs run **Pricing,
@@ -241,8 +247,11 @@ feed the pricing panel immediately:
    value leaves the curve untouched and says why.
 2. **Events** — a table of dated volatility bumps. **Auto-load** pulls the
    scheduled economic releases for the pair's currencies over a chosen horizon;
-   every row is then editable, and rows can be added or deleted by hand. Applying
-   re-solves each event height so the quoted bump is reproduced exactly. The
+   every row is then editable, and rows can be added or deleted by hand. A row
+   holds each **leg's weight** (the event is weighted per currency) and the
+   pair's **adjustment**; the bump the curve is calibrated to is the two
+   weights added plus the adjustment, shown beside them and never typed over.
+   Applying re-solves each event height so that bump is reproduced exactly. The
    *vol day* column shows which volatility day each bump actually prices into —
    the day rolls at 14:00 UTC, so a late release lands on the next one and is
    flagged.
@@ -325,15 +334,38 @@ barrier for a touch, the strike for a vanilla or a digital — so the product a
 band matters most for is no longer the one product nothing was said about.
 
 Two refusals are deliberate. **Break risk is a marked input, never inferred
-from a butterfly**: a wider Beta body and a higher hazard both raise the
-at-the-money, so a joint fit is degenerate. `--solve-hazard` inverts it anyway,
-deliberately, and reports what the answer depended on. And a band is an
+from a butterfly alone**: a wider Beta body and a higher hazard both raise the
+at-the-money, so the at-the-money cannot separate them. And a band is an
 *absolute* price range while the surface works in strike over forward, so
 placing one needs an outright forward from the feed; without one the BAND
 method refuses and names the feed rather than guessing a level.
 
+What the wings can say about the break regime is a **proposal**, and the
+calibration is two stages kept apart because they are identified by different
+quotes. Stage A is exact: the forward pins where the peg-intact Beta sits and
+the at-the-money sets how concentrated it is, one monotone solve. Stage B
+reads the break regime off the wings — the 10 and 25 delta risk reversals and
+butterflies — by least squares, holding what it was not asked to free (the
+jump sizes by default: where a peg would go is a policy view, how likely it is
+to go is what the market prices). It runs per tenor
+(`banded.calibrate_band_wings`) or over the whole curve at once
+(`calibrate_band_term_structure`): the hazard and the share of breaks are
+properties of the regime, not of a tenor, and the body is bounded by the band
+while break variance grows with time, so the term structure separates the two
+in a way no single expiry can. Every quote reports its residual, the Jacobian
+at the answer says which parameters these quotes informed and names a
+near-degenerate pair, and each tenor's own implied hazard is printed beside the
+shared one — a flat row says the regime is consistent across the curve, a
+sloping one points at the jump sizes or the band. `--solve-hazard` is the
+one-parameter, one-instrument case of the same machinery (the hazard against
+the strangle premium at one delta, bracketed) and gives the number it always
+gave. Nothing is marked by any of it: the card's **Fit from the wings** fills
+the boxes and Apply is the same Apply.
+
 ```bash
 volkit band USDHKD --feed market_feed.csv --hazard 3 --weak-jump 8
+volkit band USDHKD --feed market_feed.csv --fit                   # hazard and weak_share
+volkit band USDHKD --feed market_feed.csv --fit hazard,weak_share,weak_vol
 volkit vol USDHKD 2026-03-16 --strike 7.90 --method BAND --feed market_feed.csv
 ```
 
@@ -939,6 +971,29 @@ volkit serve --session marks.json              # start with them on
 `--session` is global, so every subcommand prices against the same marks the
 screen would be showing.
 
+#### Writing a session into the workbook
+
+When a morning's marks should become the book of record, the session file can
+be written into the workbook's own cells:
+
+```bash
+volkit session marks.json --to-workbook                 # -> vol_marks_marked.xlsx beside it
+volkit session marks.json --to-workbook out.xlsx        # a named copy
+volkit session marks.json --to-workbook --in-place      # the workbook itself
+volkit session marks.json --to-workbook --pair USDJPY   # one pair only
+```
+
+**Write to workbook copy** on the Vol marking panel does the first of these
+(after saving the marks); only the command can write in place. Curve
+parameters and events go into PARAMS -- weights into the currency columns,
+the pair's adjustment into its own -- and the marks the workbook had no cell
+for go into rows the tool reads back: `atm 1m` (an ATM overwrite, in points),
+`slog25 3m` (a smile parameter overwrite), `shift rho25` (a wing shift),
+`anchor`, and a `BANDS` sheet for the band treatment. A copy loads as the
+session it came from; formulas and their last values are kept, images and
+charts are not. A pair is replaced, not merged, and the report says every
+cell it touched and anything it could not write.
+
 ### Exchange traded options
 
 A third panel fits a SABR curve to a listed market and holds it up against the
@@ -1060,8 +1115,29 @@ Dates come from two places, neither of which needs a network connection:
 US CPI has no stable rule; a second-Wednesday generator exists but is off by
 default and flags itself as approximate.
 
+**Weights are per currency, not per pair.** `volkit/data/event_weights.csv`
+(`EVENT,CCY,WEIGHT`, vol points) says how much each release is worth on each
+currency; without a row an event weighs its default on the currency that
+releases it and nothing on any other. A pair's bump is its two legs' weights
+**added** (`events.superpose`: a bump is a variance increment over twice the
+volatility, so two bumps add to first order -- a root-sum-square would be the
+rule for two event *volatilities*, which a bump is not) plus whatever the
+pair marks on top in its own events table. So `FOMC,JPY,0.3` makes the Fed 1.8
+on USDJPY and leaves it 1.5 on EURUSD, and a weight on a currency that does not
+release the event puts the event on every pair with that leg. A weight of 0
+switches an event off for that currency.
+
+The table can also be marked for a session without touching the file: the
+**Weights** button on the marking screen's Events card opens an optional card
+holding it (one row per release, one column per currency, **Apply** posts it
+whole), `--set EVENT:CCY=POINTS` does the same on the command line, and a saved
+session keeps it. Applying changes what **Auto-load** suggests from then on and
+nothing already on a pair's events table.
+
 ```bash
-python3 -m volkit events USDJPY --horizon 1     # what would be auto-loaded
+python3 -m volkit events USDJPY --horizon 1     # what would be auto-loaded, leg by leg
+python3 -m volkit events USDJPY --weights        # ... and the whole weight table
+python3 -m volkit events USDJPY --set FOMC:JPY=0.3   # the weights card, as a flag
 ```
 
 ## Run
@@ -1120,6 +1196,8 @@ python3 -m volkit mark propose EURUSD --file run.txt --out p.json     # the card
 python3 -m volkit mark propose EURUSD --target curve.txt --out p.json
 python3 -m volkit mark record  EURUSD --proposal p.json --verdict edited
 python3 -m volkit mark learn   EURUSD                    # what the journal says
+python3 -m volkit mark rules   EURUSD                    # the rules of thumb against the desk
+python3 -m volkit mark learn   EURUSD --no-rules         # the desk-only answer
 python3 -m volkit mark confer  EURUSD --archive mm_archive.jsonl   # the two agents
 ```
 
@@ -1158,6 +1236,18 @@ on, **Take the plan onto the fit** puts the agent's knob choices on the fit
 panel and runs it, and each answer is a line in the journal (`serve
 --journal`; `mm_remarks.jsonl` beside the workbook by default).
 
+Before the journal holds anything the agent can be given **rules of thumb**
+(`mm_rules.toml` beside the workbook, TOML, hand-edited; `serve --rules`;
+`files/mm_rules_sample.toml` is the shape). A rule is a belief about where
+this desk lands relative to the fit on one knob, with a weight of two to five
+answered proposals, seeded into the learned sample so the journal can outvote
+it. A rule can shape the size of a nudge and never authorise one -- three
+real corrections on its side are needed before anything is applied -- and
+every rule-shaped number decomposes into the rule's share and the desk's.
+`volkit mark rules PAIR` prints each rule against the real corrections and
+flags one the desk contests; `--no-rules` (and the checkbox on the card) is
+the desk-only answer beside it.
+
 `volkit mark confer` is the two of them talking. The quoting agent's flag
 about where the market has been becomes a target for the marking agent; the
 marking agent proposes; the quoting agent scores what the proposal fixed and
@@ -1170,7 +1260,11 @@ anonymised FX option trade reports the CFTC requires to be published -- into
 the SDR folder, where the reader picks them up. DTCC keeps 366 days. It runs
 wherever there is a network, so a desk with no route out can have them fetched
 elsewhere and dropped in the folder; `--proxy`, or `https_proxy` in the
-environment, covers a desk behind one. `agent trades PAIR --invert` then turns
+environment, covers a desk behind one, and `--no-proxy` gets past a system
+proxy that is named and not running. Whichever of those carried the request
+is named on a failure, because urllib reads the Windows registry's proxy on
+its own and a connection refused by one nothing named reads exactly like no
+network at all. `agent trades PAIR --invert` then turns
 each printed premium into the volatility it implies, using the forward on the
 trade's own date out of the historical workbook -- and refusing, by name, any
 trade whose forward it cannot find rather than reaching for today's.
@@ -1278,6 +1372,9 @@ the same clock always gives the same numbers.
   generator to `RULE_GENERATORS` in `econ.py` for a rule-based release. New
   releasing bodies need one line in `RELEASE_TIMES` giving currency, time zone
   and local release time.
+* **An event's weight on another currency** — a row in
+  `volkit/data/event_weights.csv`; or, for one workbook, a currency column in
+  `PARAMS`.
 * **A different intraday profile** — pass `hourly_weight` / `session_hours`
   to `TimeWeighting`; holiday combinations are computed, not enumerated.
 * **A new output in the UI** — add a branch to `BookService.calc` and a name

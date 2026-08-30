@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import io
 import math
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -25,7 +26,8 @@ import numpy as np
 import pandas as pd
 
 from .cross import dollar_legs, infer_leg_signs, is_cross as pair_is_cross
-from .surface import SmileMark
+from .surface import PARAM_NAMES, SmileMark
+from .events import EventEntry
 from .timeutil import UTC, parse_datetime
 
 # Row labels in the PARAMS sheet, matched case- and space-insensitively.
@@ -59,6 +61,40 @@ SMILE_COLUMNS = {
 }
 
 VOL_POINT = 100.0  # the workbook quotes vol in points; the model works in decimals
+
+#: The sheet a session's band treatments are written to, one row per pair,
+#: with the columns ``BandTreatment.to_request`` names (spaces or underscores).
+BANDS_SHEET = "BANDS"
+
+_TENOR = re.compile(r"^\d+[dwmy]$")
+
+
+def overlay_label(label) -> tuple[str, ...] | None:
+    """Read a PARAMS row label that holds a *session* mark rather than a
+    backbone parameter.
+
+    These are the rows ``session.export_workbook`` writes so that what a
+    morning marked can live in the workbook: ``atm 1m`` (an ATM overwrite, in
+    points), ``slog25 3m`` (a smile parameter overwrite, raw), ``shift rho25``
+    (the market maker's curve-wide wing shift) and ``anchor`` (the anchor
+    switch, 1 or 0).  Returns the kind and its arguments, or ``None`` for a
+    label that is none of these -- which the caller then reports, exactly as
+    it always has, because a row the tool does not read must not sit there
+    looking read.
+    """
+    words = _norm(label).split()
+    if words == ["anchor"]:
+        return ("anchor",)
+    if len(words) != 2:
+        return None
+    a, b = words
+    if a == "shift" and b in PARAM_NAMES:
+        return ("shift", b)
+    if a == "atm" and _TENOR.match(b):
+        return ("atm", b)
+    if a in PARAM_NAMES and _TENOR.match(b):
+        return ("smile", a, b)
+    return None
 
 
 class MarketDataError(ValueError):
@@ -101,7 +137,9 @@ class PairParams:
     short_decay: float = 50.0
     rate_vol: float = 0.0
     rate_corr: float = 0.0
-    events: list[tuple[datetime, float]] = field(default_factory=list)
+    #: The pair's events, resolved: each carries the bump the curve takes,
+    #: its two legs' weights and the pair's adjustment, all in decimals.
+    events: list[EventEntry] = field(default_factory=list)
 
 
 @dataclass
@@ -112,7 +150,16 @@ class MarketData:
     params: dict[str, PairParams] = field(default_factory=dict)
     marks: dict[str, list[SmileMark]] = field(default_factory=dict)
     tenor_points: tuple[str, ...] = ("1w", "2w", "3w", "1m", "2m", "3m", "6m", "9m", "1y")
+    #: PARAMS event rows read off a *currency* column: when -> currency ->
+    #: decimal bump.  A pair's event is its two legs' entries here superposed,
+    #: plus the pair's own cell.
+    event_weights: dict[datetime, dict[str, float]] = field(default_factory=dict)
     problems: list[str] = field(default_factory=list)
+    #: Session marks the workbook holds beyond its backbone: per pair, a block
+    #: in the session file's own shape (``atm_overwrites``, ``smile_overwrites``,
+    #: ``param_shifts``, ``anchor_tenors``, ``band``) and units, so the book
+    #: applies it with the same function that applies a session file.
+    overlays: dict[str, dict] = field(default_factory=dict)
     #: Things the reader worked out rather than read: a cross broken into its
     #: dollar legs, a leg added because a cross needed it.  Not problems --
     #: the workbook is fine -- but never silent either.
@@ -185,6 +232,8 @@ class ExcelSource:
             self._load_config(xls, data)
             self._load_params(xls, data)
             self._load_marks(xls, data, sheets)
+            if BANDS_SHEET in sheets:
+                self._load_bands_sheet(xls, data)
         return data
 
     # -- CONFIG -----------------------------------------------------------
@@ -327,7 +376,10 @@ class ExcelSource:
         raw = pd.read_excel(xls, "PARAMS", index_col=0)
         row_map: dict[str, int] = {}
         event_rows: list[tuple[int, datetime]] = []
+        overlay_rows: list[tuple[int, tuple[str, ...]]] = []
         for i, label in enumerate(raw.index):
+            if label is None or (isinstance(label, float) and math.isnan(label)):
+                continue  # a blank row is a blank row, not a parameter it cannot name
             key = PARAM_ROWS.get(_norm(label))
             if key is not None:
                 row_map[key] = i
@@ -335,6 +387,10 @@ class ExcelSource:
             when = self._parse_event_label(label)
             if when is not None:
                 event_rows.append((i, when))
+                continue
+            overlay = overlay_label(label)
+            if overlay is not None:
+                overlay_rows.append((i, overlay))
             elif str(label).strip() and not str(label).startswith("Unnamed"):
                 data.problems.append(f"PARAMS row {label!r} is neither a known parameter nor a date")
 
@@ -343,6 +399,38 @@ class ExcelSource:
                 raise MarketDataError(
                     f"PARAMS sheet has no {required!r} row; found {list(raw.index)}"
                 )
+
+        shift = timedelta(hours=self.event_tz_offset_hours)
+
+        def event_cell(col, idx: int) -> float | None:
+            if idx >= len(col):
+                return None
+            v = col[idx]
+            if v is None or (isinstance(v, float) and math.isnan(v)):
+                return None
+            return float(v) / VOL_POINT
+
+        # A column headed by a currency rather than a pair holds that
+        # currency's weight on each event row.  Pair columns keep reading
+        # exactly as they always did, so a workbook with no currency columns
+        # gets the bumps it always got; with them, a pair's cell is the
+        # adjustment on top of its legs.
+        currency_cols = [c for c in raw.columns
+                         if isinstance(c, str) and len(c.strip()) == 3
+                         and c.strip().isalpha() and c.strip().upper() not in data.pairs]
+        for c in currency_cols:
+            ccy = c.strip().upper()
+            col = raw[c].values
+            for idx, when in event_rows:
+                v = event_cell(col, idx)
+                if v is None or v == 0.0:
+                    continue
+                data.event_weights.setdefault(when - shift, {})[ccy] = v
+        if currency_cols:
+            data.notes.append(
+                "PARAMS event weights per currency: " + ", ".join(sorted(currency_cols))
+                + "; a pair's cell on an event row is its adjustment on top of its legs"
+            )
 
         for name, spec in data.pairs.items():
             if name not in raw.columns:
@@ -392,15 +480,87 @@ class ExcelSource:
                         f"({p.long_term * VOL_POINT:.4g}) volatility must both be positive"
                     )
 
-            shift = timedelta(hours=self.event_tz_offset_hours)
             for idx, when in event_rows:
-                if idx >= len(col):
+                cell_value = event_cell(col, idx) or 0.0
+                weights = data.event_weights.get(when - shift, {})
+                entry = EventEntry(when - shift, None, weights=weights, adjust=cell_value)
+                entry = entry.resolve(name)
+                if entry.bump == 0.0 and not any(entry.weights.values()):
                     continue
-                v = col[idx]
-                if v is None or (isinstance(v, float) and math.isnan(v)) or float(v) == 0.0:
-                    continue
-                p.events.append((when - shift, float(v) / VOL_POINT))
+                p.events.append(entry)
             data.params[name] = p
+
+            block = self._overlay_block(col, overlay_rows)
+            if block:
+                data.overlays[name] = block
+        if data.overlays:
+            data.notes.append(
+                "PARAMS session marks (overwrites, wing shifts, anchor) read for "
+                + ", ".join(sorted(data.overlays)))
+
+    @staticmethod
+    def _overlay_block(col, overlay_rows) -> dict:
+        """One pair's column read off the session rows, in the session
+        file's own shape and units: ATM overwrites in points, smile
+        overwrites and shifts raw.  A blank cell is an absent mark, and a
+        pair with no cell filled has no block at all."""
+        block: dict = {}
+        for idx, overlay in overlay_rows:
+            if idx >= len(col):
+                continue
+            v = col[idx]
+            if v is None or (isinstance(v, float) and math.isnan(v)):
+                continue
+            v = float(v)
+            kind = overlay[0]
+            if kind == "anchor":
+                block["anchor_tenors"] = bool(v)
+            elif kind == "atm":
+                block.setdefault("atm_overwrites", {})[overlay[1]] = v
+            elif kind == "shift":
+                if v:
+                    block.setdefault("param_shifts", {})[overlay[1]] = v
+            elif kind == "smile":
+                block.setdefault("smile_overwrites", {}).setdefault(
+                    overlay[1], {})[overlay[2].upper()] = v
+        return block
+
+    # -- BANDS ------------------------------------------------------------
+    def _load_bands_sheet(self, xls, data: MarketData) -> None:
+        """One row per pair: the band treatment as ``BandTreatment.to_request``
+        spells it, percentages and all.  Read into the pair's overlay block
+        and turned into a treatment by the book, through the same
+        ``from_request`` the band card uses, so a cell it refuses is refused
+        with the same words."""
+        df = pd.read_excel(xls, BANDS_SHEET)
+        cols = {_norm(c).replace(" ", "_"): c for c in df.columns}
+        if "pair" not in cols:
+            data.problems.append(f"sheet {BANDS_SHEET!r} needs a 'pair' column; found "
+                                 f"{list(df.columns)}")
+            return
+        read: list[str] = []
+        for i, row in df.iterrows():
+            raw_pair = row[cols["pair"]]
+            if raw_pair is None or (isinstance(raw_pair, float) and math.isnan(raw_pair)):
+                continue
+            name = str(raw_pair).strip().upper()
+            if name not in data.pairs:
+                data.problems.append(f"sheet {BANDS_SHEET!r} row {i + 2}: {name!r} is not a "
+                                     "pair this workbook builds")
+                continue
+            payload = {}
+            for key, column in cols.items():
+                if key == "pair":
+                    continue
+                v = row[column]
+                if v is None or (isinstance(v, float) and math.isnan(v)):
+                    continue
+                payload[key] = v
+            if payload:
+                data.overlays.setdefault(name, {})["band"] = payload
+                read.append(name)
+        if read:
+            data.notes.append(f"{BANDS_SHEET}: band treatment read for {', '.join(read)}")
 
     def _parse_event_label(self, label) -> datetime | None:
         if isinstance(label, datetime):

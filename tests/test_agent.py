@@ -743,6 +743,47 @@ class TestSuggestCard(unittest.TestCase):
         self.assertEqual(len(out["rows"]), 2)
         self.assertTrue(any(r["superseded"] for r in out["rows"]))
 
+    def test_the_rows_are_the_request_box_when_it_holds_anything(self):
+        # The card sits beside the quote button and the desk read it as
+        # answering about the market paste instead: with a request typed it
+        # still compared the paste's rows.  The request box is what is being
+        # asked for, so those are the rows; the paste supplies "their width"
+        # beside a request it also quoted, matched the quote panel's way.
+        self._seen(0.40)
+        out = self._run(text="1M ATM 8.20/8.60\n3M ATM 8.00/8.50",
+                        request_text="1M ATM\n2M 25d RR",
+                        rules=[Rule(kind="spread", value=0.41, instrument="atm")])
+        self.assertEqual(out["source"], "request")
+        self.assertEqual([r["line"] for r in out["rows"]], [1, 2])
+        atm, rr = out["rows"]
+        self.assertEqual(atm["instrument"], "atm")
+        self.assertAlmostEqual(atm["market_width"], 0.40)      # the paste's 1M
+        self.assertEqual(atm["verdict"], "agrees")
+        self.assertEqual(rr["instrument"], "rr")
+        self.assertIsNone(rr["market_width"])                  # not in the paste
+        self.assertEqual(rr["verdict"], "thin")
+
+    def test_a_request_needs_no_market_paste(self):
+        self._seen(0.40)
+        out = self._run(text="", request_text="1M ATM",
+                        rules=[Rule(kind="spread", value=0.30, instrument="atm")])
+        self.assertEqual(out["rows"][0]["verdict"], "tight")
+        self.assertIsNone(out["rows"][0]["market_width"])
+        self.assertTrue(any("no market is pasted" in n for n in out["notes"]))
+
+    def test_a_price_in_the_request_box_is_refused_not_quoted(self):
+        self._seen(0.40)
+        out = self._run(text="", request_text="1M ATM 8.20/8.60")
+        self.assertEqual(out["rows"], [])
+        self.assertTrue(out["skipped"], "the priced line should be reported")
+
+    def test_the_paste_is_compared_only_when_nothing_is_asked_for(self):
+        self._seen(0.40)
+        out = self._run(text="1M ATM 8.20/8.60", request_text="")
+        self.assertEqual(out["source"], "market")
+        self.assertEqual(len(out["rows"]), 1)
+        self.assertAlmostEqual(out["rows"][0]["market_width"], 0.40)
+
     def test_the_card_answers_with_nothing_pasted(self):
         self._seen(0.40)
         out = self._run(text="")
@@ -844,9 +885,11 @@ class _Server:
         self.content_type = content_type
         self.asked: list[str] = []
         self.fail_first = 0
+        self.direct = False
 
-    def __call__(self, url, *, timeout, proxy, user_agent=""):
+    def __call__(self, url, *, timeout, proxy, user_agent="", direct=False):
         from volkit import dtcc
+        self.direct = direct
         self.asked.append(url)
         if url.endswith(".csv"):
             return dtcc.Response(url=url, status=404, body=b"")
@@ -939,12 +982,111 @@ class TestDtccDownload(unittest.TestCase):
         self.assertIn("https://", out.days[0].why)
 
     def test_the_proxy_is_named_when_it_is_the_thing_that_refused(self):
-        def refuse(url, *, timeout, proxy, user_agent=""):
+        def refuse(url, *, timeout, proxy, user_agent="", direct=False):
             raise self.dtcc.DtccError(f"could not reach {url} through the proxy {proxy}: no")
         self.down.opener = refuse
         self.down.proxy = "http://desk-proxy:8080"
         out = self.down.fetch([date(2026, 8, 25)], self.folder, today=self.today)
         self.assertIn("desk-proxy:8080", out.days[0].why)
+
+    def test_a_system_proxy_nobody_named_is_still_named_on_the_failure(self):
+        # The bug: WinError 10061 arrived reading "could not reach
+        # https://pddata.dtcc.com/...", as though the attempt had gone
+        # straight out, while urllib had in fact dialled the proxy in the
+        # Windows registry -- which is what refused.  ``default_proxy`` reads
+        # the environment only, so nothing in the tool ever named it.
+        import urllib.error
+        import urllib.request
+        real_get, real_bypass = urllib.request.getproxies, urllib.request.proxy_bypass
+        real_build = urllib.request.build_opener
+
+        class _Refuses:
+            def open(self, *a, **k):
+                raise urllib.error.URLError(
+                    ConnectionRefusedError(10061, "no connection could be made because "
+                                                  "the target machine actively refused it"))
+
+        urllib.request.getproxies = lambda: {"https": "http://127.0.0.1:8080"}
+        urllib.request.proxy_bypass = lambda host: False
+        urllib.request.build_opener = lambda *h: _Refuses()
+        try:
+            with self.assertRaises(self.dtcc.DtccError) as caught:
+                self.dtcc.urllib_opener("https://pddata.dtcc.com/x.zip", timeout=1, proxy=None)
+        finally:
+            urllib.request.getproxies = real_get
+            urllib.request.proxy_bypass = real_bypass
+            urllib.request.build_opener = real_build
+        said = str(caught.exception)
+        self.assertIn("127.0.0.1:8080", said)          # the thing that actually refused
+        self.assertIn("--no-proxy", said)              # and the way past it
+
+    def test_a_direct_refusal_says_a_proxy_may_be_the_missing_piece(self):
+        # The other half of the same diagnosis: no proxy anywhere, the
+        # connection refused before it left the building.  urllib does not
+        # execute a PAC script, so a desk configured that way goes direct
+        # here while its browser does not.
+        import urllib.error
+        import urllib.request
+        real_get, real_build = urllib.request.getproxies, urllib.request.build_opener
+
+        class _Refuses:
+            def open(self, *a, **k):
+                raise urllib.error.URLError(ConnectionRefusedError(10061, "refused"))
+
+        urllib.request.getproxies = lambda: {}
+        urllib.request.build_opener = lambda *h: _Refuses()
+        try:
+            with self.assertRaises(self.dtcc.DtccError) as caught:
+                self.dtcc.urllib_opener("https://pddata.dtcc.com/x.zip", timeout=1,
+                                        proxy=None, direct=True)
+        finally:
+            urllib.request.getproxies = real_get
+            urllib.request.build_opener = real_build
+        said = str(caught.exception)
+        self.assertIn("--proxy", said)
+        self.assertIn("Scan folders", said)            # the offline way in
+
+    def test_a_drop_is_not_diagnosed_as_a_refusal(self):
+        # A timeout (WinError 10060) is a different fault with a different
+        # cure, and offering the refusal's advice for it would be a guess.
+        import urllib.error
+        import urllib.request
+        real_get, real_build = urllib.request.getproxies, urllib.request.build_opener
+
+        class _Times:
+            def open(self, *a, **k):
+                raise urllib.error.URLError(TimeoutError("timed out"))
+
+        urllib.request.getproxies = lambda: {}
+        urllib.request.build_opener = lambda *h: _Times()
+        try:
+            with self.assertRaises(self.dtcc.DtccError) as caught:
+                self.dtcc.urllib_opener("https://pddata.dtcc.com/x.zip", timeout=1, proxy=None)
+        finally:
+            urllib.request.getproxies = real_get
+            urllib.request.build_opener = real_build
+        self.assertNotIn("--no-proxy", str(caught.exception))
+
+    def test_direct_ignores_every_proxy_the_environment_names(self):
+        import urllib.request
+        real_get = urllib.request.getproxies
+        urllib.request.getproxies = lambda: {"https": "http://127.0.0.1:8080"}
+        try:
+            self.assertIsNone(self.dtcc.effective_proxy("https://x/y", None, direct=True))
+            self.assertEqual(self.dtcc.effective_proxy("https://x/y", None),
+                             "http://127.0.0.1:8080")
+            # An explicitly named one still wins over the system's.
+            self.assertEqual(self.dtcc.effective_proxy("https://x/y", "http://named:3128"),
+                             "http://named:3128")
+        finally:
+            urllib.request.getproxies = real_get
+
+    def test_a_direct_downloader_says_so_and_asks_for_no_proxy(self):
+        self.down.direct = True
+        out = self.down.fetch([date(2026, 8, 25)], self.folder, today=self.today)
+        self.assertEqual(out.days[0].status, "written")
+        self.assertTrue(self.server.direct)            # it reached the opener
+        self.assertIn("--no-proxy", self.down.route)
 
     def test_weekends_are_not_asked_for(self):
         days = self.dtcc.business_days(date(2026, 8, 21), date(2026, 8, 25))

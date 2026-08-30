@@ -510,7 +510,21 @@ class Evaluator:
         raise ValueError(f"cannot value a {kind!r} quote")
 
     def value(self, q: MarketQuote, expiries: dict, forwards: dict) -> float:
-        """The model's mid for one quote, in decimals."""
+        """The model's mid for one quote, in decimals.
+
+        A structure is the signed sum of its legs, each leg valued exactly as
+        the plain instrument it is; a premium quote is valued as the
+        volatility at its strike, because the market side of it has already
+        been turned into a volatility by :func:`premiums_as_vols` and the fit
+        compares like with like.
+        """
+        if q.instrument == "structure":
+            total = 0.0
+            for leg in q.legs:
+                dt, t = expiries[_key(leg.expiry)]
+                total += leg.weight * self.leg_value(leg.kind, leg, dt, t,
+                                                     forwards.get(_key(leg.expiry)))
+            return total
         if q.instrument == "spread":
             near_dt, near_t = expiries[_key(q.expiry)]
             far_dt, far_t = expiries[_key(q.expiry_far)]
@@ -546,10 +560,8 @@ def verified_fast_expiries(surface, quotes, expiries, method: str,
     """Which expiries the fit may read off the wings, measured rather than assumed."""
     wanted = set()
     for q in quotes:
-        for value in (q.expiry, q.expiry_far):
-            if value is None:
-                continue
-            if anchor_wing(method, q.delta) is not None:
+        for value, delta in _leg_deltas(q):
+            if anchor_wing(method, delta) is not None:
                 wanted.add(_key(value))
     ok, notes = set(), []
     for key in sorted(wanted):
@@ -572,6 +584,19 @@ def verified_fast_expiries(surface, quotes, expiries, method: str,
     return frozenset(ok), notes
 
 
+def _leg_deltas(q) -> list[tuple]:
+    """``(expiry, delta)`` for every leg of a quote, structures included."""
+    if q.instrument == "structure":
+        return [(leg.expiry, leg.delta) for leg in q.legs]
+    return [(value, q.delta) for value in (q.expiry, q.expiry_far) if value is not None]
+
+
+def _row_expiry(q):
+    """The expiry a row is filed under: the far leg of a spread or structure."""
+    return q.expiry_far if q.instrument in ("spread", "structure") and q.expiry_far is not None \
+        else q.expiry
+
+
 def informative_params(quotes, method: str) -> tuple[set, list[str]]:
     """Which smile parameters the pasted quotes can actually determine.
 
@@ -590,8 +615,10 @@ def informative_params(quotes, method: str) -> tuple[set, list[str]]:
     """
     informed: set = set()
     reasons: list[str] = []
-    for q in quotes:
+    for q in _flatten_legs(quotes):
         kind = q.leg if q.instrument == "spread" else q.instrument
+        if kind == "atm":
+            continue
         wing = anchor_wing(method, q.delta) or (
             25 if q.delta is not None and abs(q.delta - 0.25) < 1e-9 else
             10 if q.delta is not None and abs(q.delta - 0.10) < 1e-9 else None)
@@ -615,6 +642,91 @@ def _key(expiry) -> str:
     return str(expiry)
 
 
+def _flatten_legs(quotes) -> list:
+    """Every plain instrument the quotes contain: a structure's legs, each as
+    a quote of its own, so a rule written for quotes reads them unchanged."""
+    out = []
+    for q in quotes:
+        if q.instrument != "structure":
+            out.append(q)
+            continue
+        for leg in q.legs:
+            out.append(MarketQuote(instrument=leg.kind, expiry=leg.expiry, bid=0.0, ask=0.0,
+                                   delta=leg.delta, strike=leg.strike, is_call=leg.is_call,
+                                   fly_kind=leg.fly_kind, line=q.line, raw=q.raw))
+    return out
+
+
+def _levels_for(book, pair: str, expiries: dict) -> dict:
+    """``Book.market_level`` at every expiry: spot, forward and pip for the
+    premium conversions.  One lookup, the same one the forwards came from."""
+    return {key: book.market_level(pair, t) for key, (_, t) in expiries.items()}
+
+
+def premiums_as_vols(quotes, expiries: dict, levels: dict, pair: str) -> tuple[list, list[str]]:
+    """Every premium quote in the run, as the volatility two-way it implies.
+
+    A premium is turned into a volatility **once, here**, so the fit, the
+    residuals and the market table all read one unit.  The price is brought
+    to the term currency per unit of base -- pips through the pip size, a per
+    cent of the base notional through the spot it is paid at -- and Black-76
+    is inverted against the feed's forward at the quote's own expiry.  No
+    discount curve anywhere in this package, so the volatility reads a touch
+    low on a long-dated option, and the row says so.  A quote that cannot be
+    converted keeps its place with the reason and is not used by the fit.
+
+    Returns the quotes with the premiums replaced, and a parallel list of
+    reasons, empty where the quote is usable.
+    """
+    out, errors = [], []
+    for q in quotes:
+        if q.quote_kind != "premium":
+            out.append(q)
+            errors.append("")
+            continue
+        if q.instrument == "structure":
+            out.append(q)
+            errors.append("a premium on a multi-leg structure cannot be turned into one "
+                          "volatility; quote the legs in volatility, or the structure as a "
+                          "volatility spread")
+            continue
+        level = levels.get(_key(q.expiry)) or {}
+        fwd, spot, pip = level.get("forward"), level.get("spot"), level.get("pip")
+        if not level.get("feed") or fwd is None:
+            out.append(q)
+            errors.append(f"a premium needs the forward to become a volatility, and there is "
+                          f"no forward feed for {pair}")
+            continue
+        _, t = expiries[_key(q.expiry)]
+        try:
+            if q.premium_unit == "pips":
+                if not pip:
+                    raise ValueError("the feed gives no pip size for this pair")
+                # The feed's pip is a divisor: 10000 pips to the unit on EURUSD.
+                factor, how = 1.0 / pip, f"/ {pip:g} pips per unit"
+            elif q.premium_unit == "pct":
+                base_level = spot if spot else fwd
+                factor, how = base_level / 100.0, (f"% of base x {'spot' if spot else 'forward'} "
+                                                   f"{base_level:g}")
+            else:
+                factor, how = 1.0, "term currency per unit of base"
+            vols = [black.implied_vol(px * factor, fwd, q.strike, t, bool(q.is_call))
+                    for px in (q.bid, q.ask)]
+        except (ValueError, ArithmeticError, ConvergenceError) as exc:
+            out.append(q)
+            errors.append(f"the premium could not be inverted to a volatility: {exc}")
+            continue
+        lo, hi = sorted(vols)
+        unit = {"pips": "pips", "pct": "%", "price": ""}[q.premium_unit or "price"]
+        out.append(MarketQuote(**{**vars(q), "bid": lo, "ask": hi, "quote_kind": "vol",
+                                  "premium_unit": None, "notes": q.notes + (
+            f"premium {q.bid:g}/{q.ask:g} {unit} ({how}) inverted against the forward "
+            f"{fwd:g}: {lo * 100:.3f}/{hi * 100:.3f} vol. Undiscounted, so a touch low on a "
+            f"long-dated option",)}))
+        errors.append("")
+    return out, errors
+
+
 def resolve_expiries(clock, quotes) -> dict[str, tuple]:
     """Map every expiry mentioned in a run to a (datetime, years) pair.
 
@@ -624,7 +736,7 @@ def resolve_expiries(clock, quotes) -> dict[str, tuple]:
     """
     out: dict[str, tuple] = {}
     for q in quotes:
-        for value in (q.expiry, q.expiry_far):
+        for value in q.expiries():
             if value is None or _key(value) in out:
                 continue
             if isinstance(value, str):
@@ -1215,6 +1327,12 @@ class Panel:
                 f"{', '.join(stale)} is not in the future at the valuation time "
                 f"{clock.now:%Y-%m-%d %H:%M}Z")
         forwards, forward_notes = _forwards_for(book, self.pair, expiries)
+        # A premium becomes a volatility here, once, against the same forward
+        # the strike quotes are placed with; a line that cannot be converted
+        # keeps its place and its reason, like any other row that will not
+        # price.
+        quotes, premium_errors = premiums_as_vols(
+            quotes, expiries, _levels_for(book, self.pair, expiries), self.pair)
 
         # -- what the surface says before anything moves --------------------
         before = capture_marks(surface)
@@ -1223,7 +1341,11 @@ class Panel:
         ev0 = Evaluator(surface, method, self.cut)
         model_before: list[float | None] = []
         row_errors: list[str] = []
-        for q in quotes:
+        for q, unusable in zip(quotes, premium_errors):
+            if unusable:
+                model_before.append(None)
+                row_errors.append(unusable)
+                continue
             try:
                 model_before.append(ev0.value(q, expiries, forwards))
                 row_errors.append("")
@@ -1256,7 +1378,8 @@ class Panel:
         # wings.  A pure at-the-money quote does not, and is the curve's job.
         wing_quotes = [q for q, e in zip(quotes, row_errors) if not e and (
             q.instrument in ("rr", "fly", "outright")
-            or (q.instrument == "spread" and q.leg in ("rr", "fly")))]
+            or (q.instrument == "spread" and q.leg in ("rr", "fly"))
+            or (q.instrument == "structure" and any(l.kind != "atm" for l in q.legs)))]
         if self.tune_wings:
             try:
                 if not wing_quotes:
@@ -1365,11 +1488,14 @@ class Panel:
         """
         rows = []
         for q, mb, ma, err in zip(quotes, before, after, errors):
-            _, t = expiries[_key(q.expiry_far if q.instrument == "spread" else q.expiry)]
+            _, t = expiries[_key(_row_expiry(q))]
+            unit_scale = 100.0 if q.quote_kind == "vol" else 1.0
             row = {
                 "line": q.line, "raw": q.raw, "label": q.label, "describe": q.describe(),
                 "instrument": q.instrument, "leg": q.leg, "delta": q.delta,
                 "strike": q.strike, "is_call": q.is_call, "fly_kind": q.fly_kind,
+                "legs": [leg.describe() for leg in q.legs],
+                "quote_kind": q.quote_kind, "premium_unit": q.premium_unit,
                 "tenor": _key(q.expiry), "tenor_far": (None if q.expiry_far is None
                                                        else _key(q.expiry_far)),
                 # What was written, not the resolved instant: a run with no
@@ -1377,8 +1503,10 @@ class Panel:
                 # back would be a date the paste never contained.
                 "timestamp": q.timestamp_text,
                 "days": t * DAYS_IN_YEAR, "size": q.size, "size_basis": q.size_basis,
-                "market_bid": q.bid * 100.0, "market_ask": q.ask * 100.0,
-                "market_mid": q.mid * 100.0, "market_width": q.spread * 100.0,
+                # A premium the fit could not turn into a volatility is shown as
+                # it was written, in its own unit, and the row says so.
+                "market_bid": q.bid * unit_scale, "market_ask": q.ask * unit_scale,
+                "market_mid": q.mid * unit_scale, "market_width": q.spread * unit_scale,
                 "model_before": None if mb is None else mb * 100.0,
                 "model_after": None if ma is None else ma * 100.0,
                 "model_move": None if (mb is None or ma is None) else (ma - mb) * 100.0,
@@ -1406,6 +1534,8 @@ class Panel:
             "unit_evidence": run_.unit_evidence,
             "notes": list(run_.notes) + list(forward_notes),
             "skipped": [{"line": n, "text": t, "why": w} for n, t, w in run_.skipped],
+            # Lines that quote another pair: not wrong, just somebody else's.
+            "ignored": [{"line": n, "text": t, "why": w} for n, t, w in run_.ignored],
             # Read, understood, and then replaced by a later quote of the same
             # thing.  Reported rather than dropped: a line that disappeared
             # between the paste and the screen is a silent zero in disguise.
@@ -1470,6 +1600,7 @@ class QuotePanel:
     def run(self, book, *, bank: KnowledgeBank | None = None, hist=None,
             archive=None) -> dict:
         surface, method, clock = _prepare(book, self.pair, self.method)
+        self._book = book
 
         out: dict = {
             "pair": self.pair, "cut": self.cut, "method": method, "label": self.label,
@@ -1492,7 +1623,12 @@ class QuotePanel:
             try:
                 run_ = parse_quotes(self.text, pair=self.pair, vol_unit=self.vol_unit,
                                     fly_convention=self.fly_convention)
-                market = {instrument_key(q): q for q in run_.quotes}
+                market = {instrument_key(q): q for q in run_.quotes
+                          if q.quote_kind == "vol"}
+                if any(q.quote_kind == "premium" for q in run_.quotes):
+                    market_notes.append(
+                        "premium lines in the market paste are not set beside the prices "
+                        "here; the fit turns them into volatilities and reports them")
                 # Its own notes are not repeated here.  The paste is read by
                 # the fit, which reports what it inferred from it; saying the
                 # same three sentences again beside a price is how a panel
@@ -1559,6 +1695,7 @@ class QuotePanel:
             "rows": rows,
             "notes": list(asked.notes) + market_notes + forward_notes,
             "skipped": [{"line": n, "text": t, "why": w} for n, t, w in asked.skipped],
+            "ignored": [{"line": n, "text": t, "why": w} for n, t, w in asked.ignored],
             "n_quotes": len(rows),
             "priced": sum(1 for r in rows if r["our_bid"] is not None),
             "matched": sum(1 for r in rows if r["market_mid"] is not None),
@@ -1591,15 +1728,61 @@ class QuotePanel:
                       "widths": sum(1 for w in made.widths if w.enough),
                       "notes": list(made.notes)}
 
+    def _premium_row(self, row: dict, q, t: float, bid, ask, forward) -> None:
+        if bid is None:
+            row["notes"].append("asked as a premium, but there is no width, so there is no "
+                                "two-way to turn into one")
+            return
+        if forward is None:
+            row["warnings"].append(f"asked as a premium, and there is no forward feed for "
+                                   f"{self.pair} to price it against; the volatility two-way "
+                                   f"stands")
+            return
+        level = self._level_at(t)
+        try:
+            prices = [float(black.price(forward, q.strike, v, t, bool(q.is_call)))
+                      for v in (bid, ask)]
+        except (ValueError, ArithmeticError) as exc:
+            row["warnings"].append(f"the premium could not be priced: {exc}")
+            return
+        if q.premium_unit == "pips":
+            pip = level.get("pip")
+            if not pip:
+                row["warnings"].append("asked in pips, and the feed gives no pip size")
+                return
+            factor, label = pip, "pips"          # the feed's pip is a divisor
+        elif q.premium_unit == "pct":
+            base_level = level.get("spot") or forward
+            factor, label = 100.0 / base_level, "% of base"
+        else:
+            factor, label = 1.0, f"{self.pair[3:6].upper()} per {self.pair[:3].upper()}"
+        row["premium_bid"], row["premium_ask"] = prices[0] * factor, prices[1] * factor
+        row["premium_label"] = label
+        row["notes"].append(f"premium {prices[0] * factor:.4g}/{prices[1] * factor:.4g} {label} "
+                            f"off the volatility two-way against the forward {forward:g}; "
+                            f"undiscounted")
+
+    def _level_at(self, t: float) -> dict:
+        book = getattr(self, "_book", None)
+        if book is None:
+            return {}
+        try:
+            return book.market_level(self.pair, t)
+        except (ValueError, KeyError):
+            return {}
+
     def _row(self, q, ev, expiries, forwards, pk: PairKnowledge, rich_at, axe_at,
              market: dict, synthesis=None) -> dict:
-        dt_key = _key(q.expiry_far if q.instrument == "spread" else q.expiry)
+        dt_key = _key(_row_expiry(q))
         t = expiries[dt_key][1]
         days = t * DAYS_IN_YEAR
         row = {
             "line": q.line, "raw": q.raw, "label": q.label, "describe": q.describe(),
             "instrument": q.instrument, "leg": q.leg, "delta": q.delta,
             "strike": q.strike, "is_call": q.is_call, "fly_kind": q.fly_kind,
+            "legs": [leg.describe() for leg in q.legs],
+            "quote_kind": q.quote_kind, "premium_unit": q.premium_unit,
+            "premium_bid": None, "premium_ask": None, "premium_label": "",
             "tenor": _key(q.expiry), "tenor_far": (None if q.expiry_far is None
                                                    else _key(q.expiry_far)),
             "days": days, "size": q.size, "size_basis": q.size_basis,
@@ -1725,6 +1908,11 @@ class QuotePanel:
         if width is not None:
             bid, ask = our_mid - width / 2.0, our_mid + width / 2.0
             row["our_bid"], row["our_ask"] = bid * 100.0, ask * 100.0
+        if q.quote_kind == "premium":
+            # Asked for live, so answered as a premium: our volatility two-way
+            # at the strike, put through Black-76 against the feed's forward.
+            # The volatilities stay on the row beside it.
+            self._premium_row(row, q, t, bid, ask, forwards.get(_key(q.expiry)))
 
         # The market, when this exact instrument was quoted in the paste.  In
         # the row's own convention, like everything else on it.
@@ -1976,7 +2164,7 @@ def learn_from_panel(payload: dict, clock) -> tuple[list[Rule], list[str], dict]
     expiries = resolve_expiries(clock, run_.all_quotes)
 
     def days_of(q):
-        got = expiries.get(_key(q.expiry_far if q.instrument == "spread" else q.expiry))
+        got = expiries.get(_key(_row_expiry(q)))
         return None if got is None else got[1] * DAYS_IN_YEAR
 
     # Width evidence, not fit input: a tenor quoted twice is one live price

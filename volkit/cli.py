@@ -21,7 +21,7 @@ from pathlib import Path
 # function.  All three are stdlib-only, so this does not drag the numeric
 # stack into anything that did not already have it.
 from . import (archive, config, consult, dtcc, llm, marking, paths, remarks,
-               screens, session, synthesis)
+               rules, screens, session, synthesis)
 from .book import Book
 from .marketdata import ExcelSource, MarketDataError
 from .pricing import expiry_datetime
@@ -308,8 +308,59 @@ def cmd_band(args) -> int:
               f"  {'U-shaped' if r['u_shaped'] else 'bell'} a={r['a']:.3f} b={r['b']:.3f}")
     print("\n  Break risk is a marked input, never inferred from a butterfly: a wider body "
           "and a\n  higher hazard both raise the at-the-money, so a joint fit is degenerate. "
-          "--solve-hazard\n  inverts it deliberately and reports what it depended on.")
+          "--solve-hazard\n  inverts it deliberately and reports what it depended on; --fit "
+          "proposes the regime\n  from both wings at every tenor at once, and marks nothing.")
+    if getattr(args, "fit", None):
+        failed += _print_band_fit(args, surface, tenors)
     return 1 if failed else 0
+
+
+def _print_band_fit(args, surface, tenors) -> int:
+    """The term-structure proposal under ``volkit band --fit``: the same
+    function the card's *Fit from the wings* calls."""
+    from .banded import DEFAULT_FREE, fit_band_treatment
+    free = list(DEFAULT_FREE) if args.fit == "default" else [
+        f.strip() for f in args.fit.split(",") if f.strip()]
+    out = fit_band_treatment(surface, tenors, free=free, cut=args.cut)
+    print(f"\n  fit     free: {', '.join(out['free'])}")
+    if out.get("proposal") is None:
+        print(f"  {out.get('message', 'nothing could be fitted')}")
+        return 1
+    fit = out["fit"]
+    held = ", ".join(f"{k} {v:.4g}" for k, v in fit["held"].items())
+    print(f"          held: {held}")
+    print(f"          {fit['method']}; rmse {fit['rmse'] * 100:.4f} vol pts, worst "
+          f"{fit['max_abs_residual'] * 100:.4f}; hazard ceiling {fit['hazard_ceiling']:.3%}/yr")
+    for name, sv in fit["sensitivity"].items():
+        print(f"          {name:<12}{sv['value']:>10.5f}   moves the wings "
+              f"{sv['over_range'] * 100:.4f} vol pts over [{sv['lower']:.4g}, {sv['upper']:.4g}]"
+              + ("" if sv["informed"] else "   NOT INFORMED"))
+    if fit["condition"] == fit["condition"]:
+        print(f"          condition {fit['condition']:.3g}")
+    for w in out["warnings"]:
+        print(f"  ! {w}")
+    print(f"\n  proposed  {out['describe']}")
+    print(f"\n  {'tenor':<7}{'own hazard':>12}{'rmse':>9}  note")
+    for h in out["hazard_by_tenor"]:
+        hz = "—" if h["hazard"] is None else f"{h['hazard'] * 100:.4f}%"
+        rm = "" if h.get("rmse") is None else f"{h['rmse'] * 100:.4f}"
+        print(f"  {h['tenor']:<7}{hz:>12}{rm:>9}  {h['note']}")
+    print(f"\n  {'tenor':<7}{'delta':>6}{'inst':>5}{'quoted':>9}{'model':>9}{'resid':>9}  strikes")
+    bad = 0
+    for r in out["rows"]:
+        if r["message"]:
+            bad += 1
+            print(f"  {r['tenor']:<7}  {r['message']}")
+            continue
+        for w in r.get("wings", []):
+            for inst, q, m in (("rr", w["quoted_rr"], w["model_rr"]),
+                               ("fly", w["quoted_fly"], w["model_fly"])):
+                where = (f"{w['K_put']:.5f} {'in' if w['put_in_band'] else 'OUT'} / "
+                         f"{w['K_call']:.5f} {'in' if w['call_in_band'] else 'OUT'}")
+                print(f"  {r['tenor']:<7}{w['delta'] * 100:>5.0f}d{inst:>5}{q * 100:>9.4f}"
+                      f"{m * 100:>9.4f}{(m - q) * 100:>+9.4f}  {where}")
+    print("\n  Apply the proposal with --hazard, --weak-share and the rest; nothing was marked.")
+    return 1 if bad else 0
 
 
 def cmd_analysis(args) -> int:
@@ -1021,6 +1072,8 @@ def cmd_mm(args) -> int:
             print(f"  . {n}")
         for row in parse["skipped"]:
             print(f"  ! line {row['line']} skipped ({row['why']}): {row['text'][:60]}")
+        for row in parse.get("ignored") or []:
+            print(f"  . line {row['line']} passed over ({row['why']}): {row['text'][:60]}")
         if not args.save:
             print("\n  nothing was written; add --save to put these into the bank")
             return 0
@@ -1145,6 +1198,8 @@ def _print_fit(r: dict, quoting: bool) -> None:
         print(f"  . {n_}")
     for row in market["skipped"]:
         print(f"  ! line {row['line']} skipped ({row['why']}): {row['text'][:60]}")
+    for row in market.get("ignored") or []:
+        print(f"  . line {row['line']} passed over ({row['why']}): {row['text'][:60]}")
     for row in market.get("superseded") or []:
         # Not an error and not skipped: read, understood, and replaced by a
         # later quote of the same thing.  Printed so a run whose update was
@@ -1247,13 +1302,33 @@ def cmd_events(args) -> int:
     book = Book.from_excel(args.workbook, _clock(args))
     start = book.clock.now
     end = start + timedelta(days=args.horizon * 365.2425)
+    from .events import pair_legs
+    for item in args.set:
+        # EVENT:CCY=POINTS, the panel's cell as a flag; applied for this run.
+        try:
+            lhs, val = item.split("=", 1)
+            key, ccy = lhs.rsplit(":", 1)
+            book.econ.set_weight(key, ccy, float(val))
+        except ValueError as exc:
+            print(f"--set wants EVENT:CCY=POINTS, got {item!r}: {exc}", file=sys.stderr)
+            return 2
     rows = book.econ.for_pair(args.pair, start, end)
+    a, b = pair_legs(args.pair)
     print(f"{args.pair}: {len(rows)} scheduled events to {end:%Y-%m-%d}  "
           f"(source {book.econ.source})")
-    print(f"  {'event':<8}{'when (UTC)':<20}{'bump':>6}  note")
+    print(f"  weights per currency from "
+          f"{book.econ.weights_source or 'the defaults (no event_weights.csv)'}; "
+          f"bump = {a} + {b}, before any adjustment the pair marks on top")
+    print(f"  {'event':<8}{'when (UTC)':<20}{a:>6}{b:>6}{'bump':>7}  note")
     for e in rows:
         note = "date is a rule of thumb, verify" if e.approximate else e.source
-        print(f"  {e.name:<8}{e.when:%Y-%m-%d %H:%M}    {e.bump:>5.2f}  {note}")
+        print(f"  {e.name:<8}{e.when:%Y-%m-%d %H:%M}    {e.weights[a]:>5.2f} {e.weights[b]:>5.2f} "
+              f"{e.bump:>6.2f}  {note}")
+    if args.weights:
+        print("\n  weight table (vol points):")
+        for key in book.econ.known_events():
+            w = book.econ.weights_for(key)
+            print(f"    {key:<8}" + "  ".join(f"{c} {v:g}" for c, v in w.items()))
     return 0
 
 
@@ -1294,7 +1369,27 @@ def cmd_session(args) -> int:
             if block.get("band"):
                 bits.append(f"band {block['band'].get('mode')}")
             print(f"  {name:<9}{', '.join(bits) or 'curve only'}")
+        if doc.get("event_weights"):
+            ew = doc["event_weights"]
+            marked = sum(1 for row in ew.values() for v in row.values() if v)
+            print(f"  event weights: {len(ew)} event(s), {marked} weighted cell(s)")
         return 0
+
+    if args.to_workbook is not None:
+        # The one deliberate exception to "nothing writes to the workbook":
+        # an export, off a session *file*, into a copy unless --in-place.
+        doc = session_mod.load(path)
+        out = session_mod.export_workbook(
+            doc, args.workbook, args.to_workbook or None,
+            [args.pair] if args.pair else None, in_place=args.in_place)
+        if out["written"]:
+            print(f"{path}: written into {out['written']}"
+                  + (" (in place)" if out["in_place"] else f" -- {args.workbook} is unchanged"))
+        for note in out["notes"]:
+            print(f"  . {note}")
+        for problem in out["problems"]:
+            print(f"  ! {problem}")
+        return 1 if out["problems"] else 0
 
     # --save writes what is on the book now; the book itself may already have
     # a session on it, because --session is honoured by every command.
@@ -1328,7 +1423,9 @@ def cmd_serve(args) -> int:
           agent_sdr=getattr(args, "sdr", None) or [],
           ingest_state_path=getattr(args, "ingest_state", None),
           dtcc_proxy=getattr(args, "proxy", None),
-          journal_path=getattr(args, "journal", None))
+          dtcc_direct=bool(getattr(args, "no_proxy", False)),
+          journal_path=getattr(args, "journal", None),
+          rules_path=getattr(args, "rules", None))
     return 0
 
 
@@ -1464,11 +1561,18 @@ def cmd_agent(args) -> int:
                 print(f"error: a date must be YYYY-MM-DD ({exc})", file=sys.stderr)
                 return 2
             days = dtcc.business_days(start, end)
-        proxy = args.proxy or dtcc.default_proxy()
+        if args.no_proxy and args.proxy:
+            print("error: --proxy and --no-proxy say opposite things; pass one",
+                  file=sys.stderr)
+            return 2
+        proxy = None if args.no_proxy else (args.proxy or dtcc.default_proxy())
         down = dtcc.Downloader(jurisdiction=args.jurisdiction, asset_class=args.asset,
-                               report=args.report, proxy=proxy, timeout=args.timeout)
-        print(f"{len(days)} date(s) into {folders[0]}"
-              + (f" through {proxy}" if proxy else "")
+                               report=args.report, proxy=proxy, direct=args.no_proxy,
+                               timeout=args.timeout)
+        # ``route`` and not ``proxy``: a system proxy nobody named still carries
+        # the request, and a run that went through one must not read like a run
+        # that went straight out.
+        print(f"{len(days)} date(s) into {folders[0]} {down.route}"
               + f"  ({down.base}/{args.report}/{args.jurisdiction})")
         result = down.fetch(days, folders[0], today=today, overwrite=args.force,
                             on_day=lambda row: print(f"  {row.line()}"))
@@ -1777,12 +1881,43 @@ def cmd_mark(args) -> int:
     from . import remarks as remarks_mod
     from . import session as session_mod
 
+    from . import rules as rules_mod
+
     action = args.action
     pair = (args.pair or "").upper()
     journal = remarks_mod.Journal.load(args.journal)
     for problem in journal.problems:
         print(f"  ! {problem}", file=sys.stderr)
     clock = _clock(args)
+    # The rules of thumb.  --no-rules is the desk-only answer, and the two
+    # side by side are how anyone judges whether the priors are helping or
+    # talking.  A file that is there and wrong is an error, not an empty book.
+    rulebook = None
+    if not args.no_rules:
+        try:
+            rulebook = rules_mod.RuleBook.load(args.rules)
+        except rules_mod.RulesError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        for problem in rulebook.problems:
+            print(f"  ! {problem}", file=sys.stderr)
+
+    if action == "rules":
+        if rulebook is None:
+            print("--no-rules with 'rules' leaves nothing to print")
+            return 0
+        for line in rulebook.lines():
+            print(line)
+        if pair:
+            t = marking_mod.learn(journal, pair, asof=clock.now, lookback_days=args.lookback,
+                                  min_instances=args.min_instances, rules=rulebook)
+            print(f"\n{pair}: {t.learned_from()}")
+            for r in t.rule_reports:
+                print(f"  {rules_mod.LABEL}: {r.line()}")
+            for key in sorted(t.by_key):
+                if t.by_key[key].prior is not None:
+                    print(f"  {t.by_key[key].describe()}")
+        return 0
 
     if action == "journal":
         rows = journal.summary() if not pair else [r for r in journal.summary()
@@ -1808,7 +1943,7 @@ def cmd_mark(args) -> int:
 
     tendencies = marking_mod.learn(journal, pair, asof=clock.now,
                                    lookback_days=args.lookback,
-                                   min_instances=args.min_instances)
+                                   min_instances=args.min_instances, rules=rulebook)
     if action == "learn":
         for line in tendencies.lines():
             print(line)
@@ -1890,11 +2025,12 @@ def cmd_mark(args) -> int:
             "target_text": paths.read_text(args.target) if args.target else "",
             "free": args.free, "smile_free": args.smile_free,
             "choose_knobs": not args.no_choose, "mid_pull": args.mid_pull,
+            "use_rules": not args.no_rules,
             "lookback_days": args.lookback, "min_instances": args.min_instances,
             "use_archive": not args.no_archive, "half_life": args.half_life,
             "min_effective": args.min_evidence, "evidence_lookback": args.evidence_lookback,
         })
-        out = panel.run(book, journal, archive=arc)
+        out = panel.run(book, journal, archive=arc, rules=rulebook)
         proposal = None
         if args.json:
             print(_json.dumps(out, indent=1, sort_keys=True, default=str))
@@ -2052,6 +2188,15 @@ def build_parser() -> argparse.ArgumentParser:
                    help="put the file's marks on the book instead of writing it")
     s.add_argument("--show", action="store_true",
                    help="print what a file holds without loading a workbook")
+    s.add_argument("--to-workbook", nargs="?", const="", metavar="OUT",
+                   help="write the file's marks into the workbook's own cells: curve "
+                        "parameters and events into PARAMS, overwrites, wing shifts and "
+                        "the anchor into 'atm 1m' / 'slog25 3m' / 'shift rho25' / 'anchor' "
+                        "rows, the band treatment into a BANDS sheet. Written to OUT, or "
+                        f"to a copy beside the workbook ('{session.EXPORT_SUFFIX}' added "
+                        "to its name) -- never into the workbook itself unless --in-place")
+    s.add_argument("--in-place", action="store_true",
+                   help="with --to-workbook: overwrite the workbook itself")
     s.add_argument("--pair", help="one pair only (default: every pair in the book)")
     s.add_argument("--note", default="", help="a line recorded in the file")
     s.set_defaults(func=cmd_session)
@@ -2084,9 +2229,14 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--ingest-state", help="where the record of what has been read lives")
     s.add_argument("--proxy", help="HTTP proxy for the DTCC download (default: the one the "
                                    "environment names in https_proxy / HTTP_PROXY)")
+    s.add_argument("--no-proxy", action="store_true",
+                   help="ignore every proxy, including the system one urllib reads from the "
+                        "Windows registry, and connect straight out")
     s.add_argument("--journal", help=f"the re-marking journal the marking-agent card reads "
                                      f"and writes (default: {remarks.JOURNAL_FILENAME} beside "
                                      f"the workbook)")
+    s.add_argument("--rules", help=f"the marking agent's rules of thumb, TOML "
+                                   f"(default: {rules.RULES_FILENAME} beside the workbook)")
     s.set_defaults(func=cmd_serve)
 
     s = add_command("mm", parents=[common],
@@ -2243,6 +2393,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="cumulative: a whole day, published after it. slice: intraday")
     s.add_argument("--proxy", help="HTTP proxy for the download (default: the one the "
                                    "environment names in https_proxy / HTTP_PROXY)")
+    s.add_argument("--no-proxy", action="store_true",
+                   help="ignore every proxy, including the system one urllib reads from the "
+                        "Windows registry, and connect straight out")
     s.add_argument("--timeout", type=float, default=120.0, help="seconds per request")
     s.add_argument("--no-ingest", action="store_true",
                    help="with 'fetch', download only and do not read what arrived")
@@ -2267,14 +2420,21 @@ def build_parser() -> argparse.ArgumentParser:
     # that screen's fit, and a build without the tab has nothing for it to do.
     s = add_command("mark", parents=[common],
                     help="the marking agent: plan the fit, learn what this desk does after it")
-    s.add_argument("action", choices=("propose", "confer", "learn", "journal", "record"),
+    s.add_argument("action", choices=("propose", "confer", "learn", "journal", "record",
+                                      "rules"),
                    help="propose: plan and run the fit against a target curve. confer: take "
                         "the targets from the quote archive and let the two agents settle "
                         "on a re-mark. learn: what the journal says about this desk. "
-                        "journal: what is held. record: answer a proposal")
+                        "journal: what is held. record: answer a proposal. rules: the "
+                        "rules of thumb loaded, their weights, and any the desk contests")
     s.add_argument("pair", nargs="?")
     s.add_argument("--journal", help=f"the re-marking journal "
                                      f"(default: {remarks.JOURNAL_FILENAME} beside the workbook)")
+    s.add_argument("--rules", help=f"the rules of thumb, TOML (default: {rules.RULES_FILENAME} "
+                                   f"beside the workbook)")
+    s.add_argument("--no-rules", action="store_true",
+                   help="the desk-only answer: learn and propose from the journal alone, "
+                        "with no rule of thumb seeded in")
     s.add_argument("--target", help="with 'propose', a file of 'tenor vol' lines")
     s.add_argument("--file", help="with 'propose', the market: a pasted broker run, read "
                                   "exactly as 'mm' reads it. With this the proposal is the "
@@ -2328,6 +2488,11 @@ def build_parser() -> argparse.ArgumentParser:
     s = add_command("events", parents=[common], help="scheduled economic events for a pair")
     s.add_argument("pair")
     s.add_argument("--horizon", type=float, default=1.0, help="years")
+    s.add_argument("--weights", action="store_true",
+                   help="also print every event's weight on every currency it is weighted on")
+    s.add_argument("--set", action="append", default=[], metavar="EVENT:CCY=POINTS",
+                   help="mark one event's weight on one currency for this run, e.g. "
+                        "--set FOMC:JPY=0.3 (the weights card on the marking screen)")
     s.set_defaults(func=cmd_events)
 
     s = add_command("tenors", parents=[common], help="print the ATM term structure")
@@ -2351,6 +2516,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="spot / forward feed CSV; a band is absolute, so placing it "
                         "against the surface needs an outright forward")
     s.add_argument("--cut", default="NY")
+    s.add_argument("--fit", nargs="?", const="default", metavar="FREE",
+                   help="propose the break regime from the marked 10d and 25d wings at every "
+                        "tenor at once, holding the parameters not named: a comma list of "
+                        "hazard, weak_share, weak_jump, strong_jump, weak_vol, strong_vol "
+                        "(default hazard,weak_share). Proposes; marks nothing")
     s.set_defaults(func=cmd_band)
 
     s = add_command("vol", parents=[common, band_opts],

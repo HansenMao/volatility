@@ -615,6 +615,16 @@ def from_quotes(run, *, pair: str, source: str = "chat", origin: str = "",
         if q.replaced_by:
             notes.append(f"superseded in its own run by line {q.replaced_by}; "
                          f"kept as width evidence, not as a live level")
+        premium = q.quote_kind == "premium"
+        if premium:
+            # The archive is in volatility points.  A premium is filed as the
+            # fact that this option was shown, with no level: turning it into
+            # a volatility takes a forward and a model, both of which can be
+            # re-marked, so the number is not the archive's to invent.
+            notes.append(f"quoted as a premium ({q.bid:g}/{q.ask:g} "
+                         f"{q.premium_unit or 'price'}); filed without a volatility level")
+        if q.instrument == "structure":
+            notes.append("a structure: " + " ".join(leg.describe() for leg in q.legs))
         out.append(Observation(
             kind="quote", pair=pair.upper(), at=at,
             instrument=q.instrument,
@@ -627,8 +637,8 @@ def from_quotes(run, *, pair: str, source: str = "chat", origin: str = "",
             # because 8.2 * 100 is not 8.2 in binary and the id is a hash of
             # the text of the number: unrounded, the same quote read by two
             # routes would hash two ways and be counted twice.
-            bid=None if q.bid is None else round(q.bid * 100.0, 6),
-            ask=None if q.ask is None else round(q.ask * 100.0, 6),
+            bid=None if q.bid is None or premium else round(q.bid * 100.0, 6),
+            ask=None if q.ask is None or premium else round(q.ask * 100.0, 6),
             size=q.size, size_basis=q.size_basis,
             source=source, origin=origin, counterparty=counterparty, via=via,
             raw=q.raw, line=q.line, notes=tuple(notes)))

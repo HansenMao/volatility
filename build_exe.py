@@ -89,6 +89,7 @@ REQUIRED_SOURCES = [
     "volkit/screens.py",
     "volkit/web/index.html",
     "volkit/data/econ_events.csv",
+    "volkit/data/event_weights.csv",
 ]
 
 # The trader's own files.  Copied beside the exe rather than bundled: they are

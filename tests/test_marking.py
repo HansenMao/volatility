@@ -16,7 +16,7 @@ from unittest import mock
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from volkit import consult, marking, remarks, session
+from volkit import consult, marking, remarks, rules, session
 from volkit.book import Book
 from volkit.marketmaker import CurveTarget
 from volkit.timeutil import Clock, tenor_to_years
@@ -179,6 +179,195 @@ class TestLearning(unittest.TestCase):
 
 
 # ==========================================================================
+def _rules(text: str) -> rules.RuleBook:
+    path = _tmp("mm_rules.toml")
+    Path(path).write_text(text, encoding="utf-8")
+    return rules.RuleBook.load(path)
+
+
+RULE = """
+[[nudge_rule]]
+section = "curve"
+knob    = "long_term_vol"
+scope   = { pair = "EURUSD" }
+value   = %s
+spread  = 0.06
+weight  = %d
+why     = "back end lags broker moves"
+"""
+
+
+class TestRulesOfThumb(unittest.TestCase):
+    """A prior seeded into the sample, and the three guards on it."""
+
+    def _journal(self, n: int, *, correction=-0.12, jitter=0.01):
+        j = remarks.Journal.load(_tmp("j.jsonl"))
+        for i in range(n):
+            proposed = 6.95 + 0.40 + 0.01 * i
+            landed = proposed + correction + (jitter if i % 2 else -jitter)
+            j.add(remarks.instance("EURUSD", _snapshot(), _snapshot(long_term_vol=landed),
+                                   proposed=_snapshot(long_term_vol=proposed),
+                                   verdict="edited", at=NOW - timedelta(days=n - i)))
+        return j
+
+    def test_seeding_is_exact_at_every_allowed_weight(self):
+        # _spread's quartile indices pick different rows at each n, so the
+        # placement is pinned against the two functions themselves.
+        for w in range(rules.MIN_PRIOR_WEIGHT, rules.MAX_PRIOR_WEIGHT + 1):
+            got = rules.seed(0.10, 0.06, w)
+            self.assertEqual(len(got), w)
+            self.assertAlmostEqual(marking._median(got), 0.10, places=12, msg=f"weight {w}")
+            self.assertAlmostEqual(marking._spread(got), 0.06, places=12, msg=f"weight {w}")
+        for got, want in zip(rules.seed(0.10, 0.06, 4), [0.04, 0.07, 0.13, 0.16]):
+            self.assertAlmostEqual(got, want, places=12)
+
+    def test_a_rules_file_with_a_known_answer_loads(self):
+        book = _rules(RULE % ("0.10", 4) + """
+[[plan_rule]]
+free_order = ["long_term_vol", "initial_vol"]
+why = "the back end first"
+""")
+        self.assertEqual(len(book.nudges), 1)
+        self.assertEqual(book.nudges[0].key, "curve.long_term_vol")
+        self.assertEqual(book.nudges[0].scope, {"pair": "EURUSD"})
+        self.assertTrue(book.nudges[0].applies("eurusd"))
+        self.assertFalse(book.nudges[0].applies("USDJPY"))
+        self.assertEqual(book.free_order("EURUSD")[1], ("long_term_vol", "initial_vol"))
+        self.assertEqual(book.nudges_for("USDJPY"), [])
+
+    def test_a_malformed_or_over_weighted_file_fails_loudly(self):
+        # A weight of nine silently trimmed to five would be the agent taking
+        # an order it was never given; a file that half loads is a set of
+        # beliefs nobody can point at.
+        with self.assertRaises(rules.RulesError) as cm:
+            _rules(RULE % ("0.10", 9))
+        self.assertIn("weight 9", str(cm.exception))
+        with self.assertRaises(rules.RulesError):
+            _rules(RULE % ("0.10", 1))
+        with self.assertRaises(rules.RulesError):
+            _rules("[[nudge_rule]]\nsection = 'curve'\nknob = 'x'\nvalue = 'ten'\nspread = 0.1")
+        with self.assertRaises(rules.RulesError):
+            _rules("[[hunch]]\nvalue = 1")
+        with self.assertRaises(rules.RulesError):
+            _rules("this is = = not toml")
+        with self.assertRaises(rules.RulesError):
+            _rules(RULE.replace("spread  = 0.06", "spread  = 0.0") % ("0.10", 3))
+        missing = rules.RuleBook.load(_tmp("absent.toml"))
+        self.assertEqual(len(missing), 0)
+        self.assertTrue(any("no rules of thumb" in p for p in missing.problems))
+
+    def test_a_prior_alone_cannot_authorise_a_nudge(self):
+        # Zero real corrections: the rule is printed and nothing moves,
+        # however confident the rule.  This is also what stops a weight of 4
+        # clearing MIN_CORRECTIONS on its own, which it otherwise would.
+        book = _rules(RULE % ("0.10", 5))
+        empty = remarks.Journal.load(_tmp("j.jsonl"))
+        t = marking.learn(empty, "EURUSD", asof=NOW, rules=book)
+        self.assertEqual(t.prior_n, 5)
+        self.assertEqual(t.instances, 0)
+        got = t.get("curve", "long_term_vol")
+        self.assertEqual(got.correction_n, 5)
+        self.assertEqual(got.correction_real_n, 0)
+        self.assertGreaterEqual(got.correction_n, marking.MIN_CORRECTIONS)
+        value, why = got.bias()
+        self.assertIsNone(value)
+        self.assertIn("rule of thumb", why)
+        self.assertIn("never authorise", why)
+        self.assertIn("rule of thumb", got.describe())
+        self.assertIn("plus 5 rule of thumb pseudo-instance(s)", t.learned_from())
+        # and a proposal built on it says so, and applies nothing
+        out = marking.propose(_Book.get(), "EURUSD", tendencies=t,
+                              targets=_targets(("1M", 6.2), ("3M", 6.6), ("6M", 7.0)))
+        self.assertEqual(out.corrections, [])
+        self.assertTrue(any("pseudo-instance" in n for n in out.notes), out.notes)
+
+    def test_a_prior_shapes_a_nudge_the_desk_supports_and_the_line_decomposes(self):
+        book = _rules(RULE % ("-0.10", 4))
+        t = marking.learn(self._journal(7), "EURUSD", asof=NOW, rules=book)
+        got = t.get("curve", "long_term_vol")
+        self.assertEqual(got.correction_real_n, 7)
+        self.assertEqual(got.correction_n, 11)
+        value, why = got.bias()
+        self.assertIsNotNone(value)
+        self.assertLess(value, 0)
+        line = got.decompose()
+        self.assertIn("rule of thumb", line)
+        self.assertIn("desk (n=7)", line)
+        # two medians and a subtraction, nothing else
+        self.assertAlmostEqual(value, got.correction_real + (value - got.correction_real))
+        out = marking.propose(_Book.get(), "EURUSD", tendencies=t,
+                              targets=_targets(("1M", 6.2), ("3M", 6.6), ("6M", 7.0)))
+        for c in out.corrections:
+            self.assertEqual(c.source, "learned + rule of thumb")
+            self.assertIn("desk (n=7)", c.prior)
+        self.assertNotIn("plus 4", " ".join(n for n in out.notes if "rule of thumb" not in n))
+
+    def test_fifteen_real_corrections_overwhelm_a_weight_five_rule(self):
+        book = _rules(RULE % ("0.10", 5))
+        t = marking.learn(self._journal(15), "EURUSD", asof=NOW, rules=book)
+        value, _ = t.get("curve", "long_term_vol").bias()
+        self.assertIsNotNone(value)
+        self.assertLess(value, 0)                    # the desk's sign, not the rule's
+        self.assertAlmostEqual(value, -0.12, places=1)
+
+    def test_a_rule_far_off_the_desk_is_outvoted_at_sixteen(self):
+        # The boundary, pinned rather than hidden.  With n real corrections
+        # and a weight of 5, _spread reads its upper quartile at
+        # ceil(0.75 (n + 4)); at n = 15 that is row 15, the first pseudo-
+        # correction, so a rule half a point off the desk widens the spread
+        # past the median and nothing is applied.  At sixteen the quartile is
+        # the desk's own and the rule is outvoted.
+        book = _rules(RULE % ("0.50", 5))
+        blocked, why = marking.learn(self._journal(15), "EURUSD", asof=NOW,
+                                     rules=book).get("curve", "long_term_vol").bias()
+        self.assertIsNone(blocked)
+        self.assertIn("both sides", why)
+        value, _ = marking.learn(self._journal(16), "EURUSD", asof=NOW,
+                                 rules=book).get("curve", "long_term_vol").bias()
+        self.assertIsNotNone(value)
+        self.assertAlmostEqual(value, -0.12, places=1)
+
+    def test_a_rule_the_desk_edits_away_is_contested_and_nothing_is_retired(self):
+        book = _rules(RULE % ("0.10", 4))
+        t = marking.learn(self._journal(rules.CONTESTED_N), "EURUSD", asof=NOW, rules=book)
+        (rep,) = t.rule_reports
+        self.assertTrue(rep.contested)
+        self.assertEqual(rep.far_side, rules.CONTESTED_N)
+        self.assertLess(rep.real_median, 0)
+        self.assertIn("CONTESTED", rep.line())
+        self.assertTrue(any("contested" in n and "edit the file" in n for n in t.notes), t.notes)
+        # still seeded, still weighted as written: flagged, not halved
+        self.assertEqual(t.get("curve", "long_term_vol").correction_n, rules.CONTESTED_N + 4)
+        under = marking.learn(self._journal(rules.CONTESTED_N - 1), "EURUSD", asof=NOW,
+                              rules=book)
+        self.assertFalse(under.rule_reports[0].contested)
+
+    def test_without_rules_the_answer_is_the_desk_only_one(self):
+        t = marking.learn(self._journal(7), "EURUSD", asof=NOW)
+        self.assertEqual(t.prior_n, 0)
+        self.assertEqual(t.rule_reports, [])
+        self.assertIsNone(t.get("curve", "long_term_vol").prior)
+        self.assertNotIn("rule of thumb", " ".join(t.lines()))
+
+    def test_a_plan_rule_orders_the_free_set_and_cannot_widen_it(self):
+        # Discrete: the order knobs are freed in.  Four targets still cannot
+        # determine five parameters, whatever the file says.
+        book = _rules("""
+[[plan_rule]]
+free_order = ["long_term_vol", "initial_vol", "short_addon", "mean_reversion", "no_such_knob"]
+why = "the back end first"
+""")
+        t = marking.learn(remarks.Journal.load(_tmp("j.jsonl")), "EURUSD", asof=NOW, rules=book)
+        plan = marking.plan_fit(_Book.get(), "EURUSD", tendencies=t, targets=_targets(("1M", 6.2)))
+        self.assertEqual(plan.free, ("long_term_vol",))
+        self.assertTrue(any(c.source == "rule of thumb" and c.what == "free order"
+                            for c in plan.choices), plan.lines())
+        self.assertTrue(any("no_such_knob" in n for n in plan.notes), plan.notes)
+        plain = marking.plan_fit(_Book.get(), "EURUSD", targets=_targets(("1M", 6.2)))
+        self.assertNotEqual(plain.free, plan.free)
+
+
+# ==========================================================================
 class _Book:
     """One loaded book, shared: building it is the slow part of these tests."""
 
@@ -280,13 +469,13 @@ class TestProposal(unittest.TestCase):
         # protects against is silent -- a surface left half-marked by a
         # proposal nobody accepted, priced off all morning.
         calls = []
-        real = session._apply_pair
+        real = session.apply_block
 
         def once(surface, block):
             calls.append(block)
             return real(surface, block) if len(calls) == 1 else []
 
-        with mock.patch.object(marking.session, "_apply_pair", once):
+        with mock.patch.object(marking.session, "apply_block", once):
             with self.assertRaises(marking.MarkingError) as caught:
                 with marking.marked(self.book, "EURUSD",
                                     {**self.before,
@@ -294,7 +483,7 @@ class TestProposal(unittest.TestCase):
                                                "long_term_vol": 9.9}}):
                     pass
         self.assertIn("not restored", str(caught.exception))
-        session._apply_pair(self.book["EURUSD"], self.before)
+        session.apply_block(self.book["EURUSD"], self.before)
         self.book["EURUSD"].invalidate()
 
     def test_every_proposal_says_how_much_it_learned_from(self):
@@ -480,7 +669,7 @@ class TestCard(unittest.TestCase):
         self.journal = remarks.Journal.load(_tmp("j.jsonl"))
 
     def tearDown(self):
-        session._apply_pair(self.book["EURUSD"], self.before)
+        session.apply_block(self.book["EURUSD"], self.before)
         self.book["EURUSD"].invalidate()
         self.assertEqual(session.capture_pair(self.book, "EURUSD"), self.before)
 

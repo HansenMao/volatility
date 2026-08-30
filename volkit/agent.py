@@ -819,6 +819,14 @@ class SuggestPanel:
 
     pair: str
     text: str = ""
+    #: The request box: what is being asked for.  When it holds anything the
+    #: rows are its lines and the market paste only supplies "their width"
+    #: beside a request it also quoted; empty, the paste's own rows are
+    #: compared, which is how the card worked before it had a request box
+    #: to read.  The card sits beside the quote button (CLAUDE.md §18), and
+    #: a width proposal about a run nobody asked to be quoted was answering
+    #: the fit's question with the quote's tools.
+    request_text: str = ""
     fly_convention: str = "market"
     vol_unit: str = "auto"
     fallback_spread: float | None = None
@@ -853,30 +861,71 @@ class SuggestPanel:
         out["notes"].extend(synthesis.notes)
         out["widths"] = [_width_json(w) for w in synthesis.widths]
 
-        if not str(self.text or "").strip():
-            out["notes"].append("nothing is pasted, so there is nothing to compare; the widths "
-                                "above are what the archive holds for this pair")
-            return out
-
-        try:
-            run_ = parse_quotes(self.text, pair=pair, vol_unit=self.vol_unit,
-                                fly_convention=self.fly_convention)
-        except QuoteError as exc:
-            out["warnings"].append(str(exc))
-            return out
-        out["notes"].extend(run_.notes)
-        out["skipped"] = [{"line": n, "why": why, "text": text}
-                          for n, why, text in run_.skipped]
-
         pk: PairKnowledge = (bank or KnowledgeBank()).for_pair(pair)
         fallback = (None if self.fallback_spread in (None, "")
                     else float(self.fallback_spread))
+        asked = str(self.request_text or "").strip()
+        pasted = str(self.text or "").strip()
+        out["source"] = "request" if asked else "market"
+
+        run_ = None
+        if pasted:
+            try:
+                run_ = parse_quotes(self.text, pair=pair, vol_unit=self.vol_unit,
+                                    fly_convention=self.fly_convention)
+            except QuoteError as exc:
+                out["warnings"].append(str(exc))
+                if not asked:
+                    return out
+            else:
+                out["notes"].extend(run_.notes)
+                out["skipped"] = [{"line": n, "why": why, "text": text}
+                                  for n, text, why in run_.skipped]
+
+        if asked:
+            from .quotes import instrument_key, parse_requests
+            try:
+                reqs = parse_requests(self.request_text, pair=pair,
+                                      fly_convention=self.fly_convention)
+            except (QuoteError, ValueError) as exc:
+                out["warnings"].append(f"request box: {exc}")
+                return out
+            out["notes"].extend(reqs.notes)
+            out["skipped"].extend({"line": n, "why": why, "text": text}
+                                  for n, text, why in reqs.skipped)
+            # A request the market paste also quoted carries that market
+            # beside it, matched on what makes two lines the same quote --
+            # the quote panel's own rule (§11).  Live quotes only: a request
+            # is answered against where the market is, not where it was.
+            market = ({instrument_key(q): q for q in run_.quotes} if run_ is not None
+                      else {})
+            for rq in reqs.requests:
+                theirs = market.get(instrument_key(rq))
+                out["rows"].append(_suggest_row(
+                    rq, pk=pk, synthesis=synthesis, clock=clock, fallback=fallback,
+                    tolerance=self.tolerance, market=theirs))
+            if not out["rows"]:
+                out["notes"].append("nothing in the request box could be read, so there "
+                                    "is nothing to compare")
+            elif run_ is None:
+                out["notes"].append("no market is pasted, so each row compares the width "
+                                    "we would show against the archive alone")
+            return out
+
+        if not pasted:
+            out["notes"].append("nothing is pasted and nothing is asked for, so there is "
+                                "nothing to compare; the widths above are what the "
+                                "archive holds for this pair")
+            return out
+        out["notes"].append("the request box is empty, so the market paste's own rows "
+                            "are compared; ask for something below to compare that instead")
         # Every quote in the run, superseded ones included: one tenor quoted
         # twice is one live price and two observations of how wide it is
         # shown, and the width question is about the second thing.
         for q in run_.all_quotes:
             out["rows"].append(_suggest_row(q, pk=pk, synthesis=synthesis, clock=clock,
-                                            fallback=fallback, tolerance=self.tolerance))
+                                            fallback=fallback, tolerance=self.tolerance,
+                                            market=q))
         disagreeing = [r for r in out["rows"] if r["verdict"] in ("tight", "wide")]
         if disagreeing:
             out["notes"].append(
@@ -926,26 +975,40 @@ def _width_json(w: syn.WidthEvidence) -> dict:
             "describe": w.describe()}
 
 
-def _suggest_row(q: MarketQuote, *, pk: PairKnowledge, synthesis: syn.Synthesis,
-                 clock, fallback: float | None, tolerance: float) -> dict:
-    """One quoted row: what it was shown at, what we would show, what the market has."""
-    tenor = _tenor_of(q.expiry_far if q.instrument == "spread" else q.expiry)
+def _suggest_row(q, *, pk: PairKnowledge, synthesis: syn.Synthesis,
+                 clock, fallback: float | None, tolerance: float,
+                 market: MarketQuote | None = None) -> dict:
+    """One row: what the market showed it at, what we would show, what the archive has.
+
+    ``q`` is the instrument -- a request, or a market quote standing in for
+    one -- and ``market`` is the market quote for the same thing, if the paste
+    held one.  Only the market carries a width; a request has no price on it.
+    """
+    tenor = _tenor_of(q.expiry_far if q.instrument in ("spread", "structure")
+                      and q.expiry_far is not None else q.expiry)
     days = syn.days_of(tenor, asof=clock.now)
     row = {
         "line": q.line, "describe": q.describe(), "label": q.label,
         "instrument": q.instrument, "tenor": tenor, "delta": q.delta,
         "size": q.size, "size_basis": q.size_basis,
-        "superseded": bool(q.replaced_by), "days": _rounded(days, 3),
+        "superseded": bool(getattr(q, "replaced_by", None)), "days": _rounded(days, 3),
         # A choice price is a real thing to be shown and it is a width of
         # zero, not a missing width.  It is displayed as it was and left out
-        # of the archive's own statistics upstream.
-        "market_width": _rounded(q.spread * 100.0),
+        # of the archive's own statistics upstream.  A request the paste did
+        # not quote has no market width, and that is a blank rather than 0.
+        "market_width": (None if market is None or market.quote_kind == "premium"
+                         else _rounded(market.spread * 100.0)),
         "bank_width": None, "bank_rule": None, "width_source": "none",
         "archive_width": None, "archive_low": None, "archive_high": None,
         "archive_observations": 0, "archive_sources": 0, "archive_newest_days": None,
         "archive_model_read": 0, "archive_enough": False,
         "gap": None, "verdict": "not read", "note": "",
     }
+    if market is not None and market.quote_kind == "premium" and market is q:
+        # A premium's width is in pips or per cent and the archive's is in
+        # volatility; comparing them would be comparing a price to a quantity.
+        row["note"] = "quoted as a premium, and the archive measures widths in volatility"
+        return row
     if days is None:
         row["note"] = (f"the tenor {tenor!r} could not be turned into days, so no archived "
                        f"width could be matched to it")
@@ -1044,6 +1107,7 @@ def panel_from_request(payload: dict) -> SuggestPanel:
         raise AgentError("the quoting agent needs a pair")
     return SuggestPanel(
         pair=pair, text=str(payload.get("text") or ""),
+        request_text=str(payload.get("request_text") or ""),
         fly_convention=str(payload.get("fly_convention") or "market"),
         vol_unit=str(payload.get("vol_unit") or "auto"),
         fallback_spread=number("fallback_spread"),

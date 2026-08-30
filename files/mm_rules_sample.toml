@@ -1,0 +1,37 @@
+# Rules of thumb for the marking agent -- a sample.  Copy it beside the
+# workbook as mm_rules.toml and edit; nothing loads it from here.
+#
+# A nudge rule is a belief about where this desk lands relative to the fit on
+# one knob, in the knob's own units (volatility points for a vol knob).  It is
+# seeded into the learned sample as `weight` pseudo-corrections, so the
+# journal can outvote it: a weight of 4 is worth four answered proposals and
+# no more, and no rule may be weighted above 5.  A rule can shape the size of
+# a nudge and never authorise one -- three real corrections on its side are
+# needed before anything is applied.  `volkit mark rules PAIR` prints each rule
+# against the real corrections and flags one the desk contests.
+
+[[nudge_rule]]
+section = "curve"
+knob    = "long_term_vol"
+scope   = { pair = "EURUSD" }
+value   = 0.10
+spread  = 0.06
+weight  = 4
+why     = "back end lags broker moves; desk marks up before the fit does"
+added   = "2026-08-28"
+
+[[nudge_rule]]
+section = "curve"
+knob    = "short_addon"
+value   = -0.05
+spread  = 0.05
+weight  = 2
+why     = "the fit over-reads a bid front end into the add-on"
+added   = "2026-08-28"
+
+# A plan rule is discrete: the order the curve's knobs are freed in as the
+# targets allow.  Four targets still cannot determine five parameters; that is
+# a rule of the model and no file can weaken it.
+[[plan_rule]]
+free_order = ["initial_vol", "long_term_vol", "short_addon", "rate_vol"]
+why        = "default order in which curve knobs are freed as targets allow"

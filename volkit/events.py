@@ -25,6 +25,151 @@ import numpy as np
 from .numerics import ConvergenceError, solve_scalar
 from .timeutil import Clock, as_utc
 
+# Currencies that share a calendar and a market for the purpose of an event
+# weight: a weight given to CNH is the CNY leg's too unless CNY was given its
+# own, and the other way round.
+CURRENCY_ALIASES: dict[str, str] = {"CNH": "CNY", "CNY": "CNH"}
+
+
+def pair_legs(pair: str) -> tuple[str, str]:
+    """The two currencies of a pair, as written."""
+    pair = pair.strip().upper()
+    if len(pair) != 6 or not pair.isalpha():
+        raise ValueError(f"{pair!r} is not a six-letter currency pair")
+    return pair[:3], pair[3:6]
+
+
+def leg_weights(weights: dict[str, float] | None, pair: str) -> dict[str, float]:
+    """Each leg's weight for an event, read off a per-currency table.
+
+    A leg the table does not name weighs nothing; a leg named only through
+    its alias (CNH for CNY) takes the alias's weight.  The result always has
+    exactly the pair's two legs as keys, in the pair's own spelling, so a
+    screen can show two boxes and a file can hold two numbers.
+    """
+    table = {str(k).upper(): float(v) for k, v in (weights or {}).items()}
+    out = {}
+    for leg in pair_legs(pair):
+        if leg in table:
+            out[leg] = table[leg]
+        else:
+            out[leg] = table.get(CURRENCY_ALIASES.get(leg, ""), 0.0)
+    return out
+
+
+def superpose(a: float, b: float) -> float:
+    """Two legs' weights, superimposed into one bump for the pair.
+
+    They **add**.  Two independent surprises add in *variance*, and a quoted
+    bump is a variance increment over twice the day's volatility (``(s + b)^2
+    - s^2 = 2 s b + b^2``), so to first order two bumps add too; the exact
+    variance rule, ``sqrt((s+a)^2 + (s+b)^2 - s^2) - s``, sits between the
+    sum and the larger of the two and reaches the sum for bumps small against
+    the volatility, which is every real event on every real pair.  A
+    root-sum-square would be the rule for two *event volatilities*, and a
+    bump is not one.  Where a desk disagrees for a pair -- a release that is
+    the same news to both legs and should not count twice -- that is what the
+    adjustment is for.
+    """
+    return float(a) + float(b)
+
+
+def pair_bump(weights: dict[str, float] | None, pair: str, adjust: float = 0.0) -> float:
+    """The bump a pair takes from an event: its two legs superposed, then adjusted."""
+    legs = leg_weights(weights, pair)
+    a, b = (legs[c] for c in pair_legs(pair))
+    return superpose(a, b) + float(adjust)
+
+
+@dataclass
+class EventEntry:
+    """One event as asked for, before it is put on a pair's curve.
+
+    ``weights`` is per currency and ``adjust`` is the pair's own, both in
+    decimal volatility.  ``bump`` is the total the curve will be calibrated
+    to; ``resolve`` works it out for a pair, or, given a bump and no weights,
+    reads the whole bump as the adjustment so that ``bump == superposed +
+    adjust`` holds for every event on every curve whatever it was typed as.
+    """
+
+    when: datetime
+    bump: float | None = None
+    label: str = ""
+    weights: dict[str, float] = field(default_factory=dict)
+    adjust: float = 0.0
+
+    def resolve(self, pair: str) -> "EventEntry":
+        legs = leg_weights(self.weights, pair)
+        if self.weights:
+            total = pair_bump(legs, pair, self.adjust)
+            if self.bump is not None and abs(self.bump - total) > 1e-12:
+                raise ValueError(
+                    f"event {self.label or self.when:%Y-%m-%d %H:%M}: bump "
+                    f"{self.bump * 100:.4g} does not equal the legs' weights "
+                    f"{' + '.join(f'{c} {v * 100:.4g}' for c, v in legs.items())} "
+                    f"plus the adjustment {self.adjust * 100:+.4g}; "
+                    f"give either the total or its parts"
+                )
+            return EventEntry(self.when, total, self.label, legs, float(self.adjust))
+        bump = float(self.bump if self.bump is not None else self.adjust)
+        return EventEntry(self.when, bump, self.label, legs, bump)
+
+
+def event_entries(rows) -> tuple[list[EventEntry], list[str]]:
+    """Rows in the panel's and the session file's spelling, in vol points.
+
+    A row is ``{"when", "label", "bump"}`` or ``{"when", "label", "weights",
+    "adjust"}`` -- ``weights`` per currency -- and may carry both when they
+    agree, which is what a row a screen showed and posted back does.  Reads
+    the timestamp through ``timeutil.parse_datetime`` like every other edge.
+    Returns the entries it could read and a message for each it could not,
+    so one bad row is named rather than taking the schedule down.
+    """
+    from .timeutil import parse_datetime
+    entries: list[EventEntry] = []
+    problems: list[str] = []
+    for i, row in enumerate(rows, start=1):
+        when = row.get("when")
+        if not when:
+            problems.append(f"event {i} has no date/time")
+            continue
+        try:
+            dt = parse_datetime(str(when))
+        except ValueError as exc:
+            problems.append(f"event {i}: {exc}")
+            continue
+        try:
+            raw_w = row.get("weights") or {}
+            weights = {str(c).upper(): float(v or 0.0) / 100.0 for c, v in raw_w.items()}
+            adjust = float(row.get("adjust") or 0.0) / 100.0
+            bump_raw = row.get("bump")
+            bump = None if bump_raw in (None, "") else float(bump_raw) / 100.0
+        except (TypeError, ValueError, AttributeError):
+            problems.append(f"event {i}: weights, adjustment and bump must be numbers")
+            continue
+        if not weights and bump is None:
+            bump = adjust
+        if weights and bump is not None and abs(bump - (sum(weights.values()) + adjust)) > 1e-9:
+            # The screen shows the total beside its parts; the parts are what
+            # was marked, and a total that disagrees with them was computed
+            # off something else.
+            weights_note = ", ".join(f"{c} {v * 100:g}" for c, v in weights.items())
+            problems.append(
+                f"event {i}: bump {bump * 100:g} is not the weights ({weights_note}) plus "
+                f"the adjustment {adjust * 100:+g}; give the parts or the total, not both"
+            )
+            continue
+        entries.append(EventEntry(dt, bump, str(row.get("label") or ""), weights, adjust))
+    return entries, problems
+
+
+def coerce_entry(item) -> EventEntry:
+    """An ``EventEntry``, a ``(when, bump, label)`` tuple or a ``(when, bump)`` pair."""
+    if isinstance(item, EventEntry):
+        return item
+    when, bump, *rest = item
+    return EventEntry(when, float(bump), str(rest[0]) if rest else "")
+
 # Instantaneous-variance decay rate, per year.  At 5000/yr an event is spent
 # within a few hours, which is what confines it to its own volatility day.
 DEFAULT_EVENT_DECAY = 5000.0
@@ -38,9 +183,16 @@ class Event:
     bump: float
     label: str = ""
     height: float | None = None  # filled in by calibration
+    #: Where the bump came from: each leg's weight (per currency, decimal
+    #: volatility) and the pair's own adjustment on top.  ``bump`` is always
+    #: their total; an event typed as one number carries it as the adjustment.
+    weights: dict[str, float] = field(default_factory=dict)
+    adjust: float | None = None
 
     def __post_init__(self) -> None:
         self.when = as_utc(self.when)
+        if self.adjust is None:
+            self.adjust = self.bump - sum(self.weights.values())
 
 
 @dataclass
@@ -68,8 +220,9 @@ class EventSchedule:
         self._times = np.zeros(0)
         self._heights = np.zeros(0)
 
-    def add(self, when: datetime, bump: float, label: str = "") -> Event:
-        ev = Event(when, bump, label)
+    def add(self, when: datetime, bump: float, label: str = "", *,
+            weights: dict[str, float] | None = None, adjust: float | None = None) -> Event:
+        ev = Event(when, bump, label, weights=dict(weights or {}), adjust=adjust)
         self.events.append(ev)
         return ev
 

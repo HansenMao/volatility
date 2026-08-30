@@ -32,12 +32,15 @@ import numpy as np
 from .atm import CUTS
 from .exotics import TOUCH_MODES
 from .book import Book
+from .econ import RELEASE_TIMES
+from .events import event_entries, leg_weights, pair_legs
 from .cross import CrossAtmCurve
 from .feed import FeedError, MarketFeed
 from .listed import (GREEK_FIELDS, UNDERLYINGS, WEIGHTINGS, panel_from_request,
                      positions_from_request)
 from . import dtcc
 from .archive import Archive, ArchiveError
+from . import rules as rules_mod
 from .knowledge import KnowledgeBank, KnowledgeError, RULE_INSTRUMENTS, RULE_KINDS, SIZE_BASES
 from .marketmaker import (BACKBONE_KNOBS, CROSS_KNOBS, DEFAULT_BACKBONE_FREE,
                           DEFAULT_CROSS_FREE, TARGET_SOURCES, learn_from_panel)
@@ -83,7 +86,8 @@ class BookService:
                  session_path: str | None = None, auto_reload: float = 0.0,
                  archive_path: str | None = None, agent_chats=None, agent_sdr=None,
                  ingest_state_path: str | None = None, dtcc_proxy: str | None = None,
-                 journal_path: str | None = None):
+                 journal_path: str | None = None, rules_path: str | None = None,
+                 dtcc_direct: bool = False):
         self.path = path
         self.clock = clock or Clock.utcnow()
         self.feed_path = feed_path
@@ -160,7 +164,12 @@ class BookService:
         # The proxy the download goes through, from the command line or from
         # the environment.  Not from the browser: a page that can name a proxy
         # can send this server's requests wherever it likes.
-        self.dtcc_proxy = dtcc_proxy or dtcc.default_proxy()
+        # ``direct`` beats a named proxy: it is how a desk gets past a system
+        # proxy that is named and not running, which is what a refused
+        # connection usually is, and a proxy still named beside it would be a
+        # setting the screen shows and the request does not use.
+        self.dtcc_direct = bool(dtcc_direct)
+        self.dtcc_proxy = None if self.dtcc_direct else (dtcc_proxy or dtcc.default_proxy())
         # The archive gets a lock of its own rather than sharing the book's.
         # Reading a folder can take a minute -- a large dissemination file, or
         # a language model working through prose the grammar refused -- and
@@ -182,6 +191,16 @@ class BookService:
         except remarks.RemarkError as exc:
             self.journal = remarks.Journal(path=str(journal_path or ""))
             self.journal_error = str(exc)
+        # The rules of thumb, the marking agent's prior.  A file that is
+        # there and wrong is refused whole, and the card says so; the agent
+        # then learns from the journal alone rather than from half a file.
+        self.rules_path = rules_path
+        self.rules_error: str | None = None
+        try:
+            self.rules = rules_mod.RuleBook.load(rules_path)
+        except rules_mod.RulesError as exc:
+            self.rules = rules_mod.RuleBook(path=str(rules_path or ""))
+            self.rules_error = str(exc)
         self.reload()
         if session_path:
             # Asked for by name, so a failure is said out loud rather than
@@ -296,6 +315,12 @@ class BookService:
                         "error": self.journal_error,
                         "verdicts": list(MARK_VERDICTS),
                         "min_instances": MARK_MIN_INSTANCES,
+                    },
+                    "rules": {
+                        "path": self.rules.path,
+                        "n": len(self.rules),
+                        "problems": list(self.rules.problems),
+                        "error": self.rules_error,
                     },
                 },
                 "listed": {
@@ -856,11 +881,17 @@ class BookService:
     # -- curve parameters and events --------------------------------------
     def _event_rows(self, atm) -> list[dict]:
         rows = []
+        legs = pair_legs(atm.pair)
         for e in atm.events.events:
             start = atm.vol_day_start(e.when)
+            lw = leg_weights(e.weights, atm.pair)
             rows.append({
                 "when": e.when.strftime("%Y-%m-%dT%H:%M"),
                 "bump": e.bump * 100.0,
+                # Where the bump came from, in the panel's points: each leg's
+                # weight and the pair's adjustment.  ``bump`` is their sum.
+                "weights": {c: lw[c] * 100.0 for c in legs},
+                "adjust": (e.adjust or 0.0) * 100.0,
                 "label": e.label,
                 "height": e.height,
                 # Which volatility day the bump actually prices into.  The day
@@ -880,6 +911,7 @@ class BookService:
             is_cross = isinstance(atm, CrossAtmCurve)
             out = {
                 "pair": q["pair"], "is_cross": is_cross,
+                "legs_ccy": list(pair_legs(q["pair"])),
                 "events": self._event_rows(atm),
                 "tenors": list(self.book.data.tenor_points),
             }
@@ -924,23 +956,17 @@ class BookService:
             return {"ok": not problems, "problems": problems, **self.curve({"pair": payload["pair"]})}
 
     def set_events(self, payload: dict) -> dict:
-        """Replace the whole event schedule for a pair and re-solve the heights."""
+        """Replace the whole event schedule for a pair and re-solve the heights.
+
+        A row gives either a ``bump`` alone, or ``weights`` (per currency)
+        and an ``adjust``, all in vol points; ``event_entries`` is the one
+        reader, shared with the session file.
+        """
         with self._lock:
             surface = self.book[payload["pair"]]
-            entries = []
-            for i, row in enumerate(payload.get("events") or []):
-                when = row.get("when")
-                if not when:
-                    raise ValueError(f"event {i + 1} has no date/time")
-                try:
-                    dt = parse_datetime(str(when))
-                except ValueError as exc:
-                    raise ValueError(f"event {i + 1}: {exc}") from None
-                try:
-                    bump = float(row.get("bump") or 0.0) / 100.0
-                except (TypeError, ValueError):
-                    raise ValueError(f"event {i + 1}: bump must be a number") from None
-                entries.append((dt, bump, str(row.get("label") or "")))
+            entries, problems = event_entries(payload.get("events") or [])
+            if problems:
+                raise ValueError("; ".join(problems))
             problems = surface.atm.set_events(entries)
             surface.invalidate()
             self.dirty = True
@@ -961,11 +987,40 @@ class BookService:
                 start_day = atm.vol_day_start(e.when)
                 rows.append({**e.as_dict(),
                              "when": e.when.strftime("%Y-%m-%dT%H:%M"),
+                             "adjust": 0.0,
                              "vol_day": (start_day + timedelta(days=1)).strftime("%Y-%m-%d")})
-            return {"pair": pair, "events": rows, "source": self.book.econ.source,
+            return {"pair": pair, "legs_ccy": list(pair_legs(pair)), "events": rows,
+                    "source": self.book.econ.source,
+                    "weights_source": self.book.econ.weights_source,
                     "note": "dates from the published calendars shipped with volkit; "
                             "verify before relying on them, and edit "
-                            "volkit/data/econ_events.csv to extend"}
+                            "volkit/data/econ_events.csv to extend. Each bump is the "
+                            "pair's two legs' weights added (volkit/data/event_weights.csv)"}
+
+    def event_weights(self, q: dict | None = None) -> dict:
+        """The weight table: what each release is worth on each currency, in points."""
+        with self._lock:
+            cal = self.book.econ
+            table = cal.table()
+            currencies = sorted({c for row in table.values() for c in row})
+            return {"events": [{"name": k, "currency": RELEASE_TIMES[k][0], "weights": row}
+                               for k, row in table.items()],
+                    "currencies": currencies,
+                    "source": cal.weights_source or "",
+                    "note": "in vol points; a pair's bump is its two legs added, plus the "
+                            "pair's adjustment. Applying changes what Auto-load suggests "
+                            "and nothing already on a pair's events table"}
+
+    def set_event_weights(self, payload: dict) -> dict:
+        """Replace the whole weight table for this session.  The browser owns
+        the panel and posts it whole; nothing is written to any file."""
+        with self._lock:
+            table = payload.get("weights")
+            if not isinstance(table, dict):
+                raise ValueError("post {'weights': {EVENT: {CCY: points}}}")
+            self.book.econ.set_weights(table)
+            self.dirty = True
+            return {"ok": True, **self.event_weights()}
 
     def overwrite(self, q: dict) -> dict:
         with self._lock:
@@ -1038,6 +1093,32 @@ class BookService:
             return {"ok": True, "written": written,
                     "pairs": (pairs if pairs else self.book.pairs),
                     **self.session_state({"path": written})}
+
+    def session_export(self, payload: dict) -> dict:
+        """Write a session file into a *copy* of the workbook.
+
+        The one route that produces a workbook, and it never produces the
+        loaded one: an in-place export is a command somebody types
+        (``volkit session --to-workbook --in-place``), not a button.  The
+        marks written are the file's, not the book's -- save first, which is
+        what the page does -- so what lands in the copy is exactly what a
+        person can open and read in the session file beside it.
+        """
+        with self._lock:
+            if self.book is None:
+                raise ValueError(self.load_error or "no workbook is loaded")
+            raw = (payload.get("pairs") or None)
+            pairs = [raw] if isinstance(raw, str) and raw.strip() else raw
+            path = (payload.get("path") or "").strip() or (
+                self.session_path or str(session.default_path()))
+            src = str(getattr(self.book.data, "source", "") or "")
+            if not src:
+                raise ValueError("the loaded book did not come from a workbook file")
+            out = (payload.get("out") or "").strip() or None
+            doc = session.load(path)
+            result = session.export_workbook(doc, src, out, pairs, in_place=False)
+            return {"ok": not result["problems"], "path": str(path), "workbook": src,
+                    **result}
 
     def session_load(self, payload: dict) -> dict:
         """Put a saved session back on the loaded book.
@@ -1244,6 +1325,33 @@ class BookService:
             out["has_feed"] = bool(self.book.market_level(pair, 1.0)["feed"])
             return out
 
+    def fit_band(self, payload: dict) -> dict:
+        """Propose a break regime from the marked wings; mark nothing.
+
+        The card's fields travel with the request as the *given* part of the
+        fit -- the jump sizes, the post-break volatilities, the edges -- and
+        what comes back is a proposal in the same units, for the same Apply.
+        The surface's own treatment is not read and not written: a fit that
+        quietly marked the book would be a button that did two things.
+        """
+        from .banded import BandTreatment, DEFAULT_FREE, fit_band_treatment
+        with self._lock:
+            if self.book is None:
+                raise ValueError(self.load_error or "no workbook is loaded")
+            pair = payload["pair"]
+            if pair not in self.book:
+                raise ValueError(f"{pair} is not built in this book")
+            surface = self.book[pair]
+            treatment = BandTreatment.from_request(payload)
+            free = payload.get("free") or list(DEFAULT_FREE)
+            if isinstance(free, str):
+                free = [f.strip() for f in free.split(",") if f.strip()]
+            tenors = [payload["tenor"]] if payload.get("tenor") else list(self.book.data.tenor_points)
+            out = fit_band_treatment(surface, tenors, free=free, treatment=treatment,
+                                     cut=payload.get("cut", "NY"))
+            out["has_feed"] = bool(self.book.market_level(pair, 1.0)["feed"])
+            return out
+
     def set_band(self, payload: dict) -> dict:
         """Re-mark the band treatment for one pair, then report it.
 
@@ -1342,9 +1450,11 @@ class BookService:
             if self.book is None:
                 raise ValueError(self.load_error or "no workbook is loaded")
             with self._archive_lock:
-                out = panel.run(self.book, self.journal, archive=self.archive)
+                out = panel.run(self.book, self.journal, archive=self.archive,
+                                rules=self.rules)
             self.dirty = self.dirty  # a proposal leaves the book as it found it
         out["journal_error"] = self.journal_error
+        out["rules_error"] = self.rules_error
         out["archive_error"] = self.archive_error
         return out
 
@@ -1470,17 +1580,19 @@ class BookService:
                      else Clock.utcnow().now).date()
             known = self.book.pairs if self.book is not None else None
         folder = self.agent_sdr[0]
-        down = dtcc.Downloader(proxy=self.dtcc_proxy)
+        down = dtcc.Downloader(proxy=self.dtcc_proxy, direct=self.dtcc_direct)
         with self._archive_lock:
             try:
                 result = down.fetch(dtcc.recent_days(days_back, today=today), folder,
                                     today=today)
             except dtcc.DtccError as exc:
                 return {"available": True, "written": 0, "days": [], "reason": str(exc),
-                        "proxy": self.dtcc_proxy or "", "folder": folder}
+                        "proxy": self.dtcc_proxy or "", "route": down.route,
+                        "folder": folder}
             out = {
                 "available": True, "written": result.written, "folder": folder,
-                "proxy": self.dtcc_proxy or "", "seconds": result.seconds,
+                "proxy": self.dtcc_proxy or "", "route": down.route,
+                "seconds": result.seconds,
                 "summary": result.summary(), "reason": "",
                 "days": [{"day": d.day.isoformat(), "status": d.status, "line": d.line(),
                           "bytes": d.bytes} for d in result.days],
@@ -1704,6 +1816,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self.service.auto_state())
             elif url.path == "/api/events/suggest":
                 self._json(self.service.suggest_events(q))
+            elif url.path == "/api/events/weights":
+                self._json(self.service.event_weights(q))
             elif url.path == "/api/analysis":
                 self._json(self.service.analysis(q))
             elif url.path == "/api/relvalue":
@@ -1759,6 +1873,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self.service.set_curve(payload))
             elif url.path == "/api/events":
                 self._json(self.service.set_events(payload))
+            elif url.path == "/api/events/weights":
+                self._json(self.service.set_event_weights(payload))
             elif url.path == "/api/feed":
                 self._json(self.service.load_feed(payload))
             elif url.path == "/api/feed/refresh":
@@ -1799,12 +1915,16 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self.service.session_save(payload))
             elif url.path == "/api/session/load":
                 self._json(self.service.session_load(payload))
+            elif url.path == "/api/session/export":
+                self._json(self.service.session_export(payload))
             elif url.path == "/api/monitor/curves":
                 self._json(self.service.compare_curves(payload))
             elif url.path == "/api/monitor":
                 self._json(self.service.monitor(payload))
             elif url.path == "/api/band":
                 self._json(self.service.set_band(payload))
+            elif url.path == "/api/band/fit":
+                self._json(self.service.fit_band(payload))
             elif url.path == "/api/auto":
                 # Belongs to no screen, like the GET: the feed is read by
                 # several of them.  The switch happens to live on the pricing
@@ -1822,12 +1942,13 @@ def serve(path: str, host: str = "127.0.0.1", port: int = 8765,
           bank_path: str | None = None, session_path: str | None = None,
           auto_reload: float = 0.0, archive_path: str | None = None,
           agent_chats=None, agent_sdr=None, ingest_state_path: str | None = None,
-          dtcc_proxy: str | None = None, journal_path: str | None = None) -> None:
+          dtcc_proxy: str | None = None, journal_path: str | None = None,
+          rules_path: str | None = None, dtcc_direct: bool = False) -> None:
     """Start the local server (blocking)."""
     Handler.service = BookService(path, clock, feed_path, history_path, bank_path,
                                   session_path, auto_reload, archive_path,
                                   agent_chats, agent_sdr, ingest_state_path, dtcc_proxy,
-                                  journal_path)
+                                  journal_path, rules_path, dtcc_direct)
     httpd = ThreadingHTTPServer((host, port), Handler)
     url = f"http://{host}:{port}/"
     print(f"volkit serving {path}\n  -> {url}\n  (Ctrl-C to stop)")
@@ -1845,6 +1966,8 @@ def serve(path: str, host: str = "127.0.0.1", port: int = 8765,
         print(f"  ! observation archive: {Handler.service.archive_error}")
     if Handler.service.journal_error:
         print(f"  ! re-marking journal: {Handler.service.journal_error}")
+    if Handler.service.rules_error:
+        print(f"  ! rules of thumb: {Handler.service.rules_error}")
     watched_folders = Handler.service.agent_chats + Handler.service.agent_sdr
     if watched_folders:
         print(f"  quoting agent watching: {', '.join(watched_folders)}")
