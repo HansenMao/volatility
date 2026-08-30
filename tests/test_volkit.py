@@ -567,7 +567,11 @@ class TestMarketData(unittest.TestCase):
         """A minimal workbook with the given CONFIG columns, in a temp dir.
 
         PARAMS carries whatever ``pairs`` names, so a test can say what the
-        sheet declares and nothing else.
+        sheet declares and nothing else.  Every pair also gets a smile sheet,
+        because a real workbook has one: a pair CONFIG names with no sheet
+        behind it is now a reported problem rather than a silent skip, and a
+        fixture that left them out would be asserting on a workbook nobody
+        would ship.
         """
         import tempfile
         d = Path(tempfile.mkdtemp())
@@ -581,11 +585,21 @@ class TestMarketData(unittest.TestCase):
         for p in pairs:
             if "USD" not in (p[:3], p[3:6]):
                 params[p] = [0.4, 0.3, 0.0, 0.0, 4.0, 0.0, 50.0]
+        tenors = [t for t in config.get("TENORS", ["1m", "3m"]) if t]
+        smile = pd.DataFrame({
+            "expiry": tenors,
+            "ST 10D": [0.60] * len(tenors),
+            "ST 25D": [0.20] * len(tenors),
+            "RR 25D": [-0.10] * len(tenors),
+            "RR 10D": [-0.19] * len(tenors),
+        })
         with pd.ExcelWriter(path) as xw:
             width = max(len(v) for v in config.values())
             padded = {k: list(v) + [None] * (width - len(v)) for k, v in config.items()}
             pd.DataFrame(padded).to_excel(xw, sheet_name="CONFIG", index=False)
             params.to_excel(xw, sheet_name="PARAMS")
+            for p in pairs:
+                smile.to_excel(xw, sheet_name=p, index=False)
         return path
 
     def test_a_currency_column_in_params_weights_every_pair_with_that_leg(self):
@@ -605,10 +619,15 @@ class TestMarketData(unittest.TestCase):
             "USD":    [None] * 7 + [1.5, 0.0],
             "JPY":    [None] * 7 + [0.3, 1.5],
         }, index=idx)
+        smile = pd.DataFrame({"expiry": ["1m", "3m"], "ST 10D": [0.6, 0.6],
+                              "ST 25D": [0.2, 0.2], "RR 25D": [-0.1, -0.1],
+                              "RR 10D": [-0.19, -0.19]})
         with pd.ExcelWriter(path) as xw:
             pd.DataFrame({"PAIRS": ["USDJPY", "EURUSD"], "TENORS": ["1m", "3m"]}).to_excel(
                 xw, sheet_name="CONFIG", index=False)
             params.to_excel(xw, sheet_name="PARAMS")
+            for name in ("USDJPY", "EURUSD"):
+                smile.to_excel(xw, sheet_name=name, index=False)
         data = ExcelSource(path).load()
         self.assertEqual(data.problems, [], data.problems)
         uj = {e.when.strftime("%d%b"): e for e in data.params["USDJPY"].events}
@@ -712,6 +731,52 @@ class TestMarketData(unittest.TestCase):
             self.assertEqual(dollar_legs(pair), legs)
         self.assertEqual(infer_leg_signs("AUDJPY", *dollar_legs("AUDJPY")), (1, -1))
         self.assertEqual(infer_leg_signs("EURGBP", *dollar_legs("EURGBP")), (1, 1))
+
+    def test_a_pair_config_names_with_no_sheet_is_reported(self):
+        """The shipped workbook lost its EURGBP tab to a USDHKD one while
+        CONFIG went on naming EURGBP.  Nothing said so: the reader skipped the
+        pair in silence, ``volkit check`` reported "no problems found", and
+        the first thing to ask that surface for a smile raised "EURGBP: no
+        smile term structure; run calibrate() first" -- which names neither
+        the workbook nor the tab somebody deleted, and which took the Windows
+        build down at the test suite.
+        """
+        path = self._workbook({"PAIRS": ["USDJPY", "EURUSD"], "TENORS": ["1m", "3m"]},
+                              ["USDJPY", "EURUSD"])
+        import openpyxl
+        wb = openpyxl.load_workbook(path)
+        del wb["EURUSD"]
+        wb.save(path)
+        data = ExcelSource(path).load()
+        self.assertEqual(len(data.problems), 1, data.problems)
+        self.assertIn("EURUSD", data.problems[0])
+        self.assertIn("no 'EURUSD' sheet", data.problems[0])
+        self.assertIn("USDJPY", data.marks)
+        self.assertNotIn("EURUSD", data.marks)
+
+    def test_a_sheet_with_no_readable_row_is_reported(self):
+        """The same failure by the other route: the tab is there and empty."""
+        path = self._workbook({"PAIRS": ["USDJPY"], "TENORS": ["1m", "3m"]}, ["USDJPY"])
+        import openpyxl
+        wb = openpyxl.load_workbook(path)
+        ws = wb["USDJPY"]
+        ws.delete_rows(2, ws.max_row)
+        wb.save(path)
+        data = ExcelSource(path).load()
+        self.assertTrue(any("no readable quotes" in p for p in data.problems), data.problems)
+
+    def test_a_pair_asked_for_with_no_quotes_says_so(self):
+        """``calibrate_smiles`` used to skip it silently, so the book came
+        back looking loaded and refused on the first smile."""
+        path = self._workbook({"PAIRS": ["USDJPY", "EURUSD"], "TENORS": ["1m", "3m"]},
+                              ["USDJPY", "EURUSD"])
+        import openpyxl
+        wb = openpyxl.load_workbook(path)
+        del wb["EURUSD"]
+        wb.save(path)
+        book = Book.from_excel(path, ASOF).load_all(["USDJPY", "EURUSD"])
+        self.assertTrue(any("EURUSD" in w and "no smile quotes" in w for w in book.warnings),
+                        book.warnings)
 
     def test_a_dollar_pair_has_no_legs_to_derive(self):
         with self.assertRaises(ValueError):
@@ -5221,11 +5286,61 @@ class TestSessionIntoWorkbook(unittest.TestCase):
             self.assertEqual(ev.weights, {"USD": 0.004, "JPY": 0.001})
             self.assertAlmostEqual(ev.adjust, 0.002)
             # ...and the sheet's formulas are still formulas, with their values.
+            # Asked as ``startswith("=")`` this missed the shipped workbook's
+            # own spelling: Excel saves ``=C2*3`` as an *array* formula and
+            # openpyxl returns an ``ArrayFormula`` object, not a string.  The
+            # export dropped the cached value of every such cell and the copy
+            # came back with 126 blank quotes, while this line read a repr.
             import openpyxl
             ws = openpyxl.load_workbook(out["written"])["USDJPY"]
-            self.assertTrue(str(ws["B2"].value).startswith("="))
+            self.assertTrue(session._is_formula(ws["B2"].value), ws["B2"].value)
             self.assertIsNotNone(openpyxl.load_workbook(out["written"], data_only=True)
                                  ["USDJPY"]["B2"].value)
+
+    def test_an_array_formula_keeps_its_cached_value_through_a_copy(self):
+        """Excel writes ``=C2*3`` as an array formula ({=C2*3}, the CSE
+        spelling), openpyxl hands it back as an ``ArrayFormula`` object and
+        writes it as ``<f t="array" ref="B2">``.  Both halves of the cache
+        restore missed it -- ``_formula_cache`` tested ``startswith("=")`` on
+        a non-string, and the substitution matched only a bare ``<f>`` -- so
+        the copy came back with every quote blank.  The shipped workbook's
+        smile sheets are array formulas throughout, which is how this reached
+        the Windows build as 126 "blank quote" problems.
+        """
+        import io
+        import tempfile
+        import openpyxl
+        from openpyxl.worksheet.formula import ArrayFormula
+        from volkit import session
+
+        d = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d, True)
+        path = d / "arrays.xlsx"
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "USDJPY"
+        ws["A1"], ws["B1"] = "expiry", "ST 10D"
+        ws["C2"] = 0.2175
+        ws["B2"] = ArrayFormula("B2", "=C2*3")
+        wb.save(path)
+
+        blob = path.read_bytes()
+        wb = openpyxl.load_workbook(io.BytesIO(blob))
+        vals = openpyxl.load_workbook(io.BytesIO(blob), data_only=True)
+        # Nothing has computed it yet, so seed the value the way Excel would.
+        vals["USDJPY"]["B2"] = 0.6525
+        cached = session._formula_cache(wb, vals)
+        self.assertEqual(cached, {1: {"B2": 0.6525}})
+
+        buf = io.BytesIO()
+        wb.save(buf)
+        out = d / "copy.xlsx"
+        out.write_bytes(session._restore_formula_cache(buf.getvalue(), cached))
+        # Still a formula, and now readable without opening Excel first.
+        kept = openpyxl.load_workbook(out)["USDJPY"]["B2"].value
+        self.assertTrue(session._is_formula(kept), kept)
+        self.assertAlmostEqual(
+            openpyxl.load_workbook(out, data_only=True)["USDJPY"]["B2"].value, 0.6525)
 
     def test_a_shared_weight_does_not_reach_a_pair_whose_file_has_no_event(self):
         """USD 0.4 on the NFP row belongs to every pair with a dollar in it.
@@ -6697,6 +6812,20 @@ class TestPackaging(unittest.TestCase):
         for rel in build_exe.REQUIRED_SOURCES:
             with self.subTest(rel):
                 self.assertTrue((build_exe.ROOT / rel).exists(), f"{rel} is missing")
+
+    def test_the_shipped_workbooks_are_clean(self):
+        """The build reads them before the suite does, and refuses on a
+        problem.  This is the same reading, so a workbook edit that would stop
+        a Windows build is caught here in two seconds -- rather than half an
+        hour into a CI run, as "EURGBP: no smile term structure" once was.
+        """
+        import build_exe
+        from volkit.marketdata import ExcelSource
+        for rel in build_exe.CHECKED_WORKBOOKS:
+            with self.subTest(rel):
+                path = build_exe.ROOT / rel
+                self.assertTrue(path.exists(), f"{rel} is missing")
+                self.assertEqual(ExcelSource(path).load().problems, [], rel)
 
     def test_the_spec_bundles_the_resources_the_code_reads(self):
         """The page and the calendar travel inside the bundle; user data does not.

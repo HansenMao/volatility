@@ -577,6 +577,17 @@ class ExcelSource:
     def _load_marks(self, xls, data: MarketData, sheets: set[str]) -> None:
         for name in data.pairs:
             if name not in sheets:
+                # A pair CONFIG names with no sheet behind it used to be
+                # skipped in silence.  Nothing then failed until the surface
+                # was asked for a smile, hundreds of calls later, with
+                # "EURGBP: no smile term structure; run calibrate() first" --
+                # which names neither the workbook nor the missing sheet.
+                # Deleting a tab and leaving the pair in CONFIG is an ordinary
+                # spreadsheet accident, so it is reported where it happened.
+                data.problems.append(
+                    f"CONFIG lists {name!r} but the workbook has no {name!r} sheet, so it "
+                    f"has no smile quotes; add the sheet or take the pair out of CONFIG"
+                )
                 continue
             df = pd.read_excel(xls, name)
             cols = {_norm(c): c for c in df.columns}
@@ -610,3 +621,9 @@ class ExcelSource:
                 marks.append(SmileMark(tenor=str(tenor).strip(), **values))
             if marks:
                 data.marks[name] = marks
+            else:
+                # A sheet with the right columns and not one readable row is
+                # the same failure arriving by a different route.
+                data.problems.append(
+                    f"sheet {name!r} has no readable quotes, so {name} has no smile"
+                )

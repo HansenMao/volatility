@@ -327,6 +327,18 @@ class Book:
                 continue
             marks = self.data.marks.get(name)
             if not marks:
+                # A pair asked for by name and left uncalibrated is the one
+                # case worth saying out loud: every later call on it raises
+                # "no smile term structure", which reads like a caller that
+                # forgot to calibrate rather than a workbook with no quotes.
+                # A pair swept up by ``calibrate_smiles()`` with no argument
+                # is not -- ``load_all`` builds a cross's legs on purpose and
+                # the reader has already reported any sheet that is missing.
+                if pairs:
+                    self.warnings.append(
+                        f"{name}: no smile quotes in the workbook, so its smile was not "
+                        f"fitted; every smile on this pair will refuse"
+                    )
                 continue
             surface.calibrate(marks)
             self.warnings.extend(surface.warnings)

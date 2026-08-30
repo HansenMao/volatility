@@ -21,7 +21,7 @@ sheet it was written against is kept as `files/vol_marks_legacy_format.xlsx`
 -- same marks, old layout -- and the comparison still runs. volkit reads
 either (§4).
 
-- ~29,000 lines across 48 modules, 728 tests, `unittest` only (no pytest).
+- ~29,000 lines across 48 modules, 786 tests, `unittest` only (no pytest).
   Tests live in `tests/test_volkit.py`, `tests/test_agent.py` (the desk
   agent, §17) and `tests/test_marking.py` (the marking agent, §18).
 - Runtime deps: numpy, scipy, pandas, openpyxl. Plus `tzdata` on Windows.
@@ -183,6 +183,17 @@ preflight  startup checks (tzdata above all)
   `MarketData.notes` and is shown, for the same reason `derived` and `via`
   travel with a market level -- a pair that came out of a convention and one
   that was written down must not read the same.
+  **A pair CONFIG names must have a sheet behind it**, and a sheet with no
+  readable row is the same failure by the other route: both are reported by
+  the reader. Deleting a tab and leaving the pair in CONFIG is an ordinary
+  spreadsheet accident, and it used to be skipped in silence -- `volkit check`
+  said *no problems found*, the book loaded looking complete, and the first
+  call to reach that surface raised `EURGBP: no smile term structure; run
+  calibrate() first`, which names neither the workbook nor the tab somebody
+  deleted. `calibrate_smiles` says the same thing for a pair asked for **by
+  name** with no quotes; a leg swept up on the way to a cross is not, because
+  `load_all` builds those on purpose and the reader has already reported any
+  sheet that is missing.
 - **The server holds no screen state.** The browser owns the pricing legs, the
   listed panels and the analysis query, and posts each one whole. That is what
   makes `volkit listed` and `volkit analysis` reproduce a screen exactly, and
@@ -899,7 +910,7 @@ is built out of them.
 ## 10. Working on this
 
 ```
-python -m unittest discover -s tests        # 697 tests, ~7m
+python -m unittest discover -s tests        # 786 tests, ~10m
 PYTHONUTF8=0 LC_ALL=C python -m unittest discover -s tests   # as a cp1252 Windows
                                            # box sees it: an ASCII locale is the
                                            # only way to catch an encoding bug
@@ -973,9 +984,15 @@ python -m volkit --session marks.json vol USDJPY 2024-05-28   # price against th
   numpy, scipy or pandas, directly or otherwise; a test pins it.
 - **PyInstaller cannot cross-compile.** A Windows exe must be built on Windows
   or by the GitHub Actions workflow. `build_exe.py` is the single build entry
-  point -- preflight, deps, the full test suite, `volkit.spec`, staging the
-  user's data beside the exe, then a smoke test of the executable it just
-  built. `build_windows.bat` and the workflow are both thin wrappers around
+  point -- preflight, deps, **the workbook**, the full test suite,
+  `volkit.spec`, staging the user's data beside the exe, then a smoke test of
+  the executable it just built. The workbook step is `volkit check` on
+  `files/vol_marks.xlsx` before the suite reads it: the suite pins numbers off
+  that spreadsheet, so an edit made for reasons that have nothing to do with
+  this code can fail the build -- and once did, thirty-one minutes in, with
+  `EURGBP: no smile term structure`, because a USDHKD tab had replaced the
+  EURGBP one while CONFIG went on naming EURGBP. Reading it first costs two
+  seconds and names the sheet. `build_windows.bat` and the workflow are both thin wrappers around
   it, which is what keeps a desk build and a CI build identical. Off Windows
   it refuses instead of producing something unusable; `--host-check` builds
   the same spec for the host, which is how the spec is validated from here.
@@ -1274,8 +1291,16 @@ beside it.
   a formula with no value as a blank quote -- every smile sheet is `=C2*3`.
   `_restore_formula_cache` reads the values from a `data_only` load and puts
   them back into the saved file's `<v />` slots, so the copy is readable
-  before Excel has touched it. Images and charts do not survive openpyxl,
-  which is the other reason the default is a copy.
+  before Excel has touched it. **A formula is not always a string**: Excel
+  saves the same `=C2*3` as an *array* formula, openpyxl returns it as an
+  `ArrayFormula` object and writes `<f t="array" ref="B2">`, and both halves
+  of this missed it -- `_formula_cache` asked `startswith("=")` of a
+  non-string and the substitution matched only a bare `<f>`. `session
+  ._is_formula` is the one predicate now and the `<f ...>` element is copied
+  through whole rather than rebuilt. The shipped workbook's smile sheets are
+  array formulas throughout, so the copy came back with 126 blank quotes.
+  Images and charts do not survive openpyxl, which is the other reason the
+  default is a copy.
 - **A pair is replaced, never merged**, as on load. The one thing that cannot
   be replaced per pair is an event's *currency* weight, which every pair with
   that currency shares: the file's weights are written, none are removed, and

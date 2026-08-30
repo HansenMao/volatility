@@ -113,6 +113,15 @@ SAMPLE_DATA = [
     "files/history_sample.xlsx",
 ]
 
+# The workbooks read before the suite is (§ ``check_workbook``).  The first is
+# the one shipped beside the exe; the second is the same marks under the old
+# CONFIG layout, which the suite compares it against -- a pair added to one
+# and not the other fails a test rather than the reader, so both are read.
+CHECKED_WORKBOOKS = [
+    "files/vol_marks.xlsx",
+    "files/vol_marks_legacy_format.xlsx",
+]
+
 
 class BuildError(RuntimeError):
     """A step failed.  Carries the real message; nothing here fails silently."""
@@ -222,6 +231,36 @@ def install_deps() -> None:
     # the NY cut, the weekly close and every economic event resolve through
     # zoneinfo.  Installed everywhere so the bundle is identical either way.
     run(pip + ["tzdata", "pyinstaller"], step="build tool install")
+
+
+def check_workbook() -> None:
+    """Read the workbook that is about to be shipped, and say what is wrong.
+
+    The suite pins numbers off ``files/vol_marks.xlsx``, so an edit to that
+    spreadsheet -- somebody else's file, changed for reasons that have nothing
+    to do with this code -- can fail the build.  It did: a USDHKD tab replaced
+    the EURGBP one while CONFIG went on naming EURGBP, and the build died
+    thirty-one minutes in, at the test suite, with "EURGBP: no smile term
+    structure; run calibrate() first".
+
+    That is the right outcome and a terrible way to report it.  Reading the
+    workbook here costs a second or two, names the sheet, and puts the failure
+    before the suite rather than inside it.  It is a *check*, not a gate on the
+    code: ``check`` exits non-zero only on the reader's own problems.
+    """
+    for rel in CHECKED_WORKBOOKS:
+        src = ROOT / rel
+        if not src.exists():
+            print(f"  skipped  {rel} is not in the tree")
+            continue
+        result = capture([sys.executable, "-m", "volkit", "check", "-w", str(src)])
+        print(result.stdout.rstrip())
+        if result.returncode != 0:
+            raise BuildError(
+                f"{rel} has problems the tool will not price around.  Fix the "
+                f"workbook, or take the pair out of CONFIG; the suite reads this "
+                f"same file and would fail on it half an hour from now."
+                + (f"\n{result.stderr.rstrip()}" if result.stderr.strip() else ""))
 
 
 def run_tests() -> None:
@@ -408,7 +447,7 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
 
     target_windows = not args.host_check
-    steps = 6 + int(args.zip)
+    steps = 7 + int(args.zip)
     n = 0
 
     try:
@@ -426,6 +465,9 @@ def main(argv: list[str] | None = None) -> int:
             print("skipped (--skip-deps)")
         else:
             install_deps()
+
+        n += 1; heading(n, steps, "workbook")
+        check_workbook()
 
         n += 1; heading(n, steps, "test suite")
         if args.skip_tests:

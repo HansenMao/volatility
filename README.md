@@ -66,6 +66,13 @@ is reported — in the message box at the top of the page, and by
 per pair holds `expiry, ST 10D, ST 25D, RR 25D, RR 10D`. Everything in the
 workbook is in **vol points**. Nothing is ever written back to it.
 
+A pair named in `CONFIG` with no sheet behind it -- a tab deleted, renamed or
+overwritten, and the pair left in the list -- is reported by `volkit check`,
+which exits non-zero. It used to be skipped in silence: the book loaded
+looking complete and the first screen to ask that pair for a smile said
+`no smile term structure; run calibrate() first`, naming neither the workbook
+nor the missing tab.
+
 An event is weighted **per currency**: a `PARAMS` column headed by a currency
 (`USD`, `JPY`) holds that currency's weight on each event row, and a pair's
 bump is its two legs' weights added together plus the pair's own cell on that
@@ -1559,7 +1566,7 @@ silence, and the build would come back with every tab showing.
 
 `--explain` is the reason it exists. A failed run reports *process completed
 with exit code 1* and buries the cause several clicks away; this prints the
-failing step's own log, where `build_exe.py` says which of its six steps died
+failing step's own log, where `build_exe.py` says which of its steps died
 and why.
 
 ## Tests

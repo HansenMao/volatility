@@ -793,6 +793,25 @@ def _write_band_row(wb, sheet: str, pair: str, request: dict) -> None:
         ws.cell(row=row, column=header[key], value=value)
 
 
+def _is_formula(v) -> bool:
+    """A cell openpyxl will write back as a formula.
+
+    Not only ``"=C2*3"``: Excel saves the same expression as an *array*
+    formula (``{=C2*3}``, the legacy CSE spelling, and what a dynamic-array
+    build writes) and openpyxl hands that back as an ``ArrayFormula`` object,
+    which is not a string and so was not recognised here.  Every array-formula
+    cell therefore lost its cached value on export, and the smile sheets of
+    the shipped workbook are entirely array formulas -- the copy came back
+    with 126 "blank quote" problems, one per quote it should have carried.
+    """
+    if isinstance(v, str):
+        return v.startswith("=")
+    # Imported here for the same reason openpyxl itself is imported inside
+    # ``export_workbook``: nothing else in this module needs it.
+    from openpyxl.worksheet.formula import ArrayFormula, DataTableFormula
+    return isinstance(v, (ArrayFormula, DataTableFormula))
+
+
 def _formula_cache(wb, values) -> dict[int, dict[str, float]]:
     """Every numeric value Excel last computed for a formula cell, by
     worksheet position and coordinate.  Only numbers: the sheets the tool
@@ -803,15 +822,19 @@ def _formula_cache(wb, values) -> dict[int, dict[str, float]]:
         vs = values[ws.title]
         for row in ws.iter_rows():
             for cell in row:
-                v = cell.value
-                if isinstance(v, str) and v.startswith("="):
+                if _is_formula(cell.value):
                     cv = vs[cell.coordinate].value
                     if isinstance(cv, (int, float)) and not isinstance(cv, bool):
                         out.setdefault(i, {})[cell.coordinate] = float(cv)
     return out
 
 
-_EMPTY_V = re.compile(r'<c r="([A-Z]+[0-9]+)"([^>]*)><f>([^<]*)</f><v\s*/></c>')
+# The formula element is kept whole rather than rebuilt, because it carries
+# attributes: an array formula is ``<f t="array" ref="B2">C2*3</f>`` and a
+# shared one can be ``<f t="shared" si="0"/>`` with no text at all.  Matching
+# only a bare ``<f>`` skipped both, so the substitution silently did nothing.
+_EMPTY_V = re.compile(
+    r'<c r="([A-Z]+[0-9]+)"([^>]*)>(<f[^>]*/>|<f[^>]*>[^<]*</f>)<v\s*/></c>')
 
 
 def _restore_formula_cache(xlsx: bytes, cached: dict[int, dict[str, float]]) -> bytes:
@@ -839,7 +862,7 @@ def _restore_formula_cache(xlsx: bytes, cached: dict[int, dict[str, float]]) -> 
                     v = values.get(match.group(1))
                     if v is None:
                         return match.group(0)
-                    return (f'<c r="{match.group(1)}"{match.group(2)}><f>{match.group(3)}</f>'
+                    return (f'<c r="{match.group(1)}"{match.group(2)}>{match.group(3)}'
                             f'<v>{v!r}</v></c>')
                 data = _EMPTY_V.sub(fill, data.decode("utf-8")).encode("utf-8")
             out.writestr(item, data)
