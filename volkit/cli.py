@@ -20,11 +20,11 @@ from pathlib import Path
 # choices, and a parser cannot be built from a module imported inside a
 # function.  All three are stdlib-only, so this does not drag the numeric
 # stack into anything that did not already have it.
-from . import (archive, config, consult, dtcc, llm, marking, paths, remarks,
-               rules, screens, session, synthesis)
+from . import (archive, config, consult, dtcc, llm, marketmaker, marking, paths,
+               remarks, rules, screens, session, synthesis)
 from .book import Book
 from .marketdata import ExcelSource, MarketDataError
-from .pricing import expiry_datetime
+from .pricing import expiry_datetime, quick_vol
 from .timeutil import UTC, Clock, parse_datetime, tenor_to_years
 
 #: Every subcommand name, whether or not this build registers it.  Used before
@@ -128,14 +128,32 @@ def _band_treatment(args):
     })
 
 
+def _feed(book, path):
+    """Load a feed onto a book and say what reading it turned up.
+
+    The three commands that take ``--feed`` all report the same two lists, in
+    the same place: a problem is a row that could not be read, a note is one
+    that was read and where the reading was a decision -- a spot date derived
+    from the calendar rather than stated by the file, a dated row passed over
+    because it has already delivered.  The screen shows both on the feed pill
+    and a batch run must not be the quieter of the two.
+    """
+    from .feed import load_for
+    try:
+        book.feed = load_for(book, path)
+    except Exception as exc:  # noqa: BLE001 - the caller works without a feed
+        print(f"  ! forward feed: {exc}", file=sys.stderr)
+        return
+    for line in book.feed.problems:
+        print(f"  ! forward feed: {line}", file=sys.stderr)
+    for line in book.feed.notes:
+        print(f"  · forward feed: {line}", file=sys.stderr)
+
+
 def _apply_band(args, book) -> None:
     """Hand the marked treatment and any feed to the surfaces that have a band."""
     if getattr(args, "feed", None) and book.feed is None:
-        from .feed import MarketFeed
-        try:
-            book.feed = MarketFeed.load(args.feed)
-        except Exception as exc:  # noqa: BLE001 - the lognormal surface still works
-            print(f"  ! forward feed: {exc}", file=sys.stderr)
+        _feed(book, args.feed)
     treatment = _band_treatment(args)
     for name in book.banded_pairs():
         for w in book[name].set_band_treatment(treatment):
@@ -221,17 +239,33 @@ def cmd_daily(args) -> int:
 def cmd_vol(args) -> int:
     book = _book(args, [args.pair])
     _apply_band(args, book)
-    surface = book[args.pair]
-    # The pricing screen's own expiry box, on the command line: a tenor is
-    # resolved on the pair's calendar and a date is read in any of the
-    # spellings `timeutil` takes.  The two must not understand different
-    # things -- this command is that screen's equivalent.
-    expiry = expiry_datetime(book, args.pair, args.expiry)
-    if args.strike is None:
-        print(f"{surface.atm_vol(expiry, args.cut) * 100:.6f}")
-        return 0
-    v = surface.vol(args.strike / args.forward, expiry, args.method, args.cut)
-    print(f"{float(v) * 100:.6f}")
+    # The pricing screen's own two boxes, on the command line, and the
+    # marking screen's vol query card: one function reads both, so a tenor,
+    # a date, ``ATM``, an absolute strike and ``25d`` cannot be understood
+    # differently in the three places they are typed.  Without --forward the
+    # level is the feed's, at this expiry.
+    r = quick_vol(book, args.pair, args.expiry, args.strike or "ATM",
+                  cut=args.cut, method=args.method, forward=args.forward)
+    print(f"{r['vol']:.6f}")
+    if args.verbose:
+        wing = "" if r["is_call"] is None else (" call" if r["is_call"] else " put")
+        where = (f"strike {r['strike']:.6f}" if r["scaled"]
+                 else f"K/F {r['strike_ratio']:.6f} (no feed: the smile is read in "
+                      "strike/forward)")
+        print(f"  {r['pair']}  expiry {r['expiry']}  t={r['t']:.5f}y  "
+              f"cut={r['cut']}  method={r['method']}")
+        print(f"  {r['strike_spec']}{wing} -> {where}   (K/F {r['strike_ratio']:.6f})")
+        if r["forward_source"] == "feed":
+            print(f"  spot {r['spot']:.6f}  forward {r['forward']:.6f}"
+                  + (f"  (the {r['via']} triangle; the feed does not quote "
+                     f"{r['pair']} itself)" if r["derived"] else "")
+                  + ("  (extrapolated beyond the feed's pillars)"
+                     if r["extrapolated"] else ""))
+        elif r["forward_source"] == "typed":
+            print(f"  forward {r['forward']:.6f} as given")
+        print(f"  ATM {r['atm_vol']:.6f}")
+    for w in r["warnings"]:
+        print(f"  ! {w}")
     return 0
 
 
@@ -371,7 +405,6 @@ def cmd_analysis(args) -> int:
     reproduced in a batch job.
     """
     from . import analytics
-    from .feed import MarketFeed
     from .history import load_history
 
     def pct(v, d=3, w=8):
@@ -394,10 +427,7 @@ def cmd_analysis(args) -> int:
     # the cross alone still builds everything the triangle needs.
     book = _book(args, [args.pair])
     if args.feed:
-        try:
-            book.feed = MarketFeed.load(args.feed)
-        except Exception as exc:  # noqa: BLE001 - the carry still works without it
-            print(f"  ! forward feed: {exc}", file=sys.stderr)
+        _feed(book, args.feed)
     hist = history = None
     if args.history:
         history = load_history(args.history, book.pairs, vol_unit=args.vol_unit)
@@ -592,9 +622,6 @@ def cmd_analysis(args) -> int:
         print(f"\nrelative value — {grid.history_days:g}-day history, weights " +
               " / ".join(f"{k} {v:g}" for k, v in grid.weights.items()))
 
-        def sd(v, w=10):
-            return "—".rjust(w) if v is None or v != v else f"{v:>+{w}.2f}"
-
         def grid_block(title: str, pick, fmt) -> None:
             print(f"  {title}")
             print(f"  {'tenor':<6}" + "".join(f"{labels[c]:>11}" for c in cols))
@@ -603,8 +630,8 @@ def cmd_analysis(args) -> int:
                 print(f"  {r.tenor:<6}" +
                       "".join(fmt(pick(by[c])) if c in by else "—".rjust(11) for c in cols))
 
-        grid_block("score — standard deviations of this cell's own history, + is rich",
-                   lambda c: c.score, lambda v: sd(v, 11))
+        grid_block("score — volatility points, the weighted mean of this cell's signals, "
+                   "+ is rich", lambda c: c.score, lambda v: sgn(v, 3, 11))
         grid_block("richness — volatility points: implied less realized, roll and carry",
                    lambda c: c.richness, lambda v: sgn(v, 3, 11))
 
@@ -668,7 +695,9 @@ def cmd_analysis(args) -> int:
         # a column that repeats five times down the table is read as one
         # observation and not five agreeing ones.
         head = {n: (n + "*" if n in relvalue.SHARED else n) for n in names}
-        print("  attribution — volatility points, and the z the score actually used")
+        print("  attribution — volatility points, and beside each the z it would be read "
+              "as: how\n  many standard deviations of this cell's own history that is. The "
+              "score is the\n  weighted mean of the values, not of the z's")
         print(f"  {'tenor':<6}{'point':<9}{'impl':>8}" +
               "".join(f"{head[n]:>9}{'z':>7}" for n in names) +
               f"{'score':>8}{'scale':>8}{'conf':>7}  used")
@@ -679,10 +708,11 @@ def cmd_analysis(args) -> int:
                 for n in names:
                     sig = by.get(n)
                     line += (sgn(None if sig is None else sig.value, 3, 9) +
-                             ("—".rjust(7) if sig is None or sig.z is None or not sig.used
+                             ("—".rjust(7) if sig is None or sig.z is None
                               else f"{sig.z:>+7.2f}"))
                 scale = "—".rjust(8) if c.scale is None else f"{c.scale * 100:>8.4f}"
-                print(line + sd(c.score, 8) + scale + f"{c.confidence * 100:>6.0f}%" + "  " +
+                print(line + sgn(c.score, 3, 8) + scale + f"{c.confidence * 100:>6.0f}%"
+                      + "  " +
                       (",".join(c.used) if c.used else "—") +
                       ("" if not c.scale_source or c.scale_source == c.column
                        else f" (scale from {c.scale_source})"))
@@ -690,8 +720,8 @@ def cmd_analysis(args) -> int:
             marked = ", ".join(n for n in names if n in relvalue.SHARED)
             print(f"  * {marked} is a property of the tenor and not of the strike: the same "
                   f"number in all five\n  rows of an expiry, so it is one observation and not "
-                  f"five agreeing ones. Its z still\n  differs by cell, because each cell "
-                  f"divides by its own scale.")
+                  f"five agreeing ones. Its z still\n  differs by cell, because each cell is "
+                  f"standardised on its own scale.")
         print(f"  {grid.summary['headline']}")
         # Every reason a cell is missing a signal, said once.  Repeating it
         # forty-five times would bury the one that matters.
@@ -703,10 +733,14 @@ def cmd_analysis(args) -> int:
             list(grid.warnings) + list(grid.unavailable.values()))
         for note in notes:
             print(f"  . {note}")
-        print("  the score divides each signal by how much this very cell's volatility "
-              "usually moves,\n  so half a point on a one-year at-the-money and half a point "
-              "on a one-week wing are not\n  the same reading. A cell with no history has no "
-              "scale and no score — the volatility\n  points beside it are still measured.")
+        print("  the score is the weighted mean of this cell's signals in volatility points, "
+              "which is\n  what a mark is moved by and what a price is made in. The 'scale' "
+              "column is how much\n  this cell's volatility usually moves and the z beside "
+              "each signal is the value read\n  against it — half a point is a great deal on "
+              "a one-year at-the-money and nothing on\n  a one-week wing — but neither enters "
+              "the score. A cell with no history keeps every\n  signal but 'history' and is "
+              f"scored on them; {relvalue.EXTREME_SCORE * 100:g} volatility points is where "
+              "the summary\n  starts calling a score an outlier.")
 
     if args.compare:
         # The panel moved to the Monitor screen, and its command moved with
@@ -1038,6 +1072,10 @@ def cmd_mm(args) -> int:
         "target_source": args.target_source,
         "target_text": (paths.read_text(args.target) if args.target else ""),
         "fit_curve": not args.no_curve, "free": args.free,
+        # Two boxes on the panel, two numbers here, and the same reader: an
+        # unset flag is two blanks and the fit runs in the house range.
+        "reversion_lo": (args.reversion_range or ("", ""))[0],
+        "reversion_hi": (args.reversion_range or ("", ""))[1],
         "tune_wings": not args.no_wings, "smile_free": args.smile_free,
         "mid_pull": args.mid_pull, "max_nfev": args.max_evals,
         "apply": False,
@@ -1105,11 +1143,7 @@ def cmd_mm(args) -> int:
         # a quote written against an absolute strike needs the outright forward
         # to become a moneyness, and without it every strike row on the sheet
         # comes back unavailable.
-        from .feed import MarketFeed
-        try:
-            book.feed = MarketFeed.load(args.feed)
-        except Exception as exc:  # noqa: BLE001 - the delta quotes still price
-            print(f"  ! forward feed: {exc}", file=sys.stderr)
+        _feed(book, args.feed)
     hist = None
     if args.history:
         from .history import load_history
@@ -2252,6 +2286,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="where the target at-the-money curve comes from")
     s.add_argument("--target", help="file of 'tenor vol' lines, for --target-source paste")
     s.add_argument("--free", nargs="*", help="curve parameters to leave free")
+    s.add_argument("--reversion-range", nargs=2, metavar=("FLOOR", "CEILING"), type=float,
+                   help=f"the range the backbone's mean reversion is fitted in, a marking "
+                        f"judgement rather than a property of the model (default: "
+                        f"{marketmaker.MEAN_REVERSION_RANGE[0]:g} "
+                        f"{marketmaker.MEAN_REVERSION_RANGE[1]:g})")
     s.add_argument("--smile-free", nargs="*", help="smile parameters to leave free")
     s.add_argument("--no-curve", action="store_true", help="do not fit the at-the-money curve")
     s.add_argument("--no-wings", action="store_true", help="do not fine tune the wings")
@@ -2528,12 +2567,21 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("pair")
     s.add_argument("expiry", help="a tenor (1W, 8d, 3M) or a date (2024-05-28, "
                                   "28May24, 5/28/2024)")
-    s.add_argument("--strike", type=float)
-    s.add_argument("--forward", type=float, default=1.0)
+    s.add_argument("--strike", default="ATM",
+                   help="a number, 'ATM', or a delta like '25d', '10dp', '-25d' -- the "
+                        "pricing screen's own strike box. A bare '25d' takes the call, "
+                        "so the put wing is '25dp' or '--strike=-25d'")
+    s.add_argument("--forward", type=float,
+                   help="the outright forward to place an absolute strike against; "
+                        "without it the feed's forward at this expiry is used, and "
+                        "with no feed ATM and delta strikes are still read in K/F")
     s.add_argument("--method", default="SVI", choices=list(_methods()))
     s.add_argument("--cut", default="TK")
+    s.add_argument("-v", "--verbose", action="store_true",
+                   help="also print the expiry, the strike it resolved to and the level")
     s.add_argument("--feed", default=_default_feed(),
-                   help="spot / forward feed CSV, for placing a managed band")
+                   help="spot / forward feed CSV: the forward the strike is placed "
+                        "against, and the level a managed band is placed at")
     s.set_defaults(func=cmd_vol)
 
     s = add_command("analysis", parents=[common],
@@ -2557,13 +2605,14 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--sabr-delta", type=float, default=0.25,
                    help="which wings to read the SABR shape off (default 0.25)")
     s.add_argument("--relative-value", action="store_true",
-                   help="also score every expiry and strike for relative value: implied "
-                        "against realized in level and in shape, the roll and the forward "
-                        "carry, the cross triangle, and each cell's own z-score in history")
+                   help="also score every expiry and strike for relative value, in "
+                        "volatility points: implied against realized in level and in shape, "
+                        "the roll and the forward carry, the cross triangle, and where each "
+                        "cell sits in its own history")
     s.add_argument("--history-days", type=float, default=_history_days(),
-                   help="how far back 'recent history' reaches for the z-scores and for the "
-                        "scale they are measured in. Deliberately not the realized lookback, "
-                        "which is matched to each tenor")
+                   help="how far back 'recent history' reaches for the history signal and "
+                        "for the scale each z is read against. Deliberately not the realized "
+                        "lookback, which is matched to each tenor")
     s.add_argument("--weight", action="append", default=[], metavar="SIGNAL=W",
                    help="reweight one relative-value signal, e.g. --weight carry=0.4. "
                         "Weights are renormalised over whichever signals a cell has")

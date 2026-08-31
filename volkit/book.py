@@ -25,7 +25,7 @@ from .calendars import CalendarSet, DEFAULT_CALENDARS
 from .cross import CorrelationCurve, CrossAtmCurve, infer_leg_signs
 from .events import EventSchedule
 from .econ import EconCalendar
-from .feed import MarketFeed, pip_divisor
+from .feed import MarketFeed
 from .marketdata import ExcelSource, MarketData, MarketDataError
 from .surface import VolSurface
 from .timeutil import Clock
@@ -121,57 +121,23 @@ class Book:
         no pair of legs that has one.  The composition is exact rather than a
         convenience: a cross outright is the product of its legs' outrights in
         the right orientation, which is triangular arbitrage and not a model.
-        ``trail`` is what stops a cross of a cross walking in a circle.
+
+        The arithmetic itself lives in ``feed.MarketFeed.level``, because that
+        is where the legs' two spot rates and two swap points are and because
+        there must be exactly one of it -- a second copy is a second place for
+        a sign to be written upside down, which is what §5's first entry cost.
+        What this adds is the *workbook's* opinion about which legs a cross
+        has: a sheet that names them is not second-guessed by a convention,
+        and a cross nobody named still has the one sensible pair of dollar
+        legs the market quotes.
         """
-        key = pair.upper()
         feed = self.feed
         if feed is None:
             return None
-        if key in getattr(feed, "pairs", {}):
-            quote = feed.quote(key, t)
-            return {"spot": float(quote["spot"]), "forward": float(quote["forward"]),
-                    "points": float(quote["points"]), "pip": float(quote["pip"]),
-                    "extrapolated": bool(quote["extrapolated"]), "via": ""}
-        if key in trail:
-            return None
-        spec = self.data.pairs.get(key)
-        legs = tuple(getattr(spec, "legs", ()) or ())
-        if len(legs) != 2:
-            return None
-        try:
-            sign_a, sign_b = infer_leg_signs(key, legs[0], legs[1])
-        except ValueError:
-            return None
-        a = self._feed_level(legs[0], t, trail + (key,))
-        b = self._feed_level(legs[1], t, trail + (key,))
-        if a is None or b is None:
-            return None
-        if min(a["spot"], a["forward"], b["spot"], b["forward"]) <= 0:
-            return None
-
-        def compose(x_a: float, x_b: float) -> float:
-            # The first leg carries the base currency and the second the term,
-            # and each is turned the right way up before they meet.  The signs
-            # are the triangle's own (``infer_leg_signs``), read here as
-            # quotation rather than as correlation: +1 on the first leg means
-            # it already reads (base)/(common), +1 on the second means it reads
-            # (term)/(common) and so enters inverted.  EURJPY is EURUSD *
-            # USDJPY; EURGBP is EURUSD / GBPUSD.
-            first = x_a if sign_a > 0 else 1.0 / x_a
-            second = 1.0 / x_b if sign_b > 0 else x_b
-            return first * second
-
-        spot = compose(a["spot"], b["spot"])
-        forward = compose(a["forward"], b["forward"])
-        # The points are the composed outright less the composed spot, in the
-        # cross's own pips.  They are never the legs' points added: a point of
-        # EURUSD and a point of USDJPY are different amounts of money, and the
-        # sum of them is not a number anybody quotes.
-        pip = pip_divisor(key)
-        return {"spot": spot, "forward": forward,
-                "points": (forward - spot) * pip, "pip": pip,
-                "extrapolated": bool(a["extrapolated"] or b["extrapolated"]),
-                "via": f"{legs[0]} and {legs[1]}"}
+        def declared(name: str):
+            spec = self.data.pairs.get(name)
+            return tuple(getattr(spec, "legs", ()) or ()) or None
+        return feed.level(pair, t, declared, trail)
 
     def forward_at(self, pair: str, t: float) -> float | None:
         """The outright forward from the feed, or None when there is no feed."""

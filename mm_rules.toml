@@ -1,0 +1,94 @@
+# Rules of thumb for the marking agent.  Read by volkit/rules.py; check it
+# with `python -m volkit mark rules PAIR`.
+#
+# Three beliefs were asked for.  One of them is a plan rule and is written
+# below.  The other two are constraints on where a parameter may sit, and this
+# file has no vocabulary for a constraint -- only for the order knobs are
+# freed in, and for how far this desk lands from the fit on one knob.  They
+# are written down here as comments so the belief is on the record, each with
+# the lever that actually enforces it, and neither is loaded.
+
+
+# --------------------------------------------------------------------------
+# 1.  Free initial and final first; add the curve and the add-on after them.
+# --------------------------------------------------------------------------
+# "If not working" is spelled as target count: plan_fit keeps the first
+# `len(targets)` knobs of this order, so two pinned tenors free initial and
+# final alone and four free all of it.  short_addon is deliberately *not*
+# named -- it lands last on its own (the order is the named knobs, then
+# whatever is left of the screen's default), and naming it would put it at the
+# front of a cross, whose knobs are corr_initial, corr_final, corr_decay,
+# short_addon and short_decay.  A cross therefore passes this rule over with a
+# note and keeps its own order, which is what should happen: nothing here was
+# asked about correlation.
+#
+# This is the same order as the built-in default today, so it changes no fit
+# on its own.  It is worth stating anyway: written down, it is the desk's
+# order rather than the screen's, and a later change to the default cannot
+# move it silently.
+[[plan_rule]]
+free_order = ["initial_vol", "long_term_vol", "mean_reversion"]
+why        = "mark the level first: initial and final against the pinned tenors, and free the curve and the add-on only when there are targets to determine them"
+
+# The same belief for a cross, if it is wanted, is a scoped rule per pair --
+# scope names one pair and the general rule above is passed over for a cross:
+#
+# [[plan_rule]]
+# scope      = { pair = "EURJPY" }
+# free_order = ["corr_initial", "corr_final", "corr_decay"]
+# why        = "the cross's level belongs to its legs, so the correlation is fitted in the same order"
+
+
+# --------------------------------------------------------------------------
+# 2.  Initial and final should not be far apart.  NOT ENFORCED HERE.
+# --------------------------------------------------------------------------
+# The belief: a flatter backbone is more stable than a steep one, because a
+# steep one is what makes the whole curve sensitive to mean_reversion --
+# sigma(t) = final - (final - initial) exp(-k t), so the curve's sensitivity
+# to k is proportional to (final - initial) and a curve with the two together
+# barely notices k at all.
+#
+# This is a relation between two knobs.  A nudge rule is a signed correction
+# to *one* knob, with a fixed sign, so it cannot say "pull them together":
+# which way each should move depends on where the fit put them, and a rule
+# with a fixed sign would push initial up on the mornings it was already
+# above final.  There is no honest way to write it here.
+#
+# What does enforce it, today: pin one of the two on the fit panel and let
+# the other take the targets, or free fewer knobs so the fit has less room to
+# steepen.  What would enforce it properly is a penalty on |final - initial|
+# in fit_atm_curve's objective, which is a code change and not a rules file.
+
+
+# --------------------------------------------------------------------------
+# 3.  mean_reversion generally sits between 1.5 and 6.5.  ENFORCED IN THE FIT,
+#     NOT IN THIS FILE.
+# --------------------------------------------------------------------------
+# Read as a half-life that is ln(2)/k in years, 1.5 to 6.5 is a backbone that
+# closes half the gap between the front and the back end in five weeks to five
+# and a half months, which is the shape being described.
+#
+# This is a bound, and a rules file may seed a habit but may not narrow a
+# bound.  It lives in marketmaker.MEAN_REVERSION_RANGE, is sent to the page,
+# and is a control: `Set the mean-reversion range` on the fit panel, hidden
+# until it is asked for, and `volkit mm --reversion-range FLOOR CEILING` on
+# the command line.  Leave the boxes empty for the house range.
+#
+# What this file *can* hold is the habit, once the journal has seen it: if the
+# fit keeps landing at one end of the range and the desk keeps pulling it
+# back, that is a correction with a consistent sign and it belongs below.  It
+# is left commented because the sign is not known yet -- and a nudge rule does
+# nothing until three real corrections lie on its side anyway, so guessing the
+# sign now buys nothing and would put a hunch in the trace wearing the desk's
+# label.  Fill in value (signed, in the knob's own units) and spread from what
+# `python -m volkit mark learn PAIR` reports for curve.mean_reversion, then
+# compare it against `--no-rules`.
+#
+# [[nudge_rule]]
+# section = "curve"
+# knob    = "mean_reversion"
+# value   = -1.0      # signed: negative if the desk lands below the fit
+# spread  = 0.8       # prior half-IQR, must be positive
+# weight  = 2         # 2..5 pseudo-corrections; 16 real ones outvote any rule
+# why     = "the fit runs the curve steeper than the desk marks it"
+# added   = "2026-08-31"

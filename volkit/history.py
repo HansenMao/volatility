@@ -272,13 +272,16 @@ def load_history(path: str | Path, known_pairs=None, *, vol_unit: str = "auto") 
     """Read a historical workbook: one sheet per pair, one row per date.
 
     ``vol_unit`` says whether the volatility columns are quoted in points
-    (``9.25``) or decimals (``0.0925``).  On ``auto`` it is decided **once per
-    sheet, from the at-the-money columns**, and the same scale is then applied
-    to the risk reversals and butterflies.  Deciding it column by column is
-    what a first cut of this did, and it is wrong: a 25 delta risk reversal of
-    -0.89 vol points is below 1 in magnitude, so it looks exactly like a
-    decimal and comes through a hundred times too large.  The at-the-money
-    level is never ambiguous, so it is what decides.
+    (``9.25``) or decimals (``0.0925``).  On ``auto`` every column is read as
+    the number that is written: **volatility points, whatever the level**.
+    The scale is still decided once for the whole sheet rather than column by
+    column -- a 25 delta risk reversal of -0.89 vol points is below 1 in
+    magnitude, so per-column sniffing reads it as a decimal and returns it a
+    hundred times too large -- but a low at-the-money no longer votes either.
+    A managed pair marks its 3M at 0.35 points and a sheet holding one is a
+    sheet of points; guessing from the level turned it into 35.  A genuinely
+    decimal sheet is loaded with ``vol_unit='decimal'``, which is a thing
+    somebody says rather than a thing the reader infers.
     """
     if vol_unit not in VOL_UNITS:
         raise ValueError(f"unknown volatility unit {vol_unit!r}; expected one of {VOL_UNITS}")
@@ -398,31 +401,40 @@ def _read_sheet(book: pd.ExcelFile, sheet: str, pair: str, vol_unit: str = "auto
 def _vol_divisor(staged, vol_unit: str) -> tuple[float, str]:
     """One scale for every volatility column on the sheet, and why.
 
-    The at-the-money level decides: a quoted ATM is somewhere between 2 and 60
-    in points and between 0.02 and 0.60 in decimals, and nothing sensible sits
-    near 1.  Risk reversals and butterflies are then scaled to match, rather
-    than being sniffed individually where a small one would be misread.
+    On ``auto`` that scale is always points: what the sheet says is what the
+    number is.  The reader used to read the at-the-money level and call
+    anything under 1.0 a decimal sheet, and that is wrong wherever a quote is
+    genuinely small -- a pegged pair's at-the-money is a third of a point, and
+    reading it as a decimal put it on the monitor at 35.  A level is not
+    evidence of a unit; the caller saying ``vol_unit='decimal'`` is.
+
+    Deciding it once for the whole sheet still matters and has not changed: a
+    -0.89 risk reversal sniffed on its own column reads as a decimal and comes
+    back a hundred times too large.
     """
     if vol_unit == "percent":
         return 100.0, ""
     if vol_unit == "decimal":
         return 1.0, ""
     atm = [v for spec, v in staged if spec.field == "atm"]
-    if atm:
-        finite = np.concatenate([v[np.isfinite(v)] for v in atm]) if atm else np.empty(0)
-        if finite.size:
-            level = float(np.median(np.abs(finite)))
-            if level > 1.0:
-                return 100.0, ""
-            if 0.0 < level < 1.0:
-                return 1.0, ""
-    shaped = [v for spec, v in staged if spec.field in ("rr", "bf")]
-    if not shaped:
+    finite = [v[np.isfinite(v)] for v in atm]
+    finite = [v for v in finite if v.size]
+    if finite:
+        level = float(np.median(np.abs(np.concatenate(finite))))
+        if 0.0 < level < 1.0:
+            # Said once, because it is the one reading a person might have
+            # meant the other way; never guessed at.
+            return 100.0, (
+                f"the at-the-money columns sit around {level:g}, which is low for a quote in "
+                "volatility points; they were read as written, as points. "
+                "Load with vol_unit='decimal' if the sheet is in decimals"
+            )
+        return 100.0, ""
+    if not any(spec.field in ("rr", "bf") for spec, _ in staged):
         return 100.0, ""
     return 100.0, (
-        "no at-the-money column, so the volatility unit could not be determined from an "
-        "unambiguous number; the risk reversals and butterflies were read as vol points. "
-        "Load with vol_unit='decimal' if that is wrong"
+        "no at-the-money column, so the risk reversals and butterflies were read as written, "
+        "as volatility points. Load with vol_unit='decimal' if that is wrong"
     )
 
 

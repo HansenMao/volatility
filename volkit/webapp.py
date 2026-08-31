@@ -35,7 +35,7 @@ from .book import Book
 from .econ import RELEASE_TIMES
 from .events import event_entries, leg_weights, pair_legs
 from .cross import CrossAtmCurve
-from .feed import FeedError, MarketFeed
+from .feed import FeedError, load_for
 from .listed import (GREEK_FIELDS, UNDERLYINGS, WEIGHTINGS, panel_from_request,
                      positions_from_request)
 from . import dtcc
@@ -43,7 +43,8 @@ from .archive import Archive, ArchiveError
 from . import rules as rules_mod
 from .knowledge import KnowledgeBank, KnowledgeError, RULE_INSTRUMENTS, RULE_KINDS, SIZE_BASES
 from .marketmaker import (BACKBONE_KNOBS, CROSS_KNOBS, DEFAULT_BACKBONE_FREE,
-                          DEFAULT_CROSS_FREE, TARGET_SOURCES, learn_from_panel)
+                          DEFAULT_CROSS_FREE, MEAN_REVERSION_RANGE, TARGET_SOURCES,
+                          learn_from_panel)
 from .marketmaker import panel_from_request as mm_panel_from_request
 from .marketmaker import quote_panel_from_request as mm_quote_panel_from_request
 from .marketmaker import rules_from_request
@@ -59,7 +60,7 @@ from .curves import panel_from_request as curve_panel_from_request
 from .monitor import DEFAULT_WAS_DATE, DEFAULT_WAS_KIND, MAX_TILES
 from .monitor import panel_from_request as monitor_panel_from_request
 from .history import ANNUALISATIONS, VOL_UNITS, HistoryError, load_history
-from .pricing import PRODUCTS, OptionLeg, price_strip, resolve_legs
+from .pricing import PRODUCTS, OptionLeg, price_strip, quick_vol, resolve_legs
 from . import remarks, screens, session
 from .marking import MIN_INSTANCES as MARK_MIN_INSTANCES
 from .marking import SCREEN_VERDICTS as MARK_VERDICTS
@@ -224,7 +225,7 @@ class BookService:
             try:
                 self.book = Book.from_excel(self.path, self.clock).load_all()
                 if self.feed_path:
-                    self.book.feed = MarketFeed.load(self.feed_path)
+                    self.book.feed = load_for(self.book, self.feed_path)
                     self.feed_mtime = self._feed_mtime()
                 self.load_error = None
             except Exception as exc:  # noqa: BLE001 - reported to the browser
@@ -298,6 +299,12 @@ class BookService:
                     "cross_knobs": list(CROSS_KNOBS),
                     "default_free": list(DEFAULT_BACKBONE_FREE),
                     "default_cross_free": list(DEFAULT_CROSS_FREE),
+                    # The range the backbone's mean reversion is fitted in.
+                    # A marking judgement rather than a property of the model,
+                    # so it is declared once in marketmaker.py and sent here
+                    # for the panel to show and send its own back -- the same
+                    # arrangement as the relative-value weights above.
+                    "reversion_range": list(MEAN_REVERSION_RANGE),
                     "smile_params": list(PARAM_NAMES),
                     "fly_conventions": list(FLY_CONVENTIONS),
                     "vol_units": list(QUOTE_VOL_UNITS),
@@ -348,41 +355,19 @@ class BookService:
             }
 
     # -- endpoints --------------------------------------------------------
-    def calc(self, q: dict) -> dict:
-        with self._lock:
-            pair = q["pair"]
-            surface = self.book[pair]
-            expiry = q["expiry"]
-            method = q.get("method", "SVI")
-            cut = q.get("cut", "TK")
-            output = q.get("output", "Strike")
-            delta = float(q.get("delta", 25)) / 100.0
-            forward = float(q.get("forward") or 1.0)
-            if forward <= 0:
-                raise ValueError(f"forward must be positive, got {forward}")
+    def vol_query(self, q: dict) -> dict:
+        """The marking screen's vol query: an expiry, a strike, and the vol.
 
-            if output == "ATM":
-                return {"value": surface.atm_vol(expiry, cut) * 100, "unit": "%"}
-            if output == "Daily":
-                return {"value": surface.daily_vol(expiry) * 100, "unit": "%"}
-            if output == "Strike":
-                strike = float(q.get("strike") or forward)
-                v = float(surface.vol(strike / forward, expiry, method, cut))
-                return {"value": v * 100, "unit": "%",
-                        "detail": f"K/F = {strike / forward:.6f}"}
-            if output == "Delta":
-                is_call = str(q.get("callput", "call")).lower() == "call"
-                k, v = surface.delta_strike(expiry, delta, is_call, method, cut)
-                return {"value": v * 100, "unit": "%",
-                        "detail": f"strike = {k * forward:.6f}  (K/F = {k:.6f})"}
-            if output == "RR":
-                return {"value": surface.risk_reversal(expiry, delta, method, cut) * 100, "unit": "%"}
-            if output == "Fly":
-                return {"value": surface.strangle(expiry, delta, method, cut) * 100, "unit": "%"}
-            if output == "Density":
-                strike = float(q.get("strike") or forward)
-                return {"value": surface.density(strike / forward, expiry, method, cut), "unit": ""}
-            raise ValueError(f"unknown output {output!r}")
+        Two boxes, read exactly as the pricing screen reads them, and the
+        forward off the feed rather than out of a third box -- so what the
+        card answers is the marks as they now stand against the market as it
+        has just been published.  ``pricing.quick_vol`` is the whole of it,
+        and ``volkit vol`` is the same call.
+        """
+        with self._lock:
+            return quick_vol(self.book, q["pair"], q.get("expiry", ""),
+                             q.get("strike", "") or "ATM",
+                             cut=q.get("cut", "TK"), method=q.get("method") or None)
 
     def smile(self, q: dict) -> dict:
         with self._lock:
@@ -531,10 +516,17 @@ class BookService:
             feed = self.book.feed
             if feed is None:
                 return {"loaded": False, "pairs": [], "source": "", "problems": [],
-                        "path": self.feed_path or "", "stale": False, "written": ""}
+                        "notes": [], "path": self.feed_path or "", "stale": False,
+                        "written": ""}
             on_disk = self._feed_mtime()
             out = {"loaded": True, "source": feed.source, "asof": feed.asof,
                    "problems": feed.problems, "pairs": feed.summary(),
+                   # What was read that was neither wrong nor obvious: a spot
+                   # date derived rather than stated, a dated row passed over
+                   # as history.  A feed whose near side was placed against a
+                   # date this tool worked out for itself must not read the
+                   # same as one the publisher stated.
+                   "notes": feed.notes,
                    "covered": sorted(feed.pairs),
                    # The crosses the file does not quote and does build: a
                    # feed carrying EURUSD and USDJPY carries EURJPY, and a
@@ -553,10 +545,20 @@ class BookService:
                                  and on_disk > self.feed_mtime)}
             if q and q.get("pair") and q.get("t"):
                 try:
-                    out["quote"] = feed.quote(q["pair"], float(q["t"]))
+                    # Through the book's own legs, so a cross quoted here and
+                    # the same cross on a pricing row are the one triangle: a
+                    # sheet that names a cross's legs is not second-guessed by
+                    # a convention on one screen and honoured on the next.
+                    out["quote"] = feed.quote(q["pair"], float(q["t"]),
+                                              self._declared_legs)
                 except (FeedError, ValueError) as exc:
                     out["quote_error"] = str(exc)
             return out
+
+    def _declared_legs(self, pair: str):
+        """The legs the workbook names for a cross, or None for the convention."""
+        spec = (self.book.data.pairs.get(pair) if self.book is not None else None)
+        return tuple(getattr(spec, "legs", ()) or ()) or None
 
     def load_feed(self, payload: dict) -> dict:
         """Point the book at a spot/forward feed file."""
@@ -567,7 +569,7 @@ class BookService:
                 self.feed_path = None
                 self.feed_mtime = None
                 return self.feed_state()
-            self.book.feed = MarketFeed.load(path)
+            self.book.feed = load_for(self.book, path)
             self.feed_path = path
             self.feed_mtime = self._feed_mtime()
             return self.feed_state()
@@ -597,7 +599,7 @@ class BookService:
             # Read into a local first: a feed file that has been half written,
             # or edited into something unreadable, must not leave the screen
             # with no market at all.
-            feed = MarketFeed.load(self.feed_path)
+            feed = load_for(self.book, self.feed_path)
             self.book.feed = feed
             self.feed_mtime = self._feed_mtime()
 
@@ -751,7 +753,7 @@ class BookService:
                                          f"{Path(path).name} changed, but no workbook is "
                                          f"loaded to put it on", stamp)
             try:
-                feed = MarketFeed.load(path)
+                feed = load_for(self.book, path)
             except (FeedError, OSError) as exc:
                 return self._auto_record("feed", False,
                                          f"{Path(path).name} changed and could not be read: "
@@ -1279,7 +1281,9 @@ class BookService:
             if self.history is None:
                 out["unavailable"]["history"] = (
                     "no historical workbook is loaded, so there is no realized volatility "
-                    "to compare against and no scale to score on")
+                    "to compare against and no scale to say how unusual a difference is. "
+                    "The score is in volatility points and needs neither, so what can still "
+                    "be measured is still scored")
             elif panel.pair not in self.history:
                 out["unavailable"]["history"] = (
                     f"the historical workbook has no sheet for {panel.pair}; it holds "
@@ -1795,8 +1799,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, (STATIC_DIR / "index.html").read_bytes(), "text/html; charset=utf-8")
             elif url.path == "/api/state":
                 self._json(self.service.state())
-            elif url.path == "/api/calc":
-                self._json(self.service.calc(q))
+            elif url.path == "/api/vol":
+                self._json(self.service.vol_query(q))
             elif url.path == "/api/smile":
                 self._json(self.service.smile(q))
             elif url.path == "/api/marks":
@@ -1863,8 +1867,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self.service.reload())
             elif url.path == "/api/overwrite":
                 self._json(self.service.overwrite(payload))
-            elif url.path == "/api/calc":
-                self._json(self.service.calc(payload))
+            elif url.path == "/api/vol":
+                self._json(self.service.vol_query(payload))
             elif url.path == "/api/price":
                 self._json(self.service.price(payload))
             elif url.path == "/api/legs":

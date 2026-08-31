@@ -107,15 +107,74 @@ DEFAULT_CROSS_FREE = ("corr_initial", "corr_final")
 # Parameters that are volatilities and are therefore typed in points.
 _PERCENT_KNOBS = ("initial_vol", "long_term_vol", "short_addon", "rate_vol")
 
+#: The range the backbone's mean reversion is fitted in, and the one bound
+#: here that is a **marking judgement rather than a property of the model**.
+#: Read as a half-life -- ``ln(2) / k`` in years -- 1.5 to 6.5 is a curve that
+#: closes half the gap between the front and the back end in five weeks to
+#: five and a half months, which is the shape a desk marks.  Outside it the
+#: fit is not wrong, it is describing a term structure nobody would mark:
+#: below the floor the curve is nearly a straight line to the back end, and
+#: above the ceiling the whole shape sits in the first month, where
+#: ``short_addon`` already lives.  The ceiling is 6.5 and not 6 because
+#: AUDUSD and NZDUSD are marked at 6.5 in ``files/vol_marks.xlsx``: a default
+#: range that excludes marks the desk has actually made is a range that
+#: argues with its own book on the first morning.
+#:
+#: It is deliberately a *fit* bound and not a bound on the mark.  A value
+#: typed into the marking screen's parameter box is a mark somebody made on
+#: purpose and is left exactly as typed; what this constrains is where a cold
+#: fit through a target curve is allowed to land, and a fit that comes to rest
+#: on it says so in its warnings rather than reporting a shape as fitted.
+MEAN_REVERSION_RANGE = (1.5, 6.5)
+
 # Bounds for every knob, in decimals.  ``short_addon`` is held non-negative:
 # it is the front-end lift, and a front end *below* the backbone is what
 # ``initial_vol`` under ``long_term_vol`` already expresses.  Letting both do
 # it makes the pair degenerate.
 _BOUNDS = {
     "initial_vol": (1e-4, 3.0), "long_term_vol": (1e-4, 3.0),
-    "mean_reversion": (0.0, 200.0), "short_addon": (0.0, 0.5), "short_decay": (0.0, 500.0),
+    "mean_reversion": MEAN_REVERSION_RANGE, "short_addon": (0.0, 0.5),
+    "short_decay": (0.0, 500.0),
     "corr_initial": (-0.999, 0.999), "corr_final": (-0.999, 0.999), "corr_decay": (0.0, 200.0),
 }
+#: Sweep nodes for the mean reversion, taken from the range itself so the two
+#: cannot drift apart.  A node the polish is not allowed to reach can still win
+#: the sweep on cost and is then clipped into the bound, which is a different
+#: curve from the one that was measured.
+def reversion_nodes(rng: tuple[float, float] = MEAN_REVERSION_RANGE) -> tuple[float, ...]:
+    lo, hi = rng
+    return tuple(lo + i * (hi - lo) / 4.0 for i in range(5))
+
+def check_reversion_range(value) -> tuple[float, float]:
+    """Read a mean-reversion range somebody typed, or refuse it with the reason.
+
+    One reader for the panel, the CLI and the fit, so a range that is legal on
+    the screen cannot be illegal underneath it.  The floor is held above zero:
+    at zero the backbone is a flat line at ``initial_vol`` and the whole term
+    structure is whatever ``short_addon`` says, which is a different model
+    wearing the same parameters.
+    """
+    try:
+        lo, hi = (float(v) for v in value)
+    except (TypeError, ValueError):
+        raise ValueError("the mean-reversion range is two numbers, a floor and a "
+                         "ceiling") from None
+    if not (math.isfinite(lo) and math.isfinite(hi)):
+        raise ValueError("the mean-reversion range must be two finite numbers")
+    if lo <= 0.0:
+        raise ValueError(f"the mean-reversion floor must be above zero, not {lo:g}; at zero "
+                         f"the backbone is flat and the term structure is all short_addon")
+    if hi <= lo:
+        raise ValueError(f"the mean-reversion ceiling {hi:g} must be above its floor {lo:g}")
+    return (lo, hi)
+
+
+#: How far off its targets a fit has to be before a parameter sitting on its
+#: bound is reported as limiting the shape.  A hundredth of a basis point of
+#: volatility: far below anything a market quotes, so a fit that is inside it
+#: reached its targets and the bound held nothing back.
+_BOUND_BINDING_RMSE = 1e-5
+
 _SHIFT_BOUNDS = {"rho25": (-1.5, 1.5), "rho10": (-1.5, 1.5),
                  "slog25": (-1.0, 1.0), "slog10": (-1.0, 1.0)}
 
@@ -221,7 +280,8 @@ def _curve_vols(atm, ts: list[float]) -> list[float]:
 
 
 def fit_atm_curve(atm, targets: list[CurveTarget], *, free: tuple[str, ...] | None = None,
-                  weights: list[float] | None = None) -> CurveFit:
+                  weights: list[float] | None = None,
+                  reversion_range: tuple[float, float] | None = None) -> CurveFit:
     """Fit the free curve parameters through a target term structure.
 
     The fit runs on a copy, so the curve handed in is untouched whatever
@@ -233,6 +293,15 @@ def fit_atm_curve(atm, targets: list[CurveTarget], *, free: tuple[str, ...] | No
     polishing.  A local minimum in mean reversion is easy to land in from a
     bad start and impossible to see afterwards.
     """
+    # The mean-reversion range is a marking judgement (MEAN_REVERSION_RANGE),
+    # so it is the one bound a caller may move.  Everything downstream reads
+    # `bounds` and `seeds` rather than the module constants, so the sweep nodes
+    # and the polish can never be taken from two different ranges.
+    rev = check_reversion_range(reversion_range) if reversion_range is not None \
+        else MEAN_REVERSION_RANGE
+    bounds = {**_BOUNDS, "mean_reversion": rev}
+    reversion_seeds = reversion_nodes(rev)
+
     knobs = _Knobs(atm)
     free = tuple(free) if free is not None else knobs.default_free
     unknown = [f for f in free if f not in knobs.available]
@@ -277,8 +346,8 @@ def fit_atm_curve(atm, targets: list[CurveTarget], *, free: tuple[str, ...] | No
             return np.full(len(targets), 1e3)
         return w * (got - goals)
 
-    lo = np.array([_BOUNDS[k][0] for k in free], dtype=float)
-    hi = np.array([_BOUNDS[k][1] for k in free], dtype=float)
+    lo = np.array([bounds[k][0] for k in free], dtype=float)
+    hi = np.array([bounds[k][1] for k in free], dtype=float)
 
     # -- starting points: levels read off the data, shapes swept -----------
     short_vol, long_vol = float(goals[0]), float(goals[-1])
@@ -299,7 +368,7 @@ def fit_atm_curve(atm, targets: list[CurveTarget], *, free: tuple[str, ...] | No
             for front in (10.0, 50.0, 200.0):
                 seeds.append(seeded({"corr_decay": decay, "short_decay": front}))
     else:
-        for reversion in (0.5, 2.0, 6.0, 20.0, 60.0):
+        for reversion in reversion_seeds:
             for decay in (10.0, 50.0, 200.0):
                 seeds.append(seeded({
                     "mean_reversion": reversion, "short_decay": decay,
@@ -350,13 +419,29 @@ def fit_atm_curve(atm, targets: list[CurveTarget], *, free: tuple[str, ...] | No
             f"points, worst {err[j] * 100:+.3f} at {targets[j].tenor}. A five-parameter backbone "
             f"has one hump in it; a target curve with two does not fit, and forcing it here only "
             f"spreads the error. Pin those tenors on the marking screen instead")
+    # A parameter resting on its bound is only worth saying when the bound is
+    # actually holding the fit back.  Landing on it and hitting every target
+    # anyway limits nothing, and the claim below would be false: EURUSD is
+    # marked at exactly 6.0, the top of MEAN_REVERSION_RANGE, so an ungated
+    # check warns on every refit of the curve the desk already has -- and a
+    # warning that fires when nothing is wrong is one nobody reads.
     for k in free:
         v = values[k]
-        span = _BOUNDS[k][1] - _BOUNDS[k][0]
-        if min(abs(v - _BOUNDS[k][0]), abs(v - _BOUNDS[k][1])) < 1e-6 * max(span, 1.0):
+        span = bounds[k][1] - bounds[k][0]
+        if rmse <= _BOUND_BINDING_RMSE:
+            break
+        if min(abs(v - bounds[k][0]), abs(v - bounds[k][1])) < 1e-6 * max(span, 1.0):
+            why_bound = (
+                f" That bound is a marking judgement, not a property of the model: "
+                f"the backbone is fitted inside {rev[0]:g}-{rev[1]:g} because a curve "
+                f"outside it is one nobody marks. Widen the range on the fit panel to let "
+                f"the fit go there, or type the value on the marking screen, which is not "
+                f"bounded."
+                if k == "mean_reversion" else "")
             warnings.append(
                 f"{k} came to rest on its bound at {v:.6g}; the targets want more than the "
-                f"parameter can give, so the shape is being limited rather than fitted")
+                f"parameter can give, so the shape is being limited rather than fitted."
+                + why_bound)
     if len(targets) == len(free):
         warnings.append(
             f"{len(free)} free parameters against {len(targets)} targets is an exact solve, not "
@@ -1087,7 +1172,14 @@ def _knob_points(name: str, value: float) -> float:
 
 
 def _knob_decimal(name: str, value: float) -> float:
-    """A knob on its way back in.  The exact inverse of :func:`_knob_points`."""
+    """A knob on its way back in, the way :func:`_knob_points` sent it out.
+
+    It is the inverse in arithmetic and **not in binary**: ``x * 100 / 100``
+    differs from ``x`` in the last place for about an eighth of the values it
+    is given.  That is why keeping a fit's marks puts them on through this
+    same pair of conversions rather than leaving the raw fitted numbers on the
+    surface -- see :meth:`Panel.run`.
+    """
     return value / 100.0 if name in _PERCENT_KNOBS else value
 
 
@@ -1229,6 +1321,12 @@ class Panel:
     target_text: str = ""
     fit_curve: bool = True
     free: tuple[str, ...] | None = None
+    #: The range the backbone's mean reversion is fitted in.  ``None`` is the
+    #: house judgement, ``MEAN_REVERSION_RANGE``; a panel that names one is
+    #: overriding a marking judgement for this fit and the run says so, because
+    #: a fit made inside the house range and one made outside it must not read
+    #: the same.
+    reversion_range: tuple[float, float] | None = None
 
     # the wings
     tune_wings: bool = True
@@ -1359,7 +1457,8 @@ class Panel:
             try:
                 targets, evidence = self._targets(surface, quotes, expiries)
                 if targets:
-                    curve_fit = fit_atm_curve(surface.atm, targets, free=self.free)
+                    curve_fit = fit_atm_curve(surface.atm, targets, free=self.free,
+                                              reversion_range=self.reversion_range)
                     problems = knobs.set(curve_fit.after)
                     if problems:
                         raise ValueError("; ".join(problems))
@@ -1451,6 +1550,18 @@ class Panel:
                     "the marks were not put back exactly after the fit. Reload the workbook "
                     "before trusting this book")
         else:
+            # What goes on the book is the marks that were handed back, not the
+            # raw numbers the optimiser stopped at.  They differ: a knob leaves
+            # here in volatility points and comes back divided by a hundred,
+            # and that round trip moves about an eighth of all values by one
+            # place in the last bit.  Left alone, a price then depended on
+            # whether "keep the marks" had been ticked -- quoting off a book
+            # the fit was applied to and quoting off the marks it handed back
+            # gave prices a nanovol apart, which is nothing to a market and
+            # everything to a screen that has to reproduce itself.  One number,
+            # one spelling: the book holds exactly what the panel shows.
+            for problem in apply_marks(surface, out["marks"]):
+                out["warnings"].append(f"the fitted marks did not go on cleanly: {problem}")
             out["warnings"].append(
                 f"the fitted marks were written into the loaded book for {self.pair}. They are "
                 f"in memory only -- the workbook on disk is unchanged, and a reload discards them")
@@ -1476,6 +1587,11 @@ class Panel:
             "converged": fit.converged, "message": fit.message,
             "evaluations": fit.evaluations, "seconds": fit.seconds,
             "warnings": list(fit.warnings),
+            # The range this fit was actually run in, and whether it was the
+            # house one.  A fit made inside the marking judgement and one made
+            # outside it must not read the same on the screen.
+            "reversion_range": list(self.reversion_range or MEAN_REVERSION_RANGE),
+            "reversion_house": self.reversion_range is None,
         }
 
     def _market(self, quotes, expiries, before, after, errors, run_, forward_notes) -> dict:
@@ -2081,6 +2197,25 @@ def _common(payload: dict) -> tuple[str, str, str | None, str, str]:
     return pair, cut, method, fly, vol_unit
 
 
+def _reversion_from_request(lo, hi) -> tuple[float, float] | None:
+    """The mean-reversion range a panel typed, or ``None`` for the house one.
+
+    Two empty boxes are not a range of nothing, they are "leave it to the
+    house judgement" -- the same reading as an empty market box on the pricing
+    screen handing the field back to the feed.  One box filled and the other
+    empty is refused rather than half-read: a ceiling with no floor under it
+    is a range somebody meant to type and did not finish.
+    """
+    blank = [v is None or (isinstance(v, str) and not v.strip()) for v in (lo, hi)]
+    if all(blank):
+        return None
+    if any(blank):
+        raise ValueError("the mean-reversion range needs both a floor and a ceiling, or "
+                         "neither; leave both empty for the house range "
+                         f"{MEAN_REVERSION_RANGE[0]:g}-{MEAN_REVERSION_RANGE[1]:g}")
+    return check_reversion_range((lo, hi))
+
+
 def panel_from_request(payload: dict) -> Panel:
     """Build the fit panel from a JSON body or a CLI namespace-like mapping."""
     pair, cut, method, fly, vol_unit = _common(payload)
@@ -2097,6 +2232,10 @@ def panel_from_request(payload: dict) -> Panel:
         target_text=str(payload.get("target_text") or ""),
         fit_curve=_opt_bool(payload, "fit_curve", True),
         free=_opt_tuple(payload, "free", None),
+        # Named here rather than inside the helper so the guard that pins the
+        # panel's field list against this reader can see them.
+        reversion_range=_reversion_from_request(payload.get("reversion_lo"),
+                                                payload.get("reversion_hi")),
         tune_wings=_opt_bool(payload, "tune_wings", True),
         smile_free=_opt_tuple(payload, "smile_free", PARAM_NAMES),
         mid_pull=_opt_float(payload, "mid_pull", 0.05),

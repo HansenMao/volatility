@@ -38,7 +38,7 @@ set -euo pipefail
 WORKFLOW="build-windows.yml"
 ARTIFACT="volkit-windows"
 ONEFILE="true"
-HIDDEN="analysis,mm,monitor"
+HIDDEN="analysis,mm,monitor,listed"
 HIDDEN_SET=""
 EXCLUDE=""
 BRANCH=""

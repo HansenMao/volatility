@@ -812,6 +812,114 @@ file, no GBPNZD forward -- and a pair with no legs at all (USDCNY) is
 unchanged. To get the old behaviour back, remove the legs' rows from the feed
 file: the tool never invents a level it was not given one way or the other.
 
+### F13. A low at-the-money made a historical sheet read as decimals
+
+The historical workbook's volatility unit was decided per sheet from the
+at-the-money column, on the argument that a quoted at-the-money is somewhere
+between 2 and 60 in points and between 0.02 and 0.60 in decimals, so nothing
+sensible sits near 1. That is true of a free-floating pair and false of a
+managed one: USDHKD marks its 3M at about a third of a volatility point. A
+sheet holding it was read as a sheet of **decimals**, so 0.35 came back as
+0.35 in the model's own units and every screen that prints points showed it
+as **35.00** -- a hundred times the mark, on the monitor, which is the screen
+a desk opens first, and with the risk reversal and butterfly beside it scaled
+the same way.
+
+The level is no longer read as evidence of a unit. On `auto` a historical
+sheet is read **as written, in volatility points**, one scale for the whole
+sheet as before -- that part was never the problem, and per-column sniffing
+still returns a -0.89 risk reversal a hundred times too large. A sheet that
+really is quoted in decimals is loaded by name: `--vol-unit decimal` on the
+command line, `vol_unit` on `/api/history`, `vol_unit='decimal'` in
+`load_history`. A sub-1 at-the-money is reported once per sheet, in
+`History.problems`, saying it was read as points and how to say otherwise --
+it is the one reading somebody might have meant the other way.
+
+**What moves.** Nothing on any sheet whose at-the-money is above 1.0, which
+is every G10 sheet and the shipped sample. On a sheet quoting a pegged or
+otherwise low-volatility pair, everything read off it moves by a factor of
+100 and into the right place: the monitor's tiles and curve comparison, the
+realized columns, the relative-value score, its scale and its z's, and the
+historical percentile. To get the old numbers back, load that sheet with
+`--vol-unit decimal`.
+
+### F14. `volkit vol --strike` is a strike, not a moneyness
+
+The marking screen gained a **vol query** card -- an expiry, a strike, and the
+volatility there -- and it is the same function as the `vol` subcommand, for
+the reason every screen here has a command-line equivalent: two readings of
+one strike is two ways for one strike to be read.
+
+That made `vol` take the pricing screen's strike box rather than a float:
+`ATM`, an absolute level, or a delta (`25d`, `10dp`, `-25d`). An absolute
+strike needs a forward to be placed against marks that live in strike/forward,
+and that forward now comes from the **feed** at the expiry asked for
+(`Book.market_level`, so a cross the file quotes only through its legs is
+placed from them) instead of from `--forward`, which defaulted to `1.0`.
+
+**What moves.** `--strike X` with no `--forward`. It used to mean the
+moneyness `X`; it now means the strike `X`, placed against the feed's outright
+-- which is what the number was always written as in the documented examples,
+`volkit vol USDHKD ... --strike 7.90` among them, and what the pricing screen
+has always meant by it. On the sample feed `vol USDJPY 2024-05-28 --strike
+1.02` goes from 6.203 to 48.121 volatility points: 1.02 against a forward of 1 is
+a hair above the at-the-money, and against a USDJPY forward of 150 it is the
+far downside. With no feed for the pair an absolute strike is now **refused by
+name** rather than silently read as a ratio; `ATM` and a delta still answer, in
+`K/F`, exactly as the smile chart's axis does. Nothing changes where
+`--forward` was given, which is every example in the README and the manual.
+**To get the old figure back, pass `--forward 1`.**
+
+### F15. The relative-value score is in volatility points, not standard deviations
+
+The Analysis screen's relative-value grid scored each cell as a **z**: every
+signal divided by that cell's own historical standard deviation, and the
+composite the weighted mean of those. The reasoning was sound and is still
+written down -- half a volatility point is a great deal on a one-year
+at-the-money and nothing on a one-week 10 delta wing, and only the history
+knows which. What it answered, though, was *how unusual is this*, which is a
+statistic about a series; what a marker asks the grid is *how much am I being
+paid*, which is the number the mark is moved by and the number the price is
+made in. A headline figure that has to be translated before it can be traded
+on is the wrong headline figure.
+
+So the score is now the weighted mean of the signals' **values**, in
+volatility points, renormalised over the ones each cell has exactly as before.
+Nothing else about the grid changed: the same five signals, the same weights,
+the same renormalisation, the same structural-zero rule at the at-the-money,
+and `level + shape + carry` is still exactly the richness.
+
+**What moves.** Every number in the *score* row of `volkit analysis
+--relative-value`, the big figure in every cell of the screen, `summary
+.mean_score`, `summary.headline` and the tint -- all of them by the cell's own
+scale, so a one-week wing moves by a different factor from a one-year
+at-the-money and the *ordering* of the grid changes with them. On the sample
+marks USDJPY 1Y 10d put reads `+0.767` volatility points where it read `+17.12`
+standard deviations. `EXTREME_SCORE`, which the summary counts outliers past
+and the screen saturates its tint at, is **0.005** -- half a volatility point
+-- where it was `2.0` standard deviations.
+
+**What is gained, and it is the reason this is not a pure unit change.** A
+scale needs the historical sheet, so a cell without one used to score
+*nothing at all* -- a dash in every column of every tenor -- while `level`,
+`shape` and `carry` had each been measured perfectly well. Only `history`
+needs the series now, and everything else is scored on its own points. On a
+pair the sheet does not quote the grid goes from empty to scored on whatever
+was measurable, with `confidence` saying how much of the declared weight that
+was.
+
+**What is kept.** The standardisation is context rather than the composite: a
+signal still carries its `z` wherever a scale can be measured, the cell still
+carries `scale` and `scale_source`, and both are shown -- in the detail card's
+own column, and in the `z` columns of the command line's attribution block.
+The `z` now follows the **scale** rather than the score, so it is present
+wherever the history can measure one and absent where it cannot, whether or
+not that signal was counted.
+
+**To read the old figure**, take any signal's `z` off the attribution block or
+the cell detail and combine them at the same weights: the arithmetic is
+unchanged and the grid still reports every part of it.
+
 ## Verified correct
 
 * **Weekly close window** — Friday 22:00Z to Sunday 22:00Z, exactly 48 hours,

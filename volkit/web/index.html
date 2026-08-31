@@ -105,9 +105,11 @@ table.grid th.colhead{background:var(--head);padding:0 6px;font-size:11px;color:
 .tot div span:last-child{color:var(--ink);font-weight:600}
 
 /* ---- marking ---- */
-.mgrid{display:grid;grid-template-columns:1.5fr 1fr;gap:14px;align-items:start}
+.mgrid{display:grid;grid-template-columns:1fr 1.55fr 1.15fr;gap:14px;align-items:start}
 .mcol{display:flex;flex-direction:column;gap:14px;min-width:0}
+@media (max-width:1340px){.mgrid{grid-template-columns:1fr 1.4fr}}
 @media (max-width:960px){.mgrid{grid-template-columns:1fr}}
+.owdot{color:#c07a1e;font-weight:800}
 td.dq{font-variant-numeric:tabular-nums}
 td.dq.big{font-weight:650}
 .diff-ok{color:var(--good)} .diff-warn{color:var(--warn)} .diff-bad{color:var(--bad)}
@@ -141,6 +143,7 @@ table.mark td{padding:2px 6px}
   border-top-color:var(--accent);border-radius:50%;animation:s .7s linear infinite;vertical-align:-1px}
 @keyframes s{to{transform:rotate(360deg)}}
 .hint{color:var(--muted);font-size:11px;margin-top:8px;line-height:1.4}
+details.hint>summary{cursor:pointer}
 .hide{display:none!important}
 table.ev{width:100%;font-size:11.5px}
 table.ev th{font-size:10px}
@@ -306,6 +309,7 @@ tr.sep td{border-top:1px solid var(--line);color:var(--muted);font-size:10.5px;
 .mmwide{overflow-x:auto}
 .mmwide table{width:max-content;min-width:100%}
 .mmknob{display:flex;gap:12px;flex-wrap:wrap;font-size:11.5px;color:var(--muted)}
+.mmadv{display:flex;align-items:center;gap:6px;margin-top:10px;font-size:11.5px;color:var(--muted);cursor:pointer}
 .mmknob label{display:flex;align-items:center;gap:5px;margin:0;width:auto;font-size:11.5px}
 .mmknob input{width:auto}
 .mmstat{display:flex;gap:15px;flex-wrap:wrap;font-size:11.5px;color:var(--muted);
@@ -371,8 +375,8 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
     <div class="meta" id="feedstatus"></div>
     <input id="feedpath" placeholder="spot / forward feed CSV" style="width:230px">
     <button class="ghost" id="feedload" style="width:auto">Load feed</button>
-    <button class="ghost" id="feedrefresh" style="width:auto">Refresh spot</button>
-    <button class="ghost" id="feedfill" style="width:auto">Fill legs</button>
+    <button class="ghost" id="feedrefresh" style="width:auto"
+            title="re-read the feed file and put every market box back on it, at each leg's own expiry — including the levels you typed over">Refresh spot</button>
     <label style="margin:0;display:flex;align-items:center;gap:6px;width:auto;color:var(--muted)"
            title="look at the feed file's write time and light the pill when it has moved; nothing is re-read">
       <input type="checkbox" id="feedwatch" checked style="width:auto"> watch file
@@ -385,7 +389,7 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
   </div>
   <div class="gridwrap"><table class="grid" id="pgrid"></table></div>
   <div class="totals" id="ptotals"></div>
-  <div class="hint">
+  <details class="hint"><summary>How a leg is read</summary>
     <b>Strike</b> takes a number, <code>ATM</code>, or a delta — <code>25d</code>, <code>10dp</code>,
     <code>-25d</code>. A bare <code>25d</code> takes its wing from the option type.
     <b>Expiry</b> takes a tenor (<code>1W</code>, <code>8d</code>, <code>3M</code>) or a date in
@@ -422,56 +426,22 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
     form, so it is simulated and reports its Monte Carlo standard error.
     Buffers are applied <i>against</i> you: selling gets the conservative shift, buying the
     other way.
-    <br><b>Refresh spot</b> re-reads the feed file from disk and re-prices, so every box still
-    holding the feed's number picks up whatever has just been published. <b>Fill legs</b> does the
-    same and then writes the feed over the levels you typed as well — which is what a leg with a
-    stale hand-marked spot needs. A leg the feed has no pair for, or whose expiry will not
+    <br><b>Refresh spot</b> re-reads the feed file from disk, puts <i>every</i> market box back
+    on the feed at each leg’s own expiry — the levels you typed over included — and re-prices.
+    It says how many legs it took back, because a hand-marked level that is now the file’s
+    should not change in silence. A leg the feed has no pair for, or whose expiry will not
     resolve, is reported and left exactly as it was. A cross the file quotes only through its
-    legs is filled from them, by the same triangle that prices it.
+    legs is filled from them, by the same triangle that prices it. To keep a level you have
+    typed, do not press it: an emptied box is still the way to hand one box back on its own.
     <b>Watch file</b> only looks at when the file was last written and offers the refresh; nothing
     reloads underneath a price you are reading.
-  </div>
+  </details>
 </div>
 
 <!-- ============================ MARKING ============================ -->
 <div class="wrap hide" id="p-marking">
   <div class="mgrid">
-    <!-- column 1: the fitted surface, and the checks on it -->
-    <div class="mcol">
-      <section class="card">
-        <div class="tabs" id="tabs">
-          <button data-t="smile" class="on">Smile</button>
-          <button data-t="term">Term structure</button>
-          <button data-t="daily">Daily vols</button>
-          <div class="grow"></div>
-          <label style="margin:0;display:flex;align-items:center;gap:6px;width:auto;font-size:11px">
-            expiry <input type="date" id="chartexpiry" style="width:auto;padding:3px 6px"></label>
-        </div>
-        <div id="panes"></div>
-      </section>
-
-      <section class="card">
-        <h2>Smile parameters</h2>
-        <label style="display:flex;align-items:center;gap:7px;margin:0 0 9px">
-          <input type="checkbox" id="manchor" style="width:auto"> anchor the smile to quoted tenors</label>
-        <div class="scroll"><table class="mark" id="msmile"></table></div>
-        <div class="row" style="margin-top:9px"><button class="danger" id="mclearsmile">Clear smile overwrites</button></div>
-        <div class="hint">Type into a shaded cell and press Enter to overwrite; clear the
-          cell to revert to the fitted value.</div>
-      </section>
-
-      <section class="card">
-        <h2>Implied vs quoted <span class="grow"></span>
-          <span class="meta" id="rfnote"></span></h2>
-        <div class="scroll"><table class="mark" id="rrfly"></table></div>
-        <div class="hint">Risk reversals and butterflies read back off the fitted smile,
-          against the quotes that went in. The smile is fitted per tenor and then given a
-          parameter term structure, so these differ unless <b>anchor</b> is on — which is
-          exactly what this table is for.</div>
-      </section>
-    </div>
-
-    <!-- column 2: the curve, the ATM marks it produces, and the events on it -->
+    <!-- column 1: the curve itself, the band under it, and what a session keeps -->
     <div class="mcol">
       <section class="card">
         <h2>Curve parameters <span class="grow"></span>
@@ -486,12 +456,6 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
           <button id="capply">Apply</button><button class="ghost" id="creset">Reload workbook</button>
         </div>
         <div class="msg" id="cmsg"></div>
-      </section>
-
-      <section class="card">
-        <h2>ATM term structure</h2>
-        <div class="scroll"><table class="mark" id="matm"></table></div>
-        <div class="row" style="margin-top:9px"><button class="danger" id="mclearatm">Clear ATM overwrites</button></div>
       </section>
 
       <section class="card" id="bandcard">
@@ -515,7 +479,7 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
             title="save the marks, then write the session file into a copy of the workbook beside it: PARAMS cells, event rows and weights, 'atm 1m' / 'slog25 3m' / 'shift rho25' / 'anchor' rows and a BANDS sheet. The loaded workbook is not touched; 'volkit session --to-workbook --in-place' is the command that does that">Write to workbook copy</button>
         </div>
         <div class="msg" id="sessmsg"></div>
-        <div class="hint">Everything this session has marked — curve parameters, the correlation
+        <details class="hint"><summary>What a session file holds</summary>Everything this session has marked — curve parameters, the correlation
           term structure, events, ATM and smile overwrites, the market maker's wing shifts, the
           anchor switch and the band treatment — written to a file <b>beside</b> the workbook.
           The workbook itself is never written to by a screen. Start volkit with
@@ -525,7 +489,112 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
           workbook (<code>_marked</code> added to its name) in the cells the tool reads them
           back from, so that copy can be opened in Excel, checked, and adopted as the book of
           record — or overwritten in place from a shell with
-          <code>volkit session --to-workbook --in-place</code>.</div>
+          <code>volkit session --to-workbook --in-place</code>.</details>
+      </section>
+    </div>
+
+    <!-- column 2: the marks the curve produces, and the picture of them -->
+    <div class="mcol">
+      <!-- The curve column was taken off this table: what a marker reads here
+           is the marked cut volatility, and the unmarked curve underneath it is
+           a diagnostic that belongs beside the fit rather than in the column a
+           mark is read from.  The overwrite column is a disclosure, shut until
+           it is asked for -- but a tenor that *is* overwritten says so on its
+           own row whether the column is open or not, because a mark nobody can
+           see is worse than a column nobody wanted. -->
+      <section class="card">
+        <h2>ATM term structure <span class="grow"></span>
+          <label style="margin:0;display:flex;align-items:center;gap:5px;width:auto;font-size:11px"
+            title="the per-tenor overwrite, and the button that clears them">
+            <input type="checkbox" id="matmowshow" style="width:auto"> overwrites
+            <span class="meta" id="matmowcount"></span></label></h2>
+        <div class="scroll"><table class="mark" id="matm"></table></div>
+        <div class="row hide" id="matmowrow" style="margin-top:9px"><button class="danger" id="mclearatm">Clear ATM overwrites</button></div>
+      </section>
+
+      <section class="card">
+        <div class="tabs" id="tabs">
+          <button data-t="smile" class="on">Smile</button>
+          <button data-t="term">Term structure</button>
+          <button data-t="daily">Daily vols</button>
+          <div class="grow"></div>
+          <label style="margin:0;display:flex;align-items:center;gap:6px;width:auto;font-size:11px">
+            expiry <input type="date" id="chartexpiry" style="width:auto;padding:3px 6px"></label>
+        </div>
+        <div id="panes"></div>
+      </section>
+
+      <!-- Shut until it is asked for.  Four raw parameters per tenor are a
+           marker's second question, not the first, so the card keeps its
+           heading and folds its body away; the heading carries the count of
+           overwrites and whether the anchor is on, so nothing that has been
+           marked is out of sight without saying so. -->
+      <section class="card">
+        <h2><label style="margin:0;display:flex;align-items:center;gap:6px;width:auto;font-size:inherit;font-weight:inherit">
+            <input type="checkbox" id="msmileshow" style="width:auto"> Smile parameters</label>
+          <span class="grow"></span><span class="meta" id="msmilenote"></span></h2>
+        <div id="msmilebody" class="hide">
+          <label style="display:flex;align-items:center;gap:7px;margin:0 0 9px">
+            <input type="checkbox" id="manchor" style="width:auto"> anchor the smile to quoted tenors</label>
+          <div class="scroll"><table class="mark" id="msmile"></table></div>
+          <div class="row" style="margin-top:9px"><button class="danger" id="mclearsmile">Clear smile overwrites</button></div>
+          <div class="hint">Type into a shaded cell and press Enter to overwrite; clear the
+            cell to revert to the fitted value.</div>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Implied vs quoted <span class="grow"></span>
+          <span class="meta" id="rfnote"></span></h2>
+        <div class="scroll"><table class="mark" id="rrfly"></table></div>
+        <details class="hint"><summary>Why these read back differently from the quotes</summary>Risk reversals and butterflies read back off the fitted smile,
+          against the quotes that went in. The smile is fitted per tenor and then given a
+          parameter term structure, so these differ unless <b>anchor</b> is on — which is
+          exactly what this table is for.</details>
+      </section>
+    </div>
+
+    <!-- column 3: one question of the surface, and the events on it -->
+    <div class="mcol">
+      <!-- The vol query.  Two boxes and one number: "where is the 3M 25 delta
+           marked".  The strike and the expiry are the pricing screen's own
+           vocabulary and are read by the same functions on the server, and the
+           forward is the feed's at this expiry rather than a third box that
+           can be left stale.  It prices nothing -- no notional, no option
+           type, no premium, no greek -- because everything else on a pricing
+           row is noise around the one number a marker is asking for. -->
+      <section class="card">
+        <h2>Vol query <span class="grow"></span>
+          <span class="meta" id="vqlevel"></span></h2>
+        <div class="row">
+          <div><label>Expiry</label><input id="vqexpiry" placeholder="1M, 8d, 15Sep26"></div>
+          <div><label>Strike</label><input id="vqstrike" placeholder="ATM, 1.0850, 25d"></div>
+        </div>
+        <div class="row" style="margin-top:9px"><button id="vqrun">Read the vol</button></div>
+        <div class="out" id="vqout"><div class="v">&mdash;</div><div class="d"></div></div>
+        <details class="hint"><summary>How the two boxes are read</summary>
+          The pair, the cut and the interpolation are the ones above.
+          <b>Expiry</b> takes a tenor (<code>1W</code>, <code>8d</code>, <code>3M</code>) or a date
+          in any of the ways one is written, and <b>Strike</b> takes a number, <code>ATM</code>,
+          or a delta &mdash; <code>25d</code>, <code>10dp</code>, <code>-25d</code>; a bare
+          <code>25d</code> is the call wing. Both are the pricing screen's boxes, read by the
+          same code, so the two cannot understand one another differently.
+          <br>The <b>forward comes from the market feed</b> at this expiry, which is what puts an
+          absolute strike on the same axis as the marks &mdash; and a cross the file quotes only
+          through its legs is placed from them, by the same triangle that prices it. With no feed
+          for the pair, <code>ATM</code> and a delta still answer, in <code>K/F</code>, and the
+          card says so; an absolute strike is refused rather than quietly read as a ratio.
+          A bare <code>25d</code> names two strikes and is read on the call, as it is on the
+          pricing tab; <b>the strike box is where you say otherwise</b> &mdash;
+          <code>25dp</code> or <code>-25d</code> is the put. There is no separate wing control,
+          because that would be a second place to say one thing, and at <code>ATM</code> or an
+          absolute strike there is nothing to say: the volatility there is one number for the
+          call and the put.
+          <br><b>The boxes keep what you asked</b>, and the line under them says what it resolved
+          to &mdash; the expiry as the one standard date, <code>25d</code> as the strike it solved
+          to. This is a query and not a position: the pricing tab freezes a leg's strike so a
+          re-price cannot silently re-solve it, and here re-solving is the whole point. Move a
+          mark and the same question is asked again of the surface as it now stands.</details>
       </section>
 
       <section class="card">
@@ -542,7 +611,7 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
         </div>
         <div class="scroll" style="margin-top:9px"><table class="ev" id="etable"></table></div>
         <div class="msg" id="emsg"></div>
-        <div class="hint">Times are <b>Hong Kong time</b> (UTC+8); the model works in UTC and converts.
+        <details class="hint"><summary>How a bump is built</summary>Times are <b>Hong Kong time</b> (UTC+8); the model works in UTC and converts.
           Bumps are vol points over the <b>24 hours following the release</b>. A bump is
           the pair's two legs' <b>weights added</b> -- each event is weighted per currency in
           <code>volkit/data/event_weights.csv</code> -- plus the pair's own <b>Adj</b> on top;
@@ -550,7 +619,7 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
           The <b>day</b> column shows which volatility day the effect mostly lands in.
           Auto-loaded dates come from the published central-bank calendars shipped with
           volkit plus the NFP rule; verify them, and edit
-          <code>volkit/data/econ_events.csv</code> to extend.</div>
+          <code>volkit/data/econ_events.csv</code> to extend.</details>
       </section>
 
       <!-- Optional: the per-currency weight table behind Auto-load.  Off until
@@ -566,11 +635,11 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
         </div>
         <div class="scroll" style="margin-top:9px"><table class="ev" id="ewtable"></table></div>
         <div class="msg" id="ewmsg"></div>
-        <div class="hint">What each release is worth on each <b>currency</b>, in vol points; the
+        <details class="hint"><summary>What a weight does</summary>What each release is worth on each <b>currency</b>, in vol points; the
           releasing currency is marked <b>·</b>. A pair's bump is its two legs added plus its own
           adjustment. Applying changes what <b>Auto-load</b> suggests from now on and nothing already
           on a pair's events table; a saved session keeps the table, the shipped
-          <code>volkit/data/event_weights.csv</code> is the default.</div>
+          <code>volkit/data/event_weights.csv</code> is the default.</details>
       </section>
     </div>
   </div>
@@ -593,7 +662,7 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
        this build knows how to map to a pair, a strike direction and a size.
        Filled from /api/state on boot. -->
   <datalist id="etocodes"></datalist>
-  <div class="hint">
+  <details class="hint"><summary>How a panel is read, and what it does not correct for</summary>
     One panel is one <b>expiry / underlying</b> combination. Paste the exchange's strike and
     volatility columns into the box — tabs, commas or spaces, with or without a header row,
     percent or decimal, bid/ask or mid. Every column choice the parser makes is reported under
@@ -621,7 +690,7 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
     <br><b>Caveats this model does not correct for:</b> exchange settlement volatilities on
     American-style options are not European volatilities; a future is not a forward once rates
     move with the underlying; and the exchange's settlement time is rarely an FX cut.
-  </div>
+  </details>
 
   <!-- Positions and aggregated risk.  Every parameter the greeks need comes
        off the panel a position belongs to; the only one a fit never needed is
@@ -644,7 +713,7 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
     </div>
     <div id="gtables"></div>
     <div id="gmsg"></div>
-    <div class="hint">
+    <details class="hint"><summary>How a position line is read, and what adds up</summary>
       One line is one option: <b>contract, expiry, strike, C/P, contracts</b>. Drop the
       leading columns when the screen has only one panel that can answer
       (<code>strike, C/P, contracts</code>), or put a header row on it and name the columns in
@@ -675,7 +744,7 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
       are struck per currency. Futures-equivalent delta and gamma are never totalled across
       contracts — a euro future is not a yen future. Premiums and theta are undiscounted
       forward values, as everywhere else in volkit.
-    </div>
+    </details>
   </section>
 </div>
 
@@ -740,12 +809,14 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
       <div id="antri"></div></section>
   </div>
 
-  <div class="hint">
+  <details class="hint"><summary>What each card measures</summary>
     <b>Relative value.</b> Every expiry against every strike, with one score per cell.
     <b>Positive is rich</b> — the mark is above what the comparison says it should be, and that
-    is the side to sell. The big figure is in standard deviations of <i>that cell's own</i>
-    volatility, the small one is the same reading in volatility points, and the tint is a second
-    reading of the number rather than the only one. Click a cell to take it apart. Five signals:
+    is the side to sell. The big figure is in <b>volatility points</b> — the weighted mean of
+    this cell's signals, which is the number a mark is moved by and a price is made in — the
+    small one under it is the break-even richness (level, shape and carry alone), and the tint is
+    a second reading of the big number rather than the only one. Click a cell to take it apart.
+    Five signals:
     <b>level</b> (marked at-the-money less realized), <b>shape</b> (your smile's shape at this
     strike less the shape the <i>measured</i> &rho; and &nu; imply — the wings against what
     volatility actually did, not against another quote), <b>carry</b> (minus the roll and the
@@ -754,22 +825,26 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
     this cell sits in its own recent history) and, on a cross, <b>triangle</b> (your mark against
     what the two legs imply). The first three <i>add</i>: they are the fair-value break-even
     below moved out from the at-the-money to a strike, so their sum is the volatility-point figure
-    in the cell, and on the ATM column it is exactly the <b>Rich</b> column of the fair-value
-    card. The other two answer a different question and are averaged in as z-scores instead.
-    Everything is standardised by how much that cell's volatility <i>usually moves</i> — half a
-    point is a great deal on a one-year at-the-money and nothing on a one-week wing — measured
-    over the <b>history window</b>, which is deliberately not the realized lookback: the lookback
-    is matched to each tenor, and a month of a smooth one-month series is far too short to say how
-    much anything moves. The &rho; and &nu; behind <b>shape</b> come off that same window and for
+    in the small figure of the cell, and on the ATM column it is exactly the <b>Rich</b> column
+    of the fair-value card. The other two answer a different question, so they are averaged into
+    the score but kept out of that sum. Every signal is already in volatility points and the
+    score is their weighted mean, so the whole card is in one unit. Beside each value the detail
+    shows its <b>z</b> — the same difference against how much that cell's volatility
+    <i>usually moves</i>, since half a point is a great deal on a one-year at-the-money and
+    nothing on a one-week wing. That is <i>reported</i> and enters the score nowhere; it is
+    measured over the <b>history window</b>, which is deliberately not the realized lookback:
+    the lookback is matched to each tenor, and a month of a smooth one-month series is far too
+    short to say how much anything moves. The &rho; and &nu; behind <b>shape</b> come off that
+    same window and for
     the same reason — on the lookback they were blank at every short tenor, and at every tenor at
     once on a lookback under about a month, which left <b>shape</b> reading as a signal that never
     worked. A missing signal is renormalised away rather than counted as a zero, and so is the
     at-the-money's <b>shape</b>: it is zero there by statement rather than by measurement — the
     at-the-money <i>is</i> the level — so it is shown with its reason and kept out of the average,
     which is why an ATM cell is scored on less of the declared weight than the wings beside it.
-    Faded cells were scored on less than half the declared weight. No history means no scale and
-    no score, and the volatility points beside it are still measured — inventing a scale would be
-    inventing the answer.
+    Faded cells were scored on less than half the declared weight. No history means no <b>history</b>
+    signal and no z beside the others; the remaining signals are measured in volatility points and
+    are scored on just the same.
     <br>Three things the grid says rather than leaves to be inferred. <b>level</b> is printed
     <i>once</i>, in its own column beside the tenor: it is one number for the whole expiry and
     goes into all five cells, so it is one observation and not five agreeing ones. A tenor tagged
@@ -872,7 +947,7 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
     The correlation is degree zero and appears nowhere in that identity, which is why it is
     reported on its own: the <b>per &rho;</b> column is what a whole unit of correlation is worth
     in cross volatility points, and no amount of leg vega touches it.
-  </div>
+  </details>
 </div>
 
 <!-- =========================== MONITOR =========================== -->
@@ -914,7 +989,7 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
     <div id="cmplist"></div>
     <div id="cmpout"></div></section>
 
-  <div class="hint">
+  <details class="hint"><summary>How a panel and a curve are built</summary>
     <b>Panels.</b> One panel is one pair and two points in time: the five quoted numbers as they
     stand <i>now</i>, the same five as they stood <i>then</i>, and the change between them, tenor by
     tenor. Either end is any source the comparison below understands except a paste — the fitted
@@ -946,7 +1021,7 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
     blank rather than absent, and a curve that could not be built keeps its place and carries the
     reason. One caution the panel repeats: a historical sheet's butterfly column is whatever that
     desk quoted, while the book's is a market strangle.
-  </div>
+  </details>
 </div>
 
 <!-- ========================= MARKET MAKER ========================= -->
@@ -1006,7 +1081,15 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
       <section class="card"><h2>What the fit may move</h2>
         <label>At-the-money curve</label><div class="mmknob" id="mmfree"></div>
         <label>Smile parameters</label><div class="mmknob" id="mmsmilefree"></div>
-        <div class="hint" id="mmknobhint"></div></section>
+        <div class="hint" id="mmknobhint"></div>
+        <label class="mmadv"><input type="checkbox" id="mmrevshow"> Set the mean-reversion range</label>
+        <div class="hide" id="mmrevbox">
+          <div class="mmbar" style="margin:6px 0 0">
+            <div class="f"><label>Floor</label><input id="mmrevlo" style="width:84px"></div>
+            <div class="f"><label>Ceiling</label><input id="mmrevhi" style="width:84px"></div>
+          </div>
+          <div class="hint" id="mmrevhint"></div>
+        </div></section>
     </div>
 
     <div class="mmright">
@@ -1041,12 +1124,12 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
           </div>
         </div>
         <div class="msg" id="markmsg"></div>
-        <div class="hint" id="markhint">The agent is aimed at the <b>Fit</b> button&rsquo;s own inputs
+        <details class="hint" id="markhint"><summary>What the marking agent proposes</summary>The agent is aimed at the <b>Fit</b> button&rsquo;s own inputs
           &mdash; the same paste, the same target curve &mdash; and answers how it would run that fit
           and what came out. <b>Accept</b> hands the proposal to the quote as the marks it stands on;
           <b>Take the plan onto the fit</b> sets the knob boxes to the agent&rsquo;s plan and runs the
           fit, so you can adjust and press Fit again, then <b>record my fit as the edit</b>. Every
-          answer is a line in the journal, and the edited ones are what it learns from.</div></section>
+          answer is a line in the journal, and the edited ones are what it learns from.</details></section>
 
       <section class="card"><h2>The market against the surface <small id="mmsheethead"></small></h2>
         <div id="mmsheet"></div></section>
@@ -1072,12 +1155,12 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
         <div id="agentrows"></div>
         <div id="agentwidths"></div>
         <div class="msg" id="agentmsg"></div>
-        <div class="hint" id="agenthint">The agent proposes and changes nothing. It reads the
+        <details class="hint" id="agenthint"><summary>What the width agent reads</summary>The agent proposes and changes nothing. It reads the
           request box: for each instrument asked for, the width we would show against the
           width the archive has seen it shown at, with the market paste's own width beside
           it where the paste quoted the same thing. With the request box empty it reads
           the paste. A width it disagrees with stays on the quote sheet until you write a
-          rule for it in the knowledge bank below.</div></section>
+          rule for it in the knowledge bank below.</details></section>
       <section class="card"><h2>Ask the record <small id="askhead"></small></h2>
         <div id="askchat" class="askchat"></div>
         <div class="mmbar" style="margin:10px 0 0">
@@ -1092,11 +1175,11 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
         </div>
         <div class="meta" id="askstatus"></div>
         <div class="msg" id="askmsg"></div>
-        <div class="hint" id="askhint">The third agent, and the only one that cannot change anything.
+        <details class="hint" id="askhint"><summary>What the third agent can and cannot do</summary>The third agent, and the only one that cannot change anything.
           It reads the archive, the journal, the knowledge bank and the surface, and answers in
           facts, each tagged with where it came from. It takes the quoting agent&rsquo;s evidence
           settings above. Ask it to fetch, re-mark, record or quote and it names the button that
-          does that. &ldquo;And the 1M?&rdquo; keeps the topic of the question before.</div></section>
+          does that. &ldquo;And the 1M?&rdquo; keeps the topic of the question before.</details></section>
 
       <section class="card"><h2>At-the-money curve <small id="mmcurvehead"></small></h2>
         <div id="mmcurve"></div></section>
@@ -1114,7 +1197,7 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
     </div>
   </div>
 
-  <div class="hint">
+  <details class="hint"><summary>The two buttons, and how a run is read</summary>
     <b>Two buttons, because these are two jobs.</b> <b>Fit</b> reads the market box and moves the
     marks: the at-the-money curve to a target term structure &mdash; the tenors pinned on the
     marking screen, a pasted curve, or the mid of the at-the-money quotes in the paste &mdash;
@@ -1185,7 +1268,7 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
     <br><b>Nothing here touches the workbook.</b> The fit reports and then puts the marks back,
     and so does a quote made on them. Tick <b>keep the marks</b> to leave the fit on the loaded
     book &mdash; still in memory only, and a reload discards them.
-  </div>
+  </details>
 </div>
 
 <script>
@@ -1678,6 +1761,7 @@ function showFeed(f){
   const el=$('#feedstatus');
   if(!f||!f.loaded){el.innerHTML='<span class="pill warn">no feed</span>';return}
   const bad=(f.problems||[]).length;
+  const note=(f.notes||[]).length;
   /* A cross the file does not quote but both of whose legs it does is a pair
      the tool can price: counted apart, so the pill neither hides it nor
      claims the feed published it. */
@@ -1685,8 +1769,13 @@ function showFeed(f){
   el.innerHTML=`<span class="pill ok" title="${der?esc((f.derived||[]).join(', '))+' are built from their legs':'quoted in the file'}">feed: ${f.covered.length} pairs${der?' + '+der+' from legs':''}</span>`+
     (f.asof?` <span class="meta">asof ${esc(f.asof)}</span>`:'')+
     (f.stale?' <span class="pill warn">newer data on disk — Refresh</span>':'')+
-    (bad?` <span class="pill bad">${bad} problem${bad>1?'s':''}</span>`:'');
-  el.title=(f.problems||[]).join('\n')||
+    (bad?` <span class="pill bad">${bad} problem${bad>1?'s':''}</span>`:'')+
+    /* Notes are not problems: a spot date this tool derived rather than one
+       the file stated, a dated row passed over as history.  Counted apart and
+       readable in the tooltip, because a near side placed against a date
+       nobody stated must not read like one that was published. */
+    (note?` <span class="pill" title="${esc((f.notes||[]).join('\n'))}">${note} note${note>1?'s':''}</span>`:'');
+  el.title=(f.problems||[]).concat(f.notes||[]).join('\n')||
     (f.source+(f.written?('\nread from the file written '+f.written.replace('T',' ')):''));
 }
 $('#feedload').onclick=async()=>{
@@ -1704,27 +1793,32 @@ $('#feedload').onclick=async()=>{
   catch(e){ el.innerHTML=`<span class="pill bad">${esc(e.message)}</span>`; }
 };
 
-/* Re-read the feed file, and write what it says into the legs.
-   Two buttons, one endpoint: picking up new spot and stamping it over a level
-   somebody typed by hand are the same action on the file and different
-   actions on the pad.  Both refill the boxes the feed put a number in --
-   that is what those boxes are for -- and only `Fill legs` overwrites the
-   ones somebody has typed into. */
-async function refreshFeed(fill){
+/* Re-read the feed file and put the legs back on it.
+   One button, because there was never a second question: somebody who asks
+   for the published market wants the published market, and a level typed
+   over an hour ago is the one most likely to be stale.  So this hands
+   *every* market box back to the feed -- the ones it was already filling and
+   the ones somebody has typed into -- and says how many legs it took back,
+   because a number that was marked by hand and is now the file's must not
+   change in silence.  Emptying a box is still the way to hand one back
+   without re-reading anything, and typing in one after this is still how it
+   becomes yours again. */
+async function refreshFeed(){
   const el=$('#feedstatus'); el.innerHTML='<span class="spin"></span> re-reading the feed…';
   try{
     const r=await post('/api/feed/refresh',
       {legs:LEGS.map(L=>({pair:L.pair,expiry:L.expiry}))});
     STATE.feed=r.feed; showFeed(r.feed);
-    const bad=applyLegRows(r.legs,fill);
+    const typed=LEGS.filter(L=>L.spotsrc==='typed'||L.fwdsrc==='typed').length;
+    const bad=applyLegRows(r.legs,true);
     await priceAll();
+    const took=typed?`feed re-read · ${typed} leg${typed>1?'s':''} put back on the feed`
+                    :'feed re-read';
     $('#pstatus').innerHTML=bad.length?
-      ('<span style="color:var(--warn)">'+esc(bad.join(' · '))+'</span>'):
-      (fill?'legs filled from the feed':'feed re-read');
+      ('<span style="color:var(--warn)">'+esc(bad.join(' · '))+'</span>'):esc(took);
   }catch(e){ el.innerHTML=`<span class="pill bad">${esc(e.message)}</span>`; }
 }
-$('#feedrefresh').onclick=()=>refreshFeed(false);
-$('#feedfill').onclick=()=>refreshFeed(true);
+$('#feedrefresh').onclick=()=>refreshFeed();
 
 /* Watching is a look at when the file was last written, nothing more.  A feed
    that reloaded on its own underneath a price being read would be its own
@@ -1799,20 +1893,60 @@ $('#autonow').onclick=async()=>{
 
 /* ============================== MARKING ============================== */
 function mq(){return{pair:$('#mpair').value,cut:$('#mcut').value,method:$('#mmethod').value}}
-async function loadMarks(){
-  const o=mq(); MARKS=await api('/api/marks?'+qs({pair:o.pair,cut:o.cut}));
-  $('#manchor').checked=!!MARKS.anchor;
-  $('#matm').innerHTML=`<thead><tr><th>Tenor</th><th>Curve %</th><th>${esc(o.cut)} cut %</th><th>Overwrite %</th></tr></thead><tbody>`+
-    MARKS.atm.map(r=>`<tr><td>${esc(r.tenor)}</td><td>${num(r.curve,4)}</td><td>${num(r.cut,4)}</td>
-      <td><input data-m="atm" data-tenor="${esc(r.tenor)}" value="${r.overwrite==null?'':(r.overwrite*100).toFixed(4)}"
-        placeholder="${num(r.curve,4)}"></td></tr>`).join('')+'</tbody>';
-  const P=['slog25','slog10','rho25','rho10'];
+/* Two disclosures on this screen, and the browser owns both the way it owns
+   every other panel's state.  The ATM table's overwrite column and the whole
+   smile-parameter card are shut by default: neither is what a marker reads
+   first, and both are one click away.  What is *not* allowed to disappear
+   with them is the fact that something has been overwritten -- a mark nobody
+   can see is the silent zero this tool exists to remove -- so a shut control
+   carries the count, and a shut overwrite column puts a dot on the tenor it
+   belongs to. */
+function saveMarking(){try{localStorage.setItem('volkit.marking',JSON.stringify(
+  {atm_overwrites:$('#matmowshow').checked,smile:$('#msmileshow').checked}))}catch(e){}}
+function loadMarking(){
+  let v=null; try{v=JSON.parse(localStorage.getItem('volkit.marking')||'null')}catch(e){}
+  v=v&&typeof v==='object'?v:{};
+  $('#matmowshow').checked=!!v.atm_overwrites; $('#msmileshow').checked=!!v.smile;
+  markingVisible();
+}
+function markingVisible(){
+  $('#matmowrow').classList.toggle('hide',!$('#matmowshow').checked);
+  $('#msmilebody').classList.toggle('hide',!$('#msmileshow').checked);
+}
+const SMILEP=['slog25','slog10','rho25','rho10'];
+/* The curve column is gone: what is read off this table is the marked cut
+   volatility, and the fitted curve underneath it said nothing about the mark
+   in the row beside it. */
+function paintMarks(){
+  if(!MARKS)return;
+  const ow=$('#matmowshow').checked;
+  const nown=MARKS.atm.filter(r=>r.overwrite!=null).length;
+  $('#matmowcount').textContent=(!ow&&nown)?`· ${nown} marked`:'';
+  $('#matm').innerHTML=`<thead><tr><th>Tenor</th><th>${esc(MARKS.cut)} cut %</th>`+
+    (ow?'<th>Overwrite %</th>':'')+`</tr></thead><tbody>`+
+    MARKS.atm.map(r=>`<tr><td>${esc(r.tenor)}`+
+      ((!ow&&r.overwrite!=null)?' <span class="owdot" title="overwritten">&bull;</span>':'')+
+      `</td><td>${num(r.cut,4)}</td>`+
+      (ow?`<td><input data-m="atm" data-tenor="${esc(r.tenor)}" value="${r.overwrite==null?'':(r.overwrite*100).toFixed(4)}"
+        placeholder="${num(r.curve,4)}"></td>`:'')+'</tr>').join('')+'</tbody>';
+  const P=SMILEP;
+  const sow=MARKS.smile.reduce((a,r)=>a+P.filter(p=>r[p+'_ow']!=null).length,0), sn=[];
+  if(MARKS.anchor)sn.push('anchored');
+  if(sow)sn.push(`${sow} overwritten`);
+  $('#msmilenote').textContent=$('#msmileshow').checked?'':sn.join(' · ');
   $('#msmile').innerHTML=`<thead><tr><th>Tenor</th>${P.map(p=>`<th>${p}</th>`).join('')}</tr></thead><tbody>`+
     (MARKS.smile.length?MARKS.smile.map(r=>`<tr><td>${esc(r.tenor)}${r.ok?'':' <span class="pill bad">fit</span>'}</td>`+
       P.map(p=>`<td><input data-m="smile" data-param="${p}" data-tenor="${esc(r.tenor)}"
         value="${r[p+'_ow']==null?'':r[p+'_ow'].toFixed(4)}" placeholder="${r[p].toFixed(4)}"></td>`).join('')+'</tr>').join('')
      :`<tr><td colspan="5" class="meta">no smile quotes for this pair</td></tr>`)+'</tbody>';
 }
+async function loadMarks(){
+  const o=mq(); MARKS=await api('/api/marks?'+qs({pair:o.pair,cut:o.cut}));
+  $('#manchor').checked=!!MARKS.anchor;
+  paintMarks();
+}
+$('#matmowshow').onchange=()=>{markingVisible();saveMarking();paintMarks()};
+$('#msmileshow').onchange=()=>{markingVisible();saveMarking();paintMarks()};
 async function applyMark(el){
   const o=mq(), v=el.value.trim();
   try{
@@ -1930,7 +2064,73 @@ async function loadRRFly(){
 const DRAW={smile:drawSmile,term:drawTerm,daily:drawDaily};
 async function redraw(){if(PANEL!=='marking')return;
   try{await DRAW[TAB]()}catch(e){$('#panes').innerHTML=`<div class="out err"><div class="v">${esc(e.message)}</div></div>`}
-  loadRRFly();}
+  loadRRFly(); refreshVQ();}
+
+/* -------------------------- the vol query --------------------------
+   Two boxes and one number.  The pair, the cut and the interpolation are the
+   card above's; the expiry and the strike are the pricing screen's own
+   vocabulary and go to the server to be read by the same functions that read
+   a pricing leg, so the two screens cannot understand `1M` or `25d`
+   differently.  The forward is `Book.market_level`'s -- the one place a level
+   is read -- so there is no third box here to be left stale.
+
+   What was resolved is written back into the box it was asked in, which is
+   the pricing screen's rule and for the same reason: showing one number as an
+   input above and an answer below is two places for it to disagree.  It is
+   written back only on a run somebody asked for, never under a cursor: a
+   redraw refreshes the number and leaves the boxes exactly as they are. */
+let VQR=null;
+function vqLevel(r){
+  if(!r||r.error)return '';
+  if(r.forward_source==='feed')
+    return 'forward '+num(r.forward,6)
+      +(r.derived?' · via the '+r.via+' triangle':'')
+      +(r.extrapolated?' · extrapolated':'');
+  if(r.forward_source==='typed')return 'forward '+num(r.forward,6)+' as given';
+  return 'no feed for '+r.pair+' — read in K/F';
+}
+function vqShow(){
+  const o=$('#vqout'); if(!o)return;
+  $('#vqlevel').textContent=vqLevel(VQR);
+  if(!VQR){o.className='out';o.innerHTML='<div class="v">&mdash;</div><div class="d"></div>';return}
+  if(VQR.error){o.className='out err';o.innerHTML='<div class="v">'+esc(VQR.error)+'</div>';return}
+  const r=VQR, wing=r.is_call==null?'':(r.is_call?' call':' put');
+  const where=r.scaled?('strike '+num(r.strike,6)):('K/F '+num(r.strike_ratio,6));
+  o.className='out';
+  o.innerHTML='<div class="v">'+num(r.vol,4)+'<span style="font-size:14px;font-weight:400"> %</span></div>'
+    +'<div class="d">'+esc(r.pair+' '+r.expiry)+' · '+esc(r.strike_spec+wing)+' &rarr; '+esc(where)
+    +' · ATM '+num(r.atm_vol,4)+'</div>'
+    +(r.warnings||[]).map(w=>'<div class="d" style="color:var(--warn)">! '+esc(w)+'</div>').join('');
+}
+/* Only the last run asked for may land.  Enter fires the key handler and then
+   the browser's own change event, a redraw can refresh while somebody is
+   typing, and either way two answers in flight must not be applied in the
+   order they happen to come back. */
+let VQSEQ=0;
+async function runVQ(spin){
+  const ex=$('#vqexpiry').value.trim();
+  if(!ex){VQSEQ++;VQR=null;vqShow();return}
+  const o=mq(), seq=++VQSEQ;
+  if(spin){$('#vqout').className='out';
+    $('#vqout').innerHTML='<div class="v"><span class="spin"></span></div><div class="d"></div>'}
+  let r;
+  try{
+    // The boxes hold the request and keep it: this is a query, not a leg, and
+    // re-solving `25d` against marks that have just moved is the whole point.
+    // What it resolved to is reported under them instead.
+    r=await api('/api/vol?'+qs({pair:o.pair,cut:o.cut,method:o.method,expiry:ex,
+                                strike:$('#vqstrike').value.trim()||'ATM'}));
+  }catch(e){r={error:e.message}}
+  if(seq!==VQSEQ)return;
+  VQR=r; vqShow();
+}
+/* Ask the same question again as the marks move. */
+function refreshVQ(){if(VQR&&!VQR.error)runVQ(false)}
+$('#vqrun').onclick=()=>runVQ(true);
+['#vqexpiry','#vqstrike'].forEach(id=>{
+  $(id).onkeydown=e=>{if(e.key==='Enter')runVQ(true)};
+  $(id).onchange=()=>runVQ(true);
+});
 
 /* ---------------------- curve parameters ---------------------- */
 const PLABEL={initial_vol:'Initial vol %',long_term_vol:'Long-term vol %',mean_reversion:'Mean reversion',
@@ -2518,9 +2718,15 @@ function loadAn(){
 }
 /* the tenor axis is categorical; the chart takes numbers, so index maps to label */
 function anTenorFmt(list){return v=>{const i=Math.round(v);return (i>=0&&i<list.length)?list[i]:''}}
+/* `rows` is the list of <tr> strings.  A caller holding one already-joined
+   string is taken as written rather than as a list of characters: the band
+   card's `Fit from the wings` passed both of its tables that way and every
+   fit died on `rows.join is not a function`, with the real answer already
+   computed and the error reported as if the fit itself had failed. */
 function tblHtml(head,rows,cls){
+  const body=Array.isArray(rows)?rows.join(''):(rows==null?'':String(rows));
   return '<table'+(cls?' class="'+cls+'"':'')+'><thead><tr>'+head+'</tr></thead><tbody>'+
-    rows.join('')+'</tbody></table>';
+    body+'</tbody></table>';
 }
 const anPct=(v,d=3)=>(v==null||!isFinite(v))?'—':(v*100).toFixed(d);
 const anSgn=(v,d=3)=>(v==null||!isFinite(v))?'—':((v*100>=0?'+':'')+(v*100).toFixed(d));
@@ -2785,10 +2991,12 @@ const RVF=[
  ['triangle','Cross triangle'],
  ['weights','Signal weights'],
 ];
-/* Two standard deviations is where a reading stops being a reading, so it is
-   where the tint saturates.  The same number the server calls EXTREME_SCORE
-   and counts in its summary. */
-const RVFULL=2.0;
+/* Where a reading stops being a reading, so where the tint saturates: the
+   server's own EXTREME_SCORE, which is also what its summary counts, carried
+   on the response rather than copied here.  In volatility points like the
+   score, and held as a decimal like everything the server sends.  The
+   fallback is only for the moment before the first response arrives. */
+let RVFULL=0.005;
 
 function rvSignals(){return (STATE.analysis&&STATE.analysis.signals)||[]}
 function rvWeightBoxes(){
@@ -2837,7 +3045,9 @@ function rvApplySaved(){
 
 /* The tint is a second reading of the number, never the only one: the score
    is printed in every cell and the colour only says how far it is from zero.
-   Rich is the side to sell, so it takes the warning colour. */
+   Rich is the side to sell, so it takes the warning colour.  `score` is in
+   decimals, as the server sends it, and so is RVFULL -- the two are compared
+   before either is turned into points for display. */
 function rvTint(score){
   if(score==null||!isFinite(score))return '';
   const k=Math.min(1,Math.abs(score)/RVFULL)*26;
@@ -2852,6 +3062,7 @@ function renderRelValue(d){
     (d.is_cross?' · cross of '+d.legs.join(' and '):'')+
     (d.has_feed?'':' · no forward feed')):'';
   if(!d){host.innerHTML='';return}
+  if(d.extreme_score!=null&&isFinite(d.extreme_score)&&d.extreme_score>0)RVFULL=d.extreme_score;
   const cols=d.columns, rows=d.rows;
   const scored=rows.filter(r=>r.cells.some(c=>c.score!=null));
   const names=rows.map(r=>r.tenor);
@@ -2886,8 +3097,8 @@ function renderRelValue(d){
       const on=(RVSEL&&RVSEL[0]===r.tenor&&RVSEL[1]===col.name)?' on':'';
       return '<td class="rvcell'+thin+on+'" data-t="'+ri+'" data-c="'+esc(col.name)+
         '" style="'+rvTint(c.score).slice(1)+'" title="'+esc(rvTitle(r,c))+'">'+
-        '<b>'+anRaw(c.score,2)+'</b><span>'+
-        (c.richness==null?'—':anSgn(c.richness)+' vols')+'</span></td>';
+        '<b>'+anSgn(c.score,2)+'</b><span>'+
+        (c.richness==null?'—':anSgn(c.richness,2)+' b/e')+'</span></td>';
     }).join('')+'</tr>';
   });
   const grid='<div class="rvgrid">'+tblHtml(
@@ -2897,10 +3108,12 @@ function renderRelValue(d){
 
   const s=d.summary||{};
   const legend='<div class="rvlegend"><span>cheap</span>'+
-    [-2,-1,-0.4,0.4,1,2].map(v=>'<i style="'+rvTint(v).slice(1)+
+    [-1,-.5,-.2,.2,.5,1].map(v=>'<i style="'+rvTint(v*RVFULL).slice(1)+
       ';border:1px solid var(--line)"></i>').join('')+'<span>rich</span>'+
-    '<span style="margin-left:10px">score is in standard deviations of each cell&#39;s own '+
-    'volatility; the small figure is the same reading in volatility points</span>'+
+    '<span style="margin-left:10px" title="the weighted mean of this cell&#39;s signals, '+
+    'in the unit a mark is moved by. The tint saturates at '+anPct(RVFULL,2)+'">score is in '+
+    '<b>volatility points</b>; the small figure under it is the break-even richness '+
+    '(<b>b/e</b>) — level, shape and carry alone</span>'+
     '<span class="rvthin">faded = scored on less than half the declared weight</span>'+
     (shared?'<span>the <b>'+esc(shared.name)+'</b> column is a property of the tenor, not of '+
       'the strike — it enters all five cells of the row, so it is one observation and not '+
@@ -2915,11 +3128,12 @@ function renderRelValue(d){
     '<div class="legend">'+cols.map((c,i)=>'<span><i style="background:'+RVC[i]+'"></i>'+
       esc(c.label)+'</span>').join('')+'</div>'+
     '<div class="ankey"><span>'+esc(s.headline||'')+'</span>'+
-    (s.mean_score==null?'':'<span>mean <b>'+anRaw(s.mean_score,2)+'</b> sd across the grid</span>')+
+    (s.mean_score==null?'':'<span>mean <b>'+anSgn(s.mean_score,2)+
+      '</b> vol points across the grid</span>')+
     (s.mean_confidence==null?'':'<span>scored on <b>'+
       (s.mean_confidence*100).toFixed(0)+'%</b> of the declared weight on average</span>')+
     '<span><b>'+(s.scored||0)+'</b> of '+(s.cells||0)+' cells scored'+
-    (s.extreme?', '+s.extreme+' beyond two standard deviations':'')+'</span></div>'+
+    (s.extreme?', '+s.extreme+' beyond '+anPct(RVFULL,2)+' vol points':'')+'</span></div>'+
     rvNotes(d);
 
   /* One handler on the table rather than one per cell: the grid is rebuilt on
@@ -2985,7 +3199,7 @@ function rvWhyNoScore(c){
   return c.message||why[0]||'nothing could be scored here';
 }
 function rvTitle(r,c){
-  return r.tenor+' '+c.label+': '+anRaw(c.score,2)+' sd, on '+
+  return r.tenor+' '+c.label+': '+anSgn(c.score,2)+' volatility points, on '+
     (c.used.join(', ')||'nothing')+' — '+(c.confidence*100).toFixed(0)+'% of the weight';
 }
 /* The cell you clicked, taken apart.  Every signal is listed whether it was
@@ -3007,17 +3221,23 @@ function renderRvCell(){
   host.innerHTML='<h3>'+esc(RV.pair+' '+r.tenor+' '+c.label)+'</h3>'+
     '<div class="row" style="gap:18px;align-items:baseline;margin-bottom:9px">'+
     '<div><div class="rvbig'+(cls(c.score)?' '+cls(c.score).slice(8,-1):'')+'">'+
-      anRaw(c.score,2)+'</div><label style="margin:0">score (sd)</label></div>'+
+      anSgn(c.score,2)+'</div><label style="margin:0" title="the weighted mean of the '+
+      'signals below, in volatility points">score (vol pts)</label></div>'+
     '<div><div class="rvbig">'+anSgn(c.richness)+'</div>'+
-      '<label style="margin:0">richness (vol pts)</label></div>'+
+      '<label style="margin:0" title="level, shape and carry alone — the break-even, '+
+      'which is three of the five signals">richness (vol pts)</label></div>'+
     '<div><div class="rvbig">'+anPct(c.implied)+'</div>'+
       '<label style="margin:0">marked vol %</label></div>'+
     '<div><div class="rvbig">'+(c.strike==null?'—':num(c.strike,5))+'</div>'+
       '<label style="margin:0">'+(RV.has_feed?'strike':'strike / forward')+'</label></div>'+
     '</div>'+
-    tblHtml('<th style="text-align:left">Signal</th><th>Vol pts</th><th>z</th><th>Weight</th>'+
-      '<th style="text-align:left">In the score</th>',body)+
-    '<div class="ankey"><span>scale <b>'+anPct(c.scale)+'</b> vol points'+
+    tblHtml('<th style="text-align:left">Signal</th><th title="what the score is the '+
+      'weighted mean of">Vol pts</th><th title="the same value against how much this '+
+      'cell&#39;s volatility usually moves. Reported, not scored on">z</th>'+
+      '<th>Weight</th><th style="text-align:left">In the score</th>',body)+
+    '<div class="ankey"><span title="how much this cell&#39;s volatility usually moves. It '+
+    'is what the z column is read against and it enters the score nowhere">scale <b>'+
+    anPct(c.scale)+'</b> vol points'+
     (c.scale_source&&c.scale_source!==c.column?
       ' — measured on the at-the-money, because this wing has none of its own':'')+
     '</span>'+(c.observations?'<span><b>'+c.observations+'</b> observations':'<span>')+
@@ -3255,11 +3475,12 @@ function renderBand(){
     '<th>Tenor</th><th>Forward</th><th>ATM %</th><th>P(break) %</th><th>P(out) %</th>'+
     '<th>P(below) %</th><th>P(above) %</th><th>Body shift</th><th>RR band / logn</th>',
     rows)+'</div>'+
-    '<div class="hint">Break risk is a <b>marked input</b>, never inferred from a butterfly: a '+
+    '<details class="hint"><summary>What is marked and what is an output</summary>'+
+    'Break risk is a <b>marked input</b>, never inferred from a butterfly: a '+
     'wider body and a higher hazard both raise the at-the-money, so a joint fit is degenerate. '+
     'Out-of-band probability is an <i>output</i>, and it is real. Choosing <b>BAND</b> as the '+
     'interpolation prices this mixture instead of the lognormal smile; a band weight between '+
-    '0 and 100 blends the two, which is a marking convenience and not a model.</div>';
+    '0 and 100 blends the two, which is a marking convenience and not a model.</details>';
   $('#bandbody').innerHTML=f;
   $('#bandapply').onclick=applyBand;
   $('#bandfit').onclick=fitBand;
@@ -3288,7 +3509,7 @@ async function fitBand(){
     h+=(d.warnings||[]).map(w=>'<div class="etowarn">! '+esc(w)+'</div>').join('');
     const hz=(d.hazard_by_tenor||[]).map(x=>'<tr><td>'+esc(x.tenor)+'</td><td>'+
       (x.hazard==null?'—':anPct(x.hazard,4))+'</td><td>'+(x.rmse==null?'':num(x.rmse*100,4))+
-      '</td><td style="text-align:left;color:var(--muted);white-space:normal">'+esc(x.note||'')+'</td></tr>').join('');
+      '</td><td style="text-align:left;color:var(--muted);white-space:normal">'+esc(x.note||'')+'</td></tr>');
     const res=[];
     (d.rows||[]).forEach(r=>{
       if(r.message){res.push('<tr><td>'+esc(r.tenor)+'</td><td colspan="6" style="text-align:left;'+
@@ -3303,7 +3524,7 @@ async function fitBand(){
       '<th>Tenor</th><th>Own hazard %</th><th>rmse</th><th>Note</th>',hz)+'</div>';
     h+='<div class="anwide" style="margin-top:9px">'+tblHtml(
       '<th>Tenor</th><th>Quote</th><th>Quoted</th><th>Model</th><th>Resid</th><th>Put K</th>'+
-      '<th>Call K</th>',res.join(''))+'</div>';
+      '<th>Call K</th>',res)+'</div>';
     h+='<div class="hint">Proposed from the marked wings, holding what was not freed. The boxes '+
       'above now hold the proposal; <b>Apply</b> marks it, and until then nothing has moved.</div>';
     $('#bandfitout').innerHTML=h;
@@ -3711,6 +3932,12 @@ const MF=[
  ['pair','#mmpair'],['cut','#mmcut'],['method','#mmmethod'],
  ['target_source','#mmsource'],['fly_convention','#mmfly'],['vol_unit','#mmunit'],
  ['text','#mmtext'],['target_text','#mmtarget'],['apply','#mmapply'],
+ /* The mean-reversion range: a marking judgement rather than a property of
+    the model, so it is a control and not a constant. Hidden by default and
+    *cleared* when hidden -- a box that is out of sight and still posting a
+    number is the silent zero this screen exists to remove -- so an unopened
+    control sends two empty strings and the server fits in the house range. */
+ ['reversion_lo','#mmrevlo'],['reversion_hi','#mmrevhi'],
 ];
 const MQF=[
  ['pair','#mmpair'],['cut','#mmcut'],['method','#mmmethod'],
@@ -3775,12 +4002,38 @@ function mqAvailable(){
     'no fit of this pair yet — the quote stands on the marks as they are';
 }
 function saveMM(){try{localStorage.setItem('volkit.mm',
-  JSON.stringify(Object.assign({},mmPayload(),readFields(MQF),readFields(MKF))))}catch(e){}}
+  JSON.stringify(Object.assign({},mmPayload(),readFields(MQF),readFields(MKF),
+    {reversion_shown:$('#mmrevshow').checked})))}catch(e){}}
 function loadMM(){
   try{const r=localStorage.getItem('volkit.mm');if(r)MM=JSON.parse(r)}catch(e){MM={}}
   if(!MM||typeof MM!=='object')MM={};
   MF.concat(MQF,MKF).forEach(f=>{const el=$(f[1]),v=MM[f[0]];if(v==null)return;
     if(el.type==='checkbox')el.checked=!!v; else el.value=v;});
+  /* The browser owns panel state, so the disclosure comes back as it was left
+     -- and mmRevVisible() then clears the boxes if it was closed, so a range
+     can never be restored into a control nobody can see. */
+  $('#mmrevshow').checked=!!MM.reversion_shown;
+}
+
+/* -- the mean-reversion range ------------------------------------------
+   A marking judgement, so it is on the screen rather than in the source; and
+   an advanced one, so it is out of the way until it is asked for. Hiding it
+   hands the range back to the house judgement and the boxes are cleared to
+   say so, which is the only way back and so is the documented one. Opening it
+   fills them from what /api/state declares, so the control opens showing the
+   range the fit was already using rather than two empty boxes. */
+function mmRevVisible(){
+  const on=$('#mmrevshow').checked, box=$('#mmrevbox');
+  box.classList.toggle('hide',!on);
+  const house=(STATE.marketmaker||{}).reversion_range||[];
+  if(on){
+    if(!$('#mmrevlo').value)$('#mmrevlo').value=house[0]!=null?house[0]:'';
+    if(!$('#mmrevhi').value)$('#mmrevhi').value=house[1]!=null?house[1]:'';
+  }else{$('#mmrevlo').value='';$('#mmrevhi').value='';}
+  $('#mmrevhint').textContent=house.length
+    ? 'the house range is '+house[0]+' to '+house[1]+', a half-life of '
+      +(Math.LN2/house[1]*12).toFixed(1)+' to '+(Math.LN2/house[0]*12).toFixed(1)+' months'
+    : '';
 }
 
 /* -- which parameters the fit may move -------------------------------- */
@@ -4028,6 +4281,10 @@ function paintCurve(d){
   let h='<div class="mmstat"><span>weighted RMSE <b>'+num(c.rmse,4)+'</b> vol pts</span>'+
     '<span>worst <b>'+sgn(c.max_error,4)+'</b> at '+esc(c.max_error_tenor)+'</span>'+
     '<span>'+c.evaluations+' evaluations, '+num(c.seconds,2)+'s</span>'+
+    /* A fit run inside the house judgement and one run outside it must not
+       read the same, so the range is stated only when it was overridden. */
+    (c.reversion_house?'':'<span>mean reversion held in <b>'+num(c.reversion_range[0],2)+
+      '</b>–<b>'+num(c.reversion_range[1],2)+'</b>, not the house range</span>')+
     '<span>'+esc(c.message)+'</span></div>'+
     '<div class="antop"><div><div class="mmchart"></div>'+
     '<div class="legend"><span><i style="background:'+C2+'"></i>target</span>'+
@@ -4630,6 +4887,7 @@ $('#mqarchive').onchange=()=>{saveMM();scheduleMQ()};
 ['#agenthalf','#agentmin','#agentlook'].forEach(id=>{$(id).oninput=()=>{saveMM();
   if($('#mqarchive').checked)scheduleMQ()}});
 $('#mmsource').onchange=()=>{mmTargetVisible();saveMM();scheduleMM()};
+$('#mmrevshow').onchange=()=>{mmRevVisible();saveMM()};
 ['#mmfallback','#mmscale','#mmfair','#mmaxe','#mmcap','#mmhorizon'].forEach(id=>{
   $(id).oninput=()=>{saveMM();scheduleMQ()}});
 ['#mmtext'].forEach(id=>{$(id).oninput=()=>{saveMM();scheduleMM();scheduleMQ()}});
@@ -4688,6 +4946,7 @@ async function boot(){
     fillSel('#mpair',STATE.pairs||[]);
     fillSel('#mcut',STATE.cuts||[],'TK');
     setMethodSel('#mmethod',$('#mpair').value);
+    loadMarking();
   }
   if(has('analysis')){
     fillSel('#anpair',STATE.pairs||[]);
@@ -4733,7 +4992,7 @@ async function boot(){
     if(!MKR)$('#markhead').textContent=(J.path||'no journal yet')+' · '+(J.instances||0)+
       ' instance(s) held'+(J.error?' · '+J.error:'');
     if(J.min_instances&&!MM.min_instances)$('#markmin').value=J.min_instances;
-    renderKnobs(); mmTargetVisible(); renderRules(); mqAvailable(); loadBank();
+    renderKnobs(); mmTargetVisible(); mmRevVisible(); renderRules(); mqAvailable(); loadBank();
   }
   const SS=STATE.session||{};
   $('#sesspath').value=SS.path||SS.default||'';

@@ -337,10 +337,14 @@ def smoke_test(exe: Path, chosen: tuple[str, ...], shy: tuple[str, ...] = ()) ->
         if "marking" in chosen:
             checks.append(("term structure", [str(exe), "tenors", "USDJPY"] + book))
         if "pricing" in chosen:
-            # A fixed expiry as well as a fixed --asof, so this prices the
-            # same three months whenever the build is run.
+            # A fixed expiry as well as a fixed --asof, so this reads the
+            # same three months whenever the build is run.  The strike is a
+            # delta rather than a level because a delta is a moneyness
+            # question and needs no feed: this check must pass on a build
+            # staged without one, and an absolute strike there is refused by
+            # name (it cannot be placed against marks that are in K/F).
             checks.append(("volatility", [str(exe), "vol", "USDJPY", "2024-05-28",
-                                          "--strike", "1.02"] + book))
+                                          "--strike", "25d"] + book))
     else:
         print("  no vol_marks.xlsx staged; checking only that the exe starts")
 

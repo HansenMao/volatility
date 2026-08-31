@@ -141,12 +141,14 @@ not the two rounded boxes above it added up: the three carry different
 precisions, and on a cross the file builds from its legs the sum lands a
 digit off what was published.
 
-**Refresh spot** re-reads the feed file from disk and re-prices, so every box
-still holding the feed's number picks up whatever has just been published.
-**Fill legs** does the same and then writes the feed over the levels you typed
-as well — which is what a leg with a hand-marked spot that has gone stale
-needs. A leg the feed has no pair for, or whose expiry will not
-resolve, is reported and left exactly as it was. **Watch file** polls only for
+**Refresh spot** re-reads the feed file from disk, puts every market box back
+on the feed at each leg's own expiry — the levels you typed over included —
+and re-prices, saying how many legs it took back. It is one button and not
+two because somebody asking for the published market is asking for all of it,
+and a hand-marked spot from an hour ago is the level most likely to be stale;
+a level you want to keep is kept by not pressing it, and emptying a box is
+still the way to hand a single box back. A leg the feed has no pair for, or
+whose expiry will not resolve, is reported and left exactly as it was. **Watch file** polls only for
 when the file was last written and lights the status pill; nothing reloads
 underneath a price being read.
 
@@ -184,22 +186,69 @@ to 751% of payout.
 python3 -m volkit serve --feed files/market_feed.csv
 ```
 
-A `pair,tenor,value` CSV: `tenor` is `SPOT` for the spot rate, otherwise the
+A `pair,label,value` CSV: `label` is `SPOT` for the spot rate, otherwise the
 forward points at that pillar. Swap points are interpolated linearly in time
 between pillars, scaled to zero at the very front, and held flat beyond the
 last pillar with an `extrapolated` flag rather than trended off the end of the
 curve. The pip divisor follows the term currency (100 for JPY, 10000 otherwise).
 
-**A cross the file does not quote is built from its legs.** A feed carrying
-EURUSD and USDJPY is carrying EURJPY, so `Book.market_level` — the one lookup
-behind every level on every screen — composes the two outrights rather than
-refusing the pair by name. It is the triangle and not a model: EURJPY is
-EURUSD × USDJPY, EURGBP is EURUSD ÷ GBPUSD, and the points that come back are
-the cross's own, in the cross's own pips, never the legs' points added. Every
-screen that shows a derived level says which legs it came from, because a
-level that came out of an identity and one that was published must not read
-the same. Half a triangle is still a refusal: GBPNZD with no NZDUSD in the
-file has no forward, and says so.
+**A pillar may be named by tenor or by date, and a file may mix the two.** A
+tenor (`1W`, `3M`) is the standard broker column; a date is the same statement
+made exactly, and it is what a feed built off a bank's own forward file looks
+like — the front of one is not on standard tenors at all. A dated row is read
+by where it lands:
+
+| row | means |
+|---|---|
+| `USDJPY,3M,-35.0` | points from spot to the 3M pillar |
+| `USDJPY,2026-09-30,-11.4` | *after* the spot date: points from spot to that date |
+| `USDJPY,2026-08-31,-0.40` | *on or before* the spot date: the points for that **single day**, `(end - 1, end]` — which is what O/N and T/N are |
+| `USDJPY,2026-08-26,-0.10` | already delivered: passed over, with the reason |
+| `USDJPY,SPOT DATE,2026-08-31` | the file's own settlement date |
+
+The curve is one function of the delivery date either way: zero at the spot
+date, the cumulative points at every quoted date, and a straight line between
+the two nearest quoted dates for anything in between. On the **near** side it
+is the daily *rates* that are interpolated and then accumulated back from
+spot, because a rate is what those rows state — so the running total they
+produce is not a straight line through them, and should not be. Dates are read
+in any spelling `timeutil.parse_datetime` takes (`2026-09-30`, `30Sep26`,
+`30-Sep-2026`), and a tenor is tried first, so nothing a tenor feed already
+reads moves.
+
+Placing a dated row needs a spot date, and a spot date needs a valuation date.
+The tool never asks the machine for one: it takes the **book's clock**, or the
+file's own `# asof:` line, or — best of all — the spot date the file states for
+itself, and refuses the dated rows with a message given none of the three. A
+spot date this tool derived and one the publisher stated do not read the same:
+which it was is a **note** on the feed pill, beside the problem count, because
+a day's disagreement about the spot date moves the tom-next onto the overnight.
+
+**A cross the file does not quote is implied from its legs' two spot rates
+and two swap points.** A feed carrying EURUSD and USDJPY is carrying EURJPY,
+so it is composed rather than refused by name. It is the triangle and not a
+model: EURJPY is EURUSD × USDJPY, EURGBP is EURUSD ÷ GBPUSD. Spot and the
+outright are composed separately, each from the legs' own, and the points that
+come back are the cross's own, in the cross's own pips — never the legs'
+points added, since a point of EURUSD and a point of USDJPY are different
+amounts of money.
+
+The arithmetic is `feed.compose_level` and there is exactly one of it: the
+feed's own `quote` / `quote_on` compose, and `Book.market_level` — the one
+lookup behind every level on every screen — calls the same function and adds
+only the workbook's opinion about which legs a cross has. A sheet that names
+them wins; a cross nobody named takes the one sensible pair of dollar legs
+(`cross.dollar_legs`), so **GBPJPY prices off a file holding GBPUSD and
+USDJPY even though no spreadsheet mentions it**. Every screen that shows a
+derived level says which legs it came from, because a level that came out of
+an identity and one that was published must not read the same. Half a triangle
+is still a refusal: GBPNZD with no NZDUSD in the file has no forward, and the
+message names the leg that is missing.
+
+The near side composes too. `quote_on(pair, date)` reads **each leg on its own
+spot date**, so a cross of a T+1 pair and a T+2 pair is placed exactly rather
+than at one shared `t` — the tom-next is a day wide, and a day is the whole of
+it.
 
 Outputs per column: forward, resolved strike, vol, ATM vol, premium (term
 currency per unit of base, and % of base), delta, smile delta, vega, and the
@@ -266,6 +315,32 @@ feed the pricing panel immediately:
 4. **Smile parameters** — per-tenor `slog25`, `slog10`, `rho25`, `rho10`, and
    the **anchor** switch, which lives here rather than over the ATM table
    because what it anchors is the smile.
+
+Beside them is the **vol query**: an expiry, a strike, and the volatility
+there. It takes the pricing tab's own two boxes — a tenor or a date, and a
+number, `ATM` or a delta — and is read by the same functions on the server, so
+the two screens cannot understand `1M` or `25d` differently. There is no
+forward box: the level is the feed's outright at that expiry (through
+`Book.market_level`, the one place a level is read, so a cross quoted only
+through its legs is placed from them and the card names the triangle). Without
+a feed, `ATM` and a delta still answer in `K/F` and it says so; an absolute
+strike is refused by name, because the marks are in strike/forward and reading
+a level as a ratio is a wing nobody asked about.
+
+A bare `25d` names two strikes and is read on the call, as on the pricing tab;
+`25dp` and `-25d` are how the other wing is asked for, and there is no separate
+control for it — that would be a second place to say one thing, and one that
+could be set against a strike which had already said the opposite. At `ATM` or
+an absolute strike there is nothing to say either: the volatility there is one
+number for the call and the put.
+
+The boxes keep the request and the line under them reports what it resolved to,
+which is where this differs from a pricing leg deliberately: a leg's strike is
+frozen so that re-pricing cannot silently re-solve it, and on a query card
+re-solving under marks that have just moved is the whole point. It prices
+nothing — no notional, no option type, no premium, no greek — because
+everything else on a pricing row is noise around the one number a marker is
+asking for. `volkit vol` is the same call.
 
 The **smile chart** puts its strikes in the levels a trader would name
 whenever the feed covers the pair: the axis, the point table and the density
@@ -406,16 +481,32 @@ fair(K)`, and at the ATM column it is exactly the fair-value table's own
 `richness` (a test pins that to 1e-12). The other two answer different
 questions and are deliberately not summed with them.
 
-Combining them needs one scale, and the scale is **the cell's own historical
-standard deviation** — half a volatility point is a great deal on a one-year
-ATM and nothing on a one-week 10 delta wing, and only the history knows which.
-So each signal in volatility points becomes a z-score by dividing by that, and
-the composite is the weighted mean of whichever z-scores are available,
-**renormalised over them**: a missing signal is dropped, never counted as a
-zero, which would drag every score toward the middle. Every cell reports which
-signals it used and a **confidence** — the share of the declared weight the
-score rests on — so a cell scored on one signal and a cell scored on four are
-not read alike.
+All five are already in **volatility points**, and that is the unit the score
+is in: the composite is the weighted mean of whichever signals a cell has,
+**renormalised over them** — a missing signal is dropped, never counted as a
+zero, which would drag every score toward the middle. It reads as the number
+of volatility points the mark is rich by, which is what a mark is moved by and
+what a price is made in. Every cell reports which signals it used and a
+**confidence** — the share of the declared weight the score rests on — so a
+cell scored on one signal and a cell scored on four are not read alike.
+
+The composite was a **z-score** until 2026-08-31, each signal divided by the
+cell's own historical standard deviation, and the desk asked for the points
+back: *how unusual is this* is a statistic about a series, and *how much am I
+being paid* is the number that gets traded on. Two things follow, and both are
+gains. A cell **with no history now scores** — the scale was the only thing
+`level`, `shape` and `carry` needed the historical sheet for, so a pair the
+sheet does not quote used to score nothing at all while three of its five
+signals were measured perfectly well; only `history` itself needs the series
+now. And the whole card is in **one unit**: the score, the richness under it
+and every signal inside it are the same number in the same units.
+
+What the z-score was there for is real and is kept **beside** the value rather
+than removed. Half a volatility point is a great deal on a one-year ATM and
+nothing on a one-week 10 delta wing, and only the history knows which — so
+every signal still carries its `z` wherever a scale can be measured, the cell
+still carries the `scale` and which series it came from, and the detail card
+shows both columns. It is context now instead of the composite.
 
 The same rule catches a zero that is *not* missing. At the at-the-money column
 `shape` is zero by statement — the at-the-money **is** the level, so there is
@@ -428,10 +519,11 @@ so.
 
 Two windows, and neither is the realized lookback. The lookback is matched to
 each tenor because a one-month implied volatility forecasts one month. How much
-a volatility *moves* — the **scale** every score is divided by — is a slower
-measurement and gets its own window (`HISTORY_DAYS`, a year); run off one
-window, a month of a smooth one-month series read an ordinary half point of
-richness as thirty standard deviations. The `(ρ, ν)` the `shape` signal's
+a volatility *moves* — the **scale** each `z` is read against, and what the
+`history` signal is measured on — is a slower measurement and gets its own
+window (`HISTORY_DAYS`, a year); run off one window, a month of a smooth
+one-month series read an ordinary half point of richness as thirty standard
+deviations. The `(ρ, ν)` the `shape` signal's
 comparison smile is built from get theirs (`history.DYNAMICS_DAYS`), for the
 same reason and never shorter than the lookback: they are properties of the
 process rather than forecasts over a horizon, and they need *more* paired
@@ -439,9 +531,8 @@ observations than a realized volatility needs returns. Measured on the
 lookback, `shape` was blank at every short tenor, and blank at every tenor at
 once whenever the lookback was set under about a month — which reads as a
 signal that does not work rather than as a window that is too short. The scale
-window keeps its own constant so that changing it moves the denominator only:
-the volatility-point column is not a function of how the z-scores are scaled,
-and a test pins that.
+window keeps its own constant so that changing it moves the `z` column only,
+and never the volatility points the score is made of; a test pins that.
 
 Three things the grid says out loud rather than leaving to be inferred. The
 row carries **what the realized number is made of** — the spot leg, the
@@ -569,10 +660,15 @@ should have been measured.
 
 **Realized against implied.** Load a historical workbook — one sheet per pair,
 one row per date, columns for spot, forwards and the quoted surface. Columns
-are matched by reading their headers, not by position, and the volatility unit
-is decided **once per sheet from the at-the-money column**: a 25 delta risk
-reversal of −0.89 vol points is below 1 in magnitude, so sniffing each column
-on its own reads it as a decimal and returns it a hundred times too large.
+are matched by reading their headers, not by position, and the volatility
+columns are read **as written, in volatility points**, one scale for the whole
+sheet: a 25 delta risk reversal of −0.89 vol points is below 1 in magnitude, so
+sniffing each column on its own reads it as a decimal and returns it a hundred
+times too large. A low at-the-money is not evidence of a decimal sheet either —
+a managed pair marks its 3M at a third of a point, and reading that as a decimal
+showed it on the monitor at 35 — so a sheet that really is in decimals is loaded
+with `--vol-unit decimal`, which is something you say rather than something the
+reader guesses.
 
 Realized volatility is measured on the **forward** to each tenor wherever the
 sheet quotes the swap points, and it says which it used in the `on` column. A
@@ -1156,7 +1252,8 @@ python3 -m volkit validate USDJPY                    # hunt for competing smile 
 python3 -m volkit events   USDJPY --horizon 1        # scheduled economic events
 python3 -m volkit tenors USDJPY --cut TK
 python3 -m volkit smile  USDJPY 2024-05-28
-python3 -m volkit vol    USDJPY 2024-05-28 --strike 1.02 --forward 1.0
+python3 -m volkit vol    USDJPY 2024-05-28 --strike 1.02 --forward 1.0   # a moneyness
+python3 -m volkit vol    USDJPY 5m --strike 25dp -v --feed files/market_feed.csv
 python3 -m volkit daily  USDJPY --horizon 1 --cut NY --out USDJPY_daily_vol
 
 python3 -m volkit band   USDHKD --feed files/market_feed.csv --hazard 3
@@ -1344,7 +1441,7 @@ the same clock always gives the same numbers.
 | `pricing` | multi-leg option strips, strike/expiry specs, per-leg error isolation |
 | `econ` | scheduled economic events: rules plus a dated central-bank table |
 | `exotics` | digitals, one-touch / no-touch, and the overhedge buffers |
-| `feed` | spot and forward points from a file, interpolated between pillars |
+| `feed` | spot and forward points from a file, by tenor or by date, interpolated between pillars |
 | `banded` | managed / pegged pairs: Beta-on-band body with a hazard-rate jump leg, and how much notice the surface takes of it |
 | `curves` | several volatility curves side by side, and the same curve on other dates |
 | `monitor` | small panels: what has moved between two points in time, one pair each |

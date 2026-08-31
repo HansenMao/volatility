@@ -21,7 +21,7 @@ sheet it was written against is kept as `files/vol_marks_legacy_format.xlsx`
 -- same marks, old layout -- and the comparison still runs. volkit reads
 either (§4).
 
-- ~29,000 lines across 48 modules, 786 tests, `unittest` only (no pytest).
+- ~29,000 lines across 48 modules, 822 tests, `unittest` only (no pytest).
   Tests live in `tests/test_volkit.py`, `tests/test_agent.py` (the desk
   agent, §17) and `tests/test_marking.py` (the marking agent, §18).
 - Runtime deps: numpy, scipy, pandas, openpyxl. Plus `tzdata` on Windows.
@@ -67,10 +67,11 @@ atm        the ATM term structure
 cross      cross pairs from two legs and a correlation
 surface    ATM + smile, greeks, delta strikes, RR / fly
 exotics    digitals, one-touch / no-touch, overhedge buffers
-pricing    multi-leg strips, strike/expiry specs, per-leg error isolation
+pricing    multi-leg strips, strike/expiry specs, per-leg error isolation, and
+           the one-number reading of them the marking screen asks for
 marketdata validated Excel reader; CONFIG is two columns and a cross
            names its own dollar legs
-feed       spot / forward points from file, interpolated
+feed       spot / forward points from file, by tenor or by date, interpolated
 econ       scheduled economic events (rules + dated table), and the weight
            each puts on each currency
 book       all pairs, built in dependency order
@@ -80,9 +81,10 @@ listed     exchange traded options: paste parsing, least-squares SABR fit,
 moments    risk-neutral distribution from a smile; two combined into a cross
 history    historical spot / forwards / quotes; realized vol, skew, kurtosis
 analytics  carry and roll, fair value, the cross triangle, indication pricing
-relvalue   one score per expiry and strike: implied against realized in level
-           and in shape, the roll and the forward carry, the cross triangle,
-           and each cell's own z-score in its history
+relvalue   one score per expiry and strike, in volatility points: implied
+           against realized in level and in shape, the roll and the forward
+           carry, the cross triangle, and where each cell sits in its own
+           history
 curves     several vol curves side by side, and the same curve on other dates
 monitor    small panels: what has moved between two points in time, per pair
 quotes     a broker run, in English or in columns: outrights, RR, fly, spreads,
@@ -155,9 +157,23 @@ preflight  startup checks (tzdata above all)
   and the pip, for the band model, the strike axis, the carry table, the
   relative-value grid, a pricing leg with a blank spot and the market-maker
   sheet's absolute strikes. When the feed does not quote the pair itself but
-  quotes both of its legs, the level is **composed from them** -- EURJPY is
-  EURUSD x USDJPY, EURGBP is EURUSD / GBPUSD, by `cross.infer_leg_signs` read
-  as quotation rather than as correlation. That is triangular arbitrage and
+  quotes both of its legs, the level is **composed from them** -- the two spot
+  rates and the two swap points, which is all an implied cross rate has ever
+  been. EURJPY is EURUSD x USDJPY, EURGBP is EURUSD / GBPUSD, by
+  `cross.infer_leg_signs` read as quotation rather than as correlation. The
+  arithmetic is `feed.compose_level` and there is exactly **one** of it:
+  `MarketFeed.level` / `quote` / `quote_on` compose, and `Book.market_level`
+  calls that same function and adds only the workbook's opinion about which
+  legs a cross has. A sheet that names them still wins; a cross nobody named
+  takes `cross.dollar_legs`, so a pair no spreadsheet mentions -- GBPJPY off a
+  file holding GBPUSD and USDJPY -- is priced rather than refused, and
+  anything holding a feed and no book (the feed status route's own quote box)
+  stops reading `no feed for 'EURJPY'` off a file that quotes both its legs. A
+  second copy of that arithmetic would be a second place for the triangle's
+  signs to be written upside down, which is §5's first entry. `quote_on` reads
+  each leg on its **own** spot date, so a cross of a T+1 pair and a T+2 pair
+  is placed exactly rather than at one shared `t` -- the tom-next is a day
+  wide, and a day is the whole of it. That is triangular arbitrage and
   not a model, and it is why a loaded feed is no longer invisible to a cross:
   every screen used to ask the feed for the pair *by name*, so the
   market-maker screen refused a strike quote on EURJPY while the pricing
@@ -167,6 +183,34 @@ preflight  startup checks (tzdata above all)
   triangle is still a refusal -- no NZDUSD in the file, no GBPNZD forward --
   and the points are the cross's own in the cross's own pips, never the legs'
   points added.
+- **A feed pillar is named by a tenor or by a date, and both land on one
+  axis: years from the spot date.** A tenor sits at `tenor_to_years`, a date
+  at its days from spot over 365.2425, and they are the same number for the
+  same pillar -- so a dated file loaded beside a tenor one has no seam in it
+  and nothing that already priced moves. What a date buys is the front of the
+  curve, which is not on standard tenors at all: the overnight and the
+  tom-next are each quoted as **one day** of points rather than as points from
+  spot, because points from spot are zero at spot and there is nowhere else to
+  put them. So a dated row is read by where it lands -- after the spot date it
+  is points from spot, on or before it it is that single day's points
+  (`(end - 1, end]`), and on or before the valuation date it has already
+  delivered and is passed over with the reason. The near side interpolates the
+  **rates** and accumulates them back from spot, not the running total: a
+  straight line through two cumulative knots skips over the expensive day
+  between them and reads it as the average one. Placing any of this needs a
+  spot date, and a spot date needs a valuation date, which `feed.load_for`
+  takes from the **book's clock** -- never from the machine, the same
+  injected-clock rule as everywhere else. The file may state a spot date of
+  its own (`PAIR,SPOT DATE,<date>`) and that wins: a publisher knows its own
+  holidays and this tool's calendar may not, and a day's disagreement moves
+  the tom-next onto the overnight. Derived or stated, which it was travels in
+  `MarketFeed.notes` and is shown on the feed pill, for the same reason
+  `derived` and `via` travel with a market level. Two consequences of putting
+  the spot anchor in the knot list rather than in a special case: a feed with
+  a **single** pillar now interpolates toward zero at spot instead of holding
+  that pillar flat across the whole front, and a negative time answers 0
+  rather than the front pillar's points. Both were the front-end rule the
+  docstring already stated, applied in one place instead of three.
 - **The workbook's CONFIG sheet is two columns: the pairs and the tenors.**
   A pair with the dollar on one side is marked on its own backbone; a pair
   without one is a **cross**, is never marked directly, and is broken into the
@@ -206,10 +250,15 @@ preflight  startup checks (tzdata above all)
   volatility must be measured in the model's own volatility time
   (`history.volatility_time`), not calendar days and not a flat 252. A test
   pins it against `AtmCurve.integrated_vol`.
-- **Units and signs are decided once per source, never per row.** The
-  volatility unit of a historical sheet comes from its ATM column; the unit of
-  a pasted listed table comes from the whole table and is *refused* when
-  ambiguous. Per-column sniffing gets small risk reversals wrong.
+- **Units and signs are decided once per source, never per row.** A
+  historical sheet is read in volatility points as written, whatever its
+  level, and the same scale goes on its RR and fly; the unit of a pasted
+  listed table comes from the whole table and is *refused* when ambiguous.
+  Per-column sniffing gets small risk reversals wrong. What the reader does
+  **not** do any more is read the level as evidence of the unit: a managed
+  pair marks its at-the-money at a third of a point, and calling that a
+  decimal sheet put it on the monitor at 35. `vol_unit='decimal'` is how a
+  decimal sheet is loaded, and it is something a person says.
 - **A row that cannot be computed keeps its place and carries its reason.**
   Dropping it makes a short table look complete, and makes an all-failed table
   look empty. `carry_table`, `realized_table` and `triangle_table` all emit a
@@ -258,17 +307,23 @@ preflight  startup checks (tzdata above all)
   reads and comes back holding the one standard date, so what is priced is
   what can be read on the screen. `pricing.resolve_legs` is that place: the expiry through the pair's own
   calendar, the level through `Book.market_level`, and the *same* reading the
-  pricer does -- so what `Fill legs` writes into a row cannot differ from what
-  the row is then priced at, and a cross the feed quotes only through its legs
+  pricer does -- so what `Refresh spot` writes into a row cannot differ from
+  what the row is then priced at, and a cross the feed quotes only through its legs
   fills its boxes rather than being refused, which is what asking the feed for
   the pair *by name* used to do here. `/api/legs` answers while somebody is
   typing and re-reads no file; `/api/feed/refresh` is the same reading after
   the file has been read again. A box the feed filled is refilled when the
   pair or the expiry moves -- the points are interpolated to the expiry, so a
   forward left behind is the wrong forward -- and a box somebody typed is not;
-  the browser owns that distinction, as it owns the panel. Emptying a box
-  hands it back to the feed, which is the only way back and so is the
-  documented one, and moving a leg to another pair hands both back on its
+  the browser owns that distinction, as it owns the panel. **`Refresh spot`
+  is the one control that crosses it**, and it crosses it whole: pressing it
+  hands every market box back to the feed, typed ones included, and says how
+  many legs it took back. There is no second button for the milder reading --
+  there was, and it was the one nobody pressed, because somebody asking for
+  the published market is asking for all of it and a level typed an hour ago
+  is the one most likely to be stale. Emptying a box hands that box back
+  without re-reading anything, which is the only per-box way back and so is
+  the documented one, and moving a leg to another pair hands both back on its
   own -- a level somebody marked by hand belongs to the pair they marked it
   for, and 150.25 carried onto EURUSD is a silent zero with a decimal point
   in it. `OptionLeg.forward_points` is the other spelling, for a
@@ -290,6 +345,36 @@ preflight  startup checks (tzdata above all)
   EURUSD. Showing the same number as an input above and an answer below was
   two places for one number to disagree, and for spot and the forward it was
   worse: the box was the input and the row read like a result.
+- **The marking screen's vol query is the pricing screen's two boxes and one
+  number.** `pricing.quick_vol` is that reading and `pricing.resolve_strike`
+  is the one place a typed strike lands on the marks -- `ATM` to the
+  delta-neutral straddle's own moneyness, `25d` to a solve on the interpolated
+  smile, a number as written -- shared with `_price_leg`, which had its own
+  copy of the same six lines. A strike read two ways is a strike that can be
+  read two different ways, and `1M` understood differently on two tabs of one
+  tool is the same failure. The forward is `Book.market_level`'s, at the
+  expiry asked for, so there is no third box to leave stale and a cross the
+  feed quotes only through its legs is placed from them with the triangle
+  named. **Without a feed, `ATM` and a delta still answer** -- they are
+  moneyness questions -- in `K/F` and saying so, the same rule as the smile
+  chart's axis; an **absolute** strike is refused by name, because reading a
+  level as a ratio is a wing nobody asked about. The **boxes keep the request
+  and the answer line reports the resolution**, which is where this card
+  deliberately parts from a pricing leg: a leg's strike is written back so a
+  re-price cannot silently re-solve it, and on a query card re-solving under
+  marks that have just moved is the entire question. Nothing resolved is ever
+  written into a box, so no absolute strike can be carried onto another pair.
+  **The wing is said in the strike box and nowhere else.** A bare `25d` names
+  two strikes and is read on the call, as on the pricing screen; `25dp` and
+  `-25d` are the put. A separate wing control was built here and taken out
+  again: it was a second place to say one thing, and one that could be set to
+  Call against a strike that had already said put -- the reverse of §11's rule
+  that a side is settled once, where the row is built. At `ATM` or an absolute
+  strike no side is reported at all, because the volatility there is one
+  number for the call and the put (`quotes._settle_side`, the same statement
+  from the other end). `/api/vol` belongs to the marking screen and
+  `volkit vol` is the same call: `--strike` is that box and `--forward` an
+  override, the latter being what moved a documented number (MIGRATION F14).
 - **A screen shows a field only where the model reads it.** The pricing grid's
   rows carry the products they belong to: no barrier on a vanilla, no strike
   or ramp on a touch, no overhedge outside one. A box that can be filled in
@@ -309,8 +394,20 @@ preflight  startup checks (tzdata above all)
 - **A reload does not move the screen.** `boot()` runs again after every
   workbook reload, so every select is rebuilt with `fillSel`, which keeps what
   was chosen; the marking screen's pair, cut, interpolation and chart expiry
-  survive. The marks are discarded -- that is the point of a reload -- but
-  putting a marker on a different pair is a change nobody asked for.
+  survive, and so do its two disclosures, which the browser owns in
+  `volkit.marking` like every other piece of panel state. The marks are
+  discarded -- that is the point of a reload -- but putting a marker on a
+  different pair is a change nobody asked for.
+- **A card may be shut, but a mark may not be hidden.** The marking screen's
+  ATM table shows the marked cut volatility and no longer shows the fitted
+  curve beside it: the curve underneath a mark says nothing about the mark in
+  the row next to it, and a table a volatility is read off should hold one
+  number per tenor. Its **overwrite** column, and the whole **smile
+  parameters** card, are disclosures shut by default -- neither is a marker's
+  first question. What a disclosure may never take with it is the fact that
+  something *was* marked, so a shut control counts the overwrites in its own
+  heading and a shut overwrite column puts a dot on the tenor it belongs to.
+  A mark nobody can see is the silent zero of §2 wearing a tidier screen.
 - **Every text file is UTF-8, said once, in `paths`.** `read_text`,
   `open_text` and `write_text` are the only spellings; nothing calls
   `Path.read_text()` or `open()` on text and takes Python's default, which is
@@ -325,7 +422,16 @@ preflight  startup checks (tzdata above all)
   redirected monitor table carries an arrow, and cp1252 has no room for it.
   A test walks the source for the default spellings, so this cannot come back
   one call at a time.
-- **A fit and a quote are two calls, and the marks travel between them.**
+- **A fit and a quote are two calls, and the marks travel between them, and
+  keeping a fit keeps the marks it handed back rather than the raw numbers the
+  optimiser stopped at.** A knob leaves in volatility points and comes back
+  divided by a hundred, and `x * 100 / 100` differs from `x` in the last place
+  for about an eighth of all values -- so `_knob_decimal` is the inverse of
+  `_knob_points` in arithmetic and not in binary. Left alone, the book drifted
+  one bit away from the marks the quote panel was posting and a price depended
+  on whether *keep the marks* had been ticked: a nanovol, which is nothing to
+  a market and everything to a screen that has to reproduce itself. One
+  number, one spelling -- the book holds exactly what the panel shows.
   The market-maker screen's fit hands back `capture_marks` and the browser
   posts it with the request; `applied_marks` puts it on the surface for that
   one call and verifies the restore. The server still holds no screen state --
@@ -789,12 +895,17 @@ is built out of them.
 - Every combined distribution is renormalised onto its own forward. The shift
   is compared against the triangle's known convexity (the legs' MGFs at the
   coefficients plus `rho*sd_a*sd_b`); only the unexplained remainder warns.
-- **The volatility unit of a historical sheet is decided once, from the ATM
-  column**, and applied to the RR and fly. Per-column sniffing reads a small
-  risk reversal as a decimal and returns it 100x too large.
+- **A historical sheet is read in volatility points as written**, one scale
+  for the whole sheet, applied to the ATM, the RR and the fly alike.
+  Per-column sniffing reads a small risk reversal as a decimal and returns it
+  100x too large, so the scale is still decided once; what no longer decides
+  it is the *level*, because a low at-the-money is an ordinary quote on a
+  managed pair and reading 0.35 as a decimal showed it as 35 on the monitor.
+  A decimal sheet is loaded by name, with `vol_unit='decimal'` (`--vol-unit`,
+  or the box on the history loader).
 - **The relative-value grid** (`relvalue.py`) is the screen's first card and
-  its summary: one score per expiry and strike, positive when the mark is
-  rich. It is **not a new model** -- every signal is one of the comparisons
+  its summary: one score per expiry and strike, **in volatility points** and
+  positive when the mark is rich. It is **not a new model** -- every signal is one of the comparisons
   above, read at a strike instead of at the at-the-money -- and it is its own
   route (`/api/relvalue`) because it is the most expensive thing on the screen
   and the tables must not wait for it. Owned by the browser and posted whole,
@@ -831,19 +942,38 @@ is built out of them.
     separate constant from `HISTORY_DAYS` on purpose: that one is the
     denominator, and a knob that also moved the numerator would change the
     volatility-point column as a side effect of rescaling the z-scores.
-  - **One scale, and it is the cell's own historical standard deviation.**
-    Half a volatility point is a great deal on a one-year at-the-money and
-    nothing on a one-week wing, and only the history knows which. **The scale
-    window is not the realized lookback**: the lookback is matched to each
-    tenor because a one-month implied forecasts one month, but how much a
-    volatility *moves* is a slower measurement (`HISTORY_DAYS`, a year). Run
-    off one window it measured a one-month mark on a month of a smooth series
-    and read an ordinary half point of richness as thirty standard
-    deviations.
-  - **No history means no score**, and the volatility points are still
-    reported. Inventing a scale would be inventing the answer. A wing the
+  - **The score is in volatility points, and so is every signal in it.** The
+    composite is the weighted mean of the signals' *values*, renormalised
+    over the ones a cell has, and it reads as the number of volatility points
+    the mark is rich by. It was a **z-score** until 2026-08-31 -- each signal
+    over the cell's own historical standard deviation -- and the desk asked
+    for the points: *how unusual is this* is a statistic about a series and
+    *how much am I being paid* is what gets traded on. Two consequences, both
+    gains. **A cell with no history now scores**: the scale was the only
+    thing `level`, `shape` and `carry` needed the sheet for, so a pair it
+    does not quote scored nothing at all in every column while three of five
+    signals were measured; only `history` needs the series now. And the score,
+    the richness under it and the signals inside it are one unit, so
+    `level + shape + carry` is still exactly the richness.
+  - **The standardisation is kept beside the value, not removed.** Half a
+    volatility point is a great deal on a one-year at-the-money and nothing
+    on a one-week wing, and only the history knows which -- so every signal
+    still carries its `z` wherever a scale can be measured, and the cell
+    carries the `scale` and `scale_source`. It follows the **scale** and not
+    the score now: present where the history can measure one, absent where it
+    cannot, whether or not the value was counted. **The scale window is not
+    the realized lookback**: the lookback is matched to each tenor because a
+    one-month implied forecasts one month, but how much a volatility *moves*
+    is a slower measurement (`HISTORY_DAYS`, a year). Run off one window it
+    measured a one-month mark on a month of a smooth series and read an
+    ordinary half point of richness as thirty standard deviations. A wing the
     sheet does not quote borrows the at-the-money's scale and `scale_source`
-    says so, because a z-score is only as good as its denominator.
+    says so, because a z is only as good as its denominator.
+  - **`EXTREME_SCORE` travels on the response.** Half a volatility point is
+    where the summary starts counting a score as an outlier, and the page
+    tints to saturation there -- read off `RelativeValue.extreme_score`
+    rather than held as a second copy in the page, the same arrangement as
+    the signal weights in `/api/state`.
   - **A missing signal is renormalised away, never counted as a zero**, which
     would drag every score toward the middle. Each cell reports `used` and a
     `confidence` -- the share of the declared weight the score rests on -- so
@@ -910,7 +1040,7 @@ is built out of them.
 ## 10. Working on this
 
 ```
-python -m unittest discover -s tests        # 786 tests, ~10m
+python -m unittest discover -s tests        # 822 tests, ~10m
 PYTHONUTF8=0 LC_ALL=C python -m unittest discover -s tests   # as a cp1252 Windows
                                            # box sees it: an ASCII locale is the
                                            # only way to catch an encoding bug
@@ -918,6 +1048,7 @@ PYTHONUTF8=0 LC_ALL=C python -m unittest discover -s tests   # as a cp1252 Windo
 pip install esprima                         # enables the front-end JS syntax test
 python -m volkit check                      # validate the workbook
 python -m volkit events USDJPY --weights    # the pair's events leg by leg, and the weight table
+python -m volkit vol USDJPY 5m --strike 25dp -v --feed files/market_feed.csv  # the vol query card
 python -m volkit serve --feed files/market_feed.csv --history vol_history.xlsx
 python -m volkit serve --auto-reload 30     # re-read the market feed when it changes
                                            # (the pricing tab has the same switch)
@@ -1073,6 +1204,42 @@ does stage 3. The fit puts a price on nothing and the quote fits nothing.
   cannot leave a half-marked curve behind. For a **cross** the level belongs to
   the legs, so what is fitted is the correlation term structure instead;
   `_Knobs` hides which kind of curve it is from everything above it.
+- **The backbone's mean reversion is fitted inside 1.5 to 6.5, and that bound
+  is a marking judgement rather than a property of the model -- so it is the
+  one bound a caller may move, and it is a control on the screen rather than a
+  constant in the source.** `marketmaker.MEAN_REVERSION_RANGE` is the house
+  declaration, `/api/state` carries it so the panel cannot offer a range the
+  fitter never heard of, and `fit_atm_curve(reversion_range=...)` takes an
+  override -- the same arrangement as `relvalue.WEIGHTS`. The sweep nodes are
+  a function of whichever range is in force (`reversion_nodes`), because a
+  node the polish may not reach can still win the sweep on cost and is then
+  clipped into the bound, which is a different curve from the one that was
+  measured. Read as a half-life, `ln(2)/k`, 1.5 to 6.5 is a curve that closes
+  half the gap between the front and the back end in five weeks to five and a
+  half months. The ceiling is 6.5 and not 6 because AUDUSD and NZDUSD are
+  marked there: a default range that excludes marks the desk has actually
+  made argues with its own book on the first morning.
+  It bounds **the fit and not the mark**: a value typed into the marking
+  screen's parameter box is a mark somebody made on purpose and is left as
+  typed. `check_reversion_range` is the one reader for the panel, the CLI
+  (`volkit mm --reversion-range FLOOR CEILING`) and the fit, so a range that
+  is legal on the screen cannot be illegal underneath it, and the floor is
+  held above zero -- at zero the backbone is flat and the whole term structure
+  is `short_addon`, which is a different model wearing the same parameters.
+  **The control is hidden until it is asked for, and hiding it clears it.**
+  Two empty boxes are the house range, the way an empty market box on the
+  pricing screen hands the field back to the feed; one box filled is refused
+  rather than half-read. A box out of sight still posting a number is the
+  silent zero this screen exists to remove, so the disclosure clears both on
+  the way closed and refills them from `/api/state` on the way open. The
+  browser owns whether it is open, like every other piece of panel state.
+  The fit says which range it ran in (`reversion_house`) and the screen states
+  it **only when it was overridden**: a fit made inside the house judgement
+  and one made outside it must not read the same.
+  **A parameter resting on a bound is only reported when the bound is holding
+  the fit back** (`_BOUND_BINDING_RMSE`): AUDUSD is marked at exactly 6.5, and
+  an ungated check warned on every refit of the curve the desk already had.
+  A warning that fires when nothing is wrong is one nobody reads.
 - **The wings.** `tune_smile_shifts` moves the four smile parameters by an
   additive `VolSurface.param_shifts`, and is deliberately *not* a cold fit: it
   starts from the marked surface because that is the thing being adjusted. A

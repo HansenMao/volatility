@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import math
 import shutil
+import textwrap
 import unittest
 import inspect as _inspect
 from datetime import date, datetime, timedelta
@@ -26,7 +27,7 @@ from volkit import black, sabr, smile
 from volkit.atm import AtmCurve, BackboneParams
 from volkit.black import DeltaConvention
 from volkit.book import Book
-from volkit.calendars import CalendarSet, easter
+from volkit.calendars import DEFAULT_CALENDARS, CalendarSet, easter
 from volkit.cross import (CorrelationCurve, CrossAtmCurve, dollar_legs,
                           infer_leg_signs)
 from volkit import exotics
@@ -39,10 +40,12 @@ from volkit.knowledge import KnowledgeBank, PairKnowledge, Rule, suggest_rules
 from volkit import marketdata
 from volkit.marketdata import ExcelSource, MarketDataError
 from volkit.numerics import ConvergenceError, fixed_point, integrate_piecewise, solve_scalar
-from volkit.pricing import OptionLeg, StrikeSpec, parse_strike, price_strip, resolve_expiry
+from volkit.pricing import (OptionLeg, StrikeSpec, expiry_datetime, parse_strike, price_strip,
+                            quick_vol, resolve_expiry)
 from volkit.smile import SmileSlice, fit_svi
 from volkit.surface import PARAM_NAMES, SmileMark, VolSurface, fit_param_term_structure
-from volkit.timeutil import Clock, TenorError, UTC, add_tenor, parse_datetime, tenor_to_years
+from volkit.timeutil import (Clock, DAYS_IN_YEAR, TenorError, UTC, add_tenor,
+                             parse_datetime, tenor_to_years)
 from volkit.timeweight import DEFAULT_SESSION_HOURS, TimeWeighting, session_shares
 
 def _source(*parts: str) -> str:
@@ -924,6 +927,118 @@ class TestPricing(unittest.TestCase):
         self.assertTrue(parse_strike("25dp").side_explicit)
         self.assertFalse(parse_strike("25d").side_explicit)
 
+    # ---- the marking screen's vol query --------------------------------
+    # Two boxes and one number, sharing the pricing screen's strike and
+    # expiry vocabulary through `resolve_strike` / `expiry_datetime`.  These
+    # pin the sharing: a strike read two ways is a strike that can be read
+    # two different ways.
+
+    def test_the_vol_query_reads_the_same_strike_as_a_priced_leg(self):
+        """The card and the pricing grid must land on one strike and one vol.
+
+        Both go through `pricing.resolve_strike`; before it there were two
+        copies of the same six lines.
+        """
+        book = Book.from_excel(WORKBOOK, ASOF).load_all(["USDJPY"])
+        book.feed = MarketFeed.load(FEED)
+        for strike in ("ATM", "25d", "10dp", "151.5"):
+            q = quick_vol(book, "USDJPY", "1M", strike)
+            leg = price_strip(book, [OptionLeg("USDJPY", "1M", strike)])["legs"][0]
+            self.assertTrue(leg["ok"], leg.get("error"))
+            self.assertAlmostEqual(q["strike"], leg["strike"], places=10, msg=strike)
+            self.assertAlmostEqual(q["vol"], leg["vol"], places=10, msg=strike)
+            self.assertAlmostEqual(q["forward"], leg["forward"], places=10, msg=strike)
+
+    def test_the_vol_query_takes_its_forward_from_the_feed(self):
+        """There is no third box: the level is `Book.market_level`'s."""
+        book = Book.from_excel(WORKBOOK, ASOF).load_all(["USDJPY"])
+        book.feed = MarketFeed.load(FEED)
+        q = quick_vol(book, "USDJPY", "1M", "ATM")
+        level = book.market_level("USDJPY", q["t"])
+        self.assertTrue(q["scaled"])
+        self.assertEqual(q["forward_source"], "feed")
+        self.assertAlmostEqual(q["forward"], level["forward"], places=12)
+        self.assertAlmostEqual(q["spot"], level["spot"], places=12)
+
+    def test_the_vol_query_answers_in_moneyness_with_no_feed(self):
+        """ATM and a delta are moneyness questions and need no level at all.
+
+        Same rule as the smile chart's axis: without a feed it stays in K/F
+        and says so, rather than refusing a question it can answer.
+        """
+        for strike in ("ATM", "25d"):
+            q = quick_vol(self.book, "USDJPY", "1M", strike)
+            self.assertFalse(q["scaled"], strike)
+            self.assertIsNone(q["strike"], strike)
+            self.assertIsNone(q["forward"], strike)
+            self.assertEqual(q["forward_source"], "none")
+            self.assertAlmostEqual(
+                q["vol"],
+                float(self.book["USDJPY"].vol(q["strike_ratio"],
+                                              expiry_datetime(self.book, "USDJPY", "1M"))) * 100,
+                places=12)
+
+    def test_an_absolute_strike_with_no_feed_is_refused_by_name(self):
+        """The marks are in K/F, so 151.5 cannot be placed against them.
+
+        Read as a ratio it would be a wing nobody asked about, silently.
+        """
+        with self.assertRaises(ValueError) as ctx:
+            quick_vol(self.book, "USDJPY", "1M", "151.5")
+        self.assertIn("the feed does not quote USDJPY", str(ctx.exception))
+
+    def test_the_reported_strike_is_the_one_the_vol_was_read_at(self):
+        """The card keeps the request in its box and reports the resolution
+        under it, so the two must agree: asking again at the strike it named
+        is the same read, and the date it named resolves to itself."""
+        book = Book.from_excel(WORKBOOK, ASOF).load_all(["USDJPY"])
+        book.feed = MarketFeed.load(FEED)
+        asked = quick_vol(book, "USDJPY", "1M", "25d")
+        again = quick_vol(book, "USDJPY", "1M", repr(asked["strike"]))
+        self.assertAlmostEqual(asked["vol"], again["vol"], places=12)
+        self.assertEqual(quick_vol(book, "USDJPY", asked["expiry"], "ATM")["expiry"],
+                         asked["expiry"])
+
+    def test_the_strike_box_is_the_only_place_the_wing_is_said(self):
+        """A bare `25d` names two strikes and is read on the call, as on the
+        pricing screen; `25dp` and `-25d` are how the other one is asked for.
+
+        The card briefly had a wing toggle beside the strike box.  It was a
+        second place to say one thing -- and a place that could be set to Call
+        against a strike that already said put -- so the strike text is the
+        whole of it.
+        """
+        book = Book.from_excel(WORKBOOK, ASOF).load_all(["USDJPY"])
+        book.feed = MarketFeed.load(FEED)
+        call = quick_vol(book, "USDJPY", "1M", "25d")
+        self.assertIs(call["is_call"], True)
+        self.assertFalse(call["side_explicit"])
+        for text in ("25dp", "-25d"):
+            put = quick_vol(book, "USDJPY", "1M", text)
+            self.assertIs(put["is_call"], False, text)
+            self.assertTrue(put["side_explicit"], text)
+            self.assertLess(put["strike"], call["strike"], text)
+            self.assertNotAlmostEqual(call["vol"], put["vol"], places=6, msg=text)
+
+    def test_no_side_is_reported_where_there_are_not_two_strikes(self):
+        """At the at-the-money and at an absolute strike the volatility is one
+        number for the call and the put, so the row names no wing at all."""
+        book = Book.from_excel(WORKBOOK, ASOF).load_all(["USDJPY"])
+        book.feed = MarketFeed.load(FEED)
+        for text in ("ATM", "151.5"):
+            self.assertIsNone(quick_vol(book, "USDJPY", "1M", text)["is_call"], text)
+
+    def test_the_vol_query_flags_a_strike_outside_a_managed_band(self):
+        """Same rule as a pricing leg: the level the payout depends on is
+        checked, and a lognormal wing outside a defended band says so."""
+        book = Book.from_excel(WORKBOOK, ASOF).load_all(["USDHKD"])
+        book.feed = MarketFeed.load(FEED)
+        if "USDHKD" not in book.banded_pairs():
+            self.skipTest("no USDHKD band in bands.csv")
+        band = book["USDHKD"].band
+        q = quick_vol(book, "USDHKD", "1M", str(band.upper * 1.02), forward=band.upper)
+        self.assertTrue(any("outside the managed band" in w for w in q["warnings"]), q["warnings"])
+
     def test_bad_strike_spec_raises(self):
         for bad in ("xyz", "60d", "0d"):
             with self.assertRaises(ValueError, msg=bad):
@@ -1495,6 +1610,390 @@ class TestFeed(unittest.TestCase):
             MarketFeed.load("/nonexistent/feed.csv")
         with self.assertRaises(FeedError):
             self.feed.quote("XXXYYY", 0.2)
+
+
+class TestDatedFeed(unittest.TestCase):
+    """A feed line may name a date instead of a tenor.
+
+    Added 2026-08-31.  The front of a bank's own forward file is not on
+    standard tenors: it is the overnight and the tom-next, each quoted as one
+    *day* of points rather than as points from spot, and neither of them has a
+    tenor to be written as.  Reading them needs a spot date, which is why the
+    valuation date is threaded in from the caller's clock rather than taken
+    from the machine.
+    """
+
+    def feed(self, body, **kw):
+        import tempfile
+        tmp = tempfile.mkdtemp()
+        path = Path(tmp) / "dated.csv"
+        path.write_text(textwrap.dedent(body).lstrip(), encoding="utf-8")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        return MarketFeed.load(path, **kw)
+
+    def test_a_dated_pillar_lands_where_the_same_tenor_does(self):
+        """One axis for both spellings, so a mixed file has no seam in it.
+
+        A date 28 days after spot and the tenor a desk would call it are the
+        same point on the curve, not two.
+        """
+        f = self.feed("""
+            USDJPY,SPOT,150.25
+            USDJPY,SPOT DATE,2026-09-01
+            USDJPY,2026-09-29,-11.40
+        """)
+        self.assertEqual(f.problems, [], f.problems)
+        pf = f.pairs["USDJPY"]
+        self.assertEqual(pf.tenors, ["2026-09-29"])
+        self.assertAlmostEqual(pf.forward_points(28 / DAYS_IN_YEAR)[0], -11.40, places=10)
+        # and read by the date it was quoted at, which is the same knot
+        self.assertAlmostEqual(pf.points_on("2026-09-29")[0], -11.40, places=10)
+        self.assertAlmostEqual(pf.forward_on("2026-09-29")[0], 150.25 - 0.1140, places=10)
+
+    def test_a_date_on_or_before_spot_is_one_day_of_points(self):
+        """The near side is stated as rates and accumulated back from spot.
+
+        T/N is the day ending on the spot date, so it prices the day *before*
+        spot; O/N the one before that.  Cumulative points at the spot date are
+        zero by definition, and everything on the near side is negative of the
+        sum of the days between.
+        """
+        f = self.feed("""
+            # asof: 2026-08-27
+            USDJPY,SPOT,150.25
+            USDJPY,SPOT DATE,2026-08-31
+            USDJPY,2026-08-31,-0.40
+            USDJPY,2026-08-28,-0.10
+        """)
+        self.assertEqual(f.problems, [], f.problems)
+        pf = f.pairs["USDJPY"]
+        self.assertEqual([d.isoformat() for d, _ in pf.daily],
+                         ["2026-08-28", "2026-08-31"])
+        self.assertEqual(pf.tenors, [])          # nothing on the far side
+        self.assertAlmostEqual(pf.points_on("2026-08-31")[0], 0.0, places=12)
+        # the day ending on spot is the tom-next: it prices spot minus one
+        self.assertAlmostEqual(pf.points_on("2026-08-30")[0], +0.40, places=12)
+        # 29-Aug and 30-Aug are unquoted, so their rate is interpolated
+        # between -0.10 (28th) and -0.40 (31st): -0.20 and -0.30.
+        self.assertAlmostEqual(pf.points_on("2026-08-29")[0], 0.40 + 0.30, places=12)
+        self.assertAlmostEqual(pf.points_on("2026-08-28")[0], 0.70 + 0.20, places=12)
+        self.assertAlmostEqual(pf.points_on("2026-08-27")[0], 0.90 + 0.10, places=12)
+        # and a negative swap point means the earlier date is the higher rate
+        self.assertGreater(pf.forward_on("2026-08-27")[0], pf.spot)
+
+    def test_the_near_side_interpolates_rates_and_not_the_running_total(self):
+        """The rows are rates, so it is the rates that are interpolated.
+
+        A straight line through the *cumulative* knots at the 28th and the
+        31st would put the 30th at +0.30.  It is +0.40, because the day being
+        skipped over is the expensive one.
+        """
+        f = self.feed("""
+            # asof: 2026-08-27
+            EURUSD,SPOT,1.0842
+            EURUSD,SPOT DATE,2026-08-31
+            EURUSD,2026-08-31,-0.40
+            EURUSD,2026-08-28,-0.10
+        """)
+        pf = f.pairs["EURUSD"]
+        straight_line = 0.90 * (31 - 30) / (31 - 28)
+        self.assertNotAlmostEqual(pf.points_on("2026-08-30")[0], straight_line, places=6)
+        self.assertAlmostEqual(pf.points_on("2026-08-30")[0], 0.40, places=12)
+
+    def test_a_date_already_delivered_is_passed_over_and_said(self):
+        """A forward that has already delivered is not a forward.
+
+        Passed over rather than refused: a published file carrying yesterday's
+        row is an ordinary thing, and it is a note and not a problem.  What it
+        may never be is silently placed, which would put a knot behind the
+        valuation date and drag the front of the curve onto it.
+        """
+        f = self.feed("""
+            # asof: 2026-08-27
+            USDJPY,SPOT,150.25
+            USDJPY,2026-08-26,-0.10
+            USDJPY,2026-09-30,-11.40
+        """)
+        self.assertEqual(f.problems, [], f.problems)
+        self.assertTrue(any("2026-08-26" in n and "passed over" in n for n in f.notes), f.notes)
+        pf = f.pairs["USDJPY"]
+        self.assertEqual(pf.daily, [])
+        self.assertEqual(pf.tenors, ["2026-09-30"])
+
+    def test_a_dated_row_with_no_valuation_date_anywhere_is_refused(self):
+        """It is never guessed at.
+
+        The spot date places every dated row, and a spot date needs a day to
+        count from.  A wall-clock reading here would be the one call to
+        ``utcnow`` inside the model, and would move the whole near side of the
+        curve on a valuation in the past.
+        """
+        f = self.feed("""
+            USDJPY,SPOT,150.25
+            USDJPY,2026-09-30,-11.40
+        """)
+        self.assertTrue(any("valuation date" in p for p in f.problems), f.problems)
+        self.assertEqual(f.pairs["USDJPY"].tenors, [])
+        # and given one, the same file reads
+        f2 = self.feed("""
+            USDJPY,SPOT,150.25
+            USDJPY,2026-09-30,-11.40
+        """, today=date(2026, 8, 27))
+        self.assertEqual(f2.problems, [], f2.problems)
+        self.assertEqual(f2.pairs["USDJPY"].tenors, ["2026-09-30"])
+
+    def test_a_stated_spot_date_beats_the_calendar_and_says_so(self):
+        """A publisher knows its own holidays; this tool's calendar may not.
+
+        The near side is placed against that date, so a day's disagreement
+        moves the tom-next onto the overnight.  Stated, it is used and said;
+        derived, that is said too, because the two must not read alike.
+        """
+        derived = self.feed("""
+            # asof: 2026-08-27
+            USDJPY,SPOT,150.25
+            USDJPY,2026-09-30,-11.40
+        """)
+        self.assertEqual(derived.pairs["USDJPY"].spot_date, date(2026, 8, 31))
+        self.assertTrue(any("business days after" in n for n in derived.notes), derived.notes)
+
+        stated = self.feed("""
+            # asof: 2026-08-27
+            USDJPY,SPOT,150.25
+            USDJPY,SPOT DATE,2026-09-01
+            USDJPY,2026-09-30,-11.40
+        """)
+        self.assertEqual(stated.pairs["USDJPY"].spot_date, date(2026, 9, 1))
+        self.assertTrue(any("as the file states it" in n for n in stated.notes), stated.notes)
+        # one day of spot date is one day of curve: the same pillar sits a
+        # day further out, so every point interpolated inside it moves.
+        self.assertNotAlmostEqual(derived.pairs["USDJPY"].forward_points(0.04)[0],
+                                  stated.pairs["USDJPY"].forward_points(0.04)[0], places=6)
+
+    def test_the_callers_clock_beats_the_files_asof_and_the_difference_is_said(self):
+        """A valuation in the past against this morning's file is ordinary.
+
+        It is also a fact about what is being priced, so it is reported rather
+        than absorbed into a spot date nobody can check.
+        """
+        f = self.feed("""
+            # asof: 2026-08-27
+            USDJPY,SPOT,150.25
+            USDJPY,2026-09-30,-11.40
+        """, today=date(2026, 8, 20))
+        self.assertEqual(f.today, date(2026, 8, 20))
+        self.assertTrue(any("written as of 2026-08-27" in n for n in f.notes), f.notes)
+
+    def test_tenor_and_dated_rows_mix_in_one_curve(self):
+        """A file need not choose: the front dated, the back on tenors."""
+        f = self.feed("""
+            # asof: 2026-08-27
+            USDJPY,SPOT,150.25
+            USDJPY,SPOT DATE,2026-08-31
+            USDJPY,2026-08-31,-0.40
+            USDJPY,2026-09-30,-11.40
+            USDJPY,3M,-35.0
+            USDJPY,1Y,-146.0
+        """)
+        self.assertEqual(f.problems, [], f.problems)
+        pf = f.pairs["USDJPY"]
+        self.assertEqual(pf.tenors, ["2026-09-30", "3M", "1Y"])   # sorted by time
+        self.assertAlmostEqual(pf.forward_points(tenor_to_years("3m"))[0], -35.0, places=10)
+        self.assertAlmostEqual(pf.points_on("2026-09-30")[0], -11.40, places=10)
+        self.assertAlmostEqual(pf.points_on("2026-08-30")[0], +0.40, places=10)
+
+    def test_a_label_that_is_neither_says_both(self):
+        """The tenor is tried first, so nothing a tenor feed reads moves."""
+        f = self.feed("""
+            USDJPY,SPOT,150.25
+            USDJPY,banana,-11.40
+        """)
+        self.assertEqual(len(f.problems), 1, f.problems)
+        self.assertIn("cannot parse tenor", f.problems[0])
+        self.assertIn("not a date either", f.problems[0])
+
+    def test_a_tenor_feed_is_unchanged_by_all_of_this(self):
+        """The sample feed's every pillar, and its front and back ends."""
+        f = MarketFeed.load(FEED)
+        self.assertEqual(f.problems, [], f.problems)
+        self.assertEqual(f.notes, [], f.notes)
+        pf = f.pairs["USDJPY"]
+        self.assertIsNone(pf.spot_date)
+        for tenor, pts in zip(pf.tenors, pf.points):
+            self.assertAlmostEqual(pf.forward_points(tenor_to_years(tenor))[0], pts, places=10)
+        self.assertAlmostEqual(pf.forward_points(0.0)[0], 0.0, places=12)
+        # the front pillar is still scaled toward zero at the spot date
+        half = 0.5 * tenor_to_years("1w")
+        self.assertAlmostEqual(pf.forward_points(half)[0], 0.5 * pf.points[0], places=10)
+        self.assertFalse(pf.forward_points(half)[1])
+        self.assertTrue(pf.forward_points(5.0)[1])
+
+    def test_the_feed_is_read_against_the_books_clock(self):
+        """``load_for`` is the one caller-facing spelling, and it injects it.
+
+        Every screen and every command goes through it, so a dated feed cannot
+        be placed one way on a screen and another way in the batch command
+        beside it.
+        """
+        import tempfile
+        from volkit.feed import load_for
+
+        class FakeBook:
+            clock = Clock(datetime(2026, 8, 27, 10, 0, tzinfo=UTC))
+            calendars = DEFAULT_CALENDARS
+
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        path = Path(tmp) / "f.csv"
+        path.write_text("USDJPY,SPOT,150.25\nUSDJPY,2026-09-30,-11.40\n", encoding="utf-8")
+        f = load_for(FakeBook(), path)
+        self.assertEqual(f.today, date(2026, 8, 27))
+        self.assertEqual(f.pairs["USDJPY"].spot_date, date(2026, 8, 31))
+
+
+class TestImpliedCrossFeed(unittest.TestCase):
+    """A cross the file does not quote is implied from its two legs.
+
+    Two spot rates and two swap points are all an implied cross rate has ever
+    been, and a file that quotes EURUSD and USDJPY *is* quoting EURJPY.  The
+    arithmetic lives in `feed.compose_level` and nowhere else: `Book`
+    contributes only the workbook's opinion about which legs a cross has, so
+    there is one place for the triangle's signs to be written (§5 item 1 is
+    what a second place costs).
+    """
+
+    def feed(self, body, **kw):
+        import tempfile
+        tmp = tempfile.mkdtemp()
+        path = Path(tmp) / "cross.csv"
+        path.write_text(textwrap.dedent(body).lstrip(), encoding="utf-8")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        return MarketFeed.load(path, **kw)
+
+    def test_the_feed_itself_implies_a_cross_it_does_not_quote(self):
+        """It used to refuse by name, and only ``Book`` knew the triangle.
+
+        Anything holding a feed and not a book -- the feed status route's own
+        quote box among them -- got ``no feed for 'EURJPY'`` off a file that
+        was quoting both of its legs.
+        """
+        f = MarketFeed.load(FEED)
+        q = f.quote("EURJPY", 0.25)
+        a, b = f.quote("EURUSD", 0.25), f.quote("USDJPY", 0.25)
+        self.assertTrue(q["derived"])
+        self.assertEqual(q["via"], "EURUSD and USDJPY")
+        self.assertAlmostEqual(q["spot"], a["spot"] * b["spot"], places=12)
+        self.assertAlmostEqual(q["forward"], a["forward"] * b["forward"], places=12)
+        # the points are the cross's own, in the cross's own pips, and are
+        # never the legs' points added
+        self.assertEqual(q["pip"], 100.0)
+        self.assertAlmostEqual(q["points"], (q["forward"] - q["spot"]) * 100.0, places=10)
+        self.assertNotAlmostEqual(q["points"], a["points"] + b["points"], places=3)
+
+    def test_a_divided_cross_is_divided(self):
+        """EURGBP is EURUSD over GBPUSD, and the sign comes from one place."""
+        f = MarketFeed.load(FEED)
+        q = f.quote("EURGBP", 0.25)
+        a, b = f.quote("EURUSD", 0.25), f.quote("GBPUSD", 0.25)
+        self.assertEqual(q["via"], "EURUSD and GBPUSD")
+        self.assertAlmostEqual(q["spot"], a["spot"] / b["spot"], places=12)
+        self.assertAlmostEqual(q["forward"], a["forward"] / b["forward"], places=12)
+
+    def test_a_cross_nobody_declared_still_has_its_dollar_legs(self):
+        """GBPJPY is not in the sample workbook, and the market quotes it.
+
+        The legs of a cross are a fact about its name, not a decision -- which
+        is why `cross.dollar_legs` exists and why CONFIG stopped asking for
+        them.  Refusing a level for want of a row in a spreadsheet that has
+        nothing to do with the feed was the same refusal-by-name in a
+        different place.
+        """
+        f = MarketFeed.load(FEED)
+        self.assertNotIn("GBPJPY", f)
+        q = f.quote("GBPJPY", 0.25)
+        self.assertEqual(q["via"], "GBPUSD and USDJPY")
+        self.assertAlmostEqual(q["forward"],
+                               f.quote("GBPUSD", 0.25)["forward"]
+                               * f.quote("USDJPY", 0.25)["forward"], places=12)
+
+    def test_half_a_triangle_is_still_a_refusal_and_names_the_missing_leg(self):
+        """A guessed leg is a level nobody published wearing a published one."""
+        f = MarketFeed.load(FEED)
+        with self.assertRaises(FeedError) as caught:
+            f.quote("GBPNZD", 0.25)
+        self.assertIn("NZDUSD", str(caught.exception))
+        self.assertIn("GBPUSD and NZDUSD", str(caught.exception))
+
+    def test_the_workbook_wins_when_it_names_a_crosss_legs(self):
+        """A sheet that says something is not second-guessed by a convention."""
+        f = MarketFeed.load(FEED)
+        named = {"EURJPY": ("EURUSD", "USDJPY")}
+        q = f.quote("EURJPY", 0.25, lambda p: named.get(p))
+        self.assertEqual(q["via"], "EURUSD and USDJPY")
+        # and a pair the caller has no opinion about falls through to the
+        # dollar legs rather than being refused
+        self.assertEqual(f.quote("AUDJPY", 0.25, lambda p: named.get(p))["via"],
+                         "AUDUSD and USDJPY")
+
+    def test_the_book_still_gets_exactly_the_numbers_it_did(self):
+        """The composition moved into the feed; not one figure moved with it."""
+        book = Book.from_excel(WORKBOOK, ASOF)
+        book.feed = MarketFeed.load(FEED)
+        for pair, via in [("EURJPY", "EURUSD and USDJPY"),
+                          ("EURGBP", "EURUSD and GBPUSD"),
+                          ("AUDJPY", "AUDUSD and USDJPY")]:
+            level = book.market_level(pair, 0.25)
+            legs = via.split(" and ")
+            a = book.market_level(legs[0], 0.25)
+            b = book.market_level(legs[1], 0.25)
+            self.assertTrue(level["feed"])
+            self.assertTrue(level["derived"])
+            self.assertEqual(level["via"], via)
+            expect = (a["forward"] * b["forward"] if pair != "EURGBP"
+                      else a["forward"] / b["forward"])
+            self.assertAlmostEqual(level["forward"], expect, places=12)
+        # and a dollar pair the file quotes is untouched by any of it
+        self.assertFalse(book.market_level("EURUSD", 0.25)["derived"])
+
+    def test_an_implied_cross_reaches_the_near_side_too(self):
+        """The overnight of a cross is the two legs' overnights, composed.
+
+        Read **on the date** rather than at a time, so each leg is placed
+        against its own spot date: a cross of a T+1 pair and a T+2 pair has
+        two different dates at one ``t``, and the tom-next is a day wide.
+        """
+        f = self.feed("""
+            # asof: 2026-08-27
+            EURUSD,SPOT,1.0842
+            EURUSD,SPOT DATE,2026-08-31
+            EURUSD,2026-08-28,0.03
+            EURUSD,2026-08-31,0.12
+            EURUSD,2026-09-30,5.8
+            USDJPY,SPOT,150.25
+            USDJPY,SPOT DATE,2026-08-31
+            USDJPY,2026-08-28,-0.06
+            USDJPY,2026-08-31,-0.24
+            USDJPY,2026-09-30,-11.4
+        """)
+        self.assertEqual(f.problems, [], f.problems)
+        for when in ["2026-08-27", "2026-08-30", "2026-08-31", "2026-09-30"]:
+            q = f.quote_on("EURJPY", when)
+            a, b = f.quote_on("EURUSD", when), f.quote_on("USDJPY", when)
+            self.assertTrue(q["derived"], when)
+            self.assertAlmostEqual(q["forward"], a["forward"] * b["forward"],
+                                   places=10, msg=when)
+        # the cross's points are zero on its own spot date, by definition,
+        # and the near side is on the other side of it
+        self.assertAlmostEqual(f.quote_on("EURJPY", "2026-08-31")["points"], 0.0, places=10)
+        self.assertGreater(f.quote_on("EURJPY", "2026-08-30")["points"], 0.0)
+        self.assertLess(f.quote_on("EURJPY", "2026-09-30")["points"], 0.0)
+
+    def test_a_dated_read_of_a_cross_needs_both_legs_to_have_a_spot_date(self):
+        """A tenor-only leg has no dates on it, and says so rather than guessing."""
+        f = MarketFeed.load(FEED)      # every pillar a tenor, no spot dates
+        with self.assertRaises(FeedError) as caught:
+            f.quote_on("EURJPY", "2026-09-30")
+        self.assertIn("spot date", str(caught.exception))
 
 
 class TestExoticLegs(unittest.TestCase):
@@ -2714,6 +3213,61 @@ class TestHistory(unittest.TestCase):
             self.assertTrue(0.01 < atm < 0.50, f"{pair} ATM came back as {atm}")
             self.assertLess(abs(rr), 0.05, f"{pair} risk reversal came back as {rr}")
 
+    def test_a_low_at_the_money_is_still_read_as_points(self):
+        """A pegged pair marks its at-the-money below one volatility point.
+
+        The reader used to call any sheet whose at-the-money sat under 1.0 a
+        sheet of decimals, so USDHKD's 0.35 came back as 0.35 *decimal* and
+        the monitor showed it at 35 vol points.  What the sheet says is what
+        the number is: 0.35 points, and the risk reversal and butterfly beside
+        it on the same scale.  A genuinely decimal sheet is something the
+        caller says, with ``vol_unit='decimal'``.
+        """
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "pegged.xlsx"
+            pd.DataFrame({
+                "Date": pd.to_datetime(["2024-05-01", "2024-05-02", "2024-05-03"]),
+                "Spot": [7.81, 7.812, 7.815],
+                "3M ATM": [0.35, 0.36, 0.34],
+                "3M 25d RR": [0.12, 0.13, 0.11],
+                "3M 25d BF": [0.08, 0.08, 0.09],
+            }).to_excel(path, sheet_name="USDHKD", index=False)
+            h = history.load_history(path, ["USDHKD"])
+            hist = h["USDHKD"]
+            self.assertAlmostEqual(hist.series("atm", "3M")[-1], 0.0034)
+            self.assertAlmostEqual(hist.series("rr", "3M", 25)[-1], 0.0011)
+            self.assertAlmostEqual(hist.series("bf", "3M", 25)[-1], 0.0009)
+            # It is the one reading somebody might have meant the other way,
+            # so it is said once rather than guessed at in silence.
+            self.assertTrue(any("read as written" in p for p in h.problems), h.problems)
+            # And the other reading is still available, by name.
+            dec = history.load_history(path, ["USDHKD"], vol_unit="decimal")
+            self.assertAlmostEqual(dec["USDHKD"].series("atm", "3M")[-1], 0.34)
+
+    def test_the_monitor_shows_a_low_at_the_money_as_it_is_written(self):
+        """The same number, at the edge a person reads it at (§4).
+
+        curves is decimals throughout and the page multiplies by 100, so a
+        0.35 point at-the-money read as a decimal reached the monitor tile at
+        35.00 -- a hundred times the mark, on the screen a desk opens first.
+        """
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "pegged.xlsx"
+            pd.DataFrame({
+                "Date": pd.to_datetime(["2024-05-01", "2024-05-02"]),
+                "Spot": [7.81, 7.812],
+                "3M ATM": [0.35, 0.36],
+                "3M 25d RR": [0.12, 0.13],
+            }).to_excel(path, sheet_name="USDHKD", index=False)
+            h = history.load_history(path, ["USDHKD"])
+            from volkit import curves
+            curve = curves.history_curve(h["USDHKD"])
+            point = curve.at("3M")
+            self.assertAlmostEqual(point.values["atm"] * 100.0, 0.36)
+            self.assertAlmostEqual(point.values["rr25"] * 100.0, 0.13)
+
     def test_forcing_the_unit_matches_what_auto_detected(self):
         a = history.load_history(HISTORY, ["EURUSD"])
         b = history.load_history(HISTORY, ["EURUSD"], vol_unit="percent")
@@ -3596,12 +4150,11 @@ class TestRelativeValue(unittest.TestCase):
                     continue
                 self.assertEqual(shape.value, 0.0, row.tenor)
                 self.assertFalse(shape.used, row.tenor)
-                self.assertIsNone(shape.z, row.tenor)
                 self.assertNotIn("shape", cell.used, row.tenor)
                 rest = [s for s in cell.signals if s.used]
                 self.assertAlmostEqual(
                     cell.score,
-                    sum(s.weight * s.z for s in rest) / sum(s.weight for s in rest),
+                    sum(s.weight * s.value for s in rest) / sum(s.weight for s in rest),
                     places=12, msg=row.tenor)
                 checked += 1
         self.assertGreater(checked, 2)
@@ -3634,8 +4187,15 @@ class TestRelativeValue(unittest.TestCase):
         self.assertGreater(wings, 10, "no wing was actually scored on its shape")
 
     def test_the_score_is_the_weighted_mean_of_the_signals_it_used(self):
-        """And of no others: a missing signal is renormalised away, never
-        counted as a zero, which would drag every score toward the middle."""
+        """In **volatility points**, and of no others.
+
+        The score was the weighted mean of the *z-scores* until 2026-08-31 and
+        the desk asked for the points: how unusual a difference is is a
+        statistic about a series, and how much you are being paid is the
+        number the mark is moved by.  A missing signal is still renormalised
+        away rather than counted as a zero, which would drag every score
+        toward the middle.
+        """
         scored = 0
         for row in self.grid.rows:
             for cell in row.cells:
@@ -3645,20 +4205,49 @@ class TestRelativeValue(unittest.TestCase):
                 self.assertEqual(sorted(s.name for s in used), sorted(cell.used))
                 total = sum(s.weight for s in used)
                 self.assertAlmostEqual(
-                    cell.score, sum(s.weight * s.z for s in used) / total, places=12)
+                    cell.score, sum(s.weight * s.value for s in used) / total, places=12)
                 self.assertAlmostEqual(cell.confidence,
                                        total / sum(self.grid.weights.values()), places=12)
                 scored += 1
         self.assertGreater(scored, 10)
 
-    def test_every_signal_that_was_used_has_a_z_and_every_other_one_says_why(self):
+    def test_the_score_is_on_the_same_footing_as_the_richness_beside_it(self):
+        """One unit across the whole card.
+
+        The three additive signals sum to the richness, so a cell scored on
+        exactly those three at equal-enough weights lands within their own
+        range.  What is pinned is the weaker and more useful thing: the score
+        is never outside the span of the values it averaged, which a weighted
+        mean cannot be and a weighted mean of z-scores plainly could.
+        """
+        checked = 0
+        for row in self.grid.rows:
+            for cell in row.cells:
+                if cell.score is None:
+                    continue
+                vals = [s.value for s in cell.signals if s.used]
+                self.assertGreaterEqual(cell.score, min(vals) - 1e-12, row.tenor)
+                self.assertLessEqual(cell.score, max(vals) + 1e-12, row.tenor)
+                checked += 1
+        self.assertGreater(checked, 10)
+
+    def test_a_signal_carries_its_z_wherever_there_is_a_scale_and_says_why_not(self):
+        """The z is reported beside the value and scored on by nothing.
+
+        It used to be the score, so it was present exactly where a signal was
+        used.  Now it is the reading of *how unusual* the value is, so it
+        follows the scale instead: present wherever the history can measure
+        one, absent where it cannot, used or not.
+        """
         for row in self.grid.rows:
             for cell in row.cells:
                 for sig in cell.signals:
-                    if sig.used:
+                    if sig.value is not None and cell.scale is not None:
                         self.assertIsNotNone(sig.z, f"{row.tenor} {cell.column} {sig.name}")
+                        self.assertAlmostEqual(sig.z, sig.value / cell.scale, places=12)
                     else:
                         self.assertIsNone(sig.z)
+                    if not sig.used:
                         self.assertTrue(sig.message or cell.message,
                                         f"{row.tenor} {cell.column} {sig.name} is silent")
 
@@ -3758,21 +4347,33 @@ class TestRelativeValue(unittest.TestCase):
             self.assertEqual(cell.scale_source, "atm")
             self.assertIsNone(cell.history_mean, "a borrowed scale is not a history")
 
-    def test_without_a_history_the_volatility_points_survive_and_the_score_does_not(self):
-        """A score needs a scale and a scale needs history.  Inventing one
-        would be inventing the answer; the carry is still measured."""
+    def test_without_a_history_what_can_be_measured_is_still_scored(self):
+        """The bug the change to volatility points fixed.
+
+        A score in standard deviations needed a scale, and a scale needed the
+        historical sheet -- so a pair the sheet does not quote scored nothing
+        at all, in every cell, while its carry had been measured perfectly
+        well.  In volatility points the scale is context and not the
+        denominator: the ``history`` signal goes (it *is* the history) and so
+        does every z, and what is left is scored on its own points.
+        """
         grid = self.relvalue.relative_value(self.book, "EURUSD", None, horizon_days=7, cut="NY")
         self.assertIn("history", grid.unavailable)
-        self.assertIsNone(grid.summary["mean_score"])
+        self.assertIsNotNone(grid.summary["mean_score"])
         measured = 0
         for row in grid.rows:
             for cell in row.cells:
-                self.assertIsNone(cell.score)
                 self.assertIsNone(cell.scale)
+                for sig in cell.signals:
+                    self.assertIsNone(sig.z, f"{row.tenor} {cell.column} {sig.name}")
+                hist = [s for s in cell.signals if s.name == "history"][0]
+                self.assertFalse(hist.used)
+                self.assertIsNone(hist.value)
                 carry = [s for s in cell.signals if s.name == "carry"][0]
                 if carry.value is not None:
-                    self.assertFalse(carry.used)
-                    self.assertIn("no historical scale", carry.message)
+                    self.assertTrue(carry.used, f"{row.tenor} {cell.column}")
+                    self.assertIn("carry", cell.used)
+                    self.assertIsNotNone(cell.score)
                     measured += 1
         self.assertGreater(measured, 10)
 
@@ -3996,7 +4597,7 @@ class TestRelativeValue(unittest.TestCase):
                     continue
                 total = sum(s.weight for s in used)
                 self.assertAlmostEqual(
-                    cell.score, sum(s.weight * s.z for s in used) / total, places=12)
+                    cell.score, sum(s.weight * s.value for s in used) / total, places=12)
                 for sig in used:
                     self.assertEqual(sig.weight, grid.weights[sig.name])
 
@@ -4523,6 +5124,26 @@ class TestWebAssets(unittest.TestCase):
         probe = _re.sub(r"\?\.", ".", js.replace("??", " || "))
         esprima.parseScript(probe)
 
+    def test_a_table_body_given_as_one_string_is_not_joined(self):
+        """`rows.join is not a function`, on the band card's Fit from the wings.
+
+        `tblHtml` takes the list of <tr> strings and joins it, and every caller
+        passed a list -- except the band fit, which pre-joined both of its
+        tables and handed the result over as one string. The whole fit had
+        already been computed and came back to the desk as an error message
+        that read as though the calibration itself had failed. The guard is in
+        `tblHtml` rather than at the two call sites, because a table body is
+        naturally either shape and there is nothing to catch a third caller.
+        """
+        import re as _re
+        html = _source("volkit", "web", "index.html")
+        body = html.split("function tblHtml(head,rows,cls){")[1].split("\n}")[0]
+        self.assertIn("Array.isArray(rows)", body)
+        # And the row argument may not be joined on the way in.
+        fit = html.split("async function fitBand(){")[1].split("\n}")[0]
+        for call in _re.findall(r"tblHtml\(([^;]*?)\)\+'</div>'", fit, flags=_re.S):
+            self.assertNotIn(".join(", call.rsplit(",", 1)[-1])
+
     def test_the_panel_roots_are_siblings_and_the_markup_closes(self):
         """A missing </div> put one panel inside another.
 
@@ -4695,6 +5316,56 @@ class TestWebAssets(unittest.TestCase):
         for key in ("expiry", "spot", "forward", "points", "swap", "strike",
                     "is_call", "barrier"):
             self.assertNotIn(key, keys, f"the results still repeat the {key!r} box")
+
+    def test_refresh_spot_puts_every_market_box_back_on_the_feed(self):
+        """The old screen had two buttons: `Refresh spot`, which refilled only
+        the boxes the feed was already filling, and `Fill legs`, which also
+        wrote over a level somebody had typed.  A desk pressing the one named
+        after the thing it wanted -- the published spot -- kept its stale
+        hand-marked level and was told the feed had been re-read.
+
+        So there is one button, and it hands *every* market box back: a leg
+        holding a typed spot or a typed forward is put back on the feed and
+        the count is reported, because a hand-marked level that has just
+        become the file's must not change in silence.
+        """
+        js = _source("volkit", "web", "index.html").split("<script>")[1]
+        html = _source("volkit", "web", "index.html")
+        self.assertNotIn("feedfill", html, "the second feed button is still there")
+        body = js.split("async function refreshFeed(")[1].split("\n}")[0]
+        # The refill is unconditional -- there is no longer a flag deciding
+        # whether a typed box is taken back.
+        self.assertIn("applyLegRows(r.legs,true)", body.replace(" ", ""))
+        self.assertIn("put back on the feed", body)
+        self.assertIn("$('#feedrefresh').onclick=()=>refreshFeed()", js)
+
+    def test_the_marking_tables_hide_nothing_that_has_been_marked(self):
+        """The ATM table lost its curve column and its overwrite column is a
+        disclosure; the whole smile-parameter card is another.  Both are shut
+        by default, which is the point -- and both would be a way to lose
+        sight of a mark somebody made, which is the failure this project
+        exists to remove.  So the shut state must still count what is
+        overwritten, and the ATM row must still say which tenor it was.
+        """
+        page = _source("volkit", "web", "index.html")
+        js = page.split("<script>")[1]
+        paint = js.split("function paintMarks(){")[1].split("\nasync function loadMarks")[0]
+        # The curve column is gone from the header the painter writes.
+        self.assertNotIn("Curve %", paint)
+        self.assertIn("cut %", paint)
+        # Shut by default: neither disclosure is ticked in the markup, and
+        # both bodies carry `hide`.
+        for box in ('id="matmowshow"', 'id="msmileshow"'):
+            i = page.index(box)
+            tag = page[page.rindex("<input", 0, i):page.index(">", i)]
+            self.assertNotIn("checked", tag, f"{box} is ticked in the markup")
+        self.assertIn('<div class="row hide" id="matmowrow"', page)
+        self.assertIn('<div id="msmilebody" class="hide">', page)
+        # ...and shut, each still says what has been marked.
+        self.assertIn("matmowcount", paint)
+        self.assertIn("owdot", paint)
+        self.assertIn("msmilenote", paint)
+        self.assertIn("overwritten", paint)
 
     def test_every_class_the_script_looks_up_is_one_it_emits(self):
         """The panel shell and the painter that fills it are different functions.
@@ -6569,6 +7240,20 @@ class TestScreens(unittest.TestCase):
         self.assertIsNone(self.screens.route_refusal("/api/state"))
         self.assertIsNone(self.screens.route_refusal("/api/reload"))
 
+    def test_the_vol_query_route_leaves_with_the_marking_screen(self):
+        """The card sits on that tab, so `/api/vol` is that tab's route.
+
+        It was `/api/calc` and belonged to nobody, which in a build made
+        without the marking screen left the one endpoint of a card that was
+        no longer there still answering.
+        """
+        owner = {r: sc.name for sc in self.screens.SCREENS for r in sc.routes}
+        self.assertEqual(owner.get("/api/vol"), "marking")
+        self._select(["pricing"])
+        msg = self.screens.route_refusal("/api/vol")
+        self.assertIsNotNone(msg)
+        self.assertIn("Vol marking", msg)
+
     def test_the_server_turns_an_excluded_route_away_with_404(self):
         from volkit import webapp
         self._select(["pricing"])
@@ -7875,6 +8560,91 @@ class TestMarketMakerModel(unittest.TestCase):
             marketmaker.fit_atm_curve(atm, targets)
         self.assertIn("cannot determine", str(ctx.exception))
 
+    def test_the_mean_reversion_is_fitted_inside_the_marked_range(self):
+        """The range is a marking judgement, so the fit stays in it and the
+        sweep nodes are taken from it.  A node the polish may not reach can
+        still win the sweep on cost and is then clipped into the bound, which
+        is a different curve from the one that was measured."""
+        import copy
+        lo, hi = marketmaker.MEAN_REVERSION_RANGE
+        self.assertEqual(marketmaker._BOUNDS["mean_reversion"], (lo, hi))
+        for node in marketmaker.reversion_nodes():
+            self.assertGreaterEqual(node, lo)
+            self.assertLessEqual(node, hi)
+        atm = copy.deepcopy(self.book["EURUSD"].atm)
+        # A target curve that flattens far faster than the range allows: the
+        # unconstrained fit would run the reversion well past the top.
+        want = [marketmaker.CurveTarget(t.upper(), tenor_to_years(t), v)
+                for t, v in (("1w", 0.055), ("2w", 0.062), ("1m", 0.068),
+                             ("3m", 0.0715), ("6m", 0.072), ("1y", 0.0721))]
+        fit = marketmaker.fit_atm_curve(atm, want)
+        self.assertLessEqual(fit.after["mean_reversion"], hi)
+        self.assertGreaterEqual(fit.after["mean_reversion"], lo)
+        # Held back, it says so, and names the constant that would let it go.
+        rest = [w for w in fit.warnings if "mean_reversion came to rest" in w]
+        self.assertTrue(rest)
+        self.assertIn("marking judgement", rest[0])
+        self.assertIn("Widen the range on the fit panel", rest[0])
+
+    def test_a_parameter_on_its_bound_that_met_its_targets_is_not_warned_about(self):
+        """AUDUSD is marked at exactly the top of the range, so an ungated
+        check warned on every refit of the curve the desk already had.  A
+        parameter resting on a bound limits nothing while the targets are
+        still met, and a warning that fires when nothing is wrong is one
+        nobody reads."""
+        import copy
+        book = Book.from_excel(WORKBOOK, ASOF).load_all(["AUDUSD"])
+        atm = copy.deepcopy(book["AUDUSD"].atm)
+        self.assertEqual(atm.params.mean_reversion, marketmaker.MEAN_REVERSION_RANGE[1])
+        want = [marketmaker.CurveTarget(t.upper(), tenor_to_years(t),
+                                        atm.curve_vol(tenor_to_years(t)))
+                for t in ("1m", "2m", "3m", "6m", "1y")]
+        fit = marketmaker.fit_atm_curve(atm, want)
+        self.assertLessEqual(fit.rmse, marketmaker._BOUND_BINDING_RMSE)
+        self.assertAlmostEqual(fit.after["mean_reversion"],
+                               marketmaker.MEAN_REVERSION_RANGE[1], places=6)
+        self.assertEqual([w for w in fit.warnings if "came to rest" in w], [])
+
+    def test_the_range_is_a_marking_judgement_a_panel_may_override(self):
+        """It is the one bound a caller may move, because it is a judgement
+        about what a desk marks rather than a property of the model -- and the
+        sweep nodes move with it, so the nodes and the polish can never be
+        taken from two different ranges."""
+        import copy
+        atm = copy.deepcopy(self.book["EURUSD"].atm)
+        want = [marketmaker.CurveTarget(t.upper(), tenor_to_years(t), v)
+                for t, v in (("1w", 0.055), ("2w", 0.062), ("1m", 0.068),
+                             ("3m", 0.0715), ("6m", 0.072), ("1y", 0.0721))]
+        house = marketmaker.fit_atm_curve(atm, want)
+        wide = marketmaker.fit_atm_curve(atm, want, reversion_range=(1.0, 40.0))
+        self.assertAlmostEqual(house.after["mean_reversion"],
+                               marketmaker.MEAN_REVERSION_RANGE[1], places=6)
+        self.assertGreater(wide.after["mean_reversion"],
+                           marketmaker.MEAN_REVERSION_RANGE[1])
+        # Given room, the same targets are reached better -- which is the whole
+        # reason the range is a judgement and not a fact.
+        self.assertLess(wide.rmse, house.rmse)
+        self.assertEqual(marketmaker.reversion_nodes((1.0, 5.0))[0], 1.0)
+        self.assertEqual(marketmaker.reversion_nodes((1.0, 5.0))[-1], 5.0)
+
+    def test_a_half_typed_mean_reversion_range_is_refused(self):
+        """Two blanks are the house range -- the same reading as an empty
+        market box handing the field back to the feed.  One blank is a range
+        somebody meant to type and did not finish, and reading it half way
+        would fit in a range nobody chose."""
+        base = {"pair": "EURUSD"}
+        self.assertIsNone(marketmaker.panel_from_request(base).reversion_range)
+        self.assertIsNone(marketmaker.panel_from_request(
+            {**base, "reversion_lo": "", "reversion_hi": ""}).reversion_range)
+        self.assertEqual(marketmaker.panel_from_request(
+            {**base, "reversion_lo": "2", "reversion_hi": "9"}).reversion_range, (2.0, 9.0))
+        for bad, why in ((("2", ""), "both"), (("", "9"), "both"),
+                         (("0", "9"), "above zero"), (("9", "2"), "above its floor")):
+            with self.assertRaises(ValueError) as ctx:
+                marketmaker.panel_from_request(
+                    {**base, "reversion_lo": bad[0], "reversion_hi": bad[1]})
+            self.assertIn(why, str(ctx.exception))
+
     def test_a_cross_fits_its_correlation_not_a_level_it_does_not_own(self):
         book = Book.from_excel(WORKBOOK, ASOF).load_all(["AUDUSD", "USDJPY", "AUDJPY"])
         knobs = marketmaker._Knobs(book["AUDJPY"].atm)
@@ -8127,6 +8897,22 @@ class TestMarketMakerPanel(unittest.TestCase):
         self.assertEqual([r["our_ask"] for r in handed["sheet"]["rows"]],
                          [r["our_ask"] for r in on_book["sheet"]["rows"]])
         self.assertEqual(fit["marks"]["knobs"], reported["marks"]["knobs"])
+
+    def test_keeping_a_fit_keeps_the_marks_it_handed_back(self):
+        """The book and the panel must hold one number, not two spellings of it.
+
+        A knob leaves the fit in volatility points and comes back divided by a
+        hundred, and ``x * 100 / 100`` differs from ``x`` in the last place for
+        about an eighth of all values.  Keeping the raw fitted numbers on the
+        surface therefore left the book a bit away from the marks the quote
+        panel was posting, and the price depended on whether "keep the marks"
+        had been ticked -- a nanovol apart, which is nothing to a market and
+        everything to a screen that has to reproduce itself.
+        """
+        applied = Book.from_excel(WORKBOOK, ASOF).load_all(["EURUSD"])
+        fit = self.panel(apply=True, tune_wings=True).run(applied)
+        self.assertEqual(marketmaker.capture_marks(applied["EURUSD"]),
+                         {"knobs": fit["marks"]["knobs"], "shifts": fit["marks"]["shifts"]})
 
     def test_a_quote_standing_on_a_fit_puts_the_book_back(self):
         """The marks go on for the length of one call and come off again.  A

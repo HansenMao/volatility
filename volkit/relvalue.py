@@ -65,19 +65,37 @@ rather than added in:
   inside the triangle's own noise floor is not a difference and is reported
   but **not scored**, which is the rule that section already follows.
 
-Combining them needs one scale, and the scale is the cell's **own historical
-standard deviation** -- how much this volatility usually moves.  Half a
-volatility point is a great deal on a one-year at-the-money and nothing on a
-one-week 10 delta wing, and only the history knows which.  So a signal in
-volatility points becomes a z-score by dividing by that standard deviation,
-and the composite is the weighted mean of whichever z-scores are available,
-renormalised over them.  Every cell reports which signals it used and why the
-others are missing: a score that quietly averaged three things on one row and
-five on the next would be a different statistic in each column.
+All five are already in **volatility points**, and that is the unit the score
+is in: the composite is the weighted mean of whichever signals a cell has,
+renormalised over the ones it has, and it reads as the number of volatility
+points this mark is rich by.  Every cell reports which signals it used and
+why the others are missing: a score that quietly averaged three things on one
+row and five on the next would be a different statistic in each column.
 
-No history means no scale, and then there is no score -- the volatility-point
-columns are still reported, because they are still true.  Inventing a scale
-would be inventing the answer.
+The composite was a **z-score** until 2026-08-31 -- each signal divided by the
+cell's own historical standard deviation -- and the desk asked for the points
+back, because the two are not the same question.  *How unusual is this* is a
+statistic about a series; *how much am I being paid* is the number a mark is
+moved by and a price is made in, and a headline figure that cannot be added to
+a bid has to be translated before it can be traded on.  Two things follow from
+the change, and both are gains rather than costs:
+
+* **A cell with no history now scores.**  The scale was the only thing the
+  level, the shape and the carry needed a historical sheet for, so a pair the
+  sheet does not quote scored nothing at all while three of its five signals
+  were measured perfectly well.  Only ``history`` itself needs the series now.
+* **The whole card is in one unit.**  The score, the richness under it and
+  every signal inside it are the same number in the same units, and
+  ``level + shape + carry`` is still exactly the richness.
+
+What the z-score was there for is real and is **kept beside the value rather
+than removed**: half a volatility point is a great deal on a one-year
+at-the-money and nothing on a one-week 10 delta wing, and only the history
+knows which.  So every signal still carries its ``z`` wherever a scale can be
+measured, the cell still carries the ``scale`` and where it came from, and the
+detail card shows both columns.  It is context now instead of the composite.
+No history means no ``z`` and no ``history`` signal; it no longer means no
+score, and the volatility points were always measured either way.
 
 Three things are said out loud rather than left to be inferred, because each
 of them is a way this grid could be over-read:
@@ -170,8 +188,8 @@ ADDITIVE: tuple[str, ...] = ("level", "shape", "carry")
 #: knowing which signal it happens to be.
 SHARED: tuple[str, ...] = ("level",)
 
-#: How far back "recent history" reaches, in calendar days, for the z-score
-#: and for the scale everything else is divided by.  Deliberately **not** the
+#: How far back "recent history" reaches, in calendar days, for the history
+#: signal and for the scale each z is read against.  Deliberately **not** the
 #: realized lookback, which is matched to each tenor because a one-month
 #: implied volatility forecasts one month.  How much a volatility usually
 #: moves is a different measurement and a slower one: a month of a one-month
@@ -186,8 +204,14 @@ HISTORY_DAYS = 250.0
 MIN_SCALE_OBS = 20
 
 #: Above this the score stops being a reading and starts being an outlier;
-#: it is reported, not clipped, but the summary says how many there are.
-EXTREME_SCORE = 2.0
+#: it is reported, not clipped, but the summary says how many there are.  In
+#: decimals, like every volatility inside the model: half a volatility point.
+#: It was two standard deviations while the score was a z; half a point of
+#: composite richness is the same kind of statement in the unit the desk
+#: asked for.  It travels on the response as ``RelativeValue.extreme_score``
+#: so the page's tint saturates exactly where the summary starts counting,
+#: rather than holding a second copy of the number.
+EXTREME_SCORE = 0.005
 
 #: Where the carry stops being a detail of the option and starts being the
 #: trade.  ``z = |ln(F/S)| / (sigma * sqrt(T))`` is the forward's own drift
@@ -238,7 +262,15 @@ class RelativeValueError(ValueError):
 
 @dataclass(frozen=True)
 class Signal:
-    """One comparison, in volatility points and standardised.
+    """One comparison, in volatility points, and how unusual that is.
+
+    ``value`` is the comparison itself and is what the score is built from.
+    ``z`` is the same number divided by how much this cell's volatility
+    usually moves -- reported beside it and scored on by nothing, since the
+    score is in volatility points.  It is present wherever the history can
+    measure a scale and absent where it cannot, whether or not the signal was
+    used: a signal that is counted and a signal that can be standardised are
+    two different questions now.
 
     ``used`` is whether the score counted it.  A signal can have a value and
     still not be used -- a triangle difference inside its own noise floor is
@@ -265,8 +297,9 @@ class Signal:
     used: bool = False
     message: str = ""
     #: True where this signal is one number for the whole tenor rather than
-    #: one per strike -- see :data:`SHARED`.  The z is still per cell, because
-    #: each cell divides by its own scale.
+    #: one per strike -- see :data:`SHARED`.  The value is identical across
+    #: the row; the z beside it is not, because each cell is standardised on
+    #: its own scale.
     shared: bool = False
     #: False where the value is zero by construction; see above.
     scorable: bool = True
@@ -285,7 +318,12 @@ class Cell:
     implied: float
     signals: tuple[Signal, ...] = ()
     richness: float | None = None   # level + shape + carry, in volatility points
-    score: float | None = None      # the weighted z, positive when rich
+    #: The weighted mean of the signals this cell used, in **volatility
+    #: points** and positive when rich -- the same unit as the values it is
+    #: built from and as the richness above it.  It is not the richness: that
+    #: is the three additive signals alone, and this is every signal the cell
+    #: has, at the weights the desk declared.
+    score: float | None = None
     used: tuple[str, ...] = ()
     #: The share of the declared weight the score actually rests on.  A cell
     #: scored on one signal and a cell scored on four both print a number, and
@@ -293,6 +331,9 @@ class Cell:
     #: no triangle, and it is not meant to: a signal this pair cannot have is
     #: still a signal this score is missing.
     confidence: float = 0.0
+    #: How much this cell's volatility usually moves, and which series that
+    #: was measured on.  Context beside the signals rather than the score's
+    #: denominator: see the module docstring.
     scale: float | None = None
     scale_source: str = ""
     history_mean: float | None = None
@@ -379,6 +420,10 @@ class RelativeValue:
     summary: dict = field(default_factory=dict)
     unavailable: dict[str, str] = field(default_factory=dict)
     warnings: tuple[str, ...] = ()
+    #: :data:`EXTREME_SCORE`, carried so the screen tints on the server's own
+    #: threshold instead of on a copy of it -- the same arrangement as the
+    #: signal weights in ``/api/state``.
+    extreme_score: float = EXTREME_SCORE
 
 
 def resolve_weights(given=None) -> dict[str, float]:
@@ -641,17 +686,18 @@ def relative_value(book, pair: str, hist=None, *, horizon_days: float = 30.0,
     """Score every expiry and strike of one pair's surface for relative value.
 
     Returns a grid of :class:`Cell`, one per tenor and column, each carrying
-    its own signals, the volatility-point richness they add to, and the
-    composite z-score.  Positive is **rich**: the mark is above what the
-    comparison says it should be, and it is the side to sell.
+    its own signals, the volatility-point richness three of them add to, and
+    the composite score -- the weighted mean of the signals, in volatility
+    points like the signals themselves.  Positive is **rich**: the mark is
+    above what the comparison says it should be, and it is the side to sell.
 
     Sections that cannot be built are reported per cell and per row rather
     than dropped.  A missing forward feed costs the carry signal its
     forward-curve half and says so; a missing historical sheet costs the
-    level, the shape, the history and -- because it takes the scale with it --
-    the score itself, leaving the carry in volatility points.  A pair that is
-    not a cross simply has no triangle signal, and the weight is renormalised
-    away rather than counted as a zero.
+    level, the shape, the history signal and every z, and leaves the carry to
+    be scored on its own points.  A pair that is not a cross simply has no
+    triangle signal, and the weight is renormalised away rather than counted
+    as a zero.
     """
     if pair not in book:
         raise RelativeValueError(f"{pair} is not built in this book")
@@ -702,7 +748,9 @@ def relative_value(book, pair: str, hist=None, *, horizon_days: float = 30.0,
     if hist is None:
         unavailable["history"] = (
             "no historical sheet for this pair, so there is no realized volatility to "
-            "compare against and no scale to score on. The carry is still measured")
+            "compare against, no history signal and no scale to say how unusual a "
+            "difference is. The score is in volatility points and does not need one, so "
+            "the carry still measures and still scores")
 
     has_feed = bool(book.market_level(pair, 1.0)["feed"])
     if not has_feed:
@@ -714,7 +762,7 @@ def relative_value(book, pair: str, hist=None, *, horizon_days: float = 30.0,
         warnings.append(
             f"the shape signal's (rho, nu) are measured over their own {DYNAMICS_DAYS:.0f}-day "
             f"window rather than over each tenor's realized lookback, for the same "
-            f"reason the scale is: how a volatility moves with spot and how much it moves "
+            f"reason the scale beside it is: how a volatility moves with spot and how much it moves "
             f"are properties of the process and need more paired observations than a "
             f"realized volatility needs returns. On the lookback they were blank at every "
             f"short tenor, and at every tenor at once on a lookback under about a month")
@@ -776,10 +824,11 @@ def relative_value(book, pair: str, hist=None, *, horizon_days: float = 30.0,
         # the dynamics on one.
         #
         # Its own constant and not ``history_days``, close as the two
-        # arguments are: ``history_days`` is the denominator every score is
-        # divided by, and a knob that also moved the *numerator* would change
-        # the volatility-point column as a side effect of rescaling the
-        # z-scores.  A test pins that column against it.
+        # arguments are: ``history_days`` measures the scale every z is read
+        # against, and a knob that also moved the shape signal's own
+        # measurement would change the volatility-point column -- which is
+        # the score -- as a side effect of rescaling those z's.  A test pins
+        # that column against it.
         dyn_window = max(window, float(DYNAMICS_DAYS))
         rho = nu = None
         source = None
@@ -853,6 +902,7 @@ def relative_value(book, pair: str, hist=None, *, horizon_days: float = 30.0,
                       for n, l in SIGNALS),
         rows=tuple(rows), summary=summarise(rows), unavailable=unavailable,
         managed=managed, warnings=tuple(dict.fromkeys(warnings)),
+        extreme_score=EXTREME_SCORE,
     )
 
 
@@ -988,31 +1038,36 @@ def _cell(surface, hist, tri_row, tri_note, carry, col: GridColumn, tenor: str, 
     additive = [by_name[n].value for n in ADDITIVE]
     richness = None if any(v is None for v in additive) else float(sum(additive))
 
-    scored: list[Signal] = []
-    for s in signals:
+    def _counts(s: Signal) -> bool:
+        """Whether the score averages this signal in.
+
+        The score is in volatility points, so a **scale is not part of this
+        question** -- it used to be, and a cell whose history could not
+        measure one then scored nothing at all, in every column, even where
+        the level, the shape and the carry had all been measured perfectly
+        well.  What is left is the three reasons a value is shown and not
+        counted, each of them a statement about the value itself.
+        """
         if s.value is None or s.weight <= 0:
-            scored.append(s)
-            continue
+            return False
         if not s.scorable:
-            scored.append(s)          # zero by construction: shown, not counted
-            continue
+            return False              # zero by construction: shown, not counted
         if s.name == "triangle" and s.message:
-            scored.append(s)          # inside the noise floor: shown, not counted
-            continue
-        if scale is None:
-            # Kept beside its own note rather than instead of it: a signal
-            # that has something to say about its value and is also not being
-            # scored has to say both, or the cell explains one of the two.
-            why = "there is no historical scale to standardise it on"
-            scored.append(Signal(s.name, s.label, s.value, None, s.weight, False,
-                                 f"{s.message}; {why}" if s.message else why, s.shared))
-            continue
-        scored.append(Signal(s.name, s.label, s.value, s.value / scale, s.weight, True,
-                             s.message, s.shared))
+            return False              # inside the noise floor: shown, not counted
+        return True
+
+    # The z follows the **scale**, not the score: it is the reading of how
+    # unusual this difference is against how much this cell's volatility
+    # usually moves, so it is attached wherever the history can measure one
+    # and is absent where it cannot, whether or not the value was counted.
+    scored = [Signal(s.name, s.label, s.value,
+                     None if (scale is None or s.value is None) else s.value / scale,
+                     s.weight, _counts(s), s.message, s.shared, s.scorable)
+              for s in signals]
     used = [s for s in scored if s.used]
     total = sum(s.weight for s in used)
     declared = sum(weights.values())
-    score = (sum(s.weight * s.z for s in used) / total) if total > 0 else None
+    score = (sum(s.weight * s.value for s in used) / total) if total > 0 else None
 
     return Cell(
         column=col.name, label=col.label, delta=col.delta, is_call=col.is_call,
@@ -1079,8 +1134,9 @@ def _carry_signal(row, t: float, h: float):
 def summarise(rows) -> dict:
     """What the grid comes to: the extremes, and how much of it was scored.
 
-    A mean over a grid that scored half its cells is a different statistic
-    from one that scored all of them, so the count travels with it.
+    In volatility points, like the cells it reads.  A mean over a grid that
+    scored half its cells is a different statistic from one that scored all
+    of them, so the count travels with it.
     """
     scored = [(r, c) for r in rows for c in r.cells if c.score is not None]
     total = sum(len(r.cells) for r in rows)
@@ -1096,8 +1152,8 @@ def summarise(rows) -> dict:
         "headline": "",
     }
     if not scored:
-        out["headline"] = ("nothing could be scored: a score needs a historical scale, and "
-                           "no cell of this grid has one")
+        out["headline"] = ("nothing could be scored: not one cell of this grid has a signal "
+                           "with a value in it")
         return out
     out["mean_score"] = float(np.mean([c.score for _, c in scored]))
     out["mean_confidence"] = float(np.mean([c.confidence for _, c in scored]))
@@ -1107,9 +1163,9 @@ def summarise(rows) -> dict:
     out["richest"] = _point(*rich)
     out["cheapest"] = _point(*cheap)
     out["headline"] = (
-        f"richest {rich[0].tenor} {rich[1].label} at {rich[1].score:+.2f} sd, "
-        f"cheapest {cheap[0].tenor} {cheap[1].label} at {cheap[1].score:+.2f} sd, "
-        f"across {len(scored)} of {total} cells")
+        f"richest {rich[0].tenor} {rich[1].label} at {rich[1].score * 100:+.3f} vol points, "
+        f"cheapest {cheap[0].tenor} {cheap[1].label} at {cheap[1].score * 100:+.3f} vol "
+        f"points, across {len(scored)} of {total} cells")
     return out
 
 

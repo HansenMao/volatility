@@ -76,6 +76,41 @@ def parse_strike(text) -> StrikeSpec:
         ) from None
 
 
+def resolve_strike(surface, text, slice_, forward: float, expiry_dt, *,
+                   method: str | None = None, cut: str = "TK",
+                   option_type: str = "Auto") -> tuple[float, float, StrikeSpec]:
+    """Where a typed strike lands on the marks: ratio, absolute level, and what was asked.
+
+    ``ATM`` and ``25d`` are ways of *asking for* a strike and both are answered
+    on the surface -- the delta-neutral straddle's own moneyness for the first,
+    a solve on the interpolated smile for the second.  An absolute number is
+    taken as written.  The spec that comes back is the request as resolved, so
+    a bare ``25d`` reports the wing it was read on.
+
+    There is one of these because a strike read two ways is a strike that can
+    be read two different ways: the pricing grid and the marking screen's vol
+    query ask the same question of the same marks and must never differ on
+    which strike the answer is at.
+    """
+    spec = parse_strike(text)
+    if spec.kind == "absolute":
+        return spec.value / forward, spec.value, spec
+    if spec.kind == "atm":
+        ratio = float(slice_.strikes[2])
+        return ratio, ratio * forward, spec
+    kind_hint = (option_type or "Auto").strip().upper()[:1]
+    if spec.side_explicit:
+        side_is_call = spec.is_call
+    elif kind_hint in ("C", "P"):
+        side_is_call = kind_hint == "C"
+    else:
+        # A bare "25d" names two strikes; the call is the one `parse_strike`
+        # takes, and the row says which wing it was answered on.
+        side_is_call = True
+    ratio, _ = surface.delta_strike(expiry_dt, spec.value, side_is_call, method, cut)
+    return ratio, ratio * forward, StrikeSpec("delta", spec.value, side_is_call, True, spec.text)
+
+
 def expiry_datetime(book, pair: str, text) -> datetime:
     """A typed expiry as an instant: a tenor on the calendar, or a date as given.
 
@@ -166,6 +201,94 @@ def resolve_legs(book, rows) -> list[dict]:
             r["error"] = str(exc)
         out.append(r)
     return out
+
+
+def quick_vol(book, pair: str, expiry, strike="ATM", *,
+              cut: str = "TK", method: str | None = None,
+              forward: float | None = None) -> dict:
+    """One reading of the marked surface: an expiry, a strike, and the vol there.
+
+    The marking screen's own question, and the smallest one this tool asks.
+    It takes the two boxes the pricing screen takes and reads them the same
+    way -- ``expiry_datetime`` for a tenor or any of the date spellings,
+    ``resolve_strike`` for ``ATM``, an absolute level or a delta -- and it
+    prices nothing: there is no notional, no option type, no premium and no
+    greek, because the answer to "where is the 3M 25 delta marked" is a
+    volatility and everything else on a pricing row is noise around it.
+
+    A bare ``25d`` names two strikes and is read on the call, as it is on the
+    pricing screen; the **strike itself** is where the other wing is asked for
+    (``25dp``, ``-25d``), which is why there is no option type here to say it
+    a second way.  At an absolute strike or the at-the-money there is nothing
+    to say either: the volatility there is one number for the call and the
+    put, which is `quotes._settle_side`'s rule in the other direction.
+
+    **The forward comes from the feed**, through ``Book.market_level``, which
+    is the one place a level is read (and so a cross the feed quotes only
+    through its legs is answered from them, with ``via`` naming the triangle).
+    That is what puts an absolute strike on the same axis as the marks, which
+    are in moneyness.  Without a feed the smile is still perfectly readable in
+    ``K/F`` -- ``ATM`` and a delta are moneyness questions and need no level
+    at all -- so those answer and say the axis they answered on, exactly as
+    the smile chart does; an **absolute** strike is the one that cannot be
+    placed, and it is refused by name rather than quietly read as a ratio.
+    """
+    surface = book[pair]
+    expiry_dt = expiry_datetime(book, pair, expiry)
+    slice_ = surface.slice_at(expiry_dt, method, cut)
+    t = slice_.t
+    level = book.market_level(pair, t)
+    spec = parse_strike(strike)
+    if forward is not None and float(forward) <= 0:
+        raise ValueError(f"forward must be positive, got {forward!r}")
+    if forward is not None:
+        # The command line's own override, and the one box the card does not
+        # have: `volkit vol --forward` has always taken a level as typed.
+        forward, scaled, source = float(forward), True, "typed"
+    elif level["feed"]:
+        forward, scaled, source = float(level["forward"]), True, "feed"
+    elif spec.kind == "absolute":
+        raise ValueError(
+            f"the feed does not quote {pair.upper()}"
+            + ("" if book.feed is None else
+               ", and it does not quote both of the legs it could be built from")
+            + f", so the strike {spec.text} cannot be placed against the marks, "
+              "which are in strike/forward. Load a feed, or ask for ATM or a delta")
+    else:
+        forward, scaled, source = 1.0, False, "none"
+
+    # `resolve_strike` settles the wing a bare "25d" did not name, so what it
+    # hands back says the side is *now* explicit.  Whether the request said it
+    # is a different fact and is the one worth reporting.
+    side_asked = bool(spec.side_explicit)
+    ratio, absolute, spec = resolve_strike(
+        surface, strike, slice_, forward, expiry_dt, method=method, cut=cut)
+    vol = float(surface.vol(ratio, expiry_dt, method, cut))
+
+    warnings = list(slice_.warnings)
+    if scaled:
+        warnings += surface.band_check(absolute, forward, method)
+    # A time of day survives the box it was typed in; a tenor has none and
+    # lands on the one standard date, which is what goes back into the box.
+    when = (expiry_dt.date().isoformat() if expiry_dt.hour == expiry_dt.minute == 0
+            else expiry_dt.strftime("%Y-%m-%d %H:%M"))
+    return {
+        "pair": pair.upper(), "expiry": when, "expiry_text": str(expiry),
+        "days": (expiry_dt - book.clock.now).total_seconds() / 86400.0, "t": t,
+        "vol": vol * 100.0, "atm_vol": slice_.atm_vol * 100.0,
+        "strike": absolute if scaled else None, "strike_ratio": ratio,
+        "strike_spec": spec.text, "strike_kind": spec.kind,
+        "is_call": spec.is_call if spec.kind == "delta" else None,
+        "side_explicit": side_asked,
+        "scaled": scaled, "cut": cut, "method": method or surface.method,
+        "forward_source": source,
+        "spot": float(level["spot"]) if source == "feed" else None,
+        "forward": forward if scaled else None,
+        "extrapolated": bool(level["extrapolated"]) if source == "feed" else False,
+        "derived": bool(level["derived"]) if source == "feed" else False,
+        "via": level["via"] if source == "feed" else "",
+        "warnings": warnings,
+    }
 
 
 @dataclass
@@ -393,24 +516,9 @@ def _price_leg(book, leg: OptionLeg) -> LegResult:
         )
 
     # ---- strike-based products ------------------------------------------
-    spec = parse_strike(leg.strike)
-    if spec.kind == "absolute":
-        ratio = spec.value / forward
-        strike = spec.value
-    elif spec.kind == "atm":
-        ratio = float(sl.strikes[2])
-        strike = ratio * forward
-    else:
-        kind_hint = (leg.option_type or "Auto").strip().upper()[:1]
-        if spec.side_explicit:
-            side_is_call = spec.is_call
-        elif kind_hint in ("C", "P"):
-            side_is_call = kind_hint == "C"
-        else:
-            side_is_call = True
-        ratio, _ = surface.delta_strike(expiry_dt, spec.value, side_is_call, leg.method, leg.cut)
-        strike = ratio * forward
-        spec = StrikeSpec("delta", spec.value, side_is_call, True, spec.text)
+    ratio, strike, spec = resolve_strike(
+        surface, leg.strike, sl, forward, expiry_dt,
+        method=leg.method, cut=leg.cut, option_type=leg.option_type)
 
     band_note(strike)
 
