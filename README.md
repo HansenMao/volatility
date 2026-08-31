@@ -6,8 +6,11 @@ interface.
 
 This is a rebuild of the original `vol` tool. The legacy modules
 (`vol.py`, `cvol.py`, `ssabr.py`, `vols.py`, `common_functions.py`,
-`__main__.py`, `rv.py`) are **left untouched** in the repository root so the
-two can be compared. Nothing in `volkit/` imports them.
+`__main__.py`, `rv.py`) are **left untouched** in `legacy/` so the two can be
+compared. Nothing in `volkit/` imports them, nothing builds or tests them, and
+`legacy/` is in `.gitignore` — it stays on the desk rather than travelling with
+the repository. Earlier commits still hold it if you need it back:
+`git checkout <commit> -- vol.py`.
 
 `MIGRATION.md` lists every behavioural difference, including the three that
 change your marks.
@@ -54,7 +57,7 @@ used to name by hand.
 
 The old `BASE` / `COR` / column-per-cross layout still loads, and **explicitly
 named legs win** over the derived ones: a sheet that says something is not
-second-guessed by a convention. The legacy tool in the repo root reads only
+second-guessed by a convention. The legacy tool in `legacy/` reads only
 that layout, so the same marks in it are kept as
 `files/vol_marks_legacy_format.xlsx` and the side-by-side comparison still
 runs. Anything the reader worked out rather than read

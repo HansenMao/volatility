@@ -14,11 +14,15 @@ broken. Read it before changing anything.
 ## 1. What this is
 
 A rebuild of a legacy tool (`vol.py`, `cvol.py`, `ssabr.py`, `vols.py`,
-`common_functions.py`, `__main__.py`, `rv.py`), which is **still present in the
-repo root, untouched, for comparison**. Nothing in `volkit/` imports it.
+`common_functions.py`, `__main__.py`, `rv.py`), which is **kept untouched in
+`legacy/`, for comparison**. That directory is in `.gitignore`, so the legacy
+tool is on the desk and not in future commits -- it is somebody's old
+program, it is not built, tested or imported here, and the last version of it
+that was tracked is still in the history. Nothing in `volkit/` imports it.
 `vols.py` reads the workbook's CONFIG sheet by its old column names, so the
 sheet it was written against is kept as `files/vol_marks_legacy_format.xlsx`
--- same marks, old layout -- and the comparison still runs. volkit reads
+-- same marks, old layout, and tracked, because volkit's own reader is tested
+against it -- and the comparison still runs from `legacy/`. volkit reads
 either (§4).
 
 - ~34,000 lines across 49 modules, 825 tests, `unittest` only (no pytest).
