@@ -9,3 +9,6 @@ dist-windows/
 
 # the pre-migration legacy tool, kept locally for comparison (see README)
 legacy/
+
+# the BGC/GFI FIX specification: a vendor document, 2MB, kept locally
+BGC_&_GFI_FIX_Specification_for_FX_v1_4_3.pdf
