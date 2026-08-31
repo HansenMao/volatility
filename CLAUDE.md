@@ -21,7 +21,7 @@ sheet it was written against is kept as `files/vol_marks_legacy_format.xlsx`
 -- same marks, old layout -- and the comparison still runs. volkit reads
 either (§4).
 
-- ~29,000 lines across 48 modules, 822 tests, `unittest` only (no pytest).
+- ~34,000 lines across 49 modules, 825 tests, `unittest` only (no pytest).
   Tests live in `tests/test_volkit.py`, `tests/test_agent.py` (the desk
   agent, §17) and `tests/test_marking.py` (the marking agent, §18).
 - Runtime deps: numpy, scipy, pandas, openpyxl. Plus `tzdata` on Windows.
@@ -587,8 +587,9 @@ per pair and living on the surface beside `param_shifts`:
   (`BAND`, §6), but a band is absolute and the surface works in strike/forward
   ratio, so placing one needs the outright forward at the expiry. Without a
   feed for the pair it refuses and names the feed rather than guessing a level.
-- **Central bank dates in `econ_events.csv` are provisional** and BoJ 2026 is
-  partly filled.
+- **Central bank dates in `econ_events.csv` are provisional.** Banks publish
+  a year or two ahead and confirm at the preceding meeting; the file says so
+  at the top and is edited by hand to extend it.
 - **The cross triangle for RR and fly assumes a Gaussian copula** between the
   two legs and ignores the change of measure between their domestic
   currencies. Both are stated in `moments.py` and bounded by the reported
@@ -636,9 +637,6 @@ per pair and living on the surface beside `param_shifts`:
   every row with nothing on the screen to say so -- the same rule as §11's
   knowledge bank, where a width that no rule matches gets no width rather than
   an invented one.
-- **The RR-sign question from `test.py`** (legacy comment says rho = −0.383 for
-  a positive RR) was never settled; `pysabr` is not installed. volkit's own
-  convention is verified by round-trip.
 
 ## 8. Exchange traded options (`listed.py`)
 
@@ -945,16 +943,12 @@ is built out of them.
   - **The score is in volatility points, and so is every signal in it.** The
     composite is the weighted mean of the signals' *values*, renormalised
     over the ones a cell has, and it reads as the number of volatility points
-    the mark is rich by. It was a **z-score** until 2026-08-31 -- each signal
-    over the cell's own historical standard deviation -- and the desk asked
-    for the points: *how unusual is this* is a statistic about a series and
-    *how much am I being paid* is what gets traded on. Two consequences, both
-    gains. **A cell with no history now scores**: the scale was the only
-    thing `level`, `shape` and `carry` needed the sheet for, so a pair it
-    does not quote scored nothing at all in every column while three of five
-    signals were measured; only `history` needs the series now. And the score,
-    the richness under it and the signals inside it are one unit, so
-    `level + shape + carry` is still exactly the richness.
+    the mark is rich by, and not a z-score: *how unusual is this* is a
+    statistic about a series and *how much am I being paid* is what gets
+    traded on. So **a cell with no history still scores** -- only `history`
+    needs the series -- and the score, the richness under it and the signals
+    inside it are one unit, so `level + shape + carry` is exactly the
+    richness.
   - **The standardisation is kept beside the value, not removed.** Half a
     volatility point is a great deal on a one-year at-the-money and nothing
     on a one-week wing, and only the history knows which -- so every signal
@@ -1040,7 +1034,7 @@ is built out of them.
 ## 10. Working on this
 
 ```
-python -m unittest discover -s tests        # 822 tests, ~10m
+python -m unittest discover -s tests        # 825 tests, ~10m
 PYTHONUTF8=0 LC_ALL=C python -m unittest discover -s tests   # as a cp1252 Windows
                                            # box sees it: an ASCII locale is the
                                            # only way to catch an encoding bug
@@ -1327,14 +1321,13 @@ line came first.
   time-only line takes the last date above it; a run with no date anywhere is
   ordered on a nominal day, says so, and never shows that day back.
 
-The looser reading (2026-08-28), each a precedence stated once and said on
-the row:
+Each of these is a precedence stated once and said on the row:
 
 - **A strike beats a delta, a date beats a tenor.** `6M 25d 1.12 call` is the
   1.12 strike and `1M 30sep26 ATM` is the 30 September expiry; the other
-  name is dropped with a note. Both used to be refusals in columns. Dates
-  are read in the spellings `timeutil.parse_datetime` reads (`30sep26`,
-  `30-Sep-2026`, `2026/09/30`), gated by shape so a number is never one.
+  name is dropped with a note. Dates are read in the spellings
+  `timeutil.parse_datetime` reads (`30sep26`, `30-Sep-2026`, `2026/09/30`),
+  gated by shape so a number is never one.
 - **The side matters only where it changes the number.** A volatility at an
   absolute strike is one number for the call and the put, so `_settle_side`
   drops it, `6M 1.10 call` and `6M 1.10 put` are one quote, and the later
@@ -1394,11 +1387,10 @@ other.
   happened. Only checked for two *dated* sources -- the surface and the
   workbook quotes are both stamped with the valuation time and comparing them
   is a perfectly good thing to do.
-- **The curve comparison panel moved here** from Analysis, and its command
-  moved with it (`volkit monitor --compare`). `/api/history` moved the other
-  way, out of the Analysis screen's routes and into the shared set: two screens
-  read the historical workbook now, so loading it is a shell job like
-  `/api/reload`.
+- **The curve comparison panel lives here**, not on Analysis, and so does
+  its command (`volkit monitor --compare`). `/api/history` belongs to no
+  screen: two screens read the historical workbook, so loading it is a shell
+  job like `/api/reload`.
 
 ## 13. Saving a session (`session.py`)
 
@@ -1900,9 +1892,9 @@ Two ways in, like the quoting agent. `volkit mark propose|confer|learn|journal|
 record` on the command line, and a **card inside the market-maker tab**,
 beside the fit it plans. Both belong to the **mm** screen: the fit this agent
 runs is `marketmaker.fit_atm_curve` and `tune_smile_shifts`, the fit panel's
-own, so a build without that tab has nothing for it to plan -- and the command
-moved there with the card (it was listed under marking, which was the wrong
-screen for the same reason). Excluding the market-maker tab takes both agents.
+own, so a build without that tab has nothing for it to plan, and the command
+belongs to it for the same reason. Excluding the market-maker tab takes both
+agents.
 
 ### The card, and how the two agents are tied to the two buttons
 
@@ -2016,112 +2008,78 @@ enough for a function. So:
 
 ### Rules of thumb as a prior (`rules.py`)
 
-Built 2026-08-28 to the specification below, which is kept as written. What
-the build settled that the specification left open:
-
-- **The third test lives in `Tendency.bias()`**, after the floor and the
-  spread test, and it applies whether or not a prior is present: at least
-  `MIN_REAL_CORRECTIONS` real corrections on the median's side of zero. The
-  real corrections travel on the tendency (`real_corrections`, with
-  `correction_real_n` and `correction_real` read off them) so nothing else
-  has to know which rows were seeded.
-- **The outvote boundary is 16, not 15, for a rule far off the desk.**
-  `_spread` reads its upper quartile at `ceil(0.75 (n - 1))`; with weight 5
-  and fifteen real corrections that row is the first pseudo-correction, so a
-  rule half a point away holds the spread open and `bias()` says *both
-  sides*. Fifteen outvote a rule inside the desk's own range; the sixteenth
-  outvotes any rule. A test pins both, and `MAX_PRIOR_WEIGHT`'s comment
-  carries the arithmetic. The cap stays at 5 as specified.
-- **`Tendencies.rules` carries the rule book**, so `plan_fit` reads the plan
-  rule off the tendencies it was already given and `consult.confer` needed no
-  new argument. `_free_order` applies the plan rule's order first and the
-  journal's observed move counts second, each as its own labelled `Choice`;
-  a knob the curve does not have is passed over with a note.
-- **One nudge rule per knob per pair.** A second is passed over and said.
-- **A file that is there and wrong is refused whole** (`RulesError`): the
-  CLI exits 2, the server starts with an empty book and prints why, and the
-  card shows it. A file that is not there is a note, not an error.
-- **Where it is switched.** `serve --rules PATH`, `mark --rules PATH`,
-  `mark --no-rules`, and the **rules of thumb** checkbox on the card
-  (`use_rules`, posted with the panel and read by `panel_from_request`).
-  `mark rules PAIR` prints the file, then each rule against the pair's real
-  corrections. `files/mm_rules_sample.toml` is the sample, never loaded.
-- **Labels.** `rules.LABEL` (`rule of thumb`) is the one spelling; the
-  page's tag map keys on it, a `Correction` built with a prior in it reports
-  `learned + rule of thumb` and carries the decomposition as `prior`.
-- `tomllib` is 3.11+; `requires-python` says 3.10 and the desk build is 3.12.
-  On 3.10 a rules file that exists is a load error naming the version.
-
----
-
 Everything above learns from the journal and from nothing else, so the agent
-says nothing useful for the first month, and `MIN_INSTANCES`, `MIN_CORRECTIONS`
-and `BIAS_SIGNAL` are judgement calls no real journal has yet argued with. But
-a desk already knows things before the journal knows anything -- the back end
-lags broker moves, risk reversals are moved less often than the at-the-money,
-marks land on the quarter, a desk is readier to raise vol than to cut it into a
-bid. Writing those down turns the first month from *accumulating toward a
-floor* into *falsifying a stated belief*, which is both useful on day one and a
-far better test of the machinery than waiting.
+says nothing useful for the first month. But a desk already knows things the
+journal does not -- the back end lags broker moves, risk reversals are moved
+less often than the at-the-money, marks land on the quarter, a desk is readier
+to raise vol than to cut it into a bid. Writing those down turns the first
+month from *accumulating toward a floor* into *falsifying a stated belief*.
 
-**A rule of thumb is a third kind of reason, and is labelled as one.** A trace
-line is currently a rule (true of the model) or a learned reason (true of this
-desk, with its count). A rule of thumb is neither -- true of markers generally,
-not yet true of this desk -- and gets its own label wherever those two are
-printed. Without the third label the agent either dresses a hunch up as a model
-constraint or quotes it back as though the desk had taught it, and the whole
-point of labelling the first two apart is lost.
+**A rule of thumb is a third kind of reason, and is labelled as one.** A rule
+is true of the model, a learned reason is true of this desk and carries its
+count, and a rule of thumb is neither -- true of markers generally, not yet
+true of this desk. `rules.LABEL` (`rule of thumb`) is the one spelling, the
+page's tag map keys on it, and a `Correction` built with a prior in it reports
+`learned + rule of thumb` and carries the decomposition as `prior`. Without the
+third label the agent either dresses a hunch up as a model constraint or quotes
+it back as though the desk had taught it.
 
 **It is seeded into the sample, not inferred beside it.** At `learn` time each
 rule is expanded into `weight` synthetic corrections placed symmetrically about
 its `value` so that `_median` returns `value` and `_spread` returns `spread`
 exactly -- for `weight = 4` that is `[v-s, v-s/2, v+s/2, v+s]`, and a test pins
-the placement for each allowed weight, because `_spread`'s quartile indices
-pick different rows at each `n`. They are appended to `corrections[key]` in
-`learn` before the `Tendency` is built. **Everything downstream is untouched**:
-`bias()`, `BIAS_SIGNAL`, `CORRECTION_CAP`, `describe()`. This is not only the
-cheap implementation -- medians and interquartile ranges do not compose
-analytically the way means and variances do, so seeding the sample is the one
-clean way to blend a prior into statistics of this shape, and it leaves no
-second code path to keep in agreement with the first.
+the placement at each allowed weight, because `_spread`'s quartile indices pick
+different rows at each `n`. Everything downstream is untouched: `bias()`,
+`BIAS_SIGNAL`, `CORRECTION_CAP`, `describe()`. Medians and interquartile ranges
+do not compose analytically the way means and variances do, so seeding the
+sample is the one clean way to blend a prior into statistics of this shape, and
+it leaves no second code path to keep in agreement with the first.
 
 The failure mode is worse than the one `BIAS_SIGNAL` was built to stop: a prior
-that never gets falsified is the agent reciting the author's own hunch back at
-him with the desk's confidence attached, and it *looks* like evidence. Three
-guards:
+that never gets falsified is the author's own hunch recited back with the
+desk's confidence attached, and it *looks* like evidence. Three guards:
 
 - **`weight` is clamped at `MAX_PRIOR_WEIGHT` (5) and floored at 2.** A rules
   file asking for more is a load error and not a silent trim; below two there
-  is no spread and `bias()` refuses anyway. Ten to fifteen real corrections
-  must always be able to outvote a rule.
-- **A prior shapes the size of a nudge and never authorises one.** `Tendency`
-  carries `correction_real_n` beside `correction_n`, and `bias()` gains a test
-  after the existing two: at least `MIN_REAL_CORRECTIONS` (3) *real*
-  corrections must lie on the same side of zero as the median. Zero real
-  corrections means no correction is applied however confident the rule -- the
-  rule is still printed, as a rule of thumb the agent is not yet willing to act
-  on. This is also what stops a `weight` of 4 clearing `MIN_CORRECTIONS` on its
-  own, which it otherwise would.
+  is no spread and `bias()` refuses anyway. The outvote boundary is **16**, not
+  15: `_spread` reads its upper quartile at `ceil(0.75 (n - 1))`, so at weight
+  5 with fifteen real corrections that row is still the first pseudo-correction
+  and a rule half a point away holds the spread open. Fifteen outvote a rule
+  inside the desk's own range; the sixteenth outvotes any rule. Tests pin both,
+  and `MAX_PRIOR_WEIGHT`'s comment carries the arithmetic.
+- **A prior shapes the size of a nudge and never authorises one.** `bias()`
+  applies a third test after the floor and the spread, whether or not a prior
+  is present: at least `MIN_REAL_CORRECTIONS` (3) *real* corrections on the
+  median's side of zero. Zero real corrections means no correction is applied
+  however confident the rule -- it is still printed, as a rule of thumb the
+  agent is not yet willing to act on. That is also what stops a `weight` of 4
+  clearing `MIN_CORRECTIONS` on its own. The real corrections travel on the
+  tendency (`real_corrections`, with `correction_real_n` and `correction_real`
+  read off them) so nothing else has to know which rows were seeded.
 - **Every rule-shaped line decomposes**, e.g. `+0.15 = +0.10 rule of thumb,
-  +0.05 desk (n=7)`. Computed by calling `_median` twice, once on the seeded
-  list and once on the real-only one, and reporting the difference. No new
-  arithmetic. And "every proposal says how much it learned from" extends to
-  *from 7 instances, plus 3 rule-of-thumb pseudo-instances* -- never one
-  blended count.
+  +0.05 desk (n=7)` -- `_median` called twice, once on the seeded list and once
+  on the real-only one. And "every proposal says how much it learned from"
+  extends to *from 7 instances, plus 3 rule-of-thumb pseudo-instances*, never
+  one blended count.
 
 **The contradiction register.** The highest-information row in the file is a
 rule of thumb the desk edits away every single time. For each rule `mark learn`
 reports the real-only median and the count of real corrections on the far side
-of `value`, and prints the rule **contested** when the real-only median has the
-opposite sign with `CONTESTED_N` (8) or more real corrections behind it.
-Nothing happens automatically -- no auto-halved weight, no silent retirement.
-That would be a second unexamined mechanism with a smaller sample behind it,
-which is the mistake this section refuses to make everywhere else. It is
-flagged, and a person edits the file.
+of `value`, and prints the rule **contested** when that median has the opposite
+sign with `CONTESTED_N` (8) or more real corrections behind it. Nothing happens
+automatically -- no auto-halved weight, no silent retirement. That would be a
+second unexamined mechanism with a smaller sample behind it, which is the
+mistake this section refuses to make everywhere else. It is flagged, and a
+person edits the file.
 
 **The file** is TOML read with stdlib `tomllib` -- hand-editable by a trader,
 no new dependency, and no write path is needed. `mm_rules.toml` beside the
-workbook, or in `config/` for a house default:
+workbook, or in `config/` for a house default; `files/mm_rules_sample.toml` is
+the sample and is never loaded. A file that is there and wrong is refused whole
+(`RulesError`): the CLI exits 2, the server starts with an empty book and
+prints why, and the card shows it. A file that is not there is a note, not an
+error. `tomllib` is 3.11+ and `requires-python` says 3.10, so on 3.10 a rules
+file that exists is a load error naming the version.
 
 ```toml
 [[nudge_rule]]
@@ -2140,9 +2098,13 @@ why        = "default order in which curve knobs are freed as targets allow"
 ```
 
 Two tables because they are two different objects. `nudge_rule` is the
-pseudo-correction story above and lands in `learn`. `plan_rule` is discrete --
-a default ordering for `plan_fit`/`choose_knobs` to free by, which instances
-reorder by observed frequency rather than by blending. **The hard constraints
+pseudo-correction story above and lands in `learn`; there is one per knob per
+pair, and a second is passed over and said. `plan_rule` is discrete -- a
+default ordering for `plan_fit`/`choose_knobs` to free by, carried on
+`Tendencies.rules` so `plan_fit` reads it off the tendencies it already has and
+`consult.confer` needed no new argument. `_free_order` applies it first and the
+journal's observed move counts second, each as its own labelled `Choice`; a
+knob the curve does not have is passed over with a note. **The hard constraints
 are not expressible here**: four targets cannot determine five parameters, and
 `informative_params` still governs the wings. A rules file must not be able to
 weaken a rule that is true of the model, only to seed a habit.
@@ -2158,16 +2120,14 @@ improving its own score, which reopens exactly the circularity the score was
 built to close. Priors live in tendencies; the critique stays a fact about the
 archive.
 
-CLI: `volkit mark rules PAIR` prints the rules loaded, their weights and any
-contested flags; `--no-rules` on `mark learn` and `mark propose` prints the
-desk-only answer. The two side by side are how anyone judges whether the priors
-are helping or talking, and it is the reason the flag exists.
-
-Tests worth having: a rules file with a known answer; seeding is exact at each
-allowed weight; a prior alone cannot authorise a nudge (zero real corrections,
-no correction applied, whatever the rule says); fifteen real corrections
-overwhelm a weight-5 rule; a malformed or over-weighted rules file fails loudly
-rather than loading empty.
+**Where it is switched.** `serve --rules PATH`, `mark --rules PATH`,
+`mark --no-rules`, and the **rules of thumb** checkbox on the card (`use_rules`,
+posted with the panel and read by `panel_from_request`). `volkit mark rules
+PAIR` prints the rules loaded, their weights and any contested flags, then each
+rule against the pair's real corrections; `--no-rules` on `mark learn` and
+`mark propose` prints the desk-only answer. The two side by side are how anyone
+judges whether the priors are helping or talking, and it is the reason the flag
+exists.
 
 ### What the two agents exchange (`consult.py`)
 
