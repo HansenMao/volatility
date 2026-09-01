@@ -55,6 +55,14 @@ def resolve(argv: list[str]) -> tuple[list[str], object]:
 
 
 def main() -> int:
+    # Before anything is read or printed, and before the heavy imports.  The
+    # settings file may name a workbook under a path written in Chinese, and
+    # printing it to a console that cannot encode it used to end the exe with
+    # a traceback before it had done anything at all -- ``cli.main`` sets the
+    # streams too, but it is reached three prints too late.
+    from volkit.paths import use_utf8_streams
+    use_utf8_streams()
+
     from volkit.cli import main as cli_main
     from volkit.config import ConfigError
 

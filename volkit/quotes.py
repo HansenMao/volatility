@@ -82,8 +82,9 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from datetime import date
 
-from .timeutil import TenorError, parse_datetime, parse_tenor
+from .timeutil import TenorError, normalise_tenor, parse_datetime, parse_tenor
 
 INSTRUMENTS = ("atm", "rr", "fly", "outright", "spread", "structure")
 QUOTE_KINDS = ("vol", "premium")
@@ -402,7 +403,18 @@ _DROP = ("vol", "vols", "volatility", "in", "on", "of", "the", "for", "at", "px"
          "pay", "paying", "paid", "expiry", "exp", "maturity", "tenor", "strikes", "option",
          "options", "opt", "contract", "contracts", "twoway", "two", "way", "either", "each")
 
-_TENOR = re.compile(r"^(\d+(?:\.\d+)?)([dwmy])$")
+#: The unit of a tenor, in every spelling ``timeutil.parse_tenor`` reads: a
+#: run says "1wk" and "3mth" as readily as "1W" and "3M".  Longest first, so
+#: "wks" is not read as "w" with a tail.
+_UNIT_WORD = (r"(?:days|day|d|weeks|week|wks|wk|w"
+              r"|months|month|mths|mth|mos|mon|mo|m|years|year|yrs|yr|y)")
+_TENOR = re.compile(r"^(\d+(?:\.\d+)?)" + _UNIT_WORD + r"$")
+# The short-date codes, **only in their slashed spelling**.  ``timeutil``
+# reads the bare ones too, and this deliberately does not: a broker run is
+# English, and "on" and "sn" are words a sentence has in it -- "6M 1.10 call
+# vs 1.15 call 0.35/0.55 on the offer" would otherwise acquire an overnight
+# leg.  Nobody writes an overnight without the slash on a run sheet.
+_SHORT_DATES = {"O/N", "T/N", "S/N", "S/W"}
 _DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 # A clock time, and a date and time in one token.  Both are matched on the raw
 # token rather than the squashed one: ``_squash`` strips the colon, which is
@@ -418,9 +430,13 @@ _STRIKE_WORD = re.compile(r"^(?:k|strike|struck)[=:]?$")
 #: A date in one token that is not ISO: 30sep26, 30-Sep-2026, 2026/09/30,
 #: 09/30/2026.  Gated by shape so that ``parse_datetime`` is only asked about
 #: something that could be a date, and a number is never one.
+#: The year-less shapes are here too -- ``06Nov``, ``Nov06`` -- and are
+#: resolved forward from the caller's date; with no date behind them they
+#: come back as "not an expiry" rather than as a guess.
 _DATEISH = re.compile(
     r"^(?:\d{1,2}[-./]?[a-z]{3,9}[-./]?\d{2,4}|\d{4}[-./]\d{1,2}[-./]\d{1,2}"
-    r"|\d{1,2}/\d{1,2}/\d{4}|[a-z]{3,9}[-./ ]?\d{1,2}[-./,]?\d{4})$")
+    r"|\d{1,2}/\d{1,2}/\d{4}|[a-z]{3,9}[-./ ]?\d{1,2}[-./,]?\d{4}"
+    r"|\d{1,2}[-./]?[a-z]{3,9}|[a-z]{3,9}[-./]?\d{1,2})$")
 
 #: Words a column header is made of.  A pasted run out of a spreadsheet brings
 #: one, and a header reported as a line that could not be read is noise on top
@@ -484,14 +500,20 @@ def _squash(token: str) -> str:
     return re.sub(r"[^a-z0-9.+-]", "", token)
 
 
-def _as_expiry(token: str):
+def _as_expiry(token: str, today=None):
     """A tenor string or a date, or ``None`` if it is neither.
 
     Takes the token as written: ``30-Sep-26`` and ``2026/09/30`` carry
     punctuation that :func:`_squash` would remove, and are dates all the same.
+
+    ``today`` is the date a year-less token (``06Nov``) is resolved forward
+    from.  Without one the token is not an expiry rather than a guess, which
+    is what a run read with no clock behind it should say.
     """
     tok = token.strip().strip("[]()").rstrip(",;:")
     word = _squash(tok)
+    if tok.upper() in _SHORT_DATES:
+        return tok.upper()
     if _DATE.match(word):
         return parse_datetime(word)
     if _TENOR.match(word):
@@ -499,10 +521,10 @@ def _as_expiry(token: str):
             parse_tenor(word)
         except TenorError:
             return None
-        return word.upper()
+        return normalise_tenor(word)
     if _DATEISH.match(tok) and not _NUMBER.match(tok) and not _SIZE.match(word):
         try:
-            return parse_datetime(tok)
+            return parse_datetime(tok, today=today)
         except (ValueError, TenorError):
             return None
     return None
@@ -555,6 +577,10 @@ class _Line:
     columns: int = 1
     label: str = ""
     notes: list = field(default_factory=list)
+    #: The date a year-less expiry ("06Nov") is resolved forward from.  It
+    #: comes from the caller's clock -- a run read twice must read the same
+    #: way -- and with none given such a token is simply not an expiry.
+    today: date | None = None
 
 
 def _consume(line: str, state: _Line) -> None:
@@ -579,7 +605,7 @@ def _consume(line: str, state: _Line) -> None:
 
     # A two-legged tenor written without spaces: 1m/3m, 3m-1m, 1mx3m.
     def take_pair(mt):
-        a, b = _as_expiry(mt.group(1)), _as_expiry(mt.group(2))
+        a, b = _as_expiry(mt.group(1), state.today), _as_expiry(mt.group(2), state.today)
         if a is None or b is None:
             return mt.group(0)
         state.expiries.extend([a, b])
@@ -589,7 +615,8 @@ def _consume(line: str, state: _Line) -> None:
 
     # Spaces are allowed around '/' only: '1M - 25d' is a tenor and a put's
     # delta with a spaced separator between them, not a 1M/25-day spread.
-    line = re.sub(r"(\d+(?:\.\d+)?[dwmy])(?:\s*/\s*|-|x)(\d+(?:\.\d+)?[dwmy])(?![a-z0-9])",
+    line = re.sub(r"(\d+(?:\.\d+)?" + _UNIT_WORD + r")(?:\s*/\s*|-|x)"
+                  r"(\d+(?:\.\d+)?" + _UNIT_WORD + r")(?![a-z0-9])",
                   take_pair, line)
 
     # Tokens carry the comma column they came from.  Everything below works on
@@ -625,7 +652,7 @@ def _consume(line: str, state: _Line) -> None:
         if not seg:
             raise ValueError("'vs' with nothing on one side of it; every leg needs a tenor "
                              "or an instrument")
-        leg = _Line()
+        leg = _Line(today=state.today)
         _consume_tokens(seg, columns, leg)
         state.legs.append(leg)
     _merge_legs(state)
@@ -674,7 +701,7 @@ def _consume_tokens(tokens: list[list], columns: int, state: _Line) -> None:
             continue
         # '-2x' and '-1m': a sign glued to what follows it.
         if word[:1] in "+-" and len(word) > 1 and at_start and (
-                _WEIGHT.match(word[1:]) or _as_expiry(word[1:]) is not None
+                _WEIGHT.match(word[1:]) or _as_expiry(word[1:], state.today) is not None
                 or word[1:] in _ATM) and not _DELTA.match(word[1:]):
             state.sign = 1.0 if word[0] == "+" else -1.0
             tokens[i] = [tok.lstrip("+-"), column]
@@ -723,7 +750,7 @@ def _consume_tokens(tokens: list[list], columns: int, state: _Line) -> None:
             i += 2
             continue
 
-        exp = _as_expiry(tok)
+        exp = _as_expiry(tok, state.today)
         if exp is not None:
             state.expiries.append(exp)
             i += 1
@@ -1341,28 +1368,32 @@ def _build_structure(state: _Line, pair: str | None, default_fly: str, line_no: 
 
 
 def _decide_unit(quotes: list[MarketQuote], forced: str) -> tuple[str, str]:
-    """One volatility unit for the whole paste, from its level quotes only.
+    """One volatility unit for the whole paste, and never the level's doing.
 
-    A risk reversal cannot vote.  ``0.35`` is an entirely ordinary risk
-    reversal in points and an entirely ordinary at-the-money in decimals, so
-    letting one decide would turn a 0.35 point skew into 35 points.
+    A volatility is read as the number it was written as: 8.20 is 8.20
+    volatility points and 0.35 is 0.35 of a point.  The level is not evidence
+    of the unit -- that is the same rule §4 states for a historical sheet, and
+    for the same reason: a managed pair marks its at-the-money at a third of a
+    point, and a reader that sniffed the magnitude turned that into 35 points.
+
+    ``vol_unit='decimal'`` is how a paste in decimals is read, and it is
+    something a person says.  It used to be inferred, which meant an
+    unremarkable USDHKD run came back a hundred times too large and a paste
+    with one small level in it was refused outright.
     """
     if forced in ("percent", "decimal"):
         return forced, f"forced to {forced} by the caller"
     levels = [abs(q.mid) for q in quotes
               if q.instrument in ("atm", "outright") and q.quote_kind == "vol"]
-    if not levels:
-        return "percent", ("the paste has no at-the-money or outright level in it, so it could "
-                           "not decide its own unit; read as percent")
-    lo, hi = min(levels), max(levels)
-    if hi < 1.0:
-        return "decimal", f"every level quote is below 1.0 (largest {hi:.4g})"
-    if lo >= 1.0:
-        return "percent", f"every level quote is at or above 1.0 (smallest {lo:.4g})"
-    raise QuoteError(
-        f"the level quotes straddle 1.0 ({lo:.4g} to {hi:.4g}), so the paste is percent in one "
-        f"place and decimal in another. Fix the paste or set the volatility unit explicitly "
-        f"rather than have it guessed line by line")
+    hi = max(levels, default=0.0)
+    if levels and hi < 1.0:
+        # Said once, because it is the one reading a person might have meant
+        # the other way; never guessed at.
+        return "percent", (
+            f"read as volatility points, as written; the levels sit at or below {hi:.4g}, "
+            f"which is low for points but is what a managed pair marks. Set the volatility "
+            f"unit to decimal if the paste really is in decimals")
+    return "percent", "read as volatility points, as written"
 
 
 #: The day a run with no date in it is ordered on.  Never shown: the quotes
@@ -1490,7 +1521,7 @@ def _resolve_conflicts(quotes: list[MarketQuote],
 
 
 def parse_quotes(text: str, *, pair: str | None = None, vol_unit: str = "auto",
-                 fly_convention: str = "market") -> ParsedRun:
+                 fly_convention: str = "market", today: date | None = None) -> ParsedRun:
     """Read a broker run.  Volatilities come back as decimals.
 
     Nothing is dropped quietly: every line that cannot be used is returned in
@@ -1517,7 +1548,7 @@ def parse_quotes(text: str, *, pair: str | None = None, vol_unit: str = "auto",
         if _is_header(body):
             headers.append(n)
             continue
-        state = _Line()
+        state = _Line(today=today)
         try:
             _consume(norm, state)
             if blocks.foreign(n, raw, state):
@@ -1767,7 +1798,8 @@ def _build_request(state: _Line, pair: str | None, default_fly: str, line_no: in
 
 
 def parse_requests(text: str, *, pair: str | None = None,
-                   fly_convention: str = "market") -> ParsedRequests:
+                   fly_convention: str = "market",
+                   today: date | None = None) -> ParsedRequests:
     """Read a list of instruments to be quoted.  No prices, and none accepted.
 
     Nothing is dropped quietly, exactly as :func:`parse_quotes` drops nothing:
@@ -1797,7 +1829,7 @@ def parse_requests(text: str, *, pair: str | None = None,
         if _is_header(body):
             headers.append(n)
             continue
-        state = _Line()
+        state = _Line(today=today)
         try:
             _consume(norm, state)
             if blocks.foreign(n, raw, state):

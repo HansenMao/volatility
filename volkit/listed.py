@@ -405,18 +405,19 @@ def parse_quote_table(text: str, *, vol_unit: str = "auto",
     vals = [v for _, _, v, _, _ in staged]
     unit = vol_unit.lower()
     if unit == "auto":
-        if all(v > 1.0 for v in vals):
-            unit = "percent"
-        elif all(v < 1.0 for v in vals):
-            unit = "decimal"
+        # As written, in volatility points.  The level is not evidence of the
+        # unit (§4): a table whose implied volatilities all sit below 1.0 is
+        # an ordinary managed-currency table, and reading its magnitude as a
+        # unit returned it a hundred times too large.  A table in decimals is
+        # loaded with vol_unit='decimal', which is something a person says.
+        unit = "percent"
+        if vals and max(vals) < 1.0:
+            notes.append(
+                f"volatilities read as volatility points, as written; they all sit below "
+                f"1.0 (largest {max(vals):.4g}). Set the volatility unit to decimal if the "
+                f"table really is in decimals")
         else:
-            straddling = sorted({round(v, 6) for v in vals if 0.9 < v < 1.6})
-            raise ValueError(
-                f"cannot tell whether these volatilities are percent or decimals: they "
-                f"straddle 1.0 ({', '.join(str(v) for v in straddling[:6])}). "
-                f"Set the volatility unit explicitly."
-            )
-        notes.append(f"volatilities read as {unit}")
+            notes.append("volatilities read as volatility points, as written")
     if unit not in ("percent", "decimal"):
         raise ValueError(f"unknown volatility unit {vol_unit!r}; expected 'auto', 'percent' or 'decimal'")
     div = 100.0 if unit == "percent" else 1.0

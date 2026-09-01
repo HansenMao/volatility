@@ -36,7 +36,8 @@ from .events import EventSchedule, coerce_entry
 from .numerics import ConvergenceError, integrate_piecewise, safe_sqrt
 from zoneinfo import ZoneInfo
 
-from .timeutil import Clock, DAYS_IN_YEAR, SECONDS_IN_YEAR, UTC, as_utc, tenor_to_years
+from .calendars import CalendarSet, DEFAULT_CALENDARS
+from .timeutil import Clock, DAYS_IN_YEAR, SECONDS_IN_YEAR, UTC, as_utc
 
 
 def cut_datetime(day: datetime, cut: str, dst_aware: bool = False) -> datetime:
@@ -133,10 +134,17 @@ class AtmCurve(VolCurve):
     # defined as a local time in a city, so 10:00 New York is 15:00Z in winter
     # and 14:00Z in summer.  Set False to reproduce the legacy fixed hours.
     dst_aware_cuts: bool = True
+    # Where a quoted tenor lands.  A "1M" is not 0.0833 years, it is the
+    # option expiring on the 1M expiry date of this pair's own calendar, and
+    # the curve has to be read at the same place the option is priced --
+    # otherwise the marked 1M volatility is not the volatility a 1M option
+    # gets.  ``calendars.expiry_years`` is the one reading of that (§4);
+    # ``timeutil.tenor_to_years`` stays what it always was, a sort key.
+    calendars: CalendarSet = field(default_factory=lambda: DEFAULT_CALENDARS)
 
     def __post_init__(self) -> None:
         if self.weighting is None:
-            self.weighting = TimeWeighting(self.pair)
+            self.weighting = TimeWeighting(self.pair, calendars=self.calendars)
         self._horizon = 0.0
         self._edges = np.zeros(0)
         self._int_cache: dict[tuple[float, float], float] = {}
@@ -214,6 +222,10 @@ class AtmCurve(VolCurve):
         return safe_sqrt(self.integrated_variance(t1, t0) / (t1 - t0), what="integrated variance")
 
     # -- term structure ---------------------------------------------------
+    def tenor_years(self, tenor: str) -> float:
+        """Years from the valuation instant to this tenor's calendar expiry."""
+        return self.calendars.expiry_years(self.pair, tenor, self.clock)
+
     def _neighbour_tenors(self, t: float) -> tuple[str | None, str | None]:
         """Tenor points bracketing ``t``.
 
@@ -223,7 +235,7 @@ class AtmCurve(VolCurve):
         indexed ``[-1]`` -- both silently wrong.  Out-of-range now returns
         ``None`` and the caller falls back to the raw curve.
         """
-        ts = np.array([tenor_to_years(x) for x in self.tenor_points])
+        ts = np.array([self.tenor_years(x) for x in self.tenor_points])
         order = np.argsort(ts)
         ts, names = ts[order], [self.tenor_points[i] for i in order]
         if t < ts[0] or t > ts[-1]:
@@ -252,7 +264,7 @@ class AtmCurve(VolCurve):
         if left == right:
             return self.tenor_overwrites.get(left.lower(), self.curve_vol(t))
 
-        t1, t2 = tenor_to_years(left), tenor_to_years(right)
+        t1, t2 = self.tenor_years(left), self.tenor_years(right)
         v1 = self.tenor_overwrites.get(left.lower(), self.curve_vol(t1))
         v2 = self.tenor_overwrites.get(right.lower(), self.curve_vol(t2))
         var1 = self.integrated_variance(t1)
@@ -560,4 +572,4 @@ class AtmCurve(VolCurve):
         self._horizon = 0.0
 
     def tenor_table(self) -> list[tuple[str, float]]:
-        return [(tp, self.term_vol(tenor_to_years(tp))) for tp in self.tenor_points]
+        return [(tp, self.term_vol(self.tenor_years(tp))) for tp in self.tenor_points]

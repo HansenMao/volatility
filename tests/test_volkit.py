@@ -32,7 +32,6 @@ from volkit.cross import (CorrelationCurve, CrossAtmCurve, dollar_legs,
                           infer_leg_signs)
 from volkit import exotics
 from volkit.banded import Band, BetaBandSmile, JumpSpec, calibrate_band_smile, load_bands
-from volkit.econ import EconCalendar, generate_nfp, generate_us_cpi, nth_weekday
 from volkit.feed import FeedError, MarketFeed, pip_divisor
 from volkit import analytics, history, listed, marketmaker, moments, quotes
 from volkit.events import EventSchedule
@@ -45,7 +44,8 @@ from volkit.pricing import (OptionLeg, StrikeSpec, expiry_datetime, parse_strike
 from volkit.smile import SmileSlice, fit_svi
 from volkit.surface import PARAM_NAMES, SmileMark, VolSurface, fit_param_term_structure
 from volkit.timeutil import (Clock, DAYS_IN_YEAR, TenorError, UTC, add_tenor,
-                             parse_datetime, tenor_to_years)
+                             normalise_tenor, parse_datetime, parse_tenor,
+                             tenor_to_years)
 from volkit.timeweight import DEFAULT_SESSION_HOURS, TimeWeighting, session_shares
 
 def _source(*parts: str) -> str:
@@ -85,6 +85,66 @@ class TestTimeUtil(unittest.TestCase):
 
     def test_naive_datetime_treated_as_utc(self):
         self.assertEqual(parse_datetime("2024-02-02 10:00").tzinfo, UTC)
+
+    def test_a_unit_may_be_spelled_out(self):
+        """'1wk' is a week and '3mth' three months.
+
+        The unit used to be a single letter, so a desk that wrote its own
+        shorthand into the expiry box was told its tenor could not be parsed.
+        """
+        for text, want in (("1wk", "1W"), ("1 wk", "1W"), ("1-week", "1W"),
+                           ("2weeks", "2W"), ("3mth", "3M"), ("3 months", "3M"),
+                           ("1mo", "1M"), ("2yr", "2Y"), ("2 years", "2Y"),
+                           ("10days", "10D"), ("8d", "8D"), ("o/n", "O/N")):
+            with self.subTest(text):
+                self.assertEqual(normalise_tenor(text), want)
+        self.assertAlmostEqual(tenor_to_years("1wk"), tenor_to_years("1W"))
+        self.assertAlmostEqual(tenor_to_years("3mth"), tenor_to_years("3M"))
+        # O/N is one day, which is what the code means.
+        self.assertEqual(parse_tenor("o/n"), (1.0, "d"))
+        with self.assertRaises(TenorError):
+            tenor_to_years("1wkk")
+
+    def test_a_date_with_no_year_is_the_next_one_of_it(self):
+        """'06 Nov' is the coming sixth of November, not a parse error.
+
+        The year is obvious to whoever typed it, and the reference date is
+        the book's clock rather than the machine's, so the same box read
+        twice reads the same way.
+        """
+        today = date(2026, 9, 1)
+        for text in ("06 Nov", "06Nov", "6-Nov", "Nov 6", "November 6"):
+            with self.subTest(text):
+                self.assertEqual(parse_datetime(text, today=today).date(),
+                                 date(2026, 11, 6))
+        # Already gone this year, so it is next year's.
+        self.assertEqual(parse_datetime("31 Aug", today=today).date(), date(2027, 8, 31))
+        # Today itself matches: the horizon starts now.
+        self.assertEqual(parse_datetime("01 Sep", today=today).date(), today)
+        # A time of day survives.
+        self.assertEqual(parse_datetime("06 Nov 15:00", today=today),
+                         datetime(2026, 11, 6, 15, 0, tzinfo=UTC))
+        # 29 February is the one day whose next occurrence is not within a
+        # year; answering it beats refusing it.
+        self.assertEqual(parse_datetime("29 Feb", today=today).date(), date(2028, 2, 29))
+        # A year that is given still wins, and nothing that parsed moves.
+        self.assertEqual(parse_datetime("15Sep26", today=today).date(), date(2026, 9, 15))
+
+    def test_a_year_less_date_with_no_reference_says_what_is_missing(self):
+        """It is never the wall clock: the clock is injected (§4)."""
+        with self.assertRaises(ValueError) as caught:
+            parse_datetime("06 Nov")
+        self.assertIn("no year", str(caught.exception))
+        # A purely numeric year-less date stays ambiguous and is refused:
+        # '06/11' is a day and a month in one country and the reverse in
+        # another, and there is nothing in it to say which.
+        with self.assertRaises(ValueError):
+            parse_datetime("06/11", today=date(2026, 9, 1))
+
+    def test_the_clock_is_what_says_which_year(self):
+        from volkit.timeutil import Clock
+        clock = Clock(datetime(2026, 9, 1, 12, tzinfo=UTC))
+        self.assertEqual(clock.coerce_datetime("06 Nov").date(), date(2026, 11, 6))
 
 
 class TestNumerics(unittest.TestCase):
@@ -285,10 +345,19 @@ class TestAtmCurve(unittest.TestCase):
         self.assertEqual(self.curve._neighbour_tenors(0.3), ("3m", "6m"))
 
     def test_tenor_overwrite_is_honoured(self):
+        """And it is anchored where the tenor actually is on the calendar.
+
+        Read at ``tenor_to_years`` the overwrite is a hair off, because that
+        is not where 3M is: a month is 30 or 31 days, not a nominal 30.44.
+        ``tenor_years`` is the curve's own reading, and it is the one the
+        marks and the pricer both use.
+        """
+        t3 = self.curve.tenor_years("3m")
         self.curve.overwrite_tenor("3m", 0.09)
-        self.assertAlmostEqual(self.curve.term_vol(tenor_to_years("3m")), 0.09, places=8)
+        self.assertAlmostEqual(self.curve.term_vol(t3), 0.09, places=8)
+        self.assertNotAlmostEqual(self.curve.term_vol(tenor_to_years("3m")), 0.09, places=8)
         self.curve.clear_overwrite("3m")
-        self.assertNotAlmostEqual(self.curve.term_vol(tenor_to_years("3m")), 0.09, places=4)
+        self.assertNotAlmostEqual(self.curve.term_vol(t3), 0.09, places=4)
 
     def test_weekend_volatility_is_damped(self):
         sat = self.curve.daily_vol(datetime(2024, 3, 2, 12, tzinfo=UTC))
@@ -461,6 +530,120 @@ class TestCalendars(unittest.TestCase):
         self.assertTrue(c.is_business_day("USDJPY", exp))
 
 
+class TestFxDateConventions(unittest.TestCase):
+    """The market's own construction: settlement first, expiry back from it.
+
+    Pinned in detail because every one of these was arrived at by getting it
+    wrong first, and because a date that is a day out is a whole day of
+    volatility and two business days of swap points.
+    """
+
+    def setUp(self):
+        self.c = CalendarSet()
+
+    def test_the_settlement_date_is_the_anchor_and_the_expiry_comes_from_it(self):
+        d = self.c.fx_dates("EURUSD", "1M", date(2026, 9, 1))
+        self.assertEqual(d.spot, date(2026, 9, 3))       # T+2
+        self.assertEqual(d.delivery, date(2026, 10, 5))  # 3 Oct is a Saturday
+        self.assertEqual(d.expiry, date(2026, 10, 1))    # the spot lag back
+        # and the two are consistent both ways round
+        self.assertEqual(self.c.delivery_from_expiry("EURUSD", d.expiry), d.delivery)
+        self.assertEqual(self.c.expiry_from_delivery("EURUSD", d.delivery), d.expiry)
+
+    def test_a_us_holiday_rules_out_a_value_date_but_does_not_stop_the_count(self):
+        """The half of the spot convention that is easiest to conflate.
+
+        Counting US holidays as non-business days for a pair with no dollar in
+        it would push EURJPY spot out a day every Thanksgiving, which is not
+        what the market does.  The date the count lands on must still be one
+        USD can settle on, because every FX trade settles through New York.
+        """
+        thanksgiving = date(2026, 11, 26)
+        self.assertTrue(self.c.is_holiday("USD", thanksgiving))
+        self.assertFalse(self.c.is_holiday("EURJPY", thanksgiving))
+        # EUR and JPY are both open on the 26th, so it is the second of the two
+        # counted days -- and is then rolled off because USD is shut.
+        self.assertTrue(self.c.is_business_day("EURJPY", thanksgiving))
+        self.assertFalse(self.c.is_settlement_day("EURJPY", thanksgiving))
+        self.assertEqual(self.c.spot_date("EURJPY", date(2026, 11, 24)),
+                         date(2026, 11, 27))
+
+    def test_the_end_of_month_rule(self):
+        """Off a month-end spot, a month tenor settles on a month end.
+
+        Without it a 1M dealt off a 28-Feb spot settles 28-Mar where the
+        market settles 31-Mar, and the expiry is then a business day early.
+        """
+        d = self.c.fx_dates("EURUSD", "1M", date(2026, 2, 25))
+        self.assertEqual(d.spot, date(2026, 2, 27))      # the last value date of Feb
+        self.assertTrue(self.c.is_month_end("EURUSD", d.spot))
+        self.assertEqual(d.delivery, date(2026, 3, 31))  # not 27 Mar
+        self.assertIn("end-of-month", d.rule)
+        # and it carries down the curve, not just to the first month
+        self.assertEqual(self.c.delivery_date("EURUSD", "3M", date(2026, 2, 25)),
+                         date(2026, 5, 29))
+
+    def test_a_spot_that_is_not_a_month_end_takes_the_ordinary_roll(self):
+        d = self.c.fx_dates("EURUSD", "1M", date(2026, 1, 29))
+        self.assertFalse(self.c.is_month_end("EURUSD", d.spot))
+        self.assertNotIn("end-of-month", d.rule)
+        self.assertEqual(d.delivery, date(2026, 3, 2))
+
+    def test_a_day_tenor_is_business_days_from_the_trade_date(self):
+        """And so the short tenors stay distinct.
+
+        Adding calendar days to the spot date and taking the spot lag off the
+        end -- the old construction -- collapses them: the two days subtracted
+        swallow the weekend the addition just crossed.  Dealt on a Wednesday,
+        "1D" and "2D" both came back Thursday.
+        """
+        wed = date(2026, 9, 2)
+        got = [self.c.expiry_date("EURUSD", f"{n}D", wed) for n in (1, 2, 3, 4)]
+        # Thu, Fri, then over the weekend *and* over US Labor Day on the 7th
+        self.assertTrue(self.c.is_holiday("EURUSD", date(2026, 9, 7)))
+        self.assertEqual(got, [date(2026, 9, 3), date(2026, 9, 4),
+                               date(2026, 9, 8), date(2026, 9, 9)])
+        self.assertEqual(len(set(got)), 4)
+
+    def test_overnight_is_one_business_day_settling_from_its_own_spot(self):
+        d = self.c.fx_dates("EURUSD", "O/N", date(2026, 9, 1))
+        self.assertEqual(d.expiry, date(2026, 9, 2))
+        self.assertEqual(d.delivery, date(2026, 9, 4))
+        # "1D" is the same dates under a different name
+        one = self.c.fx_dates("EURUSD", "1D", date(2026, 9, 1))
+        self.assertEqual((one.expiry, one.delivery), (d.expiry, d.delivery))
+
+    def test_usdcad_settles_t_plus_one_all_the_way_through(self):
+        d = self.c.fx_dates("USDCAD", "1M", date(2026, 9, 1))
+        self.assertEqual(self.c.spot_lag("USDCAD"), 1)
+        self.assertEqual(d.spot, date(2026, 9, 2))
+        self.assertEqual(self.c.add_business_days("USDCAD", d.expiry, 1), d.delivery)
+
+    def test_a_pair_s_own_holiday_moves_its_settlement_and_not_another_pair_s(self):
+        """3 Nov 2026 is Culture Day in Japan and an ordinary Tuesday elsewhere."""
+        self.assertEqual(self.c.delivery_date("EURUSD", "2M", date(2026, 9, 1)),
+                         date(2026, 11, 3))
+        self.assertEqual(self.c.delivery_date("USDJPY", "2M", date(2026, 9, 1)),
+                         date(2026, 11, 4))
+
+    def test_the_short_date_codes_parse(self):
+        for text, expect in (("O/N", (1.0, "d")), ("on", (1.0, "d")),
+                             ("T/N", (2.0, "d")), ("s/n", (3.0, "d")),
+                             ("S/W", (1.0, "w"))):
+            self.assertEqual(parse_tenor(text), expect, text)
+        self.assertEqual(normalise_tenor("o/n"), "O/N")
+        self.assertEqual(normalise_tenor("3m"), "3M")
+        self.assertEqual(normalise_tenor("1D"), "1D")   # not folded into O/N
+
+    def test_expiry_years_is_the_calendar_and_not_the_nominal_length(self):
+        """The reading that moved every mark; see MIGRATION.md 1.6."""
+        clock = Clock(datetime(2026, 9, 1, 12, tzinfo=UTC))
+        t = self.c.expiry_years("EURUSD", "1M", clock)
+        expected = clock.years_to(datetime(2026, 10, 1, tzinfo=UTC))
+        self.assertAlmostEqual(t, expected, places=12)
+        self.assertNotAlmostEqual(t, tenor_to_years("1M"), places=4)
+
+
 class TestTimeWeighting(unittest.TestCase):
     def test_session_shares_sum_to_one(self):
         total = sum(session_shares(DEFAULT_SESSION_HOURS).values())
@@ -605,23 +788,30 @@ class TestMarketData(unittest.TestCase):
                 smile.to_excel(xw, sheet_name=p, index=False)
         return path
 
-    def test_a_currency_column_in_params_weights_every_pair_with_that_leg(self):
-        """A PARAMS column headed USD is the dollar's weight on each event
-        row; a pair's cell on that row is its adjustment on top.  A workbook
-        with no currency column reads exactly as it always did: the cell is
-        the whole bump."""
+    def test_a_currency_column_on_the_events_sheet_weights_every_pair_with_that_leg(self):
+        """The EVENTS sheet: a column headed USD is the dollar's weight on
+        each row and is shared by every pair with a dollar leg; a pair's cell
+        on that row is its adjustment on top.  Events used to be dated rows
+        on PARAMS, which gave one weight two homes -- the old bug this pins
+        is a weight typed on USDJPY and not on EURUSD, and the two pairs
+        disagreeing about what the Fed is worth."""
         import tempfile
         d = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, d, True)
         path = d / "book.xlsx"
-        idx = ["initial", "long term", "ratevol", "addon", "MR", "rate corr", "short decay",
-               "2026-09-16 22:00", "2026-10-30 11:00"]
+        idx = ["initial", "long term", "ratevol", "addon", "MR", "rate corr", "short decay"]
         params = pd.DataFrame({
-            "USDJPY": [8.0, 9.0, 0, 0, 5.0, 0, 50.0, 0.2, 0.0],
-            "EURUSD": [8.0, 9.0, 0, 0, 5.0, 0, 50.0, 0.0, 0.0],
-            "USD":    [None] * 7 + [1.5, 0.0],
-            "JPY":    [None] * 7 + [0.3, 1.5],
+            "USDJPY": [8.0, 9.0, 0, 0, 5.0, 0, 50.0],
+            "EURUSD": [8.0, 9.0, 0, 0, 5.0, 0, 50.0],
         }, index=idx)
+        # The sheet is typed in Hong Kong time, like every event in this tool.
+        events = pd.DataFrame({
+            None: ["2026-09-17 06:00", "2026-10-30 19:00"],
+            "USD": [1.5, 0.0],
+            "JPY": [0.3, 1.5],
+            "USDJPY": [0.2, None],
+            "EURUSD": [None, None],
+        })
         smile = pd.DataFrame({"expiry": ["1m", "3m"], "ST 10D": [0.6, 0.6],
                               "ST 25D": [0.2, 0.2], "RR 25D": [-0.1, -0.1],
                               "RR 10D": [-0.19, -0.19]})
@@ -629,24 +819,68 @@ class TestMarketData(unittest.TestCase):
             pd.DataFrame({"PAIRS": ["USDJPY", "EURUSD"], "TENORS": ["1m", "3m"]}).to_excel(
                 xw, sheet_name="CONFIG", index=False)
             params.to_excel(xw, sheet_name="PARAMS")
+            events.to_excel(xw, sheet_name="EVENTS", index=False)
             for name in ("USDJPY", "EURUSD"):
                 smile.to_excel(xw, sheet_name=name, index=False)
         data = ExcelSource(path).load()
         self.assertEqual(data.problems, [], data.problems)
-        uj = {e.when.strftime("%d%b"): e for e in data.params["USDJPY"].events}
+        # 06:00 Hong Kong is 22:00 UTC the day before: the sheet's clock is
+        # the workbook's, and the model's is UTC.
+        uj = {e.when.strftime("%d%b"): e for e in data.events.for_pair("USDJPY")}
         self.assertAlmostEqual(uj["16Sep"].bump, 0.020)          # 1.5 + 0.3 + 0.2
         self.assertEqual(uj["16Sep"].weights, {"USD": 0.015, "JPY": 0.003})
         self.assertAlmostEqual(uj["16Sep"].adjust, 0.002)
         self.assertAlmostEqual(uj["30Oct"].bump, 0.015)          # the JPY leg alone
-        eu = {e.when.strftime("%d%b"): e for e in data.params["EURUSD"].events}
+        eu = {e.when.strftime("%d%b"): e for e in data.events.for_pair("EURUSD")}
         self.assertAlmostEqual(eu["16Sep"].bump, 0.015)          # no JPY leg, no cell
-        self.assertNotIn("30Oct", eu)                            # nothing on either leg
-        self.assertTrue(any("event weights per currency" in n for n in data.notes), data.notes)
-        # The shipped workbook has no currency columns and its bumps are its cells.
-        real = ExcelSource(WORKBOOK).load()
-        self.assertFalse(any("event weights" in n for n in real.notes))
-        for e in real.params["USDCNH"].events:
-            self.assertEqual(e.adjust, e.bump)
+        self.assertAlmostEqual(eu["30Oct"].bump, 0.0)            # nothing on either leg
+        # The curve only takes the rows that move it; the panel sees them all.
+        touching = data.events.for_pair("EURUSD", touching_only=True)
+        self.assertEqual([e.when.strftime("%d%b") for e in touching], ["16Sep"])
+        self.assertTrue(any("EVENTS: 2 event(s)" in n for n in data.notes), data.notes)
+
+    def test_a_date_row_left_on_params_is_reported_not_read(self):
+        """Events had dated rows on PARAMS once.  One left behind must not be
+        read -- two homes for one bump is how a weight comes to mean two
+        things -- and must not be ignored either."""
+        import tempfile
+        d = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d, True)
+        path = d / "book.xlsx"
+        idx = ["initial", "long term", "ratevol", "addon", "MR", "rate corr", "short decay",
+               "2026-09-16 22:00"]
+        params = pd.DataFrame({"USDJPY": [8.0, 9.0, 0, 0, 5.0, 0, 50.0, 0.2]}, index=idx)
+        smile = pd.DataFrame({"expiry": ["1m"], "ST 10D": [0.6], "ST 25D": [0.2],
+                              "RR 25D": [-0.1], "RR 10D": [-0.19]})
+        with pd.ExcelWriter(path) as xw:
+            pd.DataFrame({"PAIRS": ["USDJPY"], "TENORS": ["1m"]}).to_excel(
+                xw, sheet_name="CONFIG", index=False)
+            params.to_excel(xw, sheet_name="PARAMS")
+            smile.to_excel(xw, sheet_name="USDJPY", index=False)
+        data = ExcelSource(path).load()
+        self.assertTrue(any("EVENTS" in p and "is a date" in p for p in data.problems),
+                        data.problems)
+        self.assertEqual(data.events.rows, [])
+
+    def test_an_events_column_that_is_neither_a_currency_nor_a_pair_is_reported(self):
+        """A cell nothing reads is a bump nobody gets."""
+        import tempfile
+        d = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d, True)
+        path = d / "book.xlsx"
+        idx = ["initial", "long term", "ratevol", "addon", "MR", "rate corr", "short decay"]
+        params = pd.DataFrame({"USDJPY": [8.0, 9.0, 0, 0, 5.0, 0, 50.0]}, index=idx)
+        events = pd.DataFrame({None: ["2026-09-17 06:00"], "USD": [1.5], "USDNOK": [2.0]})
+        smile = pd.DataFrame({"expiry": ["1m"], "ST 10D": [0.6], "ST 25D": [0.2],
+                              "RR 25D": [-0.1], "RR 10D": [-0.19]})
+        with pd.ExcelWriter(path) as xw:
+            pd.DataFrame({"PAIRS": ["USDJPY"], "TENORS": ["1m"]}).to_excel(
+                xw, sheet_name="CONFIG", index=False)
+            params.to_excel(xw, sheet_name="PARAMS")
+            events.to_excel(xw, sheet_name="EVENTS", index=False)
+            smile.to_excel(xw, sheet_name="USDJPY", index=False)
+        data = ExcelSource(path).load()
+        self.assertTrue(any("USDNOK" in p for p in data.problems), data.problems)
 
     def test_real_workbook_loads_without_problems(self):
         data = ExcelSource(WORKBOOK).load()
@@ -950,11 +1184,17 @@ class TestPricing(unittest.TestCase):
             self.assertAlmostEqual(q["forward"], leg["forward"], places=10, msg=strike)
 
     def test_the_vol_query_takes_its_forward_from_the_feed(self):
-        """There is no third box: the level is `Book.market_level`'s."""
+        """There is no third box: the level is `Book.market_level_for`'s.
+
+        ``market_level_for`` and not ``market_level``: the forward is the one
+        to this option's own **settlement** date, two business days past its
+        expiry, which is the date a forward is a price for.
+        """
         book = Book.from_excel(WORKBOOK, ASOF).load_all(["USDJPY"])
         book.feed = MarketFeed.load(FEED)
         q = quick_vol(book, "USDJPY", "1M", "ATM")
-        level = book.market_level("USDJPY", q["t"])
+        level = book.market_level_for("USDJPY", date.fromisoformat(q["expiry"]))
+        self.assertEqual(q["settle"], level["settle"])
         self.assertTrue(q["scaled"])
         self.assertEqual(q["forward_source"], "feed")
         self.assertAlmostEqual(q["forward"], level["forward"], places=12)
@@ -1027,6 +1267,54 @@ class TestPricing(unittest.TestCase):
         book.feed = MarketFeed.load(FEED)
         for text in ("ATM", "151.5"):
             self.assertIsNone(quick_vol(book, "USDJPY", "1M", text)["is_call"], text)
+
+    def test_the_vol_query_reports_the_delta_of_the_strike_it_read(self):
+        """The card takes a strike or a delta and answers with both.
+
+        A strike and a delta name one point on the smile; the desk has
+        whichever of the two the market gave it, so the card must be able to
+        be asked either way and report the other.  The round trip is the
+        pin: the delta reported at a 25-delta request is 25, and asking again
+        at the strike that came back reports the same delta.
+        """
+        book = Book.from_excel(WORKBOOK, ASOF).load_all(["USDJPY"])
+        book.feed = MarketFeed.load(FEED)
+        asked = quick_vol(book, "USDJPY", "1M", "25d")
+        self.assertAlmostEqual(asked["delta"], 25.0, places=6)
+        self.assertIs(asked["delta_is_call"], True)
+        back = quick_vol(book, "USDJPY", "1M", repr(asked["strike"]))
+        self.assertAlmostEqual(back["delta"], asked["delta"], places=6)
+        put = quick_vol(book, "USDJPY", "1M", "10dp")
+        self.assertAlmostEqual(put["delta"], -10.0, places=6)
+        self.assertIs(put["delta_is_call"], False)
+
+    def test_the_delta_is_reported_under_the_pairs_own_convention(self):
+        """Premium adjusted for a USD-base pair, unadjusted otherwise.
+
+        The browser has no business knowing which, so the answer says: a
+        premium-adjusted delta-neutral straddle is not at 50 delta and a page
+        that assumed it was would report a strike nobody asked about.
+        """
+        book = Book.from_excel(WORKBOOK, ASOF).load_all(["USDJPY", "EURUSD"])
+        book.feed = MarketFeed.load(FEED)
+        usd = quick_vol(book, "USDJPY", "1M", "ATM")
+        eur = quick_vol(book, "EURUSD", "1M", "ATM")
+        self.assertTrue(usd["premium_adjusted"])
+        self.assertFalse(eur["premium_adjusted"])
+        self.assertLess(usd["delta"], 50.0)
+        self.assertGreater(eur["delta"], 50.0)
+
+    def test_the_delta_comes_back_for_a_pair_with_no_feed(self):
+        """Delta is a function of moneyness, so it needs no level at all.
+
+        The strike cannot be placed without a feed and comes back as None;
+        the delta beside it must not disappear with it, because a delta is
+        exactly what a marker asks for when there is no level to hand.
+        """
+        q = quick_vol(self.book, "USDJPY", "1M", "25d")
+        self.assertFalse(q["scaled"])
+        self.assertIsNone(q["strike"])
+        self.assertAlmostEqual(q["delta"], 25.0, places=6)
 
     def test_the_vol_query_flags_a_strike_outside_a_managed_band(self):
         """Same rule as a pricing leg: the level the payout depends on is
@@ -1254,96 +1542,83 @@ class TestSabrRobustness(unittest.TestCase):
             self.assertEqual(cal.alternatives, (), f"{mark.tenor}: {cal.warnings}")
 
 
-class TestEconCalendar(unittest.TestCase):
+class TestEventTable(unittest.TestCase):
+    """The EVENTS sheet in memory: one row per release, weights per currency
+    shared across pairs, an adjustment per pair."""
+
     def setUp(self):
-        self.cal = EconCalendar.load()
+        from volkit.events import EventBook, EventRow
+        self.EventBook, self.EventRow = EventBook, EventRow
+        self.when = datetime(2026, 9, 16, 22, 0, tzinfo=UTC)
+        self.table = EventBook([EventRow(self.when, "FOMC",
+                                         weights={"USD": 0.015, "JPY": 0.003},
+                                         adjust={"USDJPY": 0.002})])
 
-    def test_shipped_calendar_loads(self):
-        self.assertGreater(len(self.cal.dated), 20)
+    def test_the_shipped_workbook_has_its_events_on_the_events_sheet(self):
+        data = ExcelSource(WORKBOOK).load()
+        self.assertEqual(data.problems, [], data.problems)
+        self.assertTrue(data.events.rows)
+        self.assertTrue(data.events.currencies())
 
-    def test_nfp_is_the_first_friday(self):
-        for e in generate_nfp(2026):
-            self.assertEqual(e.when.astimezone(ZoneInfo("America/New_York")).weekday(), 4)
+    def test_a_weight_is_shared_and_an_adjustment_is_not(self):
+        """One row, three pairs.  The dollar's weight reaches every pair with
+        a dollar leg; only USDJPY's own cell is USDJPY's."""
+        uj = self.table.for_pair("USDJPY")[0]
+        self.assertAlmostEqual(uj.bump, 0.020)
+        self.assertEqual(uj.weights, {"USD": 0.015, "JPY": 0.003})
+        self.assertAlmostEqual(uj.adjust, 0.002)
+        eu = self.table.for_pair("EURUSD")[0]
+        self.assertAlmostEqual(eu.bump, 0.015)
+        self.assertAlmostEqual(eu.adjust, 0.0)
+        eg = self.table.for_pair("EURGBP")[0]
+        self.assertAlmostEqual(eg.bump, 0.0)
+        # It is still a row of the sheet: that blank cell is where EURGBP's
+        # adjustment would be typed, so the panel sees it and the curve does not.
+        self.assertEqual(self.table.for_pair("EURGBP", touching_only=True), [])
 
-    def test_nfp_release_time_follows_us_dst(self):
-        """08:30 New York is 13:30 UTC in winter and 12:30 UTC in summer.
-        A hand-kept UTC list gets this wrong twice a year."""
-        by_month = {e.when.month: e.when.hour for e in generate_nfp(2026)}
-        self.assertEqual(by_month[1], 13)
-        self.assertEqual(by_month[7], 12)
-        self.assertEqual(by_month[12], 13)
+    def test_an_alias_leg_takes_the_weight(self):
+        """A weight on CNY is the CNH leg's too (``events.CURRENCY_ALIASES``)."""
+        self.table.rows[0].weights = {"CNY": 0.004}
+        self.assertAlmostEqual(self.table.for_pair("USDCNH")[0].bump, 0.004)
 
-    def test_nfp_shifts_off_a_holiday(self):
-        jan = generate_nfp(2027)[0]
-        self.assertEqual(jan.when.date(), date(2027, 1, 8))
-        self.assertIn("shifted", jan.source)
+    def test_marking_a_leg_weight_on_one_pair_moves_the_others_and_says_so(self):
+        """The panel shows the sheet through one pair's eyes, so a weight
+        typed there is the sheet's.  That is the point, and it is never
+        hidden: the note names every pair it reached."""
+        from volkit.events import EventEntry
+        entry = EventEntry(self.when, None, "FOMC", {"USD": 0.02, "JPY": 0.003}, 0.002)
+        bad, notes = self.table.set_pair("USDJPY", [entry],
+                                         pairs=["USDJPY", "EURUSD", "EURGBP"])
+        self.assertEqual(bad, [])
+        self.assertTrue(any("EURUSD" in n and "USD" in n for n in notes), notes)
+        self.assertNotIn("EURGBP", " ".join(notes))     # no dollar leg
+        self.assertAlmostEqual(self.table.for_pair("EURUSD")[0].bump, 0.02)
 
-    def test_events_are_filtered_by_pair_currency(self):
-        start = datetime(2026, 8, 23, tzinfo=UTC)
-        end = datetime(2026, 12, 31, tzinfo=UTC)
-        names = {e.name for e in self.cal.for_pair("USDJPY", start, end)}
-        self.assertIn("FOMC", names)
-        self.assertNotIn("ECB", names)
-        self.assertIn("ECB", {e.name for e in self.cal.for_pair("EURUSD", start, end)})
+    def test_the_other_currencies_of_a_row_are_not_cleared_by_a_pair_that_cannot_see_them(self):
+        """EURUSD's panel shows EUR and USD.  Applying it must not wipe the
+        JPY column -- a screen that never held a number must not zero it."""
+        from volkit.events import EventEntry
+        entry = EventEntry(self.when, None, "FOMC", {"EUR": 0.0, "USD": 0.015}, 0.0)
+        self.table.set_pair("EURUSD", [entry], pairs=["USDJPY", "EURUSD"])
+        self.assertAlmostEqual(self.table.rows[0].weights["JPY"], 0.003)
+        self.assertAlmostEqual(self.table.rows[0].adjust["USDJPY"], 0.002)
 
-    def test_approximate_events_are_flagged_and_off_by_default(self):
-        self.assertTrue(all(e.approximate for e in generate_us_cpi(2026)))
-        self.assertNotIn("US CPI", self.cal.rules)
+    def test_two_rows_at_one_time_are_refused(self):
+        """A row is identified by its time; a second at the same minute would
+        overwrite the first rather than add to it."""
+        from volkit.events import EventEntry
+        bad, _ = self.table.set_pair("USDJPY", [
+            EventEntry(self.when, None, "a", {"USD": 0.01}, 0.0),
+            EventEntry(self.when, None, "b", {"USD": 0.02}, 0.0)])
+        self.assertTrue(bad and "two events" in bad[0], bad)
 
-    def test_a_weight_on_the_other_currency_reaches_the_pair(self):
-        """FOMC weighted 1.5 on USD and 0.3 on JPY is 1.8 on USDJPY and still
-        1.5 on EURUSD; an ECB weighted on JPY is on the USDJPY schedule the
-        day it is given the weight, and nowhere before."""
-        start = datetime(2026, 8, 23, tzinfo=UTC)
-        end = datetime(2026, 12, 31, tzinfo=UTC)
-        before = {e.name: e.bump for e in self.cal.for_pair("USDJPY", start, end)}
-        self.assertEqual(before["FOMC"], 1.5)
-        self.assertNotIn("ECB", before)
-        self.cal.set_weight("FOMC", "JPY", 0.3)
-        self.cal.set_weight("ECB", "JPY", 0.2)
-        after = {e.name: e for e in self.cal.for_pair("USDJPY", start, end)}
-        self.assertAlmostEqual(after["FOMC"].bump, 1.8)
-        self.assertEqual(after["FOMC"].weights, {"USD": 1.5, "JPY": 0.3})
-        self.assertAlmostEqual(after["ECB"].bump, 0.2)
-        self.assertEqual(after["ECB"].weights, {"USD": 0.0, "JPY": 0.2})
-        eur = {e.name: e.bump for e in self.cal.for_pair("EURUSD", start, end)}
-        self.assertEqual(eur["FOMC"], 1.5)
-        # A rule-generated event reads the same table as a dated one.
-        self.cal.set_weight("NFP", "JPY", 0.5)
-        nfp = [e for e in self.cal.for_pair("USDJPY", start, end) if e.name == "NFP"]
-        self.assertTrue(nfp and all(e.bump == 2.0 for e in nfp))
-        with self.assertRaises(ValueError):
-            self.cal.set_weight("NOTATHING", "USD", 1.0)
-
-    def test_weights_file_overrides_and_zero_removes(self):
-        import tempfile
-        from volkit.econ import load_weights
-        d = Path(tempfile.mkdtemp())
-        self.addCleanup(shutil.rmtree, d, True)
-        good = d / "event_weights.csv"
-        good.write_text("# c\nFOMC,JPY,0.3\nBOJ,JPY,0\nfomc,usd,2\n", encoding="utf-8")
-        table = load_weights(good)
-        self.assertEqual(table["FOMC"], {"USD": 2.0, "JPY": 0.3})
-        self.assertEqual(table["BOJ"], {"JPY": 0.0})
-        cal = EconCalendar.load(weights=good)
-        start, end = datetime(2026, 8, 23, tzinfo=UTC), datetime(2026, 12, 31, tzinfo=UTC)
-        names = {e.name for e in cal.for_pair("USDJPY", start, end)}
-        self.assertNotIn("BOJ", names)          # weight zero: switched off
-        self.assertEqual(cal.weights_source, str(good))
-        for bad in ("NOTATHING,USD,1\n", "FOMC,USDX,1\n", "FOMC,USD,much\n", "FOMC,USD\n"):
-            (d / "bad.csv").write_text(bad, encoding="utf-8")
-            with self.assertRaises(ValueError, msg=bad):
-                load_weights(d / "bad.csv")
-        # The shipped file changes nothing: it is examples, all commented out.
-        self.assertEqual(EconCalendar.load().weights, load_weights(d / "nothing.csv"))
-
-    def test_unknown_event_name_in_csv_raises(self):
-        import tempfile
-        with tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False) as fh:
-            fh.write("NOTATHING,2026-01-01\n")
-            path = fh.name
-        with self.assertRaises(ValueError):
-            EconCalendar.load(path)
+    def test_set_weights_replaces_the_currencies_and_keeps_every_pair_cell(self):
+        problems = self.table.set_weights([
+            {"when": self.when, "label": "FOMC", "weights": {"USD": 0.02}}])
+        self.assertEqual(problems, [])
+        self.assertEqual(self.table.rows[0].weights, {"USD": 0.02})
+        self.assertAlmostEqual(self.table.rows[0].adjust["USDJPY"], 0.002)
+        self.assertAlmostEqual(self.table.for_pair("USDJPY")[0].bump, 0.022)
 
 
 class TestCurveMarking(unittest.TestCase):
@@ -1372,17 +1647,17 @@ class TestCurveMarking(unittest.TestCase):
 
     def test_the_events_route_takes_parts_and_returns_the_total(self):
         """The panel posts each leg's weight and the adjustment; the rows
-        that come back carry both and their total, and the suggestions carry
-        the legs' weights so the boxes can be filled rather than a total
-        typed over."""
+        that come back carry both and their total."""
         from volkit.webapp import BookService
         service = BookService(str(WORKBOOK), ASOF)
         when = (ASOF.now + timedelta(days=30)).replace(hour=16, minute=0, second=0, microsecond=0)
         r = service.set_events({"pair": "USDJPY", "events": [
             {"when": when.strftime("%Y-%m-%dT%H:%M"), "weights": {"USD": 1.5, "JPY": 0.3},
              "adjust": 0.2, "label": "FOMC"}]})
-        self.assertEqual(r["problems"], [])
-        row = r["events"][0]
+        # A dollar weight reaches every dollar pair, so a warning may come
+        # back for one of them; none of them is USDJPY's.
+        self.assertEqual([p for p in r["problems"] if p.startswith("USDJPY")], [])
+        row = next(e for e in r["events"] if e["label"] == "FOMC")
         self.assertAlmostEqual(row["bump"], 2.0)
         self.assertEqual(set(row["weights"]), {"USD", "JPY"})
         self.assertAlmostEqual(row["weights"]["JPY"], 0.3)
@@ -1392,41 +1667,73 @@ class TestCurveMarking(unittest.TestCase):
             service.set_events({"pair": "USDJPY", "events": [
                 {"when": when.strftime("%Y-%m-%dT%H:%M"), "weights": {"USD": 1.5}, "adjust": 0,
                  "bump": 3.0}]})
-        # The valuation date is 2024, before the shipped calendar's dated
-        # rows; the NFP rule generates for any year.
-        sug = service.suggest_events({"pair": "USDJPY", "horizon": 0.5})
-        self.assertEqual(sug["legs_ccy"], ["USD", "JPY"])
-        nfp = next(e for e in sug["events"] if e["name"] == "NFP")
-        self.assertEqual(nfp["weights"], {"USD": 1.5, "JPY": 0.0})
-        self.assertEqual(nfp["adjust"], 0.0)
 
-    def test_the_weights_card_is_a_whole_table_and_touches_no_existing_event(self):
-        """The optional card posts the table whole; applying it changes what
-        Auto-load suggests and nothing already on a pair.  A bad cell leaves
-        the whole table untouched."""
+    def test_a_weight_marked_on_one_pair_reaches_the_others(self):
+        """The sheet's currency columns are shared.  A dollar weight typed on
+        USDJPY's panel is EURUSD's too, and the reply says which pairs moved
+        -- the old arrangement kept a copy per pair, so the two could disagree
+        about what one release was worth."""
         from volkit.webapp import BookService
         service = BookService(str(WORKBOOK), ASOF)
+        service.book.build(["USDJPY", "EURUSD"])
+        when = (ASOF.now + timedelta(days=30)).replace(hour=16, minute=0, second=0, microsecond=0)
+        r = service.set_events({"pair": "USDJPY", "events": [
+            {"when": when.strftime("%Y-%m-%dT%H:%M"), "weights": {"USD": 1.5, "JPY": 0.3},
+             "adjust": 0.2, "label": "FOMC"}]})
+        self.assertTrue(any("EURUSD" in n for n in r["notes"]), r["notes"])
+        eu = next(e for e in service.curve({"pair": "EURUSD"})["events"]
+                  if e["label"] == "FOMC")
+        self.assertAlmostEqual(eu["bump"], 1.5)     # the dollar leg, no adjustment
+        self.assertAlmostEqual(eu["adjust"], 0.0)
+
+    def test_reload_gives_back_the_workbooks_own_rows(self):
+        """The Reload button: the EVENTS sheet as the file has it, after a
+        session has marked over it.  It reads and applies nothing."""
+        from volkit.webapp import BookService
+        service = BookService(str(WORKBOOK), ASOF)
+        before = service.workbook_events({"pair": "USDJPY"})["events"]
         when = (ASOF.now + timedelta(days=30)).replace(hour=16, minute=0, second=0, microsecond=0)
         service.set_events({"pair": "USDJPY", "events": [
-            {"when": when.strftime("%Y-%m-%dT%H:%M"), "weights": {"USD": 1.5}, "adjust": 0, "label": "X"}]})
+            {"when": when.strftime("%Y-%m-%dT%H:%M"), "weights": {"USD": 1.5}, "adjust": 0,
+             "label": "NEW"}]})
+        self.assertEqual(service.workbook_events({"pair": "USDJPY"})["events"], before)
+        self.assertNotEqual(service.curve({"pair": "USDJPY"})["events"], before)
+
+    def test_the_weights_card_is_a_whole_table_and_keeps_every_pair_cell(self):
+        """The optional card is the currency side of the sheet, posted whole.
+        Applying it re-solves every pair with those currencies and leaves each
+        pair's own adjustment column alone.  A bad cell leaves it untouched."""
+        from volkit.webapp import BookService
+        service = BookService(str(WORKBOOK), ASOF)
+        service.book.build(["USDJPY", "EURUSD"])
+        when = (ASOF.now + timedelta(days=30)).replace(hour=16, minute=0, second=0, microsecond=0)
+        service.set_events({"pair": "USDJPY", "events": [
+            {"when": when.strftime("%Y-%m-%dT%H:%M"), "weights": {"USD": 1.5}, "adjust": 0.4,
+             "label": "X"}]})
         table = service.event_weights()
         self.assertIn("USD", table["currencies"])
-        fomc = next(e for e in table["events"] if e["name"] == "FOMC")
-        self.assertEqual((fomc["currency"], fomc["weights"]), ("USD", {"USD": 1.5}))
-        weights = {e["name"]: dict(e["weights"]) for e in table["events"]}
-        weights["NFP"]["JPY"] = 0.5
-        r = service.set_event_weights({"weights": weights})
-        self.assertIn("JPY", r["currencies"])
-        nfp = next(e for e in service.suggest_events({"pair": "USDJPY", "horizon": 0.5})["events"]
-                   if e["name"] == "NFP")
-        self.assertEqual(nfp["weights"], {"USD": 1.5, "JPY": 0.5})
-        self.assertAlmostEqual(nfp["bump"], 2.0)
-        # The event already on the pair kept its parts.
-        self.assertEqual(service.curve({"pair": "USDJPY"})["events"][0]["weights"], {"USD": 1.5, "JPY": 0.0})
-        weights["NFP"]["JPY"] = "much"
+        row = next(e for e in table["events"] if e["label"] == "X")
+        self.assertAlmostEqual(row["weights"]["USD"], 1.5)
+        self.assertIn("USDJPY", row["pairs"])
+
+        rows = [{"when": e["when"] + "Z", "label": e["label"],
+                 "weights": dict(e["weights"])} for e in table["events"]]
+        next(r for r in rows if r["label"] == "X")["weights"]["USD"] = 2.0
+        r = service.set_event_weights({"weights": rows})
+        self.assertIn("USD", r["currencies"])
+        # USDJPY's own adjustment survived the currency-side replacement.
+        uj = next(e for e in service.curve({"pair": "USDJPY"})["events"] if e["label"] == "X")
+        self.assertAlmostEqual(uj["adjust"], 0.4)
+        self.assertAlmostEqual(uj["bump"], 2.4)
+        # And EURUSD, which has no cell of its own, moved with the weight.
+        eu = next(e for e in service.curve({"pair": "EURUSD"})["events"] if e["label"] == "X")
+        self.assertAlmostEqual(eu["bump"], 2.0)
+
+        next(r for r in rows if r["label"] == "X")["weights"]["USD"] = "much"
         with self.assertRaises(ValueError):
-            service.set_event_weights({"weights": weights})
-        self.assertEqual(service.book.econ.weights["NFP"], {"USD": 1.5, "JPY": 0.5})
+            service.set_event_weights({"weights": rows})
+        uj = next(e for e in service.curve({"pair": "USDJPY"})["events"] if e["label"] == "X")
+        self.assertAlmostEqual(uj["bump"], 2.4)
 
     def test_events_can_be_set_and_reprice_their_bump(self):
         atm = self.book["USDJPY"].atm
@@ -1575,10 +1882,36 @@ class TestFeed(unittest.TestCase):
         self.assertEqual(pip_divisor("EURUSD"), 10000.0)
 
     def test_interpolation_is_exact_at_the_pillars(self):
+        """Every pillar reads back exactly where the curve puts it.
+
+        Where it puts it is its own **delivery date** -- a broker's 1M swap
+        points are the points to the 1M value date, and a month is 30 or 31
+        days and not a nominal 30.44.  Asking at ``tenor_to_years`` used to be
+        the same question and no longer is; it is now a point a day or so away
+        from the pillar, which is exactly the gap this placement closes.
+        """
         pf = self.feed.pairs["USDJPY"]
-        for tenor, pts in zip(pf.tenors, pf.points):
-            got, _ = pf.forward_points(tenor_to_years(tenor))
+        self.assertIsNotNone(pf.times)
+        for t, pts in zip(pf.times, pf.points):
+            got, _ = pf.forward_points(t)
             self.assertAlmostEqual(got, pts, places=10)
+
+    def test_a_pillar_is_placed_on_its_own_delivery_date(self):
+        """The axis is years from the spot date, and a tenor pillar is on it.
+
+        Pinned because it is what makes an option's forward land *on* a
+        pillar rather than between two of them: the option is read at its own
+        settlement date, and the pillar is quoted to the same date.
+        """
+        from volkit.calendars import DEFAULT_CALENDARS
+        pf = self.feed.pairs["USDJPY"]
+        for tenor, t in zip(pf.tenors, pf.times):
+            delivery = DEFAULT_CALENDARS.delivery_date("USDJPY", tenor, self.feed.today)
+            self.assertAlmostEqual(
+                t, (delivery - pf.spot_date).days / DAYS_IN_YEAR, places=12, msg=tenor)
+        # 1M is 31 days here and not the 30.44 a nominal year fraction gives
+        self.assertNotAlmostEqual(pf.times[pf.tenors.index("1M")],
+                                  tenor_to_years("1M"), places=4)
 
     def test_interpolation_between_pillars_is_bracketed(self):
         pf = self.feed.pairs["USDJPY"]
@@ -1798,7 +2131,10 @@ class TestDatedFeed(unittest.TestCase):
         self.assertEqual(f.problems, [], f.problems)
         pf = f.pairs["USDJPY"]
         self.assertEqual(pf.tenors, ["2026-09-30", "3M", "1Y"])   # sorted by time
-        self.assertAlmostEqual(pf.forward_points(tenor_to_years("3m"))[0], -35.0, places=10)
+        # The 3M pillar reads back exactly where the curve puts it, which is
+        # its own delivery date and not a nominal 30.44-day quarter.
+        self.assertAlmostEqual(
+            pf.forward_points(pf.times[pf.tenors.index("3M")])[0], -35.0, places=10)
         self.assertAlmostEqual(pf.points_on("2026-09-30")[0], -11.40, places=10)
         self.assertAlmostEqual(pf.points_on("2026-08-30")[0], +0.40, places=10)
 
@@ -1812,18 +2148,24 @@ class TestDatedFeed(unittest.TestCase):
         self.assertIn("cannot parse tenor", f.problems[0])
         self.assertIn("not a date either", f.problems[0])
 
-    def test_a_tenor_feed_is_unchanged_by_all_of_this(self):
-        """The sample feed's every pillar, and its front and back ends."""
+    def test_a_tenor_feed_reads_back_at_its_own_pillars(self):
+        """The sample feed's every pillar, and its front and back ends.
+
+        The file states no spot date, but it carries an ``asof`` line, and a
+        valuation date is all a spot date needs -- so this feed has one and
+        every tenor pillar is placed on its own delivery date.  The pillar
+        *values* are untouched by any of that; what moved is where they sit,
+        and they read back exactly there.
+        """
         f = MarketFeed.load(FEED)
         self.assertEqual(f.problems, [], f.problems)
-        self.assertEqual(f.notes, [], f.notes)
         pf = f.pairs["USDJPY"]
-        self.assertIsNone(pf.spot_date)
-        for tenor, pts in zip(pf.tenors, pf.points):
-            self.assertAlmostEqual(pf.forward_points(tenor_to_years(tenor))[0], pts, places=10)
+        self.assertEqual(pf.spot_date, DEFAULT_CALENDARS.spot_date("USDJPY", f.today))
+        for t, pts in zip(pf.times, pf.points):
+            self.assertAlmostEqual(pf.forward_points(t)[0], pts, places=10)
         self.assertAlmostEqual(pf.forward_points(0.0)[0], 0.0, places=12)
         # the front pillar is still scaled toward zero at the spot date
-        half = 0.5 * tenor_to_years("1w")
+        half = 0.5 * pf.times[0]
         self.assertAlmostEqual(pf.forward_points(half)[0], 0.5 * pf.points[0], places=10)
         self.assertFalse(pf.forward_points(half)[1])
         self.assertTrue(pf.forward_points(5.0)[1])
@@ -1989,8 +2331,22 @@ class TestImpliedCrossFeed(unittest.TestCase):
         self.assertLess(f.quote_on("EURJPY", "2026-09-30")["points"], 0.0)
 
     def test_a_dated_read_of_a_cross_needs_both_legs_to_have_a_spot_date(self):
-        """A tenor-only leg has no dates on it, and says so rather than guessing."""
-        f = MarketFeed.load(FEED)      # every pillar a tenor, no spot dates
+        """A leg with no valuation date behind it has no dates on it, and says so.
+
+        A file that states a spot date, or one loaded against a clock, has one
+        for every pair -- the spot date is derived from the valuation date, and
+        that is what lets a *tenor* pillar be placed on its own delivery date.
+        With neither there is nothing to derive it from, and a dated read is
+        refused by name rather than answered from a guessed origin.
+        """
+        f = self.feed("""
+            EURUSD,SPOT,1.0842
+            EURUSD,1M,5.8
+            USDJPY,SPOT,150.25
+            USDJPY,1M,-11.4
+        """)                            # no asof line, and loaded with no clock
+        self.assertIsNone(f.today)
+        self.assertIsNone(f.pairs["USDJPY"].spot_date)
         with self.assertRaises(FeedError) as caught:
             f.quote_on("EURJPY", "2026-09-30")
         self.assertIn("spot date", str(caught.exception))
@@ -2701,19 +3057,31 @@ class TestListedOptions(unittest.TestCase):
         self.assertAlmostEqual(t.quotes[0].vol, 0.0820)
         self.assertTrue(any("mid" in n for n in t.notes))
 
-    def test_decimal_and_percent_are_both_understood(self):
-        dec = listed.parse_quote_table("1.05 0.0820\n1.08 0.0750\n1.10 0.0765\n")
+    def test_decimal_is_something_a_person_says(self):
+        """A table is read in volatility points as written (§4).  A table of
+        decimals is loaded with vol_unit='decimal'; it used to be inferred
+        from the level, which read a managed pair's own table 100x too big."""
+        dec = listed.parse_quote_table("1.05 0.0820\n1.08 0.0750\n1.10 0.0765\n",
+                                       vol_unit="decimal")
         pct = listed.parse_quote_table("1.05 8.20\n1.08 7.50\n1.10 7.65\n")
         self.assertEqual(dec.vol_unit, "decimal")
         self.assertEqual(pct.vol_unit, "percent")
         for a, b in zip(dec.quotes, pct.quotes):
             self.assertAlmostEqual(a.vol, b.vol, places=12)
 
-    def test_a_table_straddling_one_is_refused_rather_than_guessed(self):
-        """0.95 could be 95% or 0.95%.  Guessing would move a mark silently."""
-        with self.assertRaises(ValueError) as cm:
-            listed.parse_quote_table("1.05\t0.95\n1.08\t8.20\n1.10\t7.70\n")
-        self.assertIn("percent or decimals", str(cm.exception))
+    def test_a_table_below_one_is_read_as_written_and_says_so(self):
+        """0.82 is eight tenths of a volatility point, which is what a managed
+        pair's listed table looks like.  Read as written, and noted."""
+        t = listed.parse_quote_table("1.05 0.82\n1.08 0.75\n1.10 0.76\n")
+        self.assertEqual(t.vol_unit, "percent")
+        self.assertAlmostEqual(t.quotes[0].vol, 0.0082)
+        self.assertTrue(any("as written" in n for n in t.notes))
+
+    def test_a_table_straddling_one_is_read_and_not_refused(self):
+        """0.95 beside 8.20 used to be refused as ambiguous.  Both are points."""
+        t = listed.parse_quote_table("1.05\t0.95\n1.08\t8.20\n1.10\t7.70\n")
+        self.assertAlmostEqual(t.quotes[0].vol, 0.0095)
+        self.assertAlmostEqual(t.quotes[1].vol, 0.0820)
 
     def test_every_unusable_line_is_returned_with_a_reason(self):
         t = listed.parse_quote_table(
@@ -4803,9 +5171,21 @@ class TestSmileStrikeScale(unittest.TestCase):
         service = BookService(str(WORKBOOK), ASOF, feed_path=str(FEED))
         payload = service.smile({"pair": "USDJPY", "expiry": "2024-05-28",
                                  "method": "SVI", "cut": "TK"})
-        level = service.book.market_level("USDJPY", payload["t"])
+        book = service.book
+        expiry = date(2024, 5, 28)
+        # One lookup, and it is the settlement-date one: the chart's axis
+        # scale, the band model's placement and `market_level_for` are the
+        # same number, and the payload says which date it is a price to.
+        level = book.market_level_for("USDJPY", expiry)
         self.assertEqual(payload["forward"], level["forward"])
-        self.assertEqual(payload["forward"], service.book.forward_at("USDJPY", payload["t"]))
+        self.assertEqual(payload["settle"], level["settle"])
+        self.assertEqual(payload["settle"],
+                         book.settlement_date("USDJPY", expiry).isoformat())
+        self.assertEqual(payload["forward"],
+                         book.forward_at("USDJPY", payload["t"], expiry=expiry))
+        # and it is *not* the plain time reading, which drops the spot lag
+        self.assertNotEqual(payload["forward"],
+                            book.market_level("USDJPY", payload["t"])["forward"])
         # A pair the feed does not cover says so rather than guessing a level.
         self.assertFalse(service.book.market_level("XXXYYY", 0.25)["feed"])
         self.assertIsNone(service.book.forward_at("XXXYYY", 0.25))
@@ -4978,23 +5358,27 @@ class TestCurveComparison(unittest.TestCase):
         self.assertEqual(r["base"], 1)
         self.assertTrue(r["curves"][1]["is_base"])
 
-    def test_a_pasted_curve_decides_its_unit_once_from_the_level_column(self):
-        """0.35 is an ordinary risk reversal in points and an ordinary
-        at-the-money in decimals; letting a wing vote returns it 100x."""
+    def test_a_pasted_curve_is_read_in_points_as_written(self):
+        """The level is not evidence of the unit (§4): a managed pair's whole
+        curve sits below 1.0, and reading that as decimals put it on the
+        monitor at a hundred times its mark."""
         from volkit import curves
         c = curves.parse_pasted_curve("1M 8.20 -0.35 0.22\n3M 8.45")
         self.assertTrue(c.ok)
         self.assertAlmostEqual(c.at("1M").values["atm"], 0.0820)
         self.assertAlmostEqual(c.at("1M").values["rr25"], -0.0035)
         self.assertIsNone(c.at("3M").values["rr25"])
-        dec = curves.parse_pasted_curve("1M 0.0820 -0.0035")
-        self.assertAlmostEqual(dec.at("1M").values["atm"], 0.0820)
+        low = curves.parse_pasted_curve("1M 0.35 -0.02")
+        self.assertTrue(low.ok)
+        self.assertAlmostEqual(low.at("1M").values["atm"], 0.0035)
+        self.assertIn("volatility points", low.source)
 
-    def test_a_pasted_curve_that_straddles_one_is_refused_not_guessed(self):
+    def test_a_pasted_curve_that_straddles_one_is_read_and_not_refused(self):
         from volkit import curves
-        c = curves.parse_pasted_curve("1M 8.20\n3M 0.0845")
-        self.assertFalse(c.ok)
-        self.assertIn("straddle", c.message)
+        c = curves.parse_pasted_curve("1M 8.20\n3M 0.35")
+        self.assertTrue(c.ok)
+        self.assertAlmostEqual(c.at("1M").values["atm"], 0.0820)
+        self.assertAlmostEqual(c.at("3M").values["atm"], 0.0035)
         bad = curves.parse_pasted_curve("1M\n3M 8.4")
         self.assertFalse(bad.ok)
         self.assertIn("line 1", bad.message)
@@ -5123,6 +5507,48 @@ class TestWebAssets(unittest.TestCase):
         # esprima tops out at ES2017; downlevel the two newer operators used.
         probe = _re.sub(r"\?\.", ".", js.replace("??", " || "))
         esprima.parseScript(probe)
+
+    def test_the_settlement_date_is_an_input_row_and_is_not_repeated_below(self):
+        """It moved from Results to Inputs when it turned out to be a box.
+
+        The rule it moved under is the one it used to be an example of: a
+        Results row may not repeat an input box.  Left in both places it
+        would be one date typed in one place and shown in another, which is
+        the disagreement that rule exists to prevent.
+        """
+        html = _source("volkit", "web", "index.html")
+        ins = html.split("const IN=[")[1].split("];")[0]
+        outs = html.split("const OUT=[")[1].split("];")[0]
+        self.assertIn("['settle','Settlement','text']", ins)
+        # Under Expiry, because that is the date it is built from.
+        self.assertLess(ins.index("'expiry'"), ins.index("'settle'"))
+        self.assertNotIn("['settle',", outs)
+        # And the one market fact that is *not* a box stays where it was.
+        self.assertIn("['market_source','Market'", outs)
+
+    def test_the_screen_tells_the_server_where_each_of_its_boxes_came_from(self):
+        """The page owns this panel, so provenance is the page's to state.
+
+        It fills spot, the swap and the settlement date and then posts what
+        is in the boxes, so nothing downstream can tell a level it filled
+        from one somebody typed.  The three source flags are the page saying
+        which is which; without them the Market row read `typed` for every
+        leg, including after `Refresh spot` had just put them all back on the
+        feed.
+        """
+        html = _source("volkit", "web", "index.html")
+        # Priced legs are posted whole, so the flags travel with them.
+        self.assertIn("post('/api/price',{legs:LEGS})", html)
+        # The two routes that post a cut-down leg have to name them.
+        for fn in ("async function resolveLegs(force){", "async function refreshFeed(){"):
+            body = html.split(fn)[1].split("\n}")[0]
+            for field in ("pair:L.pair", "expiry:L.expiry",
+                          "settle:L.settle", "settlesrc:L.settlesrc"):
+                self.assertIn(field, body, fn)
+        # And the server reads all three names.
+        py = _source("volkit", "webapp.py")
+        for name in ('row.get("settlesrc")', 'row.get("spotsrc")', 'row.get("fwdsrc")'):
+            self.assertIn(name, py)
 
     def test_a_table_body_given_as_one_string_is_not_joined(self):
         """`rows.join is not a function`, on the band card's Fit from the wings.
@@ -5339,6 +5765,114 @@ class TestWebAssets(unittest.TestCase):
         self.assertIn("put back on the feed", body)
         self.assertIn("$('#feedrefresh').onclick=()=>refreshFeed()", js)
 
+    def test_the_vol_query_asks_in_a_strike_or_a_delta_but_never_both(self):
+        """Two boxes for one point on the smile, and only one of them is the
+        request.
+
+        A box that can be filled in and is then ignored is a silent zero with
+        a cursor in it, so typing in one clears the other and the resolution
+        goes into the *placeholder* of the box that was left empty -- greyed
+        out, so it cannot be mistaken for something typed and cannot be posted
+        back as though it had been.
+        """
+        page = _source("volkit", "web", "index.html")
+        js = page.split("<script>")[1]
+        self.assertIn('id="vqstrike"', page)
+        self.assertIn('id="vqdelta"', page)
+        # Each clears the other as it is typed, not at the run.
+        self.assertIn("$('#vqstrike').oninput", js)
+        self.assertIn("$('#vqdelta').oninput", js)
+        # One request goes to the server, and the delta box is the one that
+        # gains the `d` the server's grammar wants.
+        ask = js.split("function vqAsk(){")[1].split("\n}")[0]
+        self.assertIn("vqDeltaText", ask)
+        self.assertIn("strike:vqAsk()", js.replace(" ", ""))
+        # The resolution lands in the placeholders, never in the values.
+        hints = js.split("function vqHints(r){")[1].split("\n}")[0]
+        self.assertIn("placeholder", hints)
+        self.assertNotIn(".value=", hints)
+        # ...and the answer the server sends carries both readings.
+        vol = _source("volkit", "pricing.py").split("def quick_vol(")[1].split("\n@dataclass")[0]
+        self.assertIn('"delta"', vol)
+        self.assertIn('"delta_is_call"', vol)
+
+    def test_the_screens_offer_only_the_cuts_this_desk_marks_on(self):
+        """The model knows four cuts; the selectors offer two.
+
+        Filtered in one place rather than at each of the six selectors, and
+        filtered in the *page* rather than in `atm.CUTS`, because the command
+        line still answers for any of them and the model is not what the desk
+        chose to stop looking at.
+        """
+        page = _source("volkit", "web", "index.html")
+        js = page.split("<script>")[1]
+        self.assertIn("const SHOWN_CUTS=['TK','NY']", js)
+        # Nothing reaches a selector except through the filter: the whole page
+        # names `STATE.cuts` once, inside it.
+        self.assertEqual(js.count("STATE.cuts"), 1)
+        self.assertIn("const all=STATE.cuts||[];",
+                      js.split("function cutList(){")[1].split("\n}")[0])
+        for sel in ("#mcut", "#ancut", "#mocut", "#mmcut"):
+            self.assertIn("fillSel('%s',cutList()," % sel, js)
+        # The model itself still has all four: this is a screen preference.
+        from volkit.atm import CUTS
+        self.assertEqual(sorted(CUTS), ["HK", "LDN", "NY", "TK"])
+
+    def test_the_marking_screen_opens_on_the_pair_it_marks_first(self):
+        """A preference about one screen, so it lives on that screen.
+
+        Every other selector still takes the workbook's own first pair, and
+        `fillSel` keeps whatever is already chosen -- so this is the value on
+        a cold load and a reload does not move the screen.
+        """
+        page = _source("volkit", "web", "index.html")
+        js = page.split("<script>")[1]
+        self.assertIn("const MARKING_PAIR='USDCNH'", js)
+        self.assertIn("fillSel('#mpair',STATE.pairs||[],markingPair())", js)
+        # A workbook with no CNH pair falls back to the first, as before.
+        self.assertIn("all.indexOf(MARKING_PAIR)>=0", js)
+
+    def test_the_atm_table_is_readable_with_the_overwrite_column_shut(self):
+        """Two columns sit beside each other; three fill the card.
+
+        Stretched across the card a two-column table puts the tenor at one
+        edge and its volatility at the other, which is a row read across an
+        inch of nothing.  And the tenor a morning is read against is
+        highlighted where it stands, rather than moved or pinned out of the
+        term structure it belongs to.
+        """
+        page = _source("volkit", "web", "index.html")
+        js = page.split("<script>")[1]
+        paint = js.split("function paintMarks(){")[1].split("\nasync function loadMarks")[0]
+        self.assertIn("$('#matm').className='mark'+(ow?'':' tight')", paint)
+        self.assertIn("table.mark.tight{width:auto", page)
+        self.assertIn("isKeyTenor(r.tenor)?' class=\"key\"':''", paint)
+        self.assertIn("table.mark tr.key td", page)
+        self.assertIn("const KEY_TENOR='1M'", js)
+
+    def test_a_volatility_is_shown_to_two_decimals_everywhere(self):
+        """One place decides, so two tables cannot disagree about a number.
+
+        The desk quotes volatility to a hundredth of a point; four decimals
+        is two columns of noise to scan past.  What is *typed* keeps its full
+        precision -- an overwrite box holds the mark as it was marked, not as
+        it is displayed -- so nothing is rounded by being looked at.
+        """
+        page = _source("volkit", "web", "index.html")
+        js = page.split("<script>")[1]
+        self.assertIn("const VOLDP=2", js)
+        self.assertIn("const vnum=v=>num(v,VOLDP)", js)
+        self.assertIn("const vsgn=v=>sgn(v,VOLDP)", js)
+        # The screens a marker reads first go through it.
+        paint = js.split("function paintMarks(){")[1].split("\nasync function loadMarks")[0]
+        self.assertIn("vnum(r.cut)", paint)
+        self.assertIn("['vol','Vol %',v=>vnum(v),'big']", js)
+        self.assertIn("+vnum(r.vol)+", js)          # the vol query's one number
+        self.assertIn("const anPct=(v,d=VOLDP)=>", js)   # the analysis screen
+        self.assertIn("const anSgn=(v,d=VOLDP)=>", js)
+        # The overwrite the marker types is not rounded to what is displayed.
+        self.assertIn("(r.overwrite*100).toFixed(4)", paint)
+
     def test_the_marking_tables_hide_nothing_that_has_been_marked(self):
         """The ATM table lost its curve column and its overwrite column is a
         disclosure; the whole smile-parameter card is another.  Both are shut
@@ -5366,6 +5900,36 @@ class TestWebAssets(unittest.TestCase):
         self.assertIn("owdot", paint)
         self.assertIn("msmilenote", paint)
         self.assertIn("overwritten", paint)
+        # A marked term structure replaces the fitted curve at *every* expiry,
+        # so a shut card that counted only per-tenor overwrites would hide the
+        # broadest mark on the screen.
+        self.assertIn("curve", paint)
+        self.assertIn("marked", paint)
+
+    def test_a_marked_term_structure_is_posted_as_a_whole_row(self):
+        """Three coefficients are one curve.
+
+        Sent one at a time, two of every three requests would ask the server
+        to hold a shape nobody typed -- a rho of the old initial and the new
+        final -- and the middle one could be refused as out of domain while
+        the row the marker sees is perfectly sensible.  So the browser reads
+        the row and posts it whole, and the coefficients it names are the
+        ones the route reads.
+        """
+        import re as _re
+        from volkit.surface import TERM_COEFFS
+        html = _source("volkit", "web", "index.html")
+        js = html.split("<script>")[1].split("</script>")[0]
+        decl = js.split("const TERMC=[")[1].split("];")[0]
+        self.assertEqual(_re.findall(r"'([a-z]+)'", decl), list(TERM_COEFFS))
+        body = js.split("function termBody(param){")[1].split("\n}")[0]
+        # Every coefficient is read off the row, and a blank box falls back to
+        # the fitted value it is showing rather than to zero.
+        self.assertIn("TERMC.map", body)
+        self.assertIn("placeholder", body)
+        apply_ = js.split("async function applyMark(el){")[1].split("\n}")[0]
+        self.assertIn("kind:'smile_term'", apply_.replace(" ", ""))
+        self.assertIn("kind:'clear_smile_term'", apply_.replace(" ", ""))
 
     def test_every_class_the_script_looks_up_is_one_it_emits(self):
         """The panel shell and the painter that fills it are different functions.
@@ -5651,7 +6215,7 @@ class TestWebAssets(unittest.TestCase):
         for f in fields:
             self.assertIn(f'"{f}"', handler, f"the server never reads {f!r}")
         panel = src.split("def panel_from_request")[1]
-        for f in ("cut", "method", "field", "tiles"):
+        for f in ("cut", "method", "field", "tiles", "big"):
             self.assertIn(f'"{f}"', panel, f"the server never reads {f!r}")
 
     def test_the_relative_value_panel_fields_are_all_understood_by_the_server(self):
@@ -5710,6 +6274,111 @@ class TestWebAssets(unittest.TestCase):
         self.assertEqual(refs - ids - {"c1"}, set())
 
 
+class TestSmileTermStructureMarks(unittest.TestCase):
+    """The three coefficients behind each smile parameter, marked by hand.
+
+    Every smile parameter already had a term structure -- ``final - (final -
+    initial) * exp(-decay t)``, fitted across the quoted tenors -- but it was
+    computed, shipped on ``/api/term``, and shown nowhere, so the only handles
+    on a wing's *shape* across expiries were a per-tenor overwrite and the
+    market maker's curve-wide shift.  A marked curve is kept beside the fitted
+    one rather than written into it, which is what these pin.
+    """
+
+    def surface(self):
+        return Book.from_excel(WORKBOOK, ASOF).load_all(["EURUSD"])["EURUSD"]
+
+    def test_a_marked_curve_replaces_the_fitted_one_and_clearing_gives_it_back(self):
+        s = self.surface()
+        t = s.tenor_years("3M")
+        before = s.params_at(t)
+        self.assertEqual(s.set_param_term("rho10", -0.2, -0.05, 1.5), [])
+        after = s.params_at(t)
+        self.assertAlmostEqual(after["rho10"], -0.05 - (-0.05 - -0.2) * math.exp(-1.5 * t))
+        # ...and only that parameter moved.
+        for name in ("slog10", "slog25", "rho25"):
+            self.assertAlmostEqual(after[name], before[name], places=12)
+        s.clear_param_terms("rho10")
+        self.assertAlmostEqual(s.params_at(t)["rho10"], before["rho10"], places=12)
+
+    def test_a_refit_does_not_discard_a_marked_curve(self):
+        """Why ``term_marks`` is a second dict and not an assignment into
+        ``term``: the cross triangle recalibrates a leg in place, and a
+        workbook export recalibrates every pair, so a mark written into the
+        fitted dict would vanish somewhere no screen would ever show.
+        """
+        s = self.surface()
+        s.set_param_term("rho10", -0.2, -0.05, 1.5)
+        t = s.tenor_years("3M")
+        marked = s.params_at(t)["rho10"]
+        s.calibrate()
+        self.assertAlmostEqual(s.params_at(t)["rho10"], marked, places=12)
+        self.assertIsNotNone(s.term.get("rho10"), "the fit is still underneath it")
+
+    def test_a_bad_coefficient_is_refused_whole(self):
+        """Half a curve is not a curve.  A rejected set leaves the parameter
+        exactly as it was, and the message quotes the number that was typed.
+        """
+        s = self.surface()
+        t = s.tenor_years("3M")
+        before = s.params_at(t)["rho10"]
+        for args, wanted in ((("rho10", -1.0, -0.05, 1.5), "strictly inside"),
+                             (("rho10", -0.2, -0.05, -1.0), "must not be negative"),
+                             (("slog25", 0.0, 0.6, 1.0), "must be positive"),
+                             (("slog25", float("nan"), 0.6, 1.0), "finite")):
+            problems = s.set_param_term(*args)
+            self.assertTrue(problems, args)
+            self.assertIn(wanted, problems[0])
+            self.assertEqual(s.term_marks, {}, args)
+        self.assertAlmostEqual(s.params_at(t)["rho10"], before, places=12)
+
+    def test_the_shift_and_the_marked_curve_compose(self):
+        """A wing shift is additive on whatever curve is in force, so it has
+        to read the marked one -- a shift measured against a curve the surface
+        is no longer using is a shift the market maker cannot reason about.
+        """
+        s = self.surface()
+        t = s.tenor_years("3M")
+        s.set_param_term("rho10", -0.2, -0.05, 1.5)
+        plain = s.params_at(t)["rho10"]
+        s.set_param_shifts({"rho10": 0.03})
+        self.assertAlmostEqual(s.params_at(t)["rho10"], plain + 0.03, places=12)
+        # And a shift that would push the marked curve out of the domain is
+        # reported rather than silently clamped.
+        s.set_param_shifts({"rho10": 1.5})
+        self.assertTrue([w for w in s.shift_warnings() if "rho10" in w])
+
+    def test_the_route_marks_a_curve_and_the_grid_reports_it(self):
+        from volkit.webapp import BookService
+        svc = BookService(str(WORKBOOK), clock=ASOF)
+        svc.reload()
+        rows = {r["param"]: r for r in svc.marks({"pair": "EURUSD", "cut": "NY"})["term"]}
+        self.assertEqual(sorted(rows), ["rho10", "rho25", "slog10", "slog25"])
+        self.assertIsNone(rows["rho10"]["marked"])
+        self.assertIn("decay", rows["rho10"]["fitted"])
+        svc.overwrite({"pair": "EURUSD", "kind": "smile_term", "param": "rho10",
+                       "initial": "-0.2", "final": "-0.05", "decay": "1.5"})
+        rows = {r["param"]: r for r in svc.marks({"pair": "EURUSD", "cut": "NY"})["term"]}
+        self.assertEqual(rows["rho10"]["marked"],
+                         {"initial": -0.2, "final": -0.05, "decay": 1.5})
+        # An empty box is named rather than read as a zero.
+        with self.assertRaises(ValueError) as caught:
+            svc.overwrite({"pair": "EURUSD", "kind": "smile_term", "param": "rho10",
+                           "initial": "", "final": "-0.05", "decay": "1.5"})
+        self.assertIn("initial", str(caught.exception))
+        svc.overwrite({"pair": "EURUSD", "kind": "clear_smile_term"})
+        self.assertTrue(all(r["marked"] is None
+                            for r in svc.marks({"pair": "EURUSD", "cut": "NY"})["term"]))
+
+    def test_the_workbook_row_grammar_reads_what_the_export_writes(self):
+        from volkit.marketdata import overlay_label
+        self.assertEqual(overlay_label("term rho10 decay"), ("term", "rho10", "decay"))
+        self.assertEqual(overlay_label("TERM  Rho25  Initial"), ("term", "rho25", "initial"))
+        # A row the tool would not read must not sit there looking read.
+        for bad in ("term rho10", "term rho10 slope", "term bogus final"):
+            self.assertIsNone(overlay_label(bad), bad)
+
+
 class TestSessionFile(unittest.TestCase):
     """Saving the marks a session made, and putting them back.
 
@@ -5725,6 +6394,7 @@ class TestSessionFile(unittest.TestCase):
         surface = book["USDJPY"]
         surface.atm.overwrite_tenor("1m", 0.0925)
         surface.overwrite_param("slog25", "3M", 0.61)
+        surface.set_param_term("rho10", -0.2, -0.05, 1.5)
         surface.set_param_shifts({"rho25": 0.05})
         surface.anchor_tenors = True
         surface.atm.set_params(long_term_vol=0.081)
@@ -5782,19 +6452,28 @@ class TestSessionFile(unittest.TestCase):
         self.assertEqual(book["USDJPY"].param_shifts, {"rho25": 0.05})
 
     def test_event_weights_and_adjustment_survive_the_round_trip(self):
-        """The file holds the parts and the total in points, so a file
-        written before events had parts -- a bump alone -- still loads, as an
-        adjustment."""
+        """The file holds the whole event table -- a row per release, weights
+        per currency and an adjustment per pair -- and each pair block keeps
+        its resolved schedule for the record."""
         from volkit import session
         from volkit.events import EventEntry
         book = Book.from_excel(WORKBOOK, ASOF).load_all(["USDJPY"])
         when = (ASOF.now + timedelta(days=13)).replace(hour=16, minute=0, second=0, microsecond=0)
-        book["USDJPY"].atm.set_events([EventEntry(when, None, "FOMC", {"USD": 0.015, "JPY": 0.003}, 0.002)])
+        # A mark goes onto the table, which is what reaches the curves; a
+        # currency weight is shared and has nowhere else to live.
+        book.events.set_pair("USDJPY", [
+            EventEntry(when, None, "FOMC", {"USD": 0.015, "JPY": 0.003}, 0.002)],
+            pairs=book.data.pairs)
+        book.apply_events()
         doc = session.capture(book, ["USDJPY"])
         row = doc["pairs"]["USDJPY"]["events"][0]
         self.assertAlmostEqual(row["bump"], 2.0)
         self.assertAlmostEqual(row["weights"]["JPY"], 0.3)
         self.assertAlmostEqual(row["adjust"], 0.2)
+        table = doc["event_table"][0]
+        self.assertAlmostEqual(table["weights"]["USD"], 1.5)
+        self.assertAlmostEqual(table["adjust"]["USDJPY"], 0.2)
+
         fresh = Book.from_excel(WORKBOOK, ASOF).load_all(["USDJPY"])
         out = session.apply_document(fresh, doc)
         self.assertEqual(out["problems"], [])
@@ -5802,40 +6481,77 @@ class TestSessionFile(unittest.TestCase):
         self.assertAlmostEqual(ev.bump, 0.020)
         self.assertAlmostEqual(ev.weights["JPY"], 0.003)
         self.assertAlmostEqual(ev.adjust, 0.002)
-        old = {"pairs": {"USDJPY": {"events": [{"when": when.strftime("%Y-%m-%dT%H:%M"),
-                                                "bump": 1.25, "label": "OLD"}]}}}
-        session.apply_document(fresh, old)
+
+    def test_a_file_from_before_the_event_table_is_rebuilt_from_its_pairs(self):
+        """An older session file spread the same events across its pairs.  A
+        currency weight was shared even then, so the table is unioned back
+        out of them rather than the events being dropped."""
+        from volkit import session
+        fresh = Book.from_excel(WORKBOOK, ASOF).load_all(["USDJPY"])
+        when = (ASOF.now + timedelta(days=13)).replace(hour=16, minute=0, second=0, microsecond=0)
+        old = {"pairs": {"USDJPY": {"events": [
+            {"when": when.strftime("%Y-%m-%dT%H:%M"), "bump": 1.25, "label": "OLD"}]}}}
+        out = session.apply_document(fresh, old)
+        self.assertEqual(out["problems"], [])
+        self.assertTrue(any("rebuilt from its pairs" in n for n in out["notes"]), out["notes"])
         ev = fresh["USDJPY"].atm.events.events[0]
         self.assertAlmostEqual(ev.bump, 0.0125)
         self.assertAlmostEqual(ev.adjust, 0.0125)
 
-    def test_the_weight_table_is_saved_with_the_session(self):
+    def test_two_pairs_disagreeing_about_a_currency_weight_are_reported(self):
+        """In an older file the same weight sat in two pair blocks and could
+        drift apart.  Rebuilding the table names the disagreement rather than
+        averaging it -- §4, a total that disagrees with its parts is refused."""
         from volkit import session
-        book = Book.from_excel(WORKBOOK, ASOF).load_all(["USDJPY"])
-        book.econ.set_weight("FOMC", "JPY", 0.3)
+        fresh = Book.from_excel(WORKBOOK, ASOF).load_all(["USDJPY", "EURUSD"])
+        when = (ASOF.now + timedelta(days=13)).replace(hour=16, minute=0, second=0, microsecond=0)
+        stamp = when.strftime("%Y-%m-%dT%H:%M")
+        old = {"pairs": {
+            "USDJPY": {"events": [{"when": stamp, "weights": {"USD": 1.5, "JPY": 0.0},
+                                   "adjust": 0.0, "label": "FOMC"}]},
+            "EURUSD": {"events": [{"when": stamp, "weights": {"USD": 2.0, "EUR": 0.0},
+                                   "adjust": 0.0, "label": "FOMC"}]}}}
+        out = session.apply_document(fresh, old)
+        self.assertTrue(any("disagrees" in p and "USD" in p for p in out["problems"]),
+                        out["problems"])
+
+    def test_the_event_table_is_saved_with_the_session(self):
+        from volkit import session
+        from volkit.events import EventEntry
+        book = Book.from_excel(WORKBOOK, ASOF).load_all(["USDJPY", "EURUSD"])
+        when = (ASOF.now + timedelta(days=13)).replace(hour=16, minute=0, second=0, microsecond=0)
+        book.events.set_pair("USDJPY", [EventEntry(when, None, "FOMC", {"USD": 0.015}, 0.0)],
+                             pairs=book.data.pairs)
+        book.apply_events()
         doc = session.capture(book, ["USDJPY"])
-        self.assertEqual(doc["event_weights"]["FOMC"], {"USD": 1.5, "JPY": 0.3})
-        fresh = Book.from_excel(WORKBOOK, ASOF).load_all(["USDJPY"])
+        self.assertEqual(len(doc["event_table"]), 1)
+        fresh = Book.from_excel(WORKBOOK, ASOF).load_all(["USDJPY", "EURUSD"])
         out = session.apply_document(fresh, doc)
         self.assertEqual(out["problems"], [])
-        self.assertEqual(fresh.econ.weights["FOMC"], {"USD": 1.5, "JPY": 0.3})
-        # A file from before the table existed leaves the defaults alone.
+        # Saved for one pair, restored for the book: the weight is the
+        # dollar's, so EURUSD takes it too.
+        self.assertAlmostEqual(fresh["EURUSD"].atm.events.events[0].bump, 0.015)
+        # A file from before the table existed leaves the book's alone.
         older = Book.from_excel(WORKBOOK, ASOF).load_all(["USDJPY"])
+        before = len(older.events.rows)
         session.apply_document(older, {"pairs": {}})
-        self.assertEqual(older.econ.weights["FOMC"], {"USD": 1.5})
+        self.assertEqual(len(older.events.rows), before)
 
     def test_events_are_replaced_and_not_merged(self):
-        """A saved schedule is the whole schedule.
+        """A saved table is the whole table.
 
         Merging would double every release that appears in both the workbook
         and the file, which nothing downstream could tell from a real bump.
         """
         from volkit import session
+        from volkit.events import EventEntry
         book = Book.from_excel(WORKBOOK, ASOF).load_all(["EURUSD"])
         when = ASOF.now + timedelta(days=10)
-        book["EURUSD"].atm.set_events([(when, 0.004, "TEST")])
+        book.events.set_pair("EURUSD", [EventEntry(when, None, "TEST", {}, 0.004)],
+                             pairs=book.data.pairs)
+        book.apply_events()
         doc = session.capture(book, ["EURUSD"])
-        self.assertEqual(len(doc["pairs"]["EURUSD"]["events"]), 1)
+        self.assertEqual(len(doc["event_table"]), 1)
         fresh = Book.from_excel(WORKBOOK, ASOF).load_all(["EURUSD"])
         session.apply_document(fresh, doc)
         self.assertEqual(len(fresh["EURUSD"].atm.events.events), 1)
@@ -5901,13 +6617,19 @@ class TestSessionIntoWorkbook(unittest.TestCase):
         s = book["USDJPY"]
         s.atm.overwrite_tenor("1m", 0.0925)
         s.overwrite_param("slog25", "3M", 0.61)
+        s.set_param_term("rho10", -0.2, -0.05, 1.5)
         s.set_param_shifts({"rho25": 0.05})
         s.anchor_tenors = True
         s.atm.set_params(long_term_vol=0.081)
         # A Tuesday release, with weights on both legs and an adjustment.
+        # It goes on the book's event table, which is where every event lives:
+        # the USD weight is EURUSD's too, and the 0.2 adjustment is USDJPY's
+        # alone.
         when = (ASOF.now + timedelta(days=13)).replace(hour=13, minute=30)
-        s.atm.set_events([EventEntry(when, None, "NFP", {"USD": 0.004, "JPY": 0.001},
-                                     0.002).resolve("USDJPY")])
+        book.events.set_pair("USDJPY", [
+            EventEntry(when, None, "NFP", {"USD": 0.004, "JPY": 0.001}, 0.002)],
+            pairs=book.data.pairs)
+        book.apply_events()
         s.set_band_treatment(BandTreatment.from_request({"mode": "warn", "hazard": 3}))
         book["EURJPY"].atm.correlation  # a cross: its curve is a correlation
         path = tmp / "marks.json"
@@ -5950,6 +6672,10 @@ class TestSessionIntoWorkbook(unittest.TestCase):
             self.assertAlmostEqual(s.atm.tenor_overwrites["1m"], 0.0925)
             self.assertEqual(s.param_overwrites, {"slog25": {"3M": 0.61}})
             self.assertEqual(s.param_shifts, {"rho25": 0.05})
+            self.assertEqual(sorted(s.term_marks), ["rho10"])
+            self.assertAlmostEqual(s.term_marks["rho10"].initial, -0.2)
+            self.assertAlmostEqual(s.term_marks["rho10"].final, -0.05)
+            self.assertAlmostEqual(s.term_marks["rho10"].decay, 1.5)
             self.assertTrue(s.anchor_tenors)
             self.assertAlmostEqual(s.band_treatment.jump.hazard, 0.03)
             ev = s.atm.events.events[-1]
@@ -6013,10 +6739,12 @@ class TestSessionIntoWorkbook(unittest.TestCase):
         self.assertAlmostEqual(
             openpyxl.load_workbook(out, data_only=True)["USDJPY"]["B2"].value, 0.6525)
 
-    def test_a_shared_weight_does_not_reach_a_pair_whose_file_has_no_event(self):
-        """USD 0.4 on the NFP row belongs to every pair with a dollar in it.
-        EURUSD's saved schedule is empty, so its own cell cancels the legs --
-        the weight itself is not zeroed, because it is USDJPY's too."""
+    def test_the_events_sheet_is_written_whole_and_a_weight_reaches_every_pair(self):
+        """USD 0.4 on the NFP row belongs to every pair with a dollar in it,
+        so the sheet is written once from the file's one table rather than
+        pair by pair.  The old export wrote a pair's view of a shared weight
+        and then had to cancel it in every other pair's column; a table
+        written whole has nothing to cancel."""
         import shutil
         import tempfile
         from volkit import session
@@ -6026,15 +6754,25 @@ class TestSessionIntoWorkbook(unittest.TestCase):
             shutil.copy(WORKBOOK, wb)
             _, doc = self.marked_session(tmp)
             out = session.export_workbook(doc, wb)
-            self.assertTrue(any("EURUSD: the file has no event" in n for n in out["notes"]))
+            self.assertEqual(out["problems"], [])
+            self.assertTrue(any("EVENTS" in n and "written whole" in n for n in out["notes"]),
+                            out["notes"])
             copy = Book.from_excel(out["written"], ASOF).load_all(["EURUSD", "USDJPY"])
-            live = [e for e in copy["EURUSD"].atm.events.events if e.when > ASOF.now]
-            self.assertEqual([e.bump for e in live], [0.0])
-            self.assertAlmostEqual(live[0].adjust, -0.004)
-            self.assertEqual(copy["USDJPY"].atm.events.events[-1].weights,
-                             {"USD": 0.004, "JPY": 0.001})
+            self.assertEqual(copy.data.problems, [], copy.data.problems)
+            # One row, and both pairs read it: EURUSD takes the dollar leg
+            # alone, USDJPY takes both legs and its own cell.
+            eu = [e for e in copy["EURUSD"].atm.events.events if e.when > ASOF.now]
+            self.assertEqual([round(e.bump, 12) for e in eu], [0.004])
+            self.assertAlmostEqual(eu[0].adjust, 0.0)
+            uj = copy["USDJPY"].atm.events.events[-1]
+            # A named release keeps its name through the sheet.
+            self.assertEqual(uj.label, "NFP")
+            self.assertEqual(uj.weights, {"USD": 0.004, "JPY": 0.001})
+            self.assertAlmostEqual(uj.bump, 0.007)
+            self.assertAlmostEqual(uj.adjust, 0.002)
 
     def test_writing_over_the_workbook_itself_needs_in_place(self):
+        import hashlib
         import shutil
         import tempfile
         from volkit import session
@@ -6042,16 +6780,31 @@ class TestSessionIntoWorkbook(unittest.TestCase):
             tmp = Path(tmp)
             wb = tmp / "vol_marks.xlsx"
             shutil.copy(WORKBOOK, wb)
+            before = hashlib.md5(wb.read_bytes()).hexdigest()
             _, doc = self.marked_session(tmp)
             with self.assertRaises(session.SessionError):
                 session.export_workbook(doc, wb, wb)
             out = session.export_workbook(doc, wb, wb, in_place=True)
             self.assertEqual(Path(out["written"]), wb)
+            # The bytes it replaced are kept beside it: openpyxl does not
+            # carry images or charts through a round trip, so the backup is
+            # the only way back from an export.
+            self.assertTrue(out["backup"], out["notes"])
+            bak = Path(out["backup"])
+            self.assertTrue(bak.exists())
+            self.assertEqual(hashlib.md5(bak.read_bytes()).hexdigest(), before)
+            self.assertTrue(bak.name.startswith("vol_marks.bak-"))
+            self.assertTrue(any("kept at" in n for n in out["notes"]), out["notes"])
             copy = Book.from_excel(wb, ASOF).load_all(["USDJPY"])
             self.assertAlmostEqual(copy["USDJPY"].atm.tenor_overwrites["1m"], 0.0925)
             # A second export onto the same file reuses its rows rather than
-            # adding another 'atm 1m' under the first.
-            session.export_workbook(doc, wb, wb, in_place=True)
+            # adding another 'atm 1m' under the first.  It also names no
+            # output: in_place *is* the destination -- naming none and asking
+            # for in place used to write the ``_marked`` copy and report it
+            # as having gone into the workbook.
+            again = session.export_workbook(doc, wb, in_place=True)
+            self.assertEqual(Path(again["written"]), wb)
+            self.assertFalse((tmp / "vol_marks_marked.xlsx").exists())
             import openpyxl
             labels = [r[0] for r in openpyxl.load_workbook(wb)["PARAMS"]
                       .iter_rows(min_row=2, values_only=True) if r[0] is not None]
@@ -6088,7 +6841,7 @@ class TestSessionIntoWorkbook(unittest.TestCase):
         self.assertIsNone(overlay_label("atm soon"))
         self.assertIsNone(overlay_label("initial"))
 
-    def test_the_cli_and_the_route_write_a_copy_and_never_the_workbook(self):
+    def test_the_cli_writes_a_copy_and_the_route_writes_the_workbook_itself(self):
         import hashlib
         import io
         import shutil
@@ -6112,14 +6865,30 @@ class TestSessionIntoWorkbook(unittest.TestCase):
             self.assertEqual(hashlib.md5(wb.read_bytes()).hexdigest(), before)
 
             service = BookService(str(wb), ASOF)
+            # A named output is still a copy, and leaves the workbook alone.
             out = service.session_export({"path": str(tmp / "marks.json"),
                                           "out": str(tmp / "via_route.xlsx")})
             self.assertTrue(out["ok"], out["problems"])
             self.assertEqual(Path(out["written"]), tmp / "via_route.xlsx")
+            self.assertFalse(out["backup"])
             self.assertEqual(hashlib.md5(wb.read_bytes()).hexdigest(), before)
-            # The route has no in-place spelling at all.
+            # Naming a *named* output that is the workbook is still refused:
+            # `out` means a copy there, and the in-place write is the one the
+            # button asks for by naming nothing.
             with self.assertRaises(Exception):
                 service.session_export({"path": str(tmp / "marks.json"), "out": str(wb)})
+
+            # With no output named the route writes the loaded workbook, and
+            # the marks it wrote read back through the ordinary reader.
+            out = service.session_export({"path": str(tmp / "marks.json")})
+            self.assertTrue(out["ok"], out["problems"])
+            self.assertEqual(Path(out["written"]), wb)
+            self.assertTrue(out["in_place"])
+            self.assertNotEqual(hashlib.md5(wb.read_bytes()).hexdigest(), before)
+            self.assertEqual(hashlib.md5(Path(out["backup"]).read_bytes()).hexdigest(),
+                             before)
+            back = Book.from_excel(wb, ASOF).load_all(["USDJPY"])
+            self.assertAlmostEqual(back["USDJPY"].atm.tenor_overwrites["1m"], 0.0925)
 
 
 class TestMonitorScreen(unittest.TestCase):
@@ -6204,6 +6973,87 @@ class TestMonitorScreen(unittest.TestCase):
         from volkit.curves import CurveError
         with self.assertRaises(CurveError):
             monitor.Tile(pair="EURUSD", was_kind="paste")
+
+    def test_a_big_move_is_graded_against_the_threshold_it_was_given(self):
+        """The eye has to find the handful that matter in a few hundred cells.
+
+        The grade is the model's, not the browser's, so the screen and
+        ``volkit monitor`` mark the same cells.  Two tiers: at the threshold
+        and at twice it.
+        """
+        from volkit import monitor
+        book = self.book()
+        big = 0.0025  # a quarter of a volatility point, in decimals
+        tile = monitor.run_tile(monitor.Tile(pair="EURUSD"), book, self.history(book),
+                                big=big)
+        seen = 0
+        for row in tile.rows:
+            for f, change in row["change"].items():
+                grade = row["grade"][f]
+                if change is None:
+                    self.assertEqual(grade, 0)
+                    continue
+                seen += 1
+                want = 2 if abs(change) >= 2 * big else (1 if abs(change) >= big else 0)
+                self.assertEqual(grade, want, f"{row['tenor']} {f} = {change}")
+        self.assertTrue(seen, "no change was graded at all")
+        self.assertEqual(tile.moved,
+                         sum(1 for r in tile.rows for g in r["grade"].values() if g))
+        self.assertEqual(tile.moved_hard,
+                         sum(1 for r in tile.rows for g in r["grade"].values() if g > 1))
+
+    def test_every_field_is_graded_not_only_the_highlighted_one(self):
+        """What has moved may not be what was being watched.
+
+        The screen highlights one column; a big move in any of the five is
+        still a big move, so the grading is across the board.
+        """
+        from volkit import monitor
+        from volkit.curves import CURVE_FIELDS
+        book = self.book()
+        tile = monitor.run_tile(monitor.Tile(pair="EURUSD"), book, self.history(book),
+                                big=1e-9)
+        row = next(r for r in tile.rows if all(v is not None for v in r["change"].values()))
+        self.assertEqual(sorted(row["grade"]), sorted(CURVE_FIELDS))
+        self.assertTrue(all(row["grade"][f] for f in CURVE_FIELDS),
+                        "a threshold of nothing should grade every change that exists")
+
+    def test_the_big_move_threshold_is_typed_in_volatility_points(self):
+        """Volatility points at the edge, decimals in the middle -- converted once."""
+        from volkit import monitor
+        panel = monitor.panel_from_request({"tiles": [{"pair": "EURUSD"}], "big": 0.5})
+        self.assertAlmostEqual(panel.big, 0.005)
+        # And an empty box is the declared default, not a silent zero that
+        # would leave a screen with no marks on it and no reason why.
+        for empty in ({"tiles": []}, {"tiles": [], "big": ""}, {"tiles": [], "big": None}):
+            self.assertAlmostEqual(monitor.panel_from_request(empty).big,
+                                   monitor.DEFAULT_BIG_MOVE / 100.0)
+
+    def test_a_threshold_that_cannot_be_compared_against_is_refused(self):
+        """Nothing fails silently: a bad threshold says so rather than grading nothing."""
+        from volkit import monitor
+        from volkit.curves import CurveError
+        with self.assertRaises(CurveError):
+            monitor.panel_from_request({"tiles": [], "big": "wide"})
+        with self.assertRaises(CurveError):
+            monitor.MonitorPanel(big=-1.0)
+        with self.assertRaises(CurveError):
+            monitor.MonitorPanel(big=float("nan"))
+        # Zero is the one way to turn the marking off, and it grades nothing
+        # rather than grading everything.
+        self.assertEqual(monitor.move_grade(9.9, 0.0), 0)
+
+    def test_the_panel_reports_what_it_marked(self):
+        """A tile scrolled past still says how much has moved in it."""
+        from volkit import monitor
+        book = self.book()
+        panel = monitor.MonitorPanel(tiles=(monitor.Tile(pair="EURUSD"),), big=1e-9)
+        r = panel.run(book, self.history(book))
+        self.assertAlmostEqual(r["big"], 1e-7)  # volatility points at the edge
+        self.assertEqual(r["moved"], sum(t["moved"] for t in r["tiles"]))
+        self.assertTrue(r["moved"] > 0)
+        quiet = monitor.MonitorPanel(tiles=(monitor.Tile(pair="EURUSD"),), big=0.0)
+        self.assertEqual(quiet.run(book, self.history(book))["moved"], 0)
 
 
 class TestFeedRefresh(unittest.TestCase):
@@ -6316,6 +7166,27 @@ class TestTheThreeMarketBoxes(unittest.TestCase):
                 self.assertEqual(row["error"], "")
                 self.assertEqual(row["expiry"], "2024-05-28")
 
+    def test_the_box_takes_a_spelled_out_tenor_and_a_year_less_date(self):
+        """'1wk' is a tenor and '28 May' is the coming twenty-eighth of May.
+
+        Both used to be refused: the tenor because the unit had to be one
+        letter, the date because the year was not optional.  The year comes
+        from the book's clock (28-Feb-2024 here), never the machine's.
+        """
+        week = self.rows({"pair": "USDJPY", "expiry": "1wk"})[0]
+        self.assertEqual(week["error"], "")
+        self.assertEqual(week["expiry"],
+                         self.rows({"pair": "USDJPY", "expiry": "1W"})[0]["expiry"])
+        for text in ("28 May", "28May", "May 28"):
+            with self.subTest(text):
+                row = self.rows({"pair": "USDJPY", "expiry": text})[0]
+                self.assertEqual(row["error"], "")
+                self.assertEqual(row["expiry"], "2024-05-28")
+        # A date already past this year is next year's.
+        row = self.rows({"pair": "USDJPY", "expiry": "10 Jan"})[0]
+        self.assertEqual(row["error"], "")
+        self.assertEqual(row["expiry"], "2025-01-10")
+
     def test_a_tenor_is_resolved_once_on_the_pair_s_own_calendar(self):
         for tenor in ("1W", "8d", "3M", "2y"):
             with self.subTest(tenor):
@@ -6324,10 +7195,44 @@ class TestTheThreeMarketBoxes(unittest.TestCase):
                 self.assertTrue(self.service.book.calendars.is_business_day(
                     "USDJPY", date.fromisoformat(row["expiry"])))
         # "8d" is eight days and not the eighth of something: the tenor is
-        # tried first, exactly as `resolve_expiry` has always done it.  The
-        # roll through spot and the delivery date moves it by a day or two,
-        # which is the point of resolving it on the calendar at all.
-        self.assertLess(abs(self.rows({"pair": "USDJPY", "expiry": "8d"})[0]["days"] - 8), 3)
+        # tried first, exactly as `resolve_expiry` has always done it.  And a
+        # day tenor is eight *business* days, which is what O/N is one of --
+        # so it lands eleven or twelve calendar days out, not eight.  Adding
+        # calendar days to the spot date instead collapsed the short tenors
+        # onto each other: dealt on a Wednesday, "1d" and "2d" both came back
+        # Thursday, because the two business days taken off at the end
+        # swallowed the weekend the addition had just crossed.
+        row = self.rows({"pair": "USDJPY", "expiry": "8d"})[0]
+        cal = self.service.book.calendars
+        today = self.service.book.clock.now.date()
+        self.assertEqual(row["expiry"],
+                         cal.add_business_days("USDJPY", today, 8).isoformat())
+        self.assertGreater(row["days"], 8)
+
+    def test_the_short_tenors_do_not_collapse_onto_one_date(self):
+        """One business day apart, each of them, however the weekend falls."""
+        seen = [self.rows({"pair": "USDJPY", "expiry": t})[0]["expiry"]
+                for t in ("O/N", "1d", "2d", "3d", "4d")]
+        self.assertEqual(seen[0], seen[1])          # O/N is one business day
+        self.assertEqual(len(set(seen)), 4)         # and the rest are distinct
+
+    def test_a_leg_carries_its_spot_and_settlement_dates(self):
+        """The settlement date is a fact the desk confirms on, not an internal.
+
+        It is the spot lag *after* the expiry, on the pair's own calendar, and
+        it is the date the forward beside it is a forward to.
+        """
+        cal = self.service.book.calendars
+        for text in ("1M", "2024-05-28"):
+            with self.subTest(text):
+                row = self.rows({"pair": "USDJPY", "expiry": text})[0]
+                expiry = date.fromisoformat(row["expiry"])
+                self.assertEqual(row["settle"],
+                                 cal.delivery_from_expiry("USDJPY", expiry).isoformat())
+                self.assertEqual(row["spot_date"], cal.spot_date(
+                    "USDJPY", self.service.book.clock.now.date()).isoformat())
+                self.assertTrue(cal.is_settlement_day("USDJPY",
+                                                      date.fromisoformat(row["settle"])))
 
     def test_the_level_is_the_feed_s_at_that_leg_s_own_expiry(self):
         one, three = self.rows({"pair": "USDJPY", "expiry": "1M"},
@@ -6371,6 +7276,145 @@ class TestTheThreeMarketBoxes(unittest.TestCase):
             now = service.refresh_feed(
                 {"legs": [{"pair": "USDJPY", "expiry": "3M"}]})["legs"][0]
             self.assertAlmostEqual(now["spot"], 151.25, places=12)
+
+
+class TestTheSettlementDateBox(unittest.TestCase):
+    """The settlement date is an input, and the calendar is only its default.
+
+    A tenor names a settlement date first and the expiry comes back from it,
+    so the settlement date is the anchor of the whole construction -- but it
+    is also the one date on a leg the calendar cannot always answer, because
+    a broken date is a thing two counterparties agree and not a thing a
+    holiday table knows.  So the box fills itself from the calendar, says so,
+    and takes a date typed over it; emptying it hands it back.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from volkit.webapp import BookService
+        cls.service = BookService(str(WORKBOOK), ASOF, feed_path=str(FEED))
+        # The service's own book, so the leg rows and the level checked
+        # against them are read off one feed: `feed.load_for` places a tenor
+        # pillar on its real delivery date, which is the placement the whole
+        # screen is built on.
+        cls.book = cls.service.book
+
+    def rows(self, *legs):
+        return self.service.legs({"legs": list(legs)})["legs"]
+
+    def test_an_untyped_box_is_the_calendar_s_and_says_what_the_default_is(self):
+        row = self.rows({"pair": "USDJPY", "expiry": "1M"})[0]
+        cal = self.service.book.calendars
+        expiry = date.fromisoformat(row["expiry"])
+        want = cal.delivery_from_expiry("USDJPY", expiry).isoformat()
+        self.assertEqual(row["settle"], want)
+        # The default travels with it so the screen has somewhere to put the
+        # box back to the moment it is emptied, without rebuilding a
+        # construction that lives on the pair's own holidays.
+        self.assertEqual(row["settle_default"], want)
+        self.assertFalse(row["settle_stated"])
+        self.assertEqual(row["settle_note"], "")
+
+    def test_a_date_in_the_box_is_not_evidence_anybody_typed_it(self):
+        """The screen fills this box the way it fills spot from the feed.
+
+        It then posts what is in it, so a date arriving here means nothing on
+        its own; ``settlesrc`` is the screen saying whether somebody chose
+        it.  Read the other way, every leg would have claimed a broken date.
+        """
+        default = self.rows({"pair": "USDJPY", "expiry": "1M"})[0]["settle_default"]
+        row = self.rows({"pair": "USDJPY", "expiry": "1M",
+                         "settle": "2024-12-31", "settlesrc": "calc"})[0]
+        self.assertEqual(row["settle"], default)
+        self.assertFalse(row["settle_stated"])
+        # A caller that sends a date and no flag -- the API, a script -- means
+        # it, which is the reading that needs no screen to be present.
+        row = self.rows({"pair": "USDJPY", "expiry": "1M", "settle": "2024-12-31"})[0]
+        self.assertEqual(row["settle"], "2024-12-31")
+        self.assertTrue(row["settle_stated"])
+
+    def test_the_forward_is_read_on_the_date_in_the_box_and_the_expiry_stays(self):
+        """The one thing a stated settlement date moves.
+
+        It is the date a forward is a price for, so a forward read there is a
+        different forward; the expiry is what the option is worth time on and
+        it does not move, so the volatility and the time to expiry are
+        untouched.
+        """
+        base = self.rows({"pair": "USDJPY", "expiry": "1M"})[0]
+        far = self.rows({"pair": "USDJPY", "expiry": "1M", "settle": "2024-06-28"})[0]
+        self.assertEqual(far["expiry"], base["expiry"])
+        self.assertEqual(far["days"], base["days"])
+        self.assertEqual(far["years"], base["years"])
+        self.assertEqual(far["settle"], "2024-06-28")
+        self.assertAlmostEqual(far["spot"], base["spot"], places=12)
+        self.assertNotAlmostEqual(far["points"], base["points"], places=4)
+        # And it is the *level* lookup that moved, not a second copy of it:
+        # the same date asked of the one place a level is read.
+        level = self.book.market_level_for("USDJPY", date.fromisoformat(base["expiry"]),
+                                           date(2024, 6, 28))
+        self.assertAlmostEqual(far["forward"], level["forward"], places=12)
+        self.assertEqual(level["settle"], "2024-06-28")
+
+    def test_the_priced_leg_reads_its_forward_on_the_same_date_it_shows(self):
+        """One construction, so the date shown and the date read are one date."""
+        from volkit.pricing import OptionLeg, price_strip
+        base, moved = price_strip(self.book, [
+            OptionLeg("USDJPY", "1M", "ATM"),
+            OptionLeg("USDJPY", "1M", "ATM", settle="2024-06-28")])["legs"]
+        self.assertEqual(moved["settle"], "2024-06-28")
+        self.assertEqual(moved["expiry"], base["expiry"])
+        self.assertAlmostEqual(moved["t"], base["t"], places=15)
+        self.assertAlmostEqual(moved["atm_vol"], base["atm_vol"], places=12)
+        self.assertNotAlmostEqual(moved["forward"], base["forward"], places=5)
+        self.assertIn("as typed", moved["settle_rule"])
+
+    def test_a_settlement_date_before_the_expiry_is_refused(self):
+        """An option cannot settle before it is exercised.
+
+        Nothing fails silently: the row keeps its place and carries the
+        reason, and the message says how to get the box back.
+        """
+        row = self.rows({"pair": "USDJPY", "expiry": "1M", "settle": "2024-03-01"})[0]
+        self.assertIn("before the expiry", row["error"])
+        self.assertIn("Empty the box", row["error"])
+        from volkit.pricing import OptionLeg, price_strip
+        r = price_strip(self.book,
+                        [OptionLeg("USDJPY", "1M", "ATM", settle="2024-03-01")])["legs"][0]
+        self.assertFalse(r["ok"])
+        self.assertIn("before the expiry", r["error"])
+
+    def test_a_broken_date_is_taken_and_said_out_loud(self):
+        """The case the box exists for is not the case it refuses.
+
+        A settlement date that is not a value date for the pair is
+        deliverable only by agreement -- which is exactly what somebody typing
+        one is telling the screen -- so it is priced and reported, never
+        rejected and never silently rolled to the next good day.
+        """
+        saturday = date(2024, 6, 29)
+        self.assertFalse(self.service.book.calendars.is_settlement_day("USDJPY", saturday))
+        row = self.rows({"pair": "USDJPY", "expiry": "1M", "settle": saturday.isoformat()})[0]
+        self.assertEqual(row["error"], "")
+        self.assertEqual(row["settle"], saturday.isoformat())
+        self.assertIn("not a value date", row["settle_note"])
+        from volkit.pricing import OptionLeg, price_strip
+        r = price_strip(self.book, [OptionLeg("USDJPY", "1M", "ATM",
+                                              settle=saturday.isoformat())])["legs"][0]
+        self.assertTrue(r["ok"], r["error"])
+        self.assertTrue(any("not a value date" in w for w in r["warnings"]))
+        # A date the calendar produced says nothing: a note on every leg is a
+        # note nobody reads.
+        self.assertEqual(self.rows({"pair": "USDJPY", "expiry": "1M"})[0]["settle_note"], "")
+
+    def test_the_box_takes_every_spelling_the_expiry_box_takes(self):
+        """One timestamp reader, so a screen never grows a second date parser."""
+        for text in ("2024-06-28", "28Jun24", "28 Jun 2024", "June 28, 2024",
+                     "2024/06/28", "6/28/2024", "20240628"):
+            with self.subTest(text):
+                row = self.rows({"pair": "USDJPY", "expiry": "1M", "settle": text})[0]
+                self.assertEqual(row["error"], "")
+                self.assertEqual(row["settle"], "2024-06-28")
 
 
 class TestLegMarketOverrides(unittest.TestCase):
@@ -6440,6 +7484,57 @@ class TestLegMarketOverrides(unittest.TestCase):
         # And a forward given outright wins over both of them.
         r = self.one(spot=160.0, forward=159.0, forward_points=-45.0, pip=100.0)
         self.assertAlmostEqual(r["forward"], 159.0, places=12)
+
+    def test_a_filled_box_the_screen_calls_the_feed_s_reports_as_the_feed_s(self):
+        """The bug: every leg read ``typed``, on a screen nobody had typed into.
+
+        The pricing screen fills spot and the outright from the feed and then
+        posts what is in the boxes, so by the time a leg is priced a feed
+        level and a hand-marked one look identical and the old inference --
+        "a box with something in it was somebody's" -- called both of them
+        typed.  Only the screen knows, so the screen says: ``spot_source`` /
+        ``forward_source`` change no number, they name where the number came
+        from.  This is what makes `Refresh spot`, which puts every box back
+        on the feed, put the *Market* row back with them.
+        """
+        fed = self.one()                     # blank boxes: the feed fills both
+        r = self.one(spot=fed["spot"], forward=fed["forward"],
+                     spot_source="feed", forward_source="feed")
+        self.assertEqual(r["market_source"], "feed")
+        self.assertTrue(r["feed_used"])
+        self.assertAlmostEqual(r["spot"], fed["spot"], places=12)
+        self.assertAlmostEqual(r["forward"], fed["forward"], places=12)
+
+    def test_a_level_the_screen_says_is_typed_is_typed_however_it_got_there(self):
+        fed = self.one()
+        r = self.one(spot=fed["spot"], forward=fed["forward"],
+                     spot_source="typed", forward_source="typed")
+        self.assertEqual(r["market_source"], "typed")
+        self.assertFalse(r["feed_used"])
+        # Half and half, each half named: a typed outright over the feed's
+        # spot, and the other way round.
+        self.assertEqual(self.one(spot=fed["spot"], forward=155.0,
+                                  spot_source="feed", forward_source="typed"
+                                  )["market_source"], "spot from the feed")
+        # A typed spot with the feed's *swap* on top of it: the outright box
+        # then holds neither party's outright, and saying "forward from the
+        # feed" would claim the file published a level it did not.
+        self.assertEqual(self.one(spot=160.0, forward=159.5,
+                                  spot_source="typed", forward_source="feed"
+                                  )["market_source"], "swap from the feed")
+
+    def test_a_blank_box_is_the_feed_s_whatever_the_caller_says(self):
+        """Neither half can be talked out of what actually happened.
+
+        A caller that leaves the box empty and calls it typed still gets the
+        feed's level, because that is where it came from; and a caller that
+        says nothing at all gets the old inference, which is what the command
+        line and any script hold.
+        """
+        self.assertEqual(self.one(spot_source="typed", forward_source="typed"
+                                  )["market_source"], "feed")
+        self.assertEqual(self.one()["market_source"], "feed")
+        self.assertEqual(self.one(spot=160.0, forward=159.4)["market_source"], "typed")
 
     def test_a_forward_on_its_own_with_no_feed_is_a_whole_market(self):
         """This model carries no discount curve, so spot has nothing to add.
@@ -6601,6 +7696,79 @@ class TestTextFilesAreUtf8(unittest.TestCase):
                          "encoding, which is cp1252 on the desk machine:\n  "
                          + "\n  ".join(offenders))
 
+    def test_a_settings_file_in_the_machines_own_code_page_is_read_and_said(self):
+        """Notepad's default on a Chinese Windows is ANSI -- cp936, not UTF-8
+        -- and a ``volkit.cfg`` saved that way used to stop the packaged exe
+        at startup with a decode error instead of reading the workbook path
+        in it.  It is read as the machine's own code page, which is a fact
+        about the machine that saved it and not a guess, and the fallback is
+        never silent."""
+        import tempfile
+        from volkit import config, paths
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Path(tmp) / "volkit.cfg"
+            cfg.write_bytes("command = check\nworkbook = \u4e0a\u6d77/\u6ce2\u52a8\u7387.xlsx\n"
+                            .encode("cp936"))
+            before = list(paths.ENCODING_NOTES)
+            paths.ENCODING_NOTES.clear()
+            self.addCleanup(lambda: (paths.ENCODING_NOTES.clear(),
+                                     paths.ENCODING_NOTES.extend(before)))
+            real = paths.ansi_encoding
+            paths.ansi_encoding = lambda: "cp936"     # stand in for that machine
+            self.addCleanup(setattr, paths, "ansi_encoding", real)
+
+            loaded = config.load(cfg)
+            self.assertEqual(loaded.argv[0], "check")
+            self.assertIn("\u4e0a\u6d77/\u6ce2\u52a8\u7387.xlsx", loaded.argv)
+            self.assertTrue(any("cp936" in n for n in paths.ENCODING_NOTES),
+                            paths.ENCODING_NOTES)
+
+    def test_a_file_saved_as_notepad_unicode_is_read(self):
+        """Notepad's 'Unicode' is UTF-16 with a byte order mark.  The mark is
+        unmistakable, so it is read; UTF-16 *without* one is not guessed at,
+        because that is how an ASCII file becomes Chinese."""
+        from volkit import paths
+        text, note = paths.decode_text("port = 8900\n".encode("utf-16"), "volkit.cfg")
+        self.assertEqual(text.strip(), "port = 8900")
+        self.assertIn("UTF-16", note)
+
+    def test_a_file_in_no_encoding_at_all_is_refused_with_the_way_out(self):
+        """Read it wrong or refuse it, but say what to do either way."""
+        from volkit import paths
+        real = paths.ansi_encoding
+        paths.ansi_encoding = lambda: "utf-8"     # a Mac: there is no second reading
+        self.addCleanup(setattr, paths, "ansi_encoding", real)
+        with self.assertRaises(UnicodeDecodeError) as caught:
+            paths.decode_text(b"port = \xc9\xcf\n", "volkit.cfg")
+        self.assertIn("save it as UTF-8", str(caught.exception))
+
+    def test_the_launcher_speaks_utf8_before_it_prints_anything(self):
+        """A settings file may name a workbook under a path written in
+        Chinese.  ``cli.main`` sets the streams, but the launcher prints the
+        settings three lines before it gets there, and on a cp1252 stream that
+        ended the packaged exe with a traceback before it had done anything at
+        all.  Pinned by reading the source: the call has to come first, and a
+        test that ran the launcher would have to own the process's streams."""
+        import ast
+        import launcher
+
+        src = _source("launcher.py")
+        tree = ast.parse(src)
+        fn = next(n for n in tree.body
+                  if isinstance(n, ast.FunctionDef) and n.name == "main")
+        # Everything before the first print must not itself print, and the
+        # stream call must be in there.
+        calls = []
+        for node in ast.walk(fn):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                calls.append((node.lineno, node.func.id))
+        first_print = min((ln for ln, name in calls if name == "print"), default=10**9)
+        set_streams = min((ln for ln, name in calls if name == "use_utf8_streams"),
+                          default=10**9)
+        self.assertLess(set_streams, first_print,
+                        "the launcher prints before it sets the streams")
+
     def test_a_file_saved_with_a_byte_order_mark_still_reads(self):
         """Notepad and Excel both write one, and it is not part of the data.
 
@@ -6636,6 +7804,13 @@ class TestTextFilesAreUtf8(unittest.TestCase):
         import tempfile
         from volkit import paths
 
+        # Pinned to a machine whose own code page *is* UTF-8, so there is no
+        # second reading to fall back to.  On a cp1252 box this file would be
+        # read as latin-1 and noted, which is the other half of the ladder and
+        # is pinned by its own test above.
+        real = paths.ansi_encoding
+        paths.ansi_encoding = lambda: "utf-8"
+        self.addCleanup(setattr, paths, "ansi_encoding", real)
         with tempfile.TemporaryDirectory() as tmp:
             bad = Path(tmp) / "cp1252.cfg"
             bad.write_bytes(b"note = caf\xe9\n")       # latin-1, not UTF-8
@@ -6643,8 +7818,8 @@ class TestTextFilesAreUtf8(unittest.TestCase):
                 paths.read_text(bad)
             self.assertIn("cp1252.cfg", str(ctx.exception))
 
-    def test_the_page_and_the_calendar_read_as_utf8(self):
-        """The two bundled files that actually carry non-ASCII."""
+    def test_the_page_reads_as_utf8(self):
+        """The one bundled file that actually carries non-ASCII."""
         from volkit import paths
 
         page = paths.read_text(self.ROOT / "volkit" / "web" / "index.html")
@@ -7722,7 +8897,10 @@ class TestStartupConfig(unittest.TestCase):
         import build_exe
         self.assertIn("files/volkit.cfg", build_exe.USER_DATA)
         cfg = config.load(Path(__file__).resolve().parents[1] / "files" / "volkit.cfg")
-        self.assertEqual(cfg.argv, ["serve"])
+        # The one live setting it ships with is where the kACE feed posts --
+        # the desk's own address, confirmed 2026-09-01 -- so a double-click
+        # gets the Post buttons without anybody editing the file.
+        self.assertEqual(cfg.argv, ["serve", "--kace-url", "https://pfcshkwapp01:8500/pricing"])
 
 
 # ===========================================================================
@@ -7758,30 +8936,38 @@ class TestQuoteParsing(unittest.TestCase):
         # is quoted from, so the side is dropped and the two lines are one quote.
         self.assertIsNone(run.quotes[3].is_call)
 
-    def test_the_unit_is_decided_once_from_the_level_quotes(self):
-        """Per-line sniffing reads a small risk reversal as a decimal.
+    def test_a_volatility_is_read_as_the_number_it_was_written_as(self):
+        """The level is not evidence of the unit (§4).
 
-        0.35 is an ordinary risk reversal in points and an ordinary
-        at-the-money in decimals.  Letting the risk reversal vote would return
-        it a hundred times too large -- the same failure §9 pins for a
-        historical sheet.
+        A paste whose at-the-money is a third of a point is a managed pair, not
+        a paste in decimals; sniffing the magnitude returned it as 35 points.
+        A paste really in decimals is loaded by saying so.
         """
         run = self.parse("1M ATM 8.20/8.60\n3M 25d RR 0.35/0.55\n")
         self.assertEqual(run.vol_unit, "percent")
         self.assertAlmostEqual(run.quotes[1].bid, 0.0035)
-        dec = self.parse("1M ATM 0.0820/0.0860\n3M 25d RR 0.0035/0.0055\n")
+        # The whole paste below 1.0: still points, and it says so.
+        low = self.parse("1M ATM 0.35/0.40\n3M 25d RR 0.02/0.04\n")
+        self.assertEqual(low.vol_unit, "percent")
+        self.assertAlmostEqual(low.quotes[0].bid, 0.0035)
+        self.assertTrue(any("as written" in n for n in low.notes))
+        dec = self.parse("1M ATM 0.0820/0.0860\n3M 25d RR 0.0035/0.0055\n",
+                         vol_unit="decimal")
         self.assertEqual(dec.vol_unit, "decimal")
         self.assertAlmostEqual(dec.quotes[0].ask, 0.0860)
 
-    def test_a_paste_that_straddles_one_is_refused_not_guessed(self):
-        with self.assertRaises(quotes.QuoteError) as ctx:
-            self.parse("1M ATM 8.20/8.60\n3M ATM 0.0825/0.0865\n")
-        self.assertIn("straddle", str(ctx.exception))
+    def test_a_paste_that_straddles_one_is_read_and_not_refused(self):
+        """It used to be refused as 'percent in one place and decimal in
+        another'.  There is only one reading now: both lines are points."""
+        run = self.parse("1M ATM 8.20/8.60\n3M ATM 0.35/0.45\n")
+        self.assertEqual(run.vol_unit, "percent")
+        self.assertAlmostEqual(run.quotes[0].bid, 0.0820)
+        self.assertAlmostEqual(run.quotes[1].bid, 0.0035)
 
-    def test_a_paste_with_no_level_quote_does_not_pretend_to_decide(self):
+    def test_a_paste_with_no_level_quote_still_reads_as_written(self):
         run = self.parse("3M 25d RR 0.35/0.55\n6M 25d fly 0.20/0.28\n")
         self.assertEqual(run.vol_unit, "percent")
-        self.assertTrue(any("could not decide its own unit" in n for n in run.notes))
+        self.assertAlmostEqual(run.quotes[0].bid, 0.0035)
 
     def test_a_direction_word_is_resolved_against_the_pair(self):
         """JPY call over on USDJPY is a dollar put over, so it is negative.
@@ -8834,7 +10020,7 @@ class TestMarketMakerPanel(unittest.TestCase):
         before = surface.atm.term_vol(tenor_to_years("1m"))
         out = self.panel(apply=True).run(book)
         self.assertTrue(out["applied"])
-        self.assertAlmostEqual(surface.atm.term_vol(tenor_to_years("1m")), 0.062, places=5)
+        self.assertAlmostEqual(surface.atm.term_vol(surface.tenor_years("1m")), 0.062, places=5)
         self.assertNotAlmostEqual(surface.atm.term_vol(tenor_to_years("1m")), before)
         self.assertTrue(any("in memory only" in w for w in out["warnings"]))
 
@@ -9085,6 +10271,537 @@ class TestSmileParameterShifts(unittest.TestCase):
         surface.set_param_shifts({"rho25": 1.4})
         self.assertLessEqual(abs(surface.params_at(0.25)["rho25"]), 0.999)
         self.assertTrue(any("clamped" in w for w in surface.shift_warnings()))
+
+
+class TestKaceFeed(unittest.TestCase):
+    """The kACE feed (`kace.py`): the XML_poster workbook, done from the book.
+
+    The sheet is the specification, so the first test pins strings the sheet
+    itself produced -- `XML_poster_DailyVol_v3.1_USDCNH_JL.xlsx`, recalculated
+    and read back -- against a Feed built from the same inputs.  The rest pin
+    the three things done differently on purpose (the horizon, `horDate`,
+    the spread table naming the pillars) and the desk's conventions.
+    """
+
+    SPREADS = Path(__file__).resolve().parents[1] / "files" / "kace_spreads.csv"
+
+    # The sheet's nine pillars (USDCNHData!K3:S11), as of a 2026-01-22 valuation.
+    SHEET_PILLARS = [
+        ("O/N", date(2026, 1, 23), 1.0, -0.25, -0.45, 0.125, 0.39375),
+        ("1W", date(2026, 1, 29), 0.8, -0.225, -0.405, 0.125, 0.39375),
+        ("2W", date(2026, 2, 5), 0.6, -0.2125, -0.3825, 0.125, 0.39375),
+        ("1M", date(2026, 2, 24), 0.4, -0.2, -0.36, 0.125, 0.39375),
+        ("2M", date(2026, 3, 24), 0.3, -0.175, -0.315, 0.1275, 0.401625),
+        ("3M", date(2026, 4, 23), 0.3, -0.175, -0.315, 0.15, 0.4725),
+        ("6M", date(2026, 7, 23), 0.2, -0.175, -0.35, 0.1875, 0.590625),
+        ("9M", date(2026, 10, 22), 0.2, -0.175, -0.3675, 0.2125, 0.669375),
+        ("1Y", date(2027, 1, 22), 0.2, -0.156, -0.37, 0.25, 0.7875),
+    ]
+    # Rows of the sheet's daily series (USDCNHData!A:B), and what its formulas
+    # wrote for them.  Row 1 is before every pillar (the ISERROR fallback to
+    # the O/N spread); 28 Jan is still on O/N's 1.0; 29 Jan is the 1W expiry
+    # and takes 0.8; 5 Feb is the 2W expiry; 30 Jan 2027 is the last row.
+    SHEET_DAYS = [
+        (date(2026, 1, 23), 2.25820980020178, "0.0175820980020178/0.0275820980020178"),
+        (date(2026, 1, 24), 2.38916548538905, "0.0188916548538905/0.0288916548538905"),
+        (date(2026, 1, 28), 1.80166787406075, "0.0130166787406075/0.0230166787406075"),
+        (date(2026, 1, 29), 2.29288067023934, "0.0189288067023934/0.0269288067023934"),
+        (date(2026, 1, 30), 2.25351386681335, "0.0185351386681335/0.0265351386681335"),
+        (date(2026, 2, 5), 2.18646548219792, "0.0188646548219792/0.0248646548219792"),
+        (date(2026, 2, 6), 2.19092359623445, "0.0189092359623445/0.0249092359623445"),
+        (date(2027, 1, 30), 3.77727687403344, "0.0367727687403344/0.0387727687403344"),
+    ]
+
+    def _sheet_feed(self):
+        from volkit import kace
+        daily = {d: v for d, v, _ in self.SHEET_DAYS}
+        # Every pillar has to be a row of the series; the sheet's were.
+        for tenor, expiry, spread, rr25, rr10, fly25, fly10 in self.SHEET_PILLARS:
+            daily.setdefault(expiry, 3.7)
+        daily[date(2027, 1, 22)] = 3.76476480984279      # S41 in the sheet
+        pillars = [kace.Pillar(tenor=t, expiry=e, spread=sp, atm=daily[e], rr25=a, rr10=b,
+                               fly25=c, fly10=d, wings="marks")
+                   for t, e, sp, a, b, c, d in self.SHEET_PILLARS]
+        return kace.Feed(pair="USDCNH", hor_date=date(2026, 1, 22), cut="NY",
+                         source="marks", daily=daily, pillars=pillars)
+
+    @staticmethod
+    def _nodes(text):
+        import xml.etree.ElementTree as ET
+        root = ET.fromstring(text.encode("utf-8"))
+        return root, {n.get("name"): {f.get("name"): f.get("value") for f in n.findall("field")}
+                      for n in root.iter("node")}
+
+    def test_the_message_is_what_the_sheet_wrote(self):
+        """Strings the workbook's own formulas produced, reproduced exactly."""
+        feed = self._sheet_feed()
+        text = feed.xml("feeuser", "password1", timestamp=datetime(2026, 1, 22, 9, tzinfo=UTC))
+        root, nodes = self._nodes(text)
+        by_day = {n["Maturity"]: n for k, n in nodes.items() if not k.startswith("S")}
+        for day, _, want in self.SHEET_DAYS:
+            label = f"{day.day:02d} {day:%b} {day.year}"
+            self.assertEqual(by_day[label]["Volity"], want, label)
+            self.assertEqual(by_day[label]["VolType"], "ATM")
+        # The pillar block: five nodes each, in the sheet's order and naming.
+        self.assertEqual(nodes["S1"], {"RateType": "Volatility", "Currency": "USD",
+                                       "CtrCcy": "CNH", "Maturity": "23 Jan 2026",
+                                       "VolType": "ATM",
+                                       "Volity": "0.0175820980020178/0.0275820980020178"})
+        self.assertEqual(nodes["S2"]["Volity"], "-0.0025")
+        self.assertEqual((nodes["S2"]["PctDelta"], nodes["S2"]["VolType"]), ("0.25", "RR"))
+        self.assertEqual(nodes["S3"]["Volity"], "-0.0045")
+        self.assertEqual((nodes["S3"]["PctDelta"], nodes["S3"]["VolType"]), ("0.10", "RR"))
+        self.assertEqual(nodes["S4"]["Volity"], "0.00125")
+        self.assertEqual((nodes["S4"]["PctDelta"], nodes["S4"]["VolType"]), ("0.25", "S"))
+        self.assertEqual(nodes["S5"]["Volity"], "0.0039375")
+        self.assertEqual(nodes["S41"]["Volity"], "0.0366476480984279/0.0386476480984279")
+        self.assertEqual(nodes["S42"]["Volity"], "-0.00156")
+        self.assertEqual(nodes["S45"]["Volity"], "0.007875")
+        self.assertEqual(nodes["S45"]["Maturity"], "22 Jan 2027")
+        self.assertEqual(len(nodes), len(feed.daily) + 45)
+        # The envelope the poster page takes.
+        header = {e.tag: (e.text or "").strip() for e in root.find("header")}
+        self.assertEqual(header["username"], "feeuser")
+        self.assertEqual(header["password"], "password1")
+        self.assertEqual(header["timestamp"], "2026-01-22T09:00:00+00:00")
+        action = root.find("body").find("action")
+        self.assertEqual(action.get("function"), "RATE_FEED")
+        opts = {o.get("name"): o.get("value") for o in action}
+        self.assertEqual(opts["scenario"], "Xyz")
+        self.assertEqual(opts["horDate"], "22 Jan 2026")
+        self.assertNotIn("clearRate", opts)
+
+    def test_the_day_takes_the_spread_of_the_last_pillar_on_or_before_it(self):
+        """The sheet's approximate VLOOKUP, and its ISERROR fallback, as a rule."""
+        from volkit import kace
+        pillars = self._sheet_feed().pillars
+        self.assertEqual(kace.spread_for(date(2026, 1, 1), pillars), 1.0)    # before O/N
+        self.assertEqual(kace.spread_for(date(2026, 1, 23), pillars), 1.0)   # the O/N expiry
+        self.assertEqual(kace.spread_for(date(2026, 1, 28), pillars), 1.0)   # still O/N's
+        self.assertEqual(kace.spread_for(date(2026, 1, 29), pillars), 0.8)   # the 1W expiry
+        self.assertEqual(kace.spread_for(date(2026, 2, 4), pillars), 0.8)    # 1W's until 2W
+        self.assertEqual(kace.spread_for(date(2026, 2, 5), pillars), 0.6)
+        self.assertEqual(kace.spread_for(date(2027, 6, 1), pillars), 0.2)    # past 1Y: 1Y's
+
+    def test_decimals_are_plain_and_dates_are_english(self):
+        from volkit import kace
+        self.assertEqual(kace._decimal(0.0175820980020178), "0.0175820980020178")
+        self.assertEqual(kace._decimal(5e-05), "0.00005")
+        self.assertEqual(kace._decimal(-0.0025), "-0.0025")
+        self.assertEqual(kace._date(date(2026, 2, 5)), "05 Feb 2026")
+
+    def test_a_non_positive_bid_is_refused(self):
+        from volkit import kace
+        feed = self._sheet_feed()
+        feed.daily[date(2026, 1, 24)] = 0.4          # spread 1.0 straddles zero
+        with self.assertRaises(kace.KaceError) as ctx:
+            feed.xml("u", "p")
+        self.assertIn("24 Jan 2026", str(ctx.exception))
+
+    def test_no_username_no_message(self):
+        from volkit import kace
+        with self.assertRaises(kace.KaceError) as ctx:
+            self._sheet_feed().xml("", "")
+        self.assertIn(kace.ENV_USER, str(ctx.exception))
+        with self.assertRaises(kace.KaceError):
+            kace.clear_message("USDCNH", date(2026, 1, 22), "", "")
+
+    def test_the_clear_message(self):
+        from volkit import kace
+        text = kace.clear_message("USDCNH", date(2026, 1, 22), "u", "p",
+                                  timestamp=datetime(2026, 1, 22, tzinfo=UTC))
+        root, nodes = self._nodes(text)
+        opts = {o.get("name"): o.get("value") for o in root.find("body").find("action")}
+        self.assertEqual(opts["clearRate"], "true")
+        self.assertEqual(opts["horDate"], "22 Jan 2026")
+        self.assertEqual(list(nodes), ["USDCNH"])
+        self.assertEqual(nodes["USDCNH"], {"RateType": "Volatility", "Currency": "USD",
+                                           "CtrCcy": "CNH"})
+
+    # -- the spread table -------------------------------------------------
+    def test_the_shipped_table_is_the_sheets_column_l(self):
+        from volkit import kace
+        table = kace.SpreadTable.load(self.SPREADS)
+        self.assertEqual(table.for_pair("usdcnh"),
+                         {"O/N": 1.0, "1W": 0.8, "2W": 0.6, "1M": 0.4, "2M": 0.3, "3M": 0.3,
+                          "6M": 0.2, "9M": 0.2, "1Y": 0.2})
+        with self.assertRaises(kace.KaceError) as ctx:
+            table.for_pair("EURUSD")
+        self.assertIn("EURUSD", str(ctx.exception))
+
+    def test_a_bad_table_is_refused_by_line(self):
+        import tempfile
+        from volkit import kace, paths
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "s.csv"
+            paths.write_text(p, "pair,tenor,spread\nUSDCNH,on,1\nUSDCNH,1W,wide\n"
+                                "USDCNH,1W,0.8\nUSDCNH,1W\nUSDCNH,7Q,0.1\n")
+            with self.assertRaises(kace.KaceError) as ctx:
+                kace.SpreadTable.load(p)
+            msg = str(ctx.exception)
+            self.assertIn("line 3", msg)          # not a number
+            self.assertIn("line 5", msg)          # too short
+            self.assertIn("line 6", msg)          # not a tenor
+            paths.write_text(p, "# comment\nUSDCNH, on , 1\nusdcnh,1w,0.8\n")
+            self.assertEqual(kace.SpreadTable.load(p).for_pair("USDCNH"), {"O/N": 1.0, "1W": 0.8})
+            with self.assertRaises(kace.KaceError) as ctx:
+                kace.SpreadTable.load(Path(tmp) / "missing.csv")
+            self.assertIn("missing.csv", str(ctx.exception))
+
+    # -- off the book ---------------------------------------------------------
+    @classmethod
+    def _book(cls):
+        if not hasattr(cls, "_cached_book"):
+            cls._cached_book = Book.from_excel(str(WORKBOOK), ASOF).load_all(["USDCNH"])
+        return cls._cached_book
+
+    def _table(self, rows):
+        from volkit import kace
+        t = kace.SpreadTable(path="test")
+        t.rows = {"USDCNH": dict(rows)}
+        return t
+
+    def test_the_series_reaches_the_last_pillar_and_hordate_is_the_books(self):
+        """The sheet's two quiet failures: #N/A at 1Y, and TODAY() in horDate."""
+        from volkit import kace
+        feed = kace.build(self._book(), "USDCNH", kace.SpreadTable.load(self.SPREADS))
+        self.assertEqual(feed.hor_date, date(2024, 2, 28))       # ASOF, not date.today()
+        self.assertNotEqual(feed.hor_date, date.today())
+        for p in feed.pillars:
+            self.assertIn(p.expiry, feed.daily, p.tenor)
+            self.assertAlmostEqual(p.atm, feed.daily[p.expiry])
+        last = max(p.expiry for p in feed.pillars)
+        self.assertEqual(last, date(2025, 2, 27))                # the 1Y expiry
+        self.assertGreaterEqual(max(feed.daily), last)
+        self.assertLessEqual((max(feed.daily) - last).days, kace.MARGIN_DAYS + 1)
+        # Valued at 12:00 UTC, before the 14:00 NY cut: today's own bucket
+        # is not a cumulative vol, and is left out with a note.
+        self.assertNotIn(date(2024, 2, 28), feed.daily)
+        self.assertEqual(min(feed.daily), date(2024, 2, 29))
+        self.assertTrue(any("28 Feb 2024" in n for n in feed.notes))
+        self.assertEqual(feed.node_count(), len(feed.daily) + 45)
+
+    def test_overnight_is_the_next_business_day_and_borrows_the_shortest_wings(self):
+        from volkit import kace
+        feed = kace.build(self._book(), "USDCNH", kace.SpreadTable.load(self.SPREADS))
+        on, w1 = feed.pillars[0], feed.pillars[1]
+        self.assertEqual(on.tenor, "O/N")
+        self.assertEqual(on.expiry, date(2024, 2, 29))
+        self.assertEqual(w1.tenor, "1W")
+        self.assertEqual(w1.expiry, date(2024, 3, 6))
+        self.assertEqual((on.rr25, on.rr10, on.fly25, on.fly10),
+                         (w1.rr25, w1.rr10, w1.fly25, w1.fly10))
+        self.assertEqual(on.wings, "marks at 1W")
+        self.assertEqual(w1.wings, "marks")
+        self.assertTrue(any("O/N" in n and "1W" in n for n in feed.notes))
+        # The desk's convention: RR is the USD call over the put, in vol
+        # points, straight off the marks sheet; S is the strangle mark.
+        self.assertAlmostEqual(w1.rr25, 0.385)
+        self.assertAlmostEqual(w1.fly25, 0.1825)
+        self.assertAlmostEqual(feed.pillars[-1].rr10, 2.645)
+
+    def test_fitted_wings_come_off_the_surface_near_the_marks(self):
+        from volkit import kace
+        feed = kace.build(self._book(), "USDCNH", kace.SpreadTable.load(self.SPREADS),
+                          source="fitted")
+        marks = kace.build(self._book(), "USDCNH", kace.SpreadTable.load(self.SPREADS))
+        for f, m in zip(feed.pillars, marks.pillars):
+            self.assertEqual(f.wings, "fitted")
+            for v in (f.rr25, f.rr10, f.fly25, f.fly10):
+                self.assertTrue(math.isfinite(v))
+            if f.tenor != "O/N":
+                self.assertLess(abs(f.rr25 - m.rr25), 0.15, f.tenor)
+                self.assertLess(abs(f.fly25 - m.fly25), 0.1, f.tenor)
+        self.assertEqual(feed.notes, [n for n in feed.notes if "O/N" not in n])
+
+    def test_a_pillar_with_no_mark_is_refused_by_name(self):
+        from volkit import kace
+        with self.assertRaises(kace.KaceError) as ctx:
+            kace.build(self._book(), "USDCNH", self._table([("1W", 0.8), ("3W", 0.5)]))
+        self.assertIn("3W", str(ctx.exception))
+        with self.assertRaises(kace.KaceError):
+            kace.build(self._book(), "USDCNH", self._table([("O/N", 1.0)]))
+        with self.assertRaises(kace.KaceError):
+            kace.build(self._book(), "USDCNH", self._table([("1W", 0.8)]), source="murex")
+
+    def test_the_web_service_and_the_download(self):
+        from volkit import kace
+        from volkit.webapp import BookService
+        service = BookService(str(WORKBOOK), ASOF, kace_spreads_path=str(self.SPREADS),
+                              kace_user="feeuser", kace_password="pw")
+        state = service.state()["kace"]
+        self.assertEqual(state["pairs"], ["USDCNH"])
+        self.assertTrue(state["credentials"])
+        self.assertIsNone(state["error"])
+        out = service.kace({"pair": "USDCNH"})
+        self.assertEqual(out["nodes"], out["xml"].count("<node "))
+        self.assertEqual(out["hor_date"], "2024-02-28")
+        self.assertEqual([p["tenor"] for p in out["pillars"]][:2], ["O/N", "1W"])
+        self.assertEqual(out["scenario"], "Xyz")                 # the start-up default
+        self.assertIn('<option name="scenario" value="Xyz"/>', out["xml"])
+        name, text = service.export_kace({"pair": "USDCNH"})
+        self.assertEqual(name, "USDCNH_kace_vols_Xyz_2024-02-28.xml")
+        self.assertEqual(text, out["xml"])
+        name, text = service.export_kace({"pair": "USDCNH", "clear": "1"})
+        self.assertEqual(name, "USDCNH_kace_clear_Xyz_2024-02-28.xml")
+        self.assertIn('name="clearRate"', text)
+        # The scenario is the page's box: it goes into the message, the
+        # file name, and the clear message alike; blank is refused, and a
+        # character XML cannot carry in an attribute is escaped.
+        out = service.kace({"pair": "USDCNH", "scenario": " UAT-2 "})
+        self.assertEqual(out["scenario"], "UAT-2")
+        self.assertIn('<option name="scenario" value="UAT-2"/>', out["xml"])
+        name, _ = service.export_kace({"pair": "USDCNH", "scenario": "UAT-2"})
+        self.assertEqual(name, "USDCNH_kace_vols_UAT_2_2024-02-28.xml")
+        _, text = service.export_kace({"pair": "USDCNH", "clear": "1", "scenario": "UAT-2"})
+        self.assertIn('<option name="scenario" value="UAT-2"/>', text)
+        self.assertIn('<option name="clearRate" value="true"/>', text)
+        with self.assertRaises(kace.KaceError) as ctx:
+            service.kace({"pair": "USDCNH", "scenario": "  "})
+        self.assertIn("blank", str(ctx.exception))
+        out = service.kace({"pair": "USDCNH", "scenario": 'A&B"c'})
+        self.assertIn('value="A&amp;B&quot;c"', out["xml"])
+        self._nodes(out["xml"])                                   # still parses
+        # Without a username the table is still shown; the message is not.
+        import os
+        had = os.environ.pop(kace.ENV_USER, None)
+        if had is not None:
+            self.addCleanup(os.environ.__setitem__, kace.ENV_USER, had)
+        bare = BookService(str(WORKBOOK), ASOF, kace_spreads_path=str(self.SPREADS))
+        self.assertFalse(bare.state()["kace"]["credentials"])
+        out = bare.kace({"pair": "USDCNH"})
+        self.assertIsNone(out["xml"])
+        self.assertIn(kace.ENV_USER, out["xml_error"])
+        self.assertEqual(len(out["pillars"]), 9)
+        with self.assertRaises(kace.KaceError):
+            bare.export_kace({"pair": "USDCNH"})
+        # A table that is wrong is the card's error, not a crash at startup.
+        broken = BookService(str(WORKBOOK), ASOF, kace_spreads_path="/nowhere/kace.csv")
+        self.assertIn("kace.csv", broken.state()["kace"]["error"])
+        with self.assertRaises(kace.KaceError):
+            broken.kace({"pair": "USDCNH"})
+
+    def test_the_routes_and_the_command_belong_to_the_marking_screen(self):
+        from volkit import screens
+        from volkit.cli import build_parser
+        owner = {r: sc.name for sc in screens.SCREENS for r in sc.routes}
+        self.assertEqual(owner["/api/kace"], "marking")
+        self.assertEqual(owner["/api/export/kace"], "marking")
+        self.assertEqual(screens.command_screen("kace"), "marking")
+        args = build_parser().parse_args(["kace", "USDCNH", "--clear", "--kace-user", "u"])
+        self.assertTrue(args.clear)
+        self.assertEqual(args.kace_user, "u")
+        self.assertEqual(args.source, "marks")
+        args = build_parser().parse_args(["serve", "--kace-spreads", "s.csv",
+                                          "--kace-scenario", "Prod"])
+        self.assertEqual((args.kace_spreads, args.kace_scenario), ("s.csv", "Prod"))
+        self.assertIn("kace", (Path(__file__).resolve().parents[1] / "volkit" / "web"
+                               / "index.html").read_text(encoding="utf-8"))
+
+    # -- posting ----------------------------------------------------------
+    REPLY_OK = ("<?xml version='1.0' encoding='UTF-8'?>\n"
+                '<gfi_message version="2.0">\n  <header>\n    <transactionId>1234567890</transactionId>\n'
+                "    <timestamp>2023-06-12T16:15:26+08:00</timestamp>\n"
+                "    <processingTime>0.298</processingTime>\n  </header>\n  <body>\n"
+                '    <response name="action1" function="RATE_FEED" version="1.0" />\n'
+                "  </body>\n</gfi_message>\n")
+
+    def test_the_reply_is_read_as_the_poster_page_shows_it(self):
+        """The one shape known to mean success, and everything else refused."""
+        from volkit import kace
+        ok, took, msg = kace.read_reply(self.REPLY_OK)
+        self.assertTrue(ok)
+        self.assertAlmostEqual(took, 0.298)
+        self.assertIn("0.298", msg)
+        ok, _, msg = kace.read_reply("<html><body>Please log in</body></html>")
+        self.assertFalse(ok)
+        self.assertIn("not a gfi_message", msg)
+        ok, _, msg = kace.read_reply("502 Bad Gateway\nnginx")
+        self.assertFalse(ok)
+        self.assertIn("not XML", msg)
+        self.assertIn("502 Bad Gateway", msg)
+        ok, _, msg = kace.read_reply('<gfi_message><header/><body><error>unknown scenario '
+                                     'Prod</error></body></gfi_message>')
+        self.assertFalse(ok)
+        self.assertIn("unknown scenario Prod", msg)
+        ok, _, msg = kace.read_reply('<gfi_message><header/><body><response status="ERROR: bad"/>'
+                                     '</body></gfi_message>')
+        self.assertFalse(ok)
+        ok, _, msg = kace.read_reply('<gfi_message><header><processingTime>0.1</processingTime>'
+                                     '</header><body/></gfi_message>')
+        self.assertFalse(ok)
+        self.assertIn("no <response>", msg)
+
+    def test_the_body_is_the_forms_the_vba_sent(self):
+        from volkit import kace
+        body = kace.form_body('<a b="1"> x&y</a>')
+        self.assertTrue(body.startswith(b"xml="))
+        import urllib.parse
+        self.assertEqual(urllib.parse.parse_qs(body.decode())["xml"], ['<a b="1"> x&y</a>'])
+        self.assertEqual(len(kace.message_hash("m")), 16)
+        self.assertNotEqual(kace.message_hash("m"), kace.message_hash("n"))
+
+    def test_post_message_through_an_injected_network(self):
+        from volkit import kace
+        seen = {}
+
+        def fake(url, body, headers, *, timeout, ca, insecure):
+            seen.update(url=url, body=body, headers=headers, timeout=timeout, ca=ca,
+                        insecure=insecure)
+            return 200, self.REPLY_OK.encode()
+
+        r = kace.post_message("<gfi_message/>", "https://kace:8500/pricing", opener=fake,
+                              ca="/desk/ca.pem")
+        self.assertTrue(r.ok)
+        self.assertEqual(r.status, 200)
+        self.assertAlmostEqual(r.processing_time, 0.298)
+        self.assertEqual(seen["headers"]["Content-Type"], kace.FORM_CONTENT_TYPE)
+        self.assertEqual(seen["body"], b"xml=%3Cgfi_message%2F%3E")
+        self.assertEqual(seen["headers"]["Content-Length"], str(len(seen["body"])))
+        self.assertEqual((seen["ca"], seen["insecure"], seen["timeout"]),
+                         ("/desk/ca.pem", False, kace.POST_TIMEOUT))
+        self.assertEqual(r.bytes_sent, len(seen["body"]))
+        # A status that is not 200 is the failure, with the first line of the body.
+        r = kace.post_message("<m/>", "http://kace:8500/x",
+                              opener=lambda *a, **k: (500, b"<html>Internal Server Error</html>"))
+        self.assertFalse(r.ok)
+        self.assertEqual(r.status, 500)
+        self.assertIn("HTTP 500", r.message)
+        self.assertIn("Internal Server Error", r.message)
+        # No address, or not an http one, is refused before anything is sent.
+        with self.assertRaises(kace.KacePostError) as ctx:
+            kace.post_message("<m/>", "", opener=fake)
+        self.assertIn(kace.ENV_URL, str(ctx.exception))
+        with self.assertRaises(kace.KacePostError):
+            kace.post_message("<m/>", "ftp://kace/x", opener=fake)
+
+    def test_the_post_log_and_a_refused_post(self):
+        import tempfile
+        from volkit import kace
+        with tempfile.TemporaryDirectory() as tmp:
+            log = kace.PostLog.at(Path(tmp) / "posts.jsonl")
+            when = datetime(2024, 2, 28, 9, 12, tzinfo=UTC)
+            # A dry run says what would go and writes nothing.
+            e = kace.post_feed("<m/>", pair="USDCNH", scenario="Xyz", clear=False,
+                               hor_date=date(2024, 2, 28), nodes=3, url="http://kace/x",
+                               log=log, when=when, dry_run=True)
+            self.assertIsNone(e["ok"])
+            self.assertIn("dry run", e["message"])
+            self.assertIn("http://kace/x", e["message"])
+            self.assertEqual(log.entries(), [])
+            # A post that cannot reach the server is recorded, as a failure.
+            def down(*a, **k):
+                raise kace.KacePostError("could not reach http://kace/x: refused")
+            e = kace.post_feed("<m/>", pair="USDCNH", scenario="Xyz", clear=True,
+                               hor_date=date(2024, 2, 28), nodes=1, url="http://kace/x",
+                               log=log, when=when, opener=down)
+            self.assertFalse(e["ok"])
+            self.assertIn("refused", e["message"])
+            self.assertEqual(e["logged"], log.path)
+            # And one that lands.
+            e = kace.post_feed("<m/>", pair="usdcnh", scenario="Live", clear=False,
+                               hor_date=date(2024, 2, 28), nodes=413, url="http://kace/x",
+                               log=log, when=when,
+                               opener=lambda *a, **k: (200, self.REPLY_OK.encode()))
+            self.assertTrue(e["ok"])
+            self.assertEqual(e["pair"], "USDCNH")
+            rows = log.entries()
+            self.assertEqual([r["ok"] for r in rows], [False, True])
+            self.assertEqual(rows[1]["scenario"], "Live")
+            self.assertEqual(rows[1]["hash"], kace.message_hash("<m/>"))
+            self.assertEqual(rows[1]["at"], "2024-02-28T09:12:00+00:00")
+            # A line that will not parse is skipped, not fatal; the pair filter works.
+            with Path(log.path).open("a", encoding="utf-8") as fh:
+                fh.write("{not json\n")
+            self.assertEqual(len(log.entries()), 2)
+            self.assertEqual(log.entries(pair="EURUSD"), [])
+            self.assertEqual(len(log.entries(pair="usdcnh", limit=1)), 1)
+
+    def test_the_post_button_sends_what_the_table_shows_and_nothing_else(self):
+        import tempfile
+        from volkit import kace
+        from volkit.webapp import BookService
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "kace_posts.jsonl"
+            service = BookService(str(WORKBOOK), ASOF, kace_spreads_path=str(self.SPREADS),
+                                  kace_user="feeuser", kace_password="pw",
+                                  kace_url="https://kace:8500/pricing", kace_insecure=True,
+                                  kace_log_path=str(log_path))
+            sent = []
+
+            def fake(url, body, headers, *, timeout, ca, insecure):
+                sent.append((url, body, headers, insecure))
+                return 200, self.REPLY_OK.encode()
+
+            service.kace_opener = fake
+            state = service.state()["kace"]
+            self.assertEqual(state["url"], "https://kace:8500/pricing")
+            self.assertTrue(state["insecure"])
+            self.assertEqual(state["posts"], [])
+            shown = service.kace({"pair": "USDCNH", "scenario": "UAT"})
+            r = service.kace_post({"pair": "USDCNH", "scenario": "UAT"})
+            self.assertTrue(r["ok"])
+            self.assertAlmostEqual(r["processing_time"], 0.298)
+            self.assertEqual(r["nodes"], 413)
+            self.assertEqual(r["scenario"], "UAT")
+            self.assertEqual(r["hor_date"], "2024-02-28")
+            self.assertEqual(r["at"], "2024-02-28T12:00:00+00:00")   # the book's clock
+            import urllib.parse
+            url, body, headers, insecure = sent[0]
+            self.assertEqual(url, "https://kace:8500/pricing")
+            self.assertTrue(insecure)
+            self.assertEqual(headers["Content-Type"], kace.FORM_CONTENT_TYPE)
+            posted = urllib.parse.parse_qs(body.decode())["xml"][0]
+            self.assertEqual(posted, shown["xml"])               # exactly the table's message
+            self.assertEqual(r["hash"], kace.message_hash(shown["xml"]))
+            self.assertEqual(len(r["posts"]), 1)
+            self.assertEqual(log_path.read_text(encoding="utf-8").count("\n"), 1)
+            # The clear goes the same way, and says so in the record.
+            r = service.kace_post({"pair": "USDCNH", "scenario": "UAT", "clear": "1"})
+            self.assertTrue(r["clear"])
+            self.assertIn('name="clearRate"', urllib.parse.parse_qs(sent[1][1].decode())["xml"][0])
+            # A dry run reaches no network and writes no line.
+            r = service.kace_post({"pair": "USDCNH", "dry_run": True})
+            self.assertTrue(r["dry_run"])
+            self.assertEqual(len(sent), 2)
+            self.assertEqual(len(service.kace_log.entries()), 2)
+            self.assertEqual(service.state()["kace"]["posts"][-1]["clear"], True)
+            # A server that answers with something else is a failure the page shows.
+            service.kace_opener = lambda *a, **k: (200, b"<html>Session expired</html>")
+            r = service.kace_post({"pair": "USDCNH"})
+            self.assertFalse(r["ok"])
+            self.assertIn("not a gfi_message", r["message"])
+            self.assertIn("Session expired", r["reply"])
+            # No address: refused by name, and recorded as refused.
+            bare = BookService(str(WORKBOOK), ASOF, kace_spreads_path=str(self.SPREADS),
+                               kace_user="u", kace_log_path=str(Path(tmp) / "bare.jsonl"))
+            import os
+            os.environ.pop(kace.ENV_URL, None)
+            bare.kace_url = ""
+            self.assertFalse(bare.state()["kace"]["url"])
+            r = bare.kace_post({"pair": "USDCNH"})
+            self.assertFalse(r["ok"])
+            self.assertIn(kace.ENV_URL, r["message"])
+            # Without a username there is no message to post at all.
+            nouser = BookService(str(WORKBOOK), ASOF, kace_spreads_path=str(self.SPREADS),
+                                 kace_url="http://kace/x")
+            nouser.kace_user = ""
+            with self.assertRaises(kace.KaceError):
+                nouser.kace_post({"pair": "USDCNH"})
+
+    def test_the_post_route_and_options(self):
+        from volkit import screens
+        from volkit.cli import build_parser
+        owner = {r: sc.name for sc in screens.SCREENS for r in sc.routes}
+        self.assertEqual(owner["/api/kace/post"], "marking")
+        args = build_parser().parse_args(["kace", "USDCNH", "--post", "--dry-run",
+                                          "--kace-url", "https://k:8500/p", "--kace-insecure"])
+        self.assertTrue(args.post and args.dry_run and args.kace_insecure)
+        self.assertEqual(args.kace_url, "https://k:8500/p")
+        args = build_parser().parse_args(["serve", "--kace-url", "http://k/x", "--kace-ca",
+                                          "ca.pem", "--kace-log", "p.jsonl"])
+        self.assertEqual((args.kace_url, args.kace_ca, args.kace_log),
+                         ("http://k/x", "ca.pem", "p.jsonl"))
 
 
 if __name__ == "__main__":

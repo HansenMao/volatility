@@ -32,7 +32,6 @@ import numpy as np
 from .atm import CUTS
 from .exotics import TOUCH_MODES
 from .book import Book
-from .econ import RELEASE_TIMES
 from .events import event_entries, leg_weights, pair_legs
 from .cross import CrossAtmCurve
 from .feed import FeedError, load_for
@@ -57,15 +56,18 @@ from .relvalue import panel_from_request as relvalue_panel_from_request
 from .banded import BAND_MODES, BandTreatment, band_panel
 from .curves import CURVE_FIELDS, CURVE_KINDS, FIELD_LABELS, KIND_LABELS
 from .curves import panel_from_request as curve_panel_from_request
-from .monitor import DEFAULT_WAS_DATE, DEFAULT_WAS_KIND, MAX_TILES
+from .monitor import (BIG_MOVE_STEP, DEFAULT_BIG_MOVE, DEFAULT_WAS_DATE,
+                      DEFAULT_WAS_KIND, MAX_TILES)
 from .monitor import panel_from_request as monitor_panel_from_request
 from .history import ANNUALISATIONS, VOL_UNITS, HistoryError, load_history
-from .pricing import PRODUCTS, OptionLeg, price_strip, quick_vol, resolve_legs
+from .pricing import (PRODUCTS, OptionLeg, expiry_datetime, price_strip,
+                      quick_vol, resolve_legs)
 from . import remarks, screens, session
 from .marking import MIN_INSTANCES as MARK_MIN_INSTANCES
 from .marking import SCREEN_VERDICTS as MARK_VERDICTS
 from .smile import INTERPOLATORS
-from .timeutil import UTC, Clock, parse_datetime, tenor_to_years
+from .timeutil import UTC, Clock, parse_datetime
+from . import kace as kace_mod
 
 STATIC_DIR = Path(__file__).parent / "web"
 
@@ -88,7 +90,11 @@ class BookService:
                  archive_path: str | None = None, agent_chats=None, agent_sdr=None,
                  ingest_state_path: str | None = None, dtcc_proxy: str | None = None,
                  journal_path: str | None = None, rules_path: str | None = None,
-                 dtcc_direct: bool = False):
+                 dtcc_direct: bool = False, kace_spreads_path: str | None = None,
+                 kace_user: str | None = None, kace_password: str | None = None,
+                 kace_scenario: str = kace_mod.DEFAULT_SCENARIO, kace_url: str | None = None,
+                 kace_ca: str | None = None, kace_insecure: bool = False,
+                 kace_log_path: str | None = None):
         self.path = path
         self.clock = clock or Clock.utcnow()
         self.feed_path = feed_path
@@ -202,6 +208,29 @@ class BookService:
         except rules_mod.RulesError as exc:
             self.rules = rules_mod.RuleBook(path=str(rules_path or ""))
             self.rules_error = str(exc)
+        # The kACE feed's spread table and credentials.  The table is the
+        # desk's own file, read here like the rules and its trouble shown on
+        # the card; the credentials come from the command line or the
+        # environment and never from the browser, for the same reason the
+        # proxy does not: a page that can set them can send them anywhere.
+        self.kace_spreads_path = kace_spreads_path
+        self.kace_error: str | None = None
+        self.kace_user, self.kace_password = kace_mod.credentials(kace_user, kace_password)
+        self.kace_scenario = kace_scenario or kace_mod.DEFAULT_SCENARIO
+        # Where a post goes, and how.  From the command line or the
+        # environment only -- the page presses the button and nothing more.
+        self.kace_url = kace_mod.settings(kace_url)
+        self.kace_ca = kace_ca
+        self.kace_insecure = bool(kace_insecure)
+        self.kace_log = kace_mod.PostLog.at(kace_log_path)
+        # The network, replaceable: tests post into a function.
+        self.kace_opener = None
+        try:
+            self.kace_spreads = kace_mod.SpreadTable.load(kace_spreads_path)
+        except kace_mod.KaceError as exc:
+            self.kace_spreads = kace_mod.SpreadTable(
+                path=str(kace_spreads_path or kace_mod.SpreadTable.default_path()))
+            self.kace_error = str(exc)
         self.reload()
         if session_path:
             # Asked for by name, so a failure is said out loud rather than
@@ -252,6 +281,12 @@ class BookService:
                 "products": list(PRODUCTS),
                 "overhedges": list(TOUCH_MODES),
                 "feed": self.feed_state(),
+                # The kACE feed: which pairs the spread table can post, and
+                # whether the message header has a username to carry.  The
+                # marking screen's kACE tab reads this before it offers a
+                # download, so a build with no table says so rather than
+                # failing on the click.
+                "kace": self.kace_state(),
                 # Watching the data files belongs to no screen: the workbook,
                 # the feed and the historical sheet are read by several.
                 "auto": self.auto_state(),
@@ -284,6 +319,11 @@ class BookService:
                     "fields": [{"key": f, "label": FIELD_LABELS[f]} for f in CURVE_FIELDS],
                     "was_kind": DEFAULT_WAS_KIND, "was_date": DEFAULT_WAS_DATE,
                     "max_tiles": MAX_TILES,
+                    # What counts as a big move, in volatility points, and how
+                    # much more makes it a very big one.  Declared once in
+                    # monitor.py so the screen and `volkit monitor` shade and
+                    # star the same cells.
+                    "big": DEFAULT_BIG_MOVE, "big_step": BIG_MOVE_STEP,
                 },
                 # Managed / pegged pairs.  The page only shows the band card
                 # for a pair that has one, and there is no point offering the
@@ -374,26 +414,35 @@ class BookService:
             pair = q["pair"]
             surface = self.book[pair]
             method, cut = q.get("method", "SVI"), q.get("cut", "TK")
-            sl = surface.slice_at(q["expiry"], method, cut)
+            # Resolved once, here: the chart's box takes a tenor as readily as
+            # a date and the level below is read on the settlement date this
+            # expiry implies, so the two must come out of one reading.
+            expiry = expiry_datetime(self.book, pair, q["expiry"])
+            sl = surface.slice_at(expiry, method, cut)
             lo = float(min(sl.strikes)) * 0.97
             hi = float(max(sl.strikes)) * 1.03
             ks = np.linspace(lo, hi, 241)
             vols = np.asarray(sl.vol(ks), dtype=float)
-            dens = [surface.density(float(k), q["expiry"], method, cut) for k in ks]
+            dens = [surface.density(float(k), expiry, method, cut) for k in ks]
             # The smile itself is always built in moneyness -- that is the
             # space the surface works in, and no number here moves because a
             # feed was loaded.  This is only the scale the chart puts on the
             # axis, so a strike reads as the level a trader would name rather
             # than as 1.0234 of a forward.
-            level = self.book.market_level(pair, sl.t)
+            level = self.book.market_level_for(pair, expiry.date())
             warnings = list(sl.warnings)
             if level["extrapolated"]:
                 warnings.append(
-                    f"the {sl.t:.4f}-year forward for {pair} is extrapolated beyond the "
-                    f"feed's pillars; the strike axis is scaled by it")
+                    f"the forward for {pair} to {level['settle']} is extrapolated beyond "
+                    f"the feed's pillars; the strike axis is scaled by it")
             return {
                 "t": sl.t,
                 "atm": sl.atm_vol * 100,
+                # The date the axis scale is a price to.  A strike axis in
+                # levels is an axis of forward-settled prices, and saying
+                # which date is what makes it checkable against a broker.
+                "settle": level["settle"],
+                "spot_date": level["spot_date"],
                 # The axis scale, never the model's own space.  ``forward`` is
                 # None when there is no feed and the page stays in moneyness.
                 "spot": level["spot"],
@@ -407,7 +456,7 @@ class BookService:
                 "density": [{"k": float(k), "d": float(d)} for k, d in zip(ks, dens)],
                 "points": [
                     {"label": r["label"], "k": r["strike"], "v": r["vol"] * 100}
-                    for r in surface.smile_table(q["expiry"], method=method, cut=cut)
+                    for r in surface.smile_table(expiry, method=method, cut=cut)
                 ],
                 "warnings": warnings,
                 "fit": None if sl.svi is None else {
@@ -424,7 +473,7 @@ class BookService:
             tenors = list(self.book.data.tenor_points)
             curve = []
             for tp in tenors:
-                t = tenor_to_years(tp)
+                t = surface.tenor_years(tp)
                 curve.append({
                     "tenor": tp, "t": t,
                     "vol": surface.atm.term_vol(t) * 100,
@@ -435,8 +484,16 @@ class BookService:
                 "slog25": f.slog25, "slog10": f.slog10,
                 "rho25": f.rho25, "rho10": f.rho10, "ok": f.ok, "message": f.message,
             } for f in surface.fits]
-            term = {k: {"initial": v.initial, "final": v.final, "decay": v.decay}
-                    for k, v in surface.term.items()}
+            # The curve each parameter is actually on, and the fit underneath
+            # it: reporting only the fit would have this route disagree with
+            # the surface the moment a term structure is marked.
+            term = {}
+            for row in surface.term_rows():
+                in_force = row["marked"] or row["fitted"]
+                if in_force is None:
+                    continue
+                term[row["param"]] = dict(in_force, marked=row["marked"] is not None,
+                                          fitted=row["fitted"])
             return {"curve": curve, "fits": fits, "term": term,
                     "events": [{"when": e.when.isoformat(), "bump": e.bump * 100,
                                 "height": e.height, "label": e.label}
@@ -849,6 +906,22 @@ class BookService:
                 overhedge=str(row.get("overhedge") or "none"),
                 buffer_pct=float(row.get("buffer") or 0.0),
                 conservative=str(row.get("side", "buy")).lower().startswith("s"),
+                # The settlement box, and only when the screen says somebody
+                # typed in it: it fills that box with the calendar's own date
+                # the way it fills spot from the feed, so a date being there
+                # is not evidence anybody chose it.
+                settle=(str(row.get("settle") or "")
+                        if str(row.get("settlesrc") or "typed").lower() == "typed" else ""),
+                # Which of the market boxes are still the feed's.  Only the
+                # screen knows -- it fills them and then posts what is in
+                # them -- and without it every leg reported its market as
+                # typed, including one nobody had touched.  `fwdsrc` names
+                # which of the swap and the outright is being held, and both
+                # of its typed spellings mean the same thing here.
+                spot_source=("feed" if str(row.get("spotsrc") or "") == "feed" else
+                             "typed" if row.get("spotsrc") else ""),
+                forward_source=("feed" if str(row.get("fwdsrc") or "") == "feed" else
+                                "typed" if row.get("fwdsrc") else ""),
             ))
         with self._lock:
             return price_strip(self.book, legs)
@@ -860,7 +933,7 @@ class BookService:
             cut = q.get("cut", "TK")
             atm_rows = []
             for tenor in self.book.data.tenor_points:
-                t = tenor_to_years(tenor)
+                t = surface.tenor_years(tenor)
                 atm_rows.append({
                     "tenor": tenor,
                     "curve": surface.atm.curve_vol(t) * 100,
@@ -877,25 +950,37 @@ class BookService:
                     row[name + "_ow"] = ow.get(fit.tenor.upper())
                 smile_rows.append(row)
             return {"atm": atm_rows, "smile": smile_rows,
+                    "term": surface.term_rows(),
                     "anchor": surface.anchor_tenors,
                     "pair": q["pair"], "cut": cut}
 
     # -- curve parameters and events --------------------------------------
-    def _event_rows(self, atm) -> list[dict]:
+    def _event_rows(self, pair: str) -> list[dict]:
+        """The event table through one pair's eyes, in the panel's units.
+
+        Every row on the sheet is here, including one that weighs nothing on
+        this pair: that blank cell is where its adjustment would be typed, and
+        a row the panel cannot see is a row it cannot mark.  The curve gets
+        only the rows that move it (``EventBook.for_pair(touching_only)``);
+        this is the sheet.
+        """
+        atm = self.book[pair].atm
+        legs = pair_legs(pair)
+        solved = {e.when.replace(second=0, microsecond=0): e.height
+                  for e in atm.events.events}
         rows = []
-        legs = pair_legs(atm.pair)
-        for e in atm.events.events:
+        for e in self.book.events.for_pair(pair):
             start = atm.vol_day_start(e.when)
-            lw = leg_weights(e.weights, atm.pair)
+            lw = leg_weights(e.weights, pair)
             rows.append({
                 "when": e.when.strftime("%Y-%m-%dT%H:%M"),
-                "bump": e.bump * 100.0,
+                "bump": (e.bump or 0.0) * 100.0,
                 # Where the bump came from, in the panel's points: each leg's
                 # weight and the pair's adjustment.  ``bump`` is their sum.
                 "weights": {c: lw[c] * 100.0 for c in legs},
                 "adjust": (e.adjust or 0.0) * 100.0,
                 "label": e.label,
-                "height": e.height,
+                "height": solved.get(e.when.replace(second=0, microsecond=0)),
                 # Which volatility day the bump actually prices into.  The day
                 # rolls at 14:00 UTC, so a late-afternoon release belongs to
                 # the next one -- worth showing rather than letting a marker
@@ -914,7 +999,7 @@ class BookService:
             out = {
                 "pair": q["pair"], "is_cross": is_cross,
                 "legs_ccy": list(pair_legs(q["pair"])),
-                "events": self._event_rows(atm),
+                "events": self._event_rows(q["pair"]),
                 "tenors": list(self.book.data.tenor_points),
             }
             if is_cross:
@@ -958,71 +1043,102 @@ class BookService:
             return {"ok": not problems, "problems": problems, **self.curve({"pair": payload["pair"]})}
 
     def set_events(self, payload: dict) -> dict:
-        """Replace the whole event schedule for a pair and re-solve the heights.
+        """Put this pair's panel back onto the event table and re-solve.
 
         A row gives either a ``bump`` alone, or ``weights`` (per currency)
         and an ``adjust``, all in vol points; ``event_entries`` is the one
-        reader, shared with the session file.
+        reader, shared with the session file.  A weight typed here is the
+        **sheet's**, so it moves every pair with that currency, and the reply
+        names them -- a mark may be shut but it may not be hidden.
         """
         with self._lock:
-            surface = self.book[payload["pair"]]
+            pair = str(payload["pair"]).upper()
             entries, problems = event_entries(payload.get("events") or [])
             if problems:
                 raise ValueError("; ".join(problems))
-            problems = surface.atm.set_events(entries)
-            surface.invalidate()
+            bad, notes = self.book.events.set_pair(
+                pair, entries, pairs=self.book.data.pairs)
+            if bad:
+                raise ValueError("; ".join(bad))
+            problems = self.book.apply_events()
             self.dirty = True
-            return {"ok": True, "problems": problems,
-                    "events": self._event_rows(surface.atm)}
+            return {"ok": True, "problems": problems, "notes": notes,
+                    "events": self._event_rows(pair)}
 
-    def suggest_events(self, q: dict) -> dict:
-        """Scheduled economic releases for this pair, ready to accept or edit."""
+    def workbook_events(self, q: dict) -> dict:
+        """This pair's rows as the workbook's EVENTS sheet has them.
+
+        What the panel's **Reload** asks for: the sheet again, after a session
+        has marked over it.  Nothing is applied here -- the browser owns the
+        panel and posts it back through ``set_events`` like any other edit.
+        """
         with self._lock:
-            pair = q["pair"]
-            horizon = float(q.get("horizon", 1.0))
-            start = self.book.clock.now
-            end = start + timedelta(days=horizon * 365.2425)
-            found = self.book.econ.for_pair(pair, start, end)
+            pair = str(q["pair"]).upper()
             atm = self.book[pair].atm
+            legs = pair_legs(pair)
             rows = []
-            for e in found:
-                start_day = atm.vol_day_start(e.when)
-                rows.append({**e.as_dict(),
-                             "when": e.when.strftime("%Y-%m-%dT%H:%M"),
-                             "adjust": 0.0,
-                             "vol_day": (start_day + timedelta(days=1)).strftime("%Y-%m-%d")})
-            return {"pair": pair, "legs_ccy": list(pair_legs(pair)), "events": rows,
-                    "source": self.book.econ.source,
-                    "weights_source": self.book.econ.weights_source,
-                    "note": "dates from the published calendars shipped with volkit; "
-                            "verify before relying on them, and edit "
-                            "volkit/data/econ_events.csv to extend. Each bump is the "
-                            "pair's two legs' weights added (volkit/data/event_weights.csv)"}
+            for e in self.book.data.events.for_pair(pair):
+                start = atm.vol_day_start(e.when)
+                lw = leg_weights(e.weights, pair)
+                rows.append({
+                    "when": e.when.strftime("%Y-%m-%dT%H:%M"),
+                    "bump": (e.bump or 0.0) * 100.0,
+                    "weights": {c: lw[c] * 100.0 for c in legs},
+                    "adjust": (e.adjust or 0.0) * 100.0,
+                    "label": e.label,
+                    "vol_day": (start + timedelta(days=1)).strftime("%Y-%m-%d"),
+                })
+            return {"pair": pair, "legs_ccy": list(legs), "events": rows,
+                    "source": self.book.data.events.source or self.book.data.source,
+                    "note": "the EVENTS sheet as the workbook holds it; apply to put it "
+                            "on the curve"}
 
     def event_weights(self, q: dict | None = None) -> dict:
-        """The weight table: what each release is worth on each currency, in points."""
+        """The currency side of the event table: one row per release."""
         with self._lock:
-            cal = self.book.econ
-            table = cal.table()
-            currencies = sorted({c for row in table.values() for c in row})
-            return {"events": [{"name": k, "currency": RELEASE_TIMES[k][0], "weights": row}
-                               for k, row in table.items()],
+            table = self.book.events
+            currencies = table.currencies()
+            return {"events": [{"when": r.when.strftime("%Y-%m-%dT%H:%M"),
+                                "label": r.label,
+                                "weights": {c: r.weights.get(c, 0.0) * 100.0
+                                            for c in currencies},
+                                "pairs": sorted(r.adjust)}
+                               for r in table.rows],
                     "currencies": currencies,
-                    "source": cal.weights_source or "",
+                    "source": table.source,
                     "note": "in vol points; a pair's bump is its two legs added, plus the "
-                            "pair's adjustment. Applying changes what Auto-load suggests "
-                            "and nothing already on a pair's events table"}
+                            "pair's own adjustment. A weight here is shared by every pair "
+                            "with that currency and moves all of them"}
 
     def set_event_weights(self, payload: dict) -> dict:
-        """Replace the whole weight table for this session.  The browser owns
-        the panel and posts it whole; nothing is written to any file."""
+        """Replace the currency side of the table; every pair's cell is kept.
+
+        The browser owns the panel and posts it whole.  Nothing is written to
+        any file -- the workbook is written only by an export asked for by
+        name (``volkit session --to-workbook``).
+        """
         with self._lock:
-            table = payload.get("weights")
-            if not isinstance(table, dict):
-                raise ValueError("post {'weights': {EVENT: {CCY: points}}}")
-            self.book.econ.set_weights(table)
+            rows = payload.get("weights")
+            if not isinstance(rows, list):
+                raise ValueError(
+                    "post {'weights': [{'when': ..., 'weights': {CCY: points}}, ...]}")
+            decimal = []
+            for row in rows:
+                if not isinstance(row, dict):
+                    raise ValueError("each weights row must be an object")
+                try:
+                    w = {str(c).upper(): float(v or 0.0) / 100.0
+                         for c, v in (row.get("weights") or {}).items()}
+                except (TypeError, ValueError):
+                    raise ValueError(f"{row.get('when')}: a weight must be a number") from None
+                decimal.append({"when": row.get("when"), "label": row.get("label"),
+                                "weights": w})
+            problems = self.book.events.set_weights(decimal)
+            if problems:
+                raise ValueError("; ".join(problems))
+            problems = self.book.apply_events()
             self.dirty = True
-            return {"ok": True, **self.event_weights()}
+            return {"ok": True, "problems": problems, **self.event_weights()}
 
     def overwrite(self, q: dict) -> dict:
         with self._lock:
@@ -1037,6 +1153,18 @@ class BookService:
                 surface.clear_param_overwrites()
             elif kind == "clear_atm":
                 surface.atm.clear_overwrite(q.get("tenor") or None)
+            elif kind == "smile_term":
+                # The three coefficients of one parameter's term structure,
+                # marked together: a curve is its shape, and half of one
+                # applied while the rest is refused is not a curve anybody
+                # asked for.
+                problems = surface.set_param_term(
+                    q["param"], _number(q, "initial"), _number(q, "final"),
+                    _number(q, "decay"))
+                if problems:
+                    raise ValueError("; ".join(problems))
+            elif kind == "clear_smile_term":
+                surface.clear_param_terms(q.get("param") or None)
             elif kind == "clear_smile":
                 surface.clear_param_overwrites()
             elif kind == "anchor":
@@ -1097,14 +1225,19 @@ class BookService:
                     **self.session_state({"path": written})}
 
     def session_export(self, payload: dict) -> dict:
-        """Write a session file into a *copy* of the workbook.
+        """Write a session file into the workbook it was marked against.
 
-        The one route that produces a workbook, and it never produces the
-        loaded one: an in-place export is a command somebody types
-        (``volkit session --to-workbook --in-place``), not a button.  The
-        marks written are the file's, not the book's -- save first, which is
-        what the page does -- so what lands in the copy is exactly what a
-        person can open and read in the session file beside it.
+        The one route that writes a workbook.  It writes the *loaded* one
+        in place unless ``out`` names somewhere else, and the file it
+        replaced is kept beside it as ``<name>.bak-<stamp>.xlsx``: openpyxl
+        does not carry images or charts through a round trip, so the bytes
+        as they were are the only way back.
+
+        What is written is the session **file's** marks, never the live
+        book's -- the page saves first, and this route reads the file back
+        off disk -- so what lands in the workbook is exactly what a person
+        can open and read in the JSON beside it.  A screen cannot write a
+        mark it has not first written down.
         """
         with self._lock:
             if self.book is None:
@@ -1118,7 +1251,7 @@ class BookService:
                 raise ValueError("the loaded book did not come from a workbook file")
             out = (payload.get("out") or "").strip() or None
             doc = session.load(path)
-            result = session.export_workbook(doc, src, out, pairs, in_place=False)
+            result = session.export_workbook(doc, src, out, pairs, in_place=out is None)
             return {"ok": not result["problems"], "path": str(path), "workbook": src,
                     **result}
 
@@ -1730,6 +1863,135 @@ class BookService:
             field = q.get("field", "cumulative")
             return "".join(f"{k}, {v[field] * 100}\n" for k, v in series.items())
 
+    # -- the kACE feed ------------------------------------------------------
+    def kace_state(self) -> dict:
+        return {"spreads": self.kace_spreads.path,
+                "pairs": sorted(self.kace_spreads.rows),
+                "error": self.kace_error,
+                "credentials": bool(self.kace_user),
+                "scenario": self.kace_scenario,
+                "sources": list(kace_mod.SOURCES),
+                # Posting: the page shows the address it would post to and
+                # the log it would write, and offers the button only when
+                # there is an address.
+                "url": self.kace_url,
+                "insecure": self.kace_insecure,
+                "log": self.kace_log.path,
+                "posts": self.kace_log.entries(limit=10)}
+
+    def kace_post(self, payload: dict) -> dict:
+        """The Post button: build the message here, send it, record it.
+
+        The browser posts the *request* -- pair, cut, wings, scenario, feed
+        or clear -- and never the XML.  What goes to kACE is therefore
+        exactly what ``kace()`` would have shown, built under the same lock
+        from the same book, and a page cannot send the platform a message
+        this server did not make.  ``dry_run`` says what would go and where
+        and sends nothing.
+        """
+        out = self.kace(payload)
+        if not out.get("xml"):
+            raise kace_mod.KaceError(out.get("xml_error") or "no message was built")
+        with self._lock:
+            when = self.book.clock.now if self.book is not None else Clock.utcnow().now
+        entry = kace_mod.post_feed(
+            out["xml"], pair=out["pair"], scenario=out["scenario"], clear=out["clear"],
+            hor_date=datetime.fromisoformat(out["hor_date"]).date(),
+            nodes=out["xml"].count("<node "), url=self.kace_url, log=self.kace_log,
+            when=when, opener=self.kace_opener, ca=self.kace_ca, insecure=self.kace_insecure,
+            dry_run=bool(payload.get("dry_run")))
+        entry["posts"] = self.kace_log.entries(limit=10)
+        return entry
+
+    def _kace_feed(self, q: dict):
+        if self.kace_error:
+            raise kace_mod.KaceError(self.kace_error)
+        return kace_mod.build(self.book, q["pair"], self.kace_spreads,
+                              cut=q.get("cut", "NY"), source=q.get("source", "marks"),
+                              method=q.get("method", "SVI"))
+
+    def _kace_scenario(self, q: dict) -> str:
+        """The scenario the message posts into: the page's box, else the start-up default.
+
+        The scenario is the one thing on the message a desk changes from
+        day to day -- a test scenario before the live one -- so it is typed
+        on the tab rather than fixed at start-up.  Blank is refused: kACE
+        would file the vols under an empty name, or refuse them later with
+        less to say.
+        """
+        if "scenario" in q:
+            scenario = str(q["scenario"]).strip()
+            if not scenario:
+                raise kace_mod.KaceError("the scenario is blank: name the kACE scenario the "
+                                         "vols are posted into")
+            return scenario
+        return self.kace_scenario
+
+    def kace(self, q: dict) -> dict:
+        """The kACE tab: the pillars, the notes, and the message itself.
+
+        The XML travels with the summary so the copy button and the table
+        are one call and cannot show two different messages.  A message
+        that cannot be built is the error, not an empty download.
+        """
+        with self._lock:
+            if self.book is None:
+                raise ValueError(self.load_error or "no workbook is loaded")
+            scenario = self._kace_scenario(q)
+            if q.get("clear"):
+                pair = q["pair"].upper()
+                if pair not in self.book.pairs:
+                    raise ValueError(f"unknown pair {pair}")
+                text = kace_mod.clear_message(pair, self.book.clock.now.date(),
+                                              self.kace_user, self.kace_password,
+                                              scenario=scenario,
+                                              timestamp=self.book.clock.now)
+                return {"pair": pair, "clear": True, "xml": text, "scenario": scenario,
+                        "hor_date": self.book.clock.now.date().isoformat()}
+            feed = self._kace_feed(q)
+            out = feed.summary()
+            out["clear"] = False
+            out["scenario"] = scenario
+            # The table is worth seeing without a username -- it is the
+            # check on the marks -- so only the message itself is withheld,
+            # and the tab says why.
+            try:
+                out["xml"] = feed.xml(self.kace_user, self.kace_password,
+                                      scenario=scenario, timestamp=self.book.clock.now)
+                out["xml_error"] = None
+            except kace_mod.KaceError as exc:
+                out["xml"] = None
+                out["xml_error"] = str(exc)
+            return out
+
+    def export_kace(self, q: dict) -> tuple[str, str]:
+        """The message as a file download: ``(filename, text)``."""
+        out = self.kace(q)
+        if not out.get("xml"):
+            raise kace_mod.KaceError(out.get("xml_error") or "no message was built")
+        kind = "clear" if out["clear"] else "vols"
+        # The scenario is in the file name, so two messages for two
+        # scenarios on one desk cannot be told apart only by opening them.
+        tag = "".join(c if c.isalnum() else "_" for c in out["scenario"])
+        return f"{out['pair']}_kace_{kind}_{tag}_{out['hor_date']}.xml", out["xml"]
+
+
+def _number(q: dict, field: str) -> float:
+    """One field of a request as a number, or a refusal naming the field.
+
+    ``float(None)`` is a ``TypeError`` about NoneType and ``float("")`` a
+    ValueError about a string: neither says which box was left empty, and a
+    box that is filled in and then misread is the silent zero this project
+    exists to remove.
+    """
+    value = q.get(field)
+    if value in (None, ""):
+        raise ValueError(f"{field} is missing; all three coefficients are marked together")
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{field}: {value!r} is not a number") from None
+
 
 def _stamp(mtime: float | None) -> str:
     """A file's write time as an ISO string, or empty when there is none.
@@ -1818,8 +2080,8 @@ class Handler(BaseHTTPRequestHandler):
                 if q.get("check"):
                     self.service.auto_check(settle=False)
                 self._json(self.service.auto_state())
-            elif url.path == "/api/events/suggest":
-                self._json(self.service.suggest_events(q))
+            elif url.path == "/api/events/workbook":
+                self._json(self.service.workbook_events(q))
             elif url.path == "/api/events/weights":
                 self._json(self.service.event_weights(q))
             elif url.path == "/api/analysis":
@@ -1838,6 +2100,17 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self.service.term(q))
             elif url.path == "/api/daily":
                 self._json(self.service.daily(q))
+            elif url.path == "/api/kace":
+                self._json(self.service.kace(q))
+            elif url.path == "/api/export/kace":
+                name, text = self.service.export_kace(q)
+                body = text.encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/xml; charset=utf-8")
+                self.send_header("Content-Disposition", f'attachment; filename="{name}"')
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
             elif url.path == "/api/export/daily":
                 body = self.service.export_daily(q).encode()
                 self.send_response(200)
@@ -1865,6 +2138,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if url.path == "/api/reload":
                 self._json(self.service.reload())
+            elif url.path == "/api/kace/post":
+                self._json(self.service.kace_post(payload))
             elif url.path == "/api/overwrite":
                 self._json(self.service.overwrite(payload))
             elif url.path == "/api/vol":
@@ -1947,12 +2222,19 @@ def serve(path: str, host: str = "127.0.0.1", port: int = 8765,
           auto_reload: float = 0.0, archive_path: str | None = None,
           agent_chats=None, agent_sdr=None, ingest_state_path: str | None = None,
           dtcc_proxy: str | None = None, journal_path: str | None = None,
-          rules_path: str | None = None, dtcc_direct: bool = False) -> None:
+          rules_path: str | None = None, dtcc_direct: bool = False,
+          kace_spreads_path: str | None = None, kace_user: str | None = None,
+          kace_password: str | None = None,
+          kace_scenario: str = kace_mod.DEFAULT_SCENARIO, kace_url: str | None = None,
+          kace_ca: str | None = None, kace_insecure: bool = False,
+          kace_log_path: str | None = None) -> None:
     """Start the local server (blocking)."""
     Handler.service = BookService(path, clock, feed_path, history_path, bank_path,
                                   session_path, auto_reload, archive_path,
                                   agent_chats, agent_sdr, ingest_state_path, dtcc_proxy,
-                                  journal_path, rules_path, dtcc_direct)
+                                  journal_path, rules_path, dtcc_direct,
+                                  kace_spreads_path, kace_user, kace_password, kace_scenario,
+                                  kace_url, kace_ca, kace_insecure, kace_log_path)
     httpd = ThreadingHTTPServer((host, port), Handler)
     url = f"http://{host}:{port}/"
     print(f"volkit serving {path}\n  -> {url}\n  (Ctrl-C to stop)")
@@ -1972,6 +2254,18 @@ def serve(path: str, host: str = "127.0.0.1", port: int = 8765,
         print(f"  ! re-marking journal: {Handler.service.journal_error}")
     if Handler.service.rules_error:
         print(f"  ! rules of thumb: {Handler.service.rules_error}")
+    if Handler.service.kace_error:
+        print(f"  ! kACE feed: {Handler.service.kace_error}")
+    elif not Handler.service.kace_user:
+        print(f"  . kACE feed: no username (--kace-user or {kace_mod.ENV_USER}); "
+              f"the marking screen shows the pillars but builds no message")
+    if Handler.service.kace_url:
+        print(f"  kACE feed posts to {Handler.service.kace_url}"
+              + (" (certificate not checked)" if Handler.service.kace_insecure else "")
+              + f"; log: {Handler.service.kace_log.path}")
+    elif not Handler.service.kace_error:
+        print(f"  . kACE feed: no post URL (--kace-url or {kace_mod.ENV_URL}); the message "
+              f"can be copied and downloaded, not posted")
     watched_folders = Handler.service.agent_chats + Handler.service.agent_sdr
     if watched_folders:
         print(f"  quoting agent watching: {', '.join(watched_folders)}")

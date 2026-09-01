@@ -82,12 +82,14 @@ import copy
 import math
 import time
 from contextlib import contextmanager
+from datetime import datetime
 from dataclasses import dataclass, field
 
 import numpy as np
 from scipy.optimize import least_squares
 
 from . import black, sabr
+from .calendars import DEFAULT_CALENDARS
 from .cross import CrossAtmCurve
 from .knowledge import KnowledgeBank, PairKnowledge, Rule, rule_from_dict, suggest_rules
 from .numerics import ConvergenceError
@@ -96,7 +98,7 @@ from .quotes import (FLY_CONVENTIONS, MarketQuote, QuoteError, VOL_UNITS,
 from .sabr import SabrParams
 from .smile import INTERPOLATORS
 from .surface import PARAM_NAMES
-from .timeutil import DAYS_IN_YEAR, tenor_to_years
+from .timeutil import DAYS_IN_YEAR, UTC, tenor_to_years
 
 TARGET_SOURCES = ("overwrites", "paste", "quotes", "current", "none")
 BACKBONE_KNOBS = ("initial_vol", "long_term_vol", "mean_reversion", "short_addon", "short_decay")
@@ -743,9 +745,11 @@ def _flatten_legs(quotes) -> list:
 
 
 def _levels_for(book, pair: str, expiries: dict) -> dict:
-    """``Book.market_level`` at every expiry: spot, forward and pip for the
-    premium conversions.  One lookup, the same one the forwards came from."""
-    return {key: book.market_level(pair, t) for key, (_, t) in expiries.items()}
+    """``Book.market_level_for`` at every expiry: spot, forward and pip for the
+    premium conversions.  One lookup, the same one the forwards came from --
+    and read on each expiry's own settlement date, as a forward is."""
+    return {key: book.market_level_for(pair, dt.date())
+            for key, (dt, _) in expiries.items()}
 
 
 def premiums_as_vols(quotes, expiries: dict, levels: dict, pair: str) -> tuple[list, list[str]]:
@@ -812,12 +816,18 @@ def premiums_as_vols(quotes, expiries: dict, levels: dict, pair: str) -> tuple[l
     return out, errors
 
 
-def resolve_expiries(clock, quotes) -> dict[str, tuple]:
+def resolve_expiries(clock, quotes, pair: str = "", calendars=None) -> dict[str, tuple]:
     """Map every expiry mentioned in a run to a (datetime, years) pair.
 
-    A tenor goes through ``tenor_to_years`` and back out of the clock, which is
-    how the rest of the package turns a quoted tenor into a date; a written
-    date is taken as it stands.
+    A tenor is resolved **on the pair's calendar** -- through the spot date and
+    the settlement date, as the market does -- so a run that quotes ``1M``
+    lands on the same expiry the marking screen and the pricing screen put it
+    on.  Resolving it out of a nominal year fraction instead put the quote a
+    day or so away from the pillar it was quoting, and the fit then residualed
+    against a slice nobody had marked.  A written date is taken as it stands.
+
+    Without a pair and a calendar -- a paste read for its widths alone, with
+    no book behind it -- the nominal length is all there is, and it is used.
     """
     out: dict[str, tuple] = {}
     for q in quotes:
@@ -825,8 +835,13 @@ def resolve_expiries(clock, quotes) -> dict[str, tuple]:
             if value is None or _key(value) in out:
                 continue
             if isinstance(value, str):
-                t = tenor_to_years(value)
-                out[_key(value)] = (clock.datetime_from_years(t), t)
+                if pair and calendars is not None:
+                    when = calendars.expiry_date(pair, value, clock.now.date())
+                    dt = datetime.combine(when, datetime.min.time()).replace(tzinfo=UTC)
+                    out[_key(value)] = (dt, clock.years_to(dt))
+                else:
+                    t = tenor_to_years(value)
+                    out[_key(value)] = (clock.datetime_from_years(t), t)
             else:
                 dt = clock.coerce_datetime(value)
                 out[_key(value)] = (dt, clock.years_to(dt))
@@ -1276,8 +1291,8 @@ def _forwards_for(book, pair: str, expiries: dict) -> tuple[dict, list[str]]:
     """
     from .analytics import _forward_at
     forwards, notes, said = {}, [], set()
-    for key, (_, t) in expiries.items():
-        fwd, real, note = _forward_at(book, pair, t)
+    for key, (dt, t) in expiries.items():
+        fwd, real, note = _forward_at(book, pair, t, dt.date())
         forwards[key] = fwd if real else None
         # Said once, not once a tenor: which pair the feed quotes is a
         # property of the feed, and eight tenors repeating one sentence is
@@ -1350,7 +1365,7 @@ class Panel:
                     "no tenor is pinned on the marking screen, so there is no target curve to "
                     "fit to. Pin the at-the-money levels you want, paste a curve, or fit to the "
                     "at-the-money quotes instead")
-            targets = [CurveTarget(tenor.upper(), tenor_to_years(tenor), vol, "pinned tenor")
+            targets = [CurveTarget(tenor.upper(), atm.tenor_years(tenor), vol, "pinned tenor")
                        for tenor, vol in pinned.items()]
             return sorted(targets, key=lambda x: x.t), (
                 f"{len(targets)} tenor(s) pinned on the marking screen")
@@ -1363,7 +1378,8 @@ class Panel:
             return sorted(targets, key=lambda x: x.t), (
                 f"the mid of {len(targets)} at-the-money quote(s) in the paste")
         if self.target_source == "current":
-            targets = [CurveTarget(tp.upper(), tenor_to_years(tp), atm.curve_vol(tenor_to_years(tp)),
+            targets = [CurveTarget(tp.upper(), atm.tenor_years(tp),
+                                   atm.curve_vol(atm.tenor_years(tp)),
                                    "the curve as it stands")
                        for tp in atm.tenor_points]
             return targets, "the curve as it stands, as a no-op check on the fit itself"
@@ -1378,7 +1394,9 @@ class Panel:
                     bad.append(f"line {n}: expected a tenor and a volatility")
                     continue
                 try:
-                    t = tenor_to_years(bits[0])
+                    # On the pair's calendar, like every other tenor here: a
+                    # pasted target names this pair's own expiries.
+                    t = atm.tenor_years(bits[0])
                     vol = float(bits[1])
                 except Exception as exc:  # noqa: BLE001
                     bad.append(f"line {n}: {exc}")
@@ -1388,12 +1406,11 @@ class Panel:
                 raise ValueError("the pasted target curve has bad lines: " + "; ".join(bad))
             if not targets:
                 raise ValueError("the pasted target curve is empty")
-            levels = [x.vol for x in targets]
-            if max(levels) >= 1.0:
-                targets = [CurveTarget(x.tenor, x.t, x.vol / 100.0, x.source) for x in targets]
-                unit = "read as volatility points"
-            else:
-                unit = "read as decimals"
+            # In volatility points, as written.  The level does not decide
+            # the unit (§4) -- a managed pair's target curve sits below 1.0
+            # and was being read as decimals, a hundred times its mark.
+            targets = [CurveTarget(x.tenor, x.t, x.vol / 100.0, x.source) for x in targets]
+            unit = "read as volatility points"
             return sorted(targets, key=lambda x: x.t), (
                 f"{len(targets)} pasted line(s), {unit}")
         raise ValueError(f"unknown target source {self.target_source!r}; "
@@ -1416,9 +1433,9 @@ class Panel:
 
         # -- the paste -----------------------------------------------------
         run_ = parse_quotes(self.text, pair=self.pair, vol_unit=self.vol_unit,
-                            fly_convention=self.fly_convention)
+                            fly_convention=self.fly_convention, today=clock.now.date())
         quotes = list(run_.quotes)
-        expiries = resolve_expiries(clock, quotes)
+        expiries = resolve_expiries(clock, quotes, self.pair, book.calendars)
         stale = [k for k, (_, t) in expiries.items() if t <= 0]
         if stale:
             raise ValueError(
@@ -1726,7 +1743,8 @@ class QuotePanel:
         }
 
         asked = parse_requests(self.request_text, pair=self.pair,
-                               fly_convention=self.fly_convention)
+                               fly_convention=self.fly_convention,
+                               today=clock.now.date())
         requests = list(asked.requests)
 
         # The market, if there is one, for the comparison columns only.  A
@@ -1738,7 +1756,8 @@ class QuotePanel:
         if self.text.strip():
             try:
                 run_ = parse_quotes(self.text, pair=self.pair, vol_unit=self.vol_unit,
-                                    fly_convention=self.fly_convention)
+                                    fly_convention=self.fly_convention,
+                                    today=clock.now.date())
                 market = {instrument_key(q): q for q in run_.quotes
                           if q.quote_kind == "vol"}
                 if any(q.quote_kind == "premium" for q in run_.quotes):
@@ -1753,7 +1772,7 @@ class QuotePanel:
                 market_notes = [f"the market paste could not be read for comparison ({exc}); "
                                 f"the prices below are unaffected"]
 
-        expiries = resolve_expiries(clock, requests)
+        expiries = resolve_expiries(clock, requests, self.pair, book.calendars)
         stale = [k for k, (_, t) in expiries.items() if t <= 0]
         if stale:
             raise ValueError(
@@ -1844,7 +1863,8 @@ class QuotePanel:
                       "widths": sum(1 for w in made.widths if w.enough),
                       "notes": list(made.notes)}
 
-    def _premium_row(self, row: dict, q, t: float, bid, ask, forward) -> None:
+    def _premium_row(self, row: dict, q, t: float, bid, ask, forward,
+                     expiry=None) -> None:
         if bid is None:
             row["notes"].append("asked as a premium, but there is no width, so there is no "
                                 "two-way to turn into one")
@@ -1854,7 +1874,7 @@ class QuotePanel:
                                    f"{self.pair} to price it against; the volatility two-way "
                                    f"stands")
             return
-        level = self._level_at(t)
+        level = self._level_at(t, expiry)
         try:
             prices = [float(black.price(forward, q.strike, v, t, bool(q.is_call)))
                       for v in (bid, ask)]
@@ -1878,11 +1898,13 @@ class QuotePanel:
                             f"off the volatility two-way against the forward {forward:g}; "
                             f"undiscounted")
 
-    def _level_at(self, t: float) -> dict:
+    def _level_at(self, t: float, expiry=None) -> dict:
         book = getattr(self, "_book", None)
         if book is None:
             return {}
         try:
+            if expiry is not None:
+                return book.market_level_for(self.pair, expiry)
             return book.market_level(self.pair, t)
         except (ValueError, KeyError):
             return {}
@@ -2028,7 +2050,8 @@ class QuotePanel:
             # Asked for live, so answered as a premium: our volatility two-way
             # at the strike, put through Black-76 against the feed's forward.
             # The volatilities stay on the row beside it.
-            self._premium_row(row, q, t, bid, ask, forwards.get(_key(q.expiry)))
+            self._premium_row(row, q, t, bid, ask, forwards.get(_key(q.expiry)),
+                              expiries[_key(_row_expiry(q))][0].date())
 
         # The market, when this exact instrument was quoted in the paste.  In
         # the row's own convention, like everything else on it.
@@ -2297,10 +2320,12 @@ def learn_from_panel(payload: dict, clock) -> tuple[list[Rule], list[str], dict]
     """
     panel = panel_from_request(payload)
     run_ = parse_quotes(panel.text, pair=panel.pair, vol_unit=panel.vol_unit,
-                        fly_convention=panel.fly_convention)
+                        fly_convention=panel.fly_convention, today=clock.now.date())
     # Every quote, so a superseded one can still be measured: the expiry it
     # names has to resolve before its width can be attributed to a tenor.
-    expiries = resolve_expiries(clock, run_.all_quotes)
+    # No book here -- this reads a paste and proposes rules -- so the default
+    # calendar set, which is the one a book uses unless it was given another.
+    expiries = resolve_expiries(clock, run_.all_quotes, panel.pair, DEFAULT_CALENDARS)
 
     def days_of(q):
         got = expiries.get(_key(_row_expiry(q)))

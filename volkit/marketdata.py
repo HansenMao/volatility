@@ -26,8 +26,8 @@ import numpy as np
 import pandas as pd
 
 from .cross import dollar_legs, infer_leg_signs, is_cross as pair_is_cross
-from .surface import PARAM_NAMES, SmileMark
-from .events import EventEntry
+from .surface import PARAM_NAMES, TERM_COEFFS, SmileMark
+from .events import EventBook, EventRow
 from .timeutil import UTC, parse_datetime
 
 # Row labels in the PARAMS sheet, matched case- and space-insensitively.
@@ -66,6 +66,23 @@ VOL_POINT = 100.0  # the workbook quotes vol in points; the model works in decim
 #: with the columns ``BandTreatment.to_request`` names (spaces or underscores).
 BANDS_SHEET = "BANDS"
 
+#: The sheet every dated event lives on: one row per release, one column per
+#: currency and one per pair.  A currency column is the weight that release
+#: puts on that currency and is **shared** by every pair with it; a pair
+#: column is that pair's own adjustment on top of its two legs.  Events used
+#: to be dated rows on PARAMS, which gave the same number two homes; there is
+#: one now, and a dated row left on PARAMS is reported rather than read.
+EVENTS_SHEET = "EVENTS"
+
+#: The spellings the EVENTS sheet's first column may be headed with.  It may
+#: also be blank, which is how PARAMS heads its own label column and how a
+#: sheet copied from it arrives.
+EVENT_WHEN_COLUMNS = ("", "when", "date", "datetime", "time", "event", "events")
+
+#: An optional second column naming the release.  A label is what a marker
+#: reads on the panel; nothing is calibrated off it.
+EVENT_LABEL_COLUMNS = ("label", "name", "release", "description")
+
 _TENOR = re.compile(r"^\d+[dwmy]$")
 
 
@@ -75,16 +92,22 @@ def overlay_label(label) -> tuple[str, ...] | None:
 
     These are the rows ``session.export_workbook`` writes so that what a
     morning marked can live in the workbook: ``atm 1m`` (an ATM overwrite, in
-    points), ``slog25 3m`` (a smile parameter overwrite, raw), ``shift rho25``
-    (the market maker's curve-wide wing shift) and ``anchor`` (the anchor
-    switch, 1 or 0).  Returns the kind and its arguments, or ``None`` for a
-    label that is none of these -- which the caller then reports, exactly as
-    it always has, because a row the tool does not read must not sit there
-    looking read.
+    points), ``slog25 3m`` (a smile parameter overwrite, raw), ``term rho10
+    decay`` (one coefficient of a marked parameter term structure, raw),
+    ``shift rho25`` (the market maker's curve-wide wing shift) and ``anchor``
+    (the anchor switch, 1 or 0).  Returns the kind and its arguments, or
+    ``None`` for a label that is none of these -- which the caller then
+    reports, exactly as it always has, because a row the tool does not read
+    must not sit there looking read.
     """
     words = _norm(label).split()
     if words == ["anchor"]:
         return ("anchor",)
+    if len(words) == 3:
+        kind, param, coeff = words
+        if kind == "term" and param in PARAM_NAMES and coeff in TERM_COEFFS:
+            return ("term", param, coeff)
+        return None
     if len(words) != 2:
         return None
     a, b = words
@@ -137,9 +160,6 @@ class PairParams:
     short_decay: float = 50.0
     rate_vol: float = 0.0
     rate_corr: float = 0.0
-    #: The pair's events, resolved: each carries the bump the curve takes,
-    #: its two legs' weights and the pair's adjustment, all in decimals.
-    events: list[EventEntry] = field(default_factory=list)
 
 
 @dataclass
@@ -150,10 +170,10 @@ class MarketData:
     params: dict[str, PairParams] = field(default_factory=dict)
     marks: dict[str, list[SmileMark]] = field(default_factory=dict)
     tenor_points: tuple[str, ...] = ("1w", "2w", "3w", "1m", "2m", "3m", "6m", "9m", "1y")
-    #: PARAMS event rows read off a *currency* column: when -> currency ->
-    #: decimal bump.  A pair's event is its two legs' entries here superposed,
-    #: plus the pair's own cell.
-    event_weights: dict[datetime, dict[str, float]] = field(default_factory=dict)
+    #: The EVENTS sheet: one row per release, weights per currency, an
+    #: adjustment per pair.  A pair's schedule is derived from it and never
+    #: stored beside it (``EventBook.for_pair``).
+    events: EventBook = field(default_factory=EventBook)
     problems: list[str] = field(default_factory=list)
     #: Session marks the workbook holds beyond its backbone: per pair, a block
     #: in the session file's own shape (``atm_overwrites``, ``smile_overwrites``,
@@ -230,6 +250,8 @@ class ExcelSource:
                     )
 
             self._load_config(xls, data)
+            if EVENTS_SHEET in sheets:
+                self._load_events_sheet(xls, data)
             self._load_params(xls, data)
             self._load_marks(xls, data, sheets)
             if BANDS_SHEET in sheets:
@@ -375,7 +397,6 @@ class ExcelSource:
     def _load_params(self, xls, data: MarketData) -> None:
         raw = pd.read_excel(xls, "PARAMS", index_col=0)
         row_map: dict[str, int] = {}
-        event_rows: list[tuple[int, datetime]] = []
         overlay_rows: list[tuple[int, tuple[str, ...]]] = []
         for i, label in enumerate(raw.index):
             if label is None or (isinstance(label, float) and math.isnan(label)):
@@ -384,13 +405,19 @@ class ExcelSource:
             if key is not None:
                 row_map[key] = i
                 continue
-            when = self._parse_event_label(label)
-            if when is not None:
-                event_rows.append((i, when))
-                continue
             overlay = overlay_label(label)
             if overlay is not None:
                 overlay_rows.append((i, overlay))
+                continue
+            # Events had dated rows here once.  They live on their own sheet
+            # now, with a column per currency as well as per pair, and a row
+            # left behind is named rather than read: two homes for one bump
+            # is how a weight comes to mean two things.
+            if self._parse_event_label(label) is not None:
+                data.problems.append(
+                    f"PARAMS row {label!r} is a date: events live on the {EVENTS_SHEET!r} "
+                    f"sheet now (one row per release, a column per currency and per pair). "
+                    f"Move the row there and delete it from PARAMS")
             elif str(label).strip() and not str(label).startswith("Unnamed"):
                 data.problems.append(f"PARAMS row {label!r} is neither a known parameter nor a date")
 
@@ -399,38 +426,6 @@ class ExcelSource:
                 raise MarketDataError(
                     f"PARAMS sheet has no {required!r} row; found {list(raw.index)}"
                 )
-
-        shift = timedelta(hours=self.event_tz_offset_hours)
-
-        def event_cell(col, idx: int) -> float | None:
-            if idx >= len(col):
-                return None
-            v = col[idx]
-            if v is None or (isinstance(v, float) and math.isnan(v)):
-                return None
-            return float(v) / VOL_POINT
-
-        # A column headed by a currency rather than a pair holds that
-        # currency's weight on each event row.  Pair columns keep reading
-        # exactly as they always did, so a workbook with no currency columns
-        # gets the bumps it always got; with them, a pair's cell is the
-        # adjustment on top of its legs.
-        currency_cols = [c for c in raw.columns
-                         if isinstance(c, str) and len(c.strip()) == 3
-                         and c.strip().isalpha() and c.strip().upper() not in data.pairs]
-        for c in currency_cols:
-            ccy = c.strip().upper()
-            col = raw[c].values
-            for idx, when in event_rows:
-                v = event_cell(col, idx)
-                if v is None or v == 0.0:
-                    continue
-                data.event_weights.setdefault(when - shift, {})[ccy] = v
-        if currency_cols:
-            data.notes.append(
-                "PARAMS event weights per currency: " + ", ".join(sorted(currency_cols))
-                + "; a pair's cell on an event row is its adjustment on top of its legs"
-            )
 
         for name, spec in data.pairs.items():
             if name not in raw.columns:
@@ -480,14 +475,6 @@ class ExcelSource:
                         f"({p.long_term * VOL_POINT:.4g}) volatility must both be positive"
                     )
 
-            for idx, when in event_rows:
-                cell_value = event_cell(col, idx) or 0.0
-                weights = data.event_weights.get(when - shift, {})
-                entry = EventEntry(when - shift, None, weights=weights, adjust=cell_value)
-                entry = entry.resolve(name)
-                if entry.bump == 0.0 and not any(entry.weights.values()):
-                    continue
-                p.events.append(entry)
             data.params[name] = p
 
             block = self._overlay_block(col, overlay_rows)
@@ -517,6 +504,9 @@ class ExcelSource:
                 block["anchor_tenors"] = bool(v)
             elif kind == "atm":
                 block.setdefault("atm_overwrites", {})[overlay[1]] = v
+            elif kind == "term":
+                block.setdefault("smile_term", {}).setdefault(
+                    overlay[1], {})[overlay[2]] = v
             elif kind == "shift":
                 if v:
                     block.setdefault("param_shifts", {})[overlay[1]] = v
@@ -524,6 +514,113 @@ class ExcelSource:
                 block.setdefault("smile_overwrites", {}).setdefault(
                     overlay[1], {})[overlay[2].upper()] = v
         return block
+
+    # -- EVENTS -----------------------------------------------------------
+    def _load_events_sheet(self, xls, data: MarketData) -> None:
+        """One row per dated release; a column per currency and per pair.
+
+        The first column is the release time **in the workbook's own clock**
+        (Hong Kong, ``event_tz_offset_hours`` ahead of UTC), which is the
+        convention every event in this tool has always been typed in.  An
+        optional second column names it.  Every other column is either three
+        letters -- a currency weight, shared by every pair with that currency
+        -- or a pair in CONFIG, whose cell is that pair's own adjustment on
+        top of its two legs.
+
+        A column that is neither is reported and not read.  A header that
+        looks like a pair but is not in CONFIG is the one worth catching: it
+        is a cell somebody typed a bump into that nothing would ever have
+        looked at.
+        """
+        raw = pd.read_excel(xls, EVENTS_SHEET)
+        if raw.empty and not len(raw.columns):
+            data.notes.append(f"{EVENTS_SHEET}: the sheet is empty; no events")
+            return
+        cols = list(raw.columns)
+        first = cols[0]
+        head = "" if str(first).startswith("Unnamed") else _norm(first)
+        if head not in EVENT_WHEN_COLUMNS:
+            data.problems.append(
+                f"{EVENTS_SHEET}: the first column is headed {first!r}; it holds the release "
+                f"time and must be blank or one of {sorted(c for c in EVENT_WHEN_COLUMNS if c)}")
+            return
+        label_col = None
+        if len(cols) > 1 and _norm(cols[1]) in EVENT_LABEL_COLUMNS:
+            label_col = cols[1]
+
+        shift = timedelta(hours=self.event_tz_offset_hours)
+        currencies: list[tuple[object, str]] = []
+        pair_cols: list[tuple[object, str]] = []
+        for c in cols[1:]:
+            if c is label_col:
+                continue
+            name = str(c).strip()
+            if not name or name.startswith("Unnamed"):
+                continue
+            key = name.upper()
+            if key in data.pairs:
+                pair_cols.append((c, key))
+            elif len(key) == 3 and key.isalpha():
+                currencies.append((c, key))
+            else:
+                data.problems.append(
+                    f"{EVENTS_SHEET}: column {name!r} is neither a currency nor a pair "
+                    f"CONFIG lists; a cell nothing reads is a bump nobody gets")
+
+        def number(v) -> float | None:
+            if v is None or (isinstance(v, float) and math.isnan(v)):
+                return None
+            try:
+                return float(v) / VOL_POINT
+            except (TypeError, ValueError):
+                return None
+
+        book = EventBook(source=f"{Path(self.path).name}!{EVENTS_SHEET}")
+        seen: dict[datetime, int] = {}
+        for i, rec in enumerate(raw.to_dict("records"), start=2):
+            when_raw = rec.get(first)
+            if when_raw is None or (isinstance(when_raw, float) and math.isnan(when_raw)):
+                continue
+            local = self._parse_event_label(when_raw)
+            if local is None:
+                data.problems.append(
+                    f"{EVENTS_SHEET} row {i}: {when_raw!r} is not a date and time")
+                continue
+            when = (local - shift).replace(second=0, microsecond=0)
+            if when in seen:
+                data.problems.append(
+                    f"{EVENTS_SHEET} row {i}: a second row at {local:%Y-%m-%d %H:%M} "
+                    f"(row {seen[when]} has it already); a row is identified by its time")
+                continue
+            seen[when] = i
+            label = ""
+            if label_col is not None:
+                v = rec.get(label_col)
+                if v is not None and not (isinstance(v, float) and math.isnan(v)):
+                    label = str(v).strip()
+            row = EventRow(when, label)
+            for where, cells in (("weights", currencies), ("adjust", pair_cols)):
+                for c, key in cells:
+                    cell = rec.get(c)
+                    if cell is None or (isinstance(cell, float) and math.isnan(cell)):
+                        continue
+                    v = number(cell)
+                    if v is None:
+                        data.problems.append(
+                            f"{EVENTS_SHEET} row {i}: {key} cell {cell!r} is not a number")
+                    elif v:
+                        getattr(row, where)[key] = v
+            book.rows.append(row)
+        book.sort()
+        data.events = book
+        missing = [n for n in data.pairs if n not in {k for _, k in pair_cols}]
+        note = (f"{EVENTS_SHEET}: {len(book.rows)} event(s), "
+                f"{len(currencies)} currency column(s) "
+                f"({', '.join(k for _, k in currencies) or 'none'})")
+        if missing:
+            note += (f"; no column for {', '.join(sorted(missing))}, which take their "
+                     "legs' weights and no adjustment")
+        data.notes.append(note)
 
     # -- BANDS ------------------------------------------------------------
     def _load_bands_sheet(self, xls, data: MarketData) -> None:

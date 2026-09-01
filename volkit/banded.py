@@ -1187,7 +1187,6 @@ def band_panel(surface, tenors=None, *, cut: str = "NY") -> dict:
     asks before deciding whether to price off the band at all.  A tenor that
     cannot be calibrated keeps its row and carries the reason.
     """
-    from .timeutil import tenor_to_years
 
     treatment = surface.band_treatment
     band = surface.band
@@ -1214,7 +1213,7 @@ def band_panel(surface, tenors=None, *, cut: str = "NY") -> dict:
 
     tenors = list(tenors or getattr(surface.atm, "tenor_points", ()) or ())
     for tenor in tenors:
-        t = tenor_to_years(tenor)
+        t = surface.tenor_years(tenor)
         row = {"tenor": tenor, "t": t, "forward": None, "message": ""}
         try:
             expiry = surface.clock.datetime_from_years(t)
@@ -1249,7 +1248,6 @@ def fit_band_treatment(surface, tenors=None, *, free: Sequence[str] = DEFAULT_FR
     forward, or one the band cannot hold, keeps its row and its reason.
     """
     from .smile import LOGNORMAL_INTERPOLATORS
-    from .timeutil import tenor_to_years
 
     treatment = treatment or surface.band_treatment
     band = surface.band
@@ -1267,7 +1265,7 @@ def fit_band_treatment(surface, tenors=None, *, free: Sequence[str] = DEFAULT_FR
     quotes: list[TenorQuotes] = []
     skipped: list[dict] = []
     for tenor in tenors:
-        t = tenor_to_years(tenor)
+        t = surface.tenor_years(tenor)
         try:
             lookup = surface.forward_lookup
             fwd = float(lookup(t)) if lookup is not None and lookup(t) else None

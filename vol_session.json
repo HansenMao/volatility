@@ -1,0 +1,283 @@
+{
+  "kind": "volkit session",
+  "version": 1,
+  "saved": "2026-09-01T22:02:47+08:00",
+  "valuation": "2026-09-01T14:01:49.976492+00:00",
+  "workbook": "/Users/runsimao/Desktop/vol/files/vol_marks.xlsx",
+  "note": "",
+  "units": "volatility numbers are in volatility points, as they are typed on the marking screen; shape parameters, decays, correlations and smile parameters are the raw numbers those fields carry",
+  "pairs": {
+    "AUDJPY": {
+      "curve": {
+        "corr_initial": 0.37,
+        "corr_final": 0.19,
+        "corr_decay": 5.5,
+        "short_addon": 1.5,
+        "short_decay": 50.0
+      },
+      "events": [],
+      "atm_overwrites": {},
+      "smile_overwrites": {},
+      "param_shifts": {},
+      "anchor_tenors": false
+    },
+    "AUDUSD": {
+      "curve": {
+        "initial_vol": 10.9,
+        "long_term_vol": 10.65,
+        "mean_reversion": 6.5,
+        "short_addon": 1.1,
+        "short_decay": 50.0,
+        "rate_vol": 0.0,
+        "rate_corr": 0.0
+      },
+      "events": [],
+      "atm_overwrites": {},
+      "smile_overwrites": {},
+      "param_shifts": {},
+      "anchor_tenors": false
+    },
+    "EURCNH": {
+      "curve": {
+        "corr_initial": 0.42,
+        "corr_final": 0.39,
+        "corr_decay": 3.0,
+        "short_addon": 0.0,
+        "short_decay": 50.0
+      },
+      "events": [],
+      "atm_overwrites": {},
+      "smile_overwrites": {},
+      "param_shifts": {},
+      "anchor_tenors": false
+    },
+    "EURGBP": {
+      "curve": {
+        "corr_initial": 0.57,
+        "corr_final": 0.54,
+        "corr_decay": 4.0,
+        "short_addon": 0.0,
+        "short_decay": 50.0
+      },
+      "events": [],
+      "atm_overwrites": {},
+      "smile_overwrites": {},
+      "param_shifts": {},
+      "anchor_tenors": false
+    },
+    "EURJPY": {
+      "curve": {
+        "corr_initial": 0.405,
+        "corr_final": 0.395,
+        "corr_decay": 5.0,
+        "short_addon": -0.2,
+        "short_decay": 50.0
+      },
+      "events": [],
+      "atm_overwrites": {},
+      "smile_overwrites": {},
+      "param_shifts": {},
+      "anchor_tenors": false
+    },
+    "EURUSD": {
+      "curve": {
+        "initial_vol": 6.25,
+        "long_term_vol": 6.950000000000001,
+        "mean_reversion": 6.0,
+        "short_addon": 0.6,
+        "short_decay": 50.0,
+        "rate_vol": 0.0,
+        "rate_corr": 0.0
+      },
+      "events": [],
+      "atm_overwrites": {},
+      "smile_overwrites": {},
+      "param_shifts": {},
+      "anchor_tenors": false
+    },
+    "GBPCNH": {
+      "curve": {
+        "corr_initial": 0.5,
+        "corr_final": 0.375,
+        "corr_decay": 3.0,
+        "short_addon": 0.6,
+        "short_decay": 50.0
+      },
+      "events": [],
+      "atm_overwrites": {},
+      "smile_overwrites": {},
+      "param_shifts": {},
+      "anchor_tenors": false
+    },
+    "GBPNZD": {
+      "curve": {
+        "corr_initial": 0.705,
+        "corr_final": 0.54,
+        "corr_decay": 4.0,
+        "short_addon": 0.0,
+        "short_decay": 50.0
+      },
+      "events": [],
+      "atm_overwrites": {},
+      "smile_overwrites": {},
+      "param_shifts": {},
+      "anchor_tenors": false
+    },
+    "GBPUSD": {
+      "curve": {
+        "initial_vol": 7.75,
+        "long_term_vol": 9.03,
+        "mean_reversion": 6.0,
+        "short_addon": 0.8,
+        "short_decay": 50.0,
+        "rate_vol": 0.0,
+        "rate_corr": 0.0
+      },
+      "events": [],
+      "atm_overwrites": {},
+      "smile_overwrites": {},
+      "param_shifts": {},
+      "anchor_tenors": false
+    },
+    "NZDUSD": {
+      "curve": {
+        "initial_vol": 10.9,
+        "long_term_vol": 10.77,
+        "mean_reversion": 6.5,
+        "short_addon": 1.2,
+        "short_decay": 50.0,
+        "rate_vol": 0.0,
+        "rate_corr": 0.0
+      },
+      "events": [],
+      "atm_overwrites": {},
+      "smile_overwrites": {},
+      "param_shifts": {},
+      "anchor_tenors": false
+    },
+    "USDCNH": {
+      "curve": {
+        "initial_vol": 4.9,
+        "long_term_vol": 6.800000000000001,
+        "mean_reversion": 4.5,
+        "short_addon": 0.0,
+        "short_decay": 50.0,
+        "rate_vol": 0.0,
+        "rate_corr": 0.0
+      },
+      "events": [],
+      "atm_overwrites": {},
+      "smile_overwrites": {},
+      "param_shifts": {},
+      "anchor_tenors": false
+    },
+    "USDCNY": {
+      "curve": {
+        "initial_vol": 5.0,
+        "long_term_vol": 4.95,
+        "mean_reversion": 3.5,
+        "short_addon": -0.25,
+        "short_decay": 50.0,
+        "rate_vol": 0.0,
+        "rate_corr": 0.0
+      },
+      "events": [],
+      "atm_overwrites": {},
+      "smile_overwrites": {},
+      "param_shifts": {},
+      "anchor_tenors": false
+    },
+    "USDHKD": {
+      "curve": {
+        "initial_vol": 0.57,
+        "long_term_vol": 0.54,
+        "mean_reversion": 4.0,
+        "short_addon": 0.0,
+        "short_decay": 50.0,
+        "rate_vol": 0.0,
+        "rate_corr": 0.0
+      },
+      "events": [],
+      "atm_overwrites": {},
+      "smile_overwrites": {},
+      "param_shifts": {},
+      "anchor_tenors": false,
+      "band": {
+        "mode": "warn",
+        "hazard": 2.0,
+        "weak_share": 85.0,
+        "weak_jump": 6.0,
+        "weak_vol": 10.0,
+        "strong_jump": 4.0,
+        "strong_vol": 8.0,
+        "lower": null,
+        "upper": null,
+        "blend": 100.0,
+        "delta": 25.0,
+        "solve_hazard": false
+      }
+    },
+    "USDJPY": {
+      "curve": {
+        "initial_vol": 6.05,
+        "long_term_vol": 7.6499999999999995,
+        "mean_reversion": 5.0,
+        "short_addon": 0.7,
+        "short_decay": 50.0,
+        "rate_vol": 0.0,
+        "rate_corr": 0.0
+      },
+      "events": [],
+      "atm_overwrites": {},
+      "smile_overwrites": {},
+      "param_shifts": {},
+      "anchor_tenors": false
+    }
+  },
+  "event_table": [
+    {
+      "when": "2024-02-01T16:00",
+      "label": "",
+      "weights": {
+        "AUD": 3.0,
+        "CAD": 2.0,
+        "CHF": 1.0,
+        "CNH": 0.2,
+        "EUR": 0.9000000000000001,
+        "GBP": 2.0,
+        "NZD": 4.0,
+        "USD": 6.0
+      },
+      "adjust": {
+        "AUDUSD": 6.5,
+        "EURUSD": 5.5,
+        "GBPUSD": 6.0,
+        "NZDUSD": 6.5,
+        "USDCNH": 0.5,
+        "USDJPY": 5.5
+      }
+    },
+    {
+      "when": "2024-02-02T02:00",
+      "label": "",
+      "weights": {
+        "AUD": 3.0,
+        "CAD": 2.0,
+        "CHF": 1.0,
+        "CNH": 0.2,
+        "EUR": 0.9000000000000001,
+        "GBP": 2.0,
+        "NZD": 4.0,
+        "USD": 1.0
+      },
+      "adjust": {
+        "AUDUSD": 6.5,
+        "EURUSD": 5.5,
+        "GBPUSD": 6.0,
+        "NZDUSD": 6.5,
+        "USDCNH": 0.5,
+        "USDJPY": 5.5
+      }
+    }
+  ]
+}

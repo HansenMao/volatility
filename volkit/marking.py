@@ -929,7 +929,8 @@ class MarkPanel:
         quotes: list = []
         if str(self.text or "").strip():
             run_ = parse_quotes(self.text, pair=self.pair, vol_unit=self.vol_unit,
-                                fly_convention=self.fly_convention)
+                                fly_convention=self.fly_convention,
+                                today=clock.now.date())
             quotes = list(run_.quotes)
             out["parse"] = {"notes": list(run_.notes),
                             "skipped": [{"line": n, "text": t, "why": w}

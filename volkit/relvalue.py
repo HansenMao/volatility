@@ -456,17 +456,19 @@ def resolve_weights(given=None) -> dict[str, float]:
     return out
 
 
-def _spot_and_forward(book, pair: str, t: float):
-    """Spot and the outright forward to ``t``, or ``(None, None)``.
+def _spot_and_forward(book, pair: str, t: float, expiry=None):
+    """Spot and the outright forward for a tenor, or ``(None, None)``.
 
     Straight off the level lookup rather than out of the carry table: that
     table reports ``1.0`` and a warning when there is no feed, which is right
     for a strike held in moneyness and useless for a ratio of two prices.
-    ``Book.market_level`` is that lookup, so a cross the feed builds from its
+    ``Book.market_level_for`` is that lookup -- so the forward is the one to
+    the option's own settlement date, and a cross the feed builds from its
     legs is read here too.
     """
     try:
-        level = book.market_level(pair, t)
+        level = (book.market_level(pair, t) if expiry is None
+                 else book.market_level_for(pair, expiry))
     except Exception:  # noqa: BLE001 - the row says so and carries on
         return None, None
     if not level["feed"]:
@@ -780,7 +782,8 @@ def relative_value(book, pair: str, hist=None, *, horizon_days: float = 30.0,
 
     rows: list[TenorRow] = []
     for tenor in names:
-        t = tenor_to_years(tenor)
+        dates = book.fx_dates(pair, tenor)
+        t = surface.tenor_years(tenor)
         expiry = clock.datetime_from_years(t)
         warn: list[str] = []
         try:
@@ -847,7 +850,7 @@ def relative_value(book, pair: str, hist=None, *, horizon_days: float = 30.0,
         # no absolute strikes, on a pair whose forward the feed was quoting
         # perfectly well.  The two are the same number where both exist:
         # ``analytics._forward_at`` asks this same feed.
-        spot, forward = _spot_and_forward(book, pair, t)
+        spot, forward = _spot_and_forward(book, pair, t, dates.expiry)
         if forward is None:
             for col in COLUMNS:
                 row = carry[col.name].get(tenor)

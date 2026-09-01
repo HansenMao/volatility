@@ -50,9 +50,9 @@ from .banded import BandTreatment
 from .cross import is_cross
 from .cross import CrossAtmCurve
 from .paths import WRITE_ENCODING, app_dir, read_text
-from .surface import PARAM_NAMES
+from .surface import PARAM_NAMES, TERM_COEFFS
 from .events import event_entries
-from .timeutil import UTC, parse_datetime
+from .timeutil import UTC, as_utc, parse_datetime
 
 #: Bumped when the shape changes in a way an older build cannot read.
 SESSION_VERSION = 1
@@ -63,11 +63,18 @@ SESSION_FILENAME = "vol_session.json"
 #: What every block of a pair may carry.  Listed once so the reader, the
 #: writer and the tests all agree on the vocabulary.
 PAIR_BLOCKS = ("curve", "events", "atm_overwrites", "smile_overwrites",
-               "param_shifts", "anchor_tenors", "band")
+               "smile_term", "param_shifts", "anchor_tenors", "band")
 
 #: The suffix a workbook copy gets when a session is exported without a
 #: named destination: ``vol_marks.xlsx`` -> ``vol_marks_marked.xlsx``.
 EXPORT_SUFFIX = "_marked"
+
+#: What an in-place export leaves behind before it writes over the book of
+#: record: ``vol_marks.xlsx`` -> ``vol_marks.bak-20260901-142530.xlsx``, the
+#: bytes exactly as they were read.  openpyxl does not carry images, charts
+#: or pivots through a round trip, and an export cannot be undone from the
+#: session file alone, so the file it replaced is kept beside it.
+BACKUP_INFIX = ".bak-"
 
 #: How the workbook spells each curve parameter's PARAMS row, for a row the
 #: sheet does not have yet.  The reader accepts these (``marketdata.PARAM_ROWS``).
@@ -169,6 +176,12 @@ def capture_pair(book, pair: str) -> dict:
         "atm_overwrites": {k: v * 100.0 for k, v in sorted(atm.tenor_overwrites.items())},
         "smile_overwrites": {name: dict(sorted(ow.items()))
                              for name, ow in sorted(surface.param_overwrites.items()) if ow},
+        # A marked term structure replaces the fitted one for that parameter,
+        # so what is written is the three coefficients themselves, raw.  Only
+        # the parameters somebody marked appear; the rest are the fit's and
+        # are not a session's to carry.
+        "smile_term": {name: {c: getattr(curve, c) for c in TERM_COEFFS}
+                       for name, curve in sorted(surface.term_marks.items())},
         "param_shifts": {k: float(v) for k, v in sorted(surface.param_shifts.items()) if v},
         "anchor_tenors": bool(surface.anchor_tenors),
     }
@@ -209,10 +222,103 @@ def capture(book, pairs=None, *, note: str = "") -> dict:
         "note": str(note or ""),
         "units": UNITS_NOTE,
         "pairs": {p: capture_pair(book, p) for p in wanted},
-        # The event weight table is the book's, not a pair's: what each
-        # release is worth on each currency, in points.  Saved whole.
-        "event_weights": book.econ.table(),
+        # The event table is the book's, not a pair's: one row per release,
+        # a weight per currency and an adjustment per pair, in points.  This
+        # is the authority on the way back in; a pair block's ``events`` is
+        # that pair's resolved schedule, kept because a re-mark of an event
+        # is a per-pair thing to record (``remarks.SECTIONS``).
+        "event_table": capture_events(book),
     }
+
+
+def capture_events(book) -> list[dict]:
+    """The event table as the file holds it: points, and times in UTC."""
+    return [{"when": r.when.strftime("%Y-%m-%dT%H:%M"),
+             "label": r.label,
+             "weights": {c: v * 100.0 for c, v in sorted(r.weights.items())},
+             "adjust": {p: v * 100.0 for p, v in sorted(r.adjust.items())}}
+            for r in sorted(book.events.rows, key=lambda r: r.when)]
+
+
+def event_table_from_doc(doc: dict) -> tuple[list, list[str], list[str]]:
+    """The document's event table as ``EventRow``s, in decimals.
+
+    A file written by this version carries ``event_table``.  An older one has
+    the same events spread across its pairs, so they are unioned back into a
+    table -- a currency weight was shared even then, and two pairs that
+    disagree about one are reported rather than averaged.
+    """
+    from .events import EventRow
+
+    problems: list[str] = []
+    notes: list[str] = []
+    rows: dict[datetime, EventRow] = {}
+
+    def at(when: datetime, label: str) -> "EventRow":
+        key = when.replace(second=0, microsecond=0)
+        row = rows.get(key)
+        if row is None:
+            row = rows[key] = EventRow(key, label)
+        elif label and not row.label:
+            row.label = label
+        return row
+
+    table = doc.get("event_table")
+    if isinstance(table, list):
+        for i, item in enumerate(table, start=1):
+            if not isinstance(item, dict):
+                problems.append(f"event table row {i} is not an object")
+                continue
+            try:
+                when = parse_datetime(str(item.get("when")))
+            except ValueError as exc:
+                problems.append(f"event table row {i}: {exc}")
+                continue
+            row = at(when, str(item.get("label") or ""))
+            try:
+                for c, v in (item.get("weights") or {}).items():
+                    if float(v or 0.0):
+                        row.weights[str(c).upper()] = float(v) / 100.0
+                for pr, v in (item.get("adjust") or {}).items():
+                    if float(v or 0.0):
+                        row.adjust[str(pr).upper()] = float(v) / 100.0
+            except (TypeError, ValueError):
+                problems.append(f"event table row {i}: a weight must be a number")
+        return list(rows.values()), problems, notes
+
+    # An older file: the table is the union of what its pairs were given.
+    seen_pairs = False
+    for name, block in (doc.get("pairs") or {}).items():
+        if not isinstance(block, dict) or "events" not in block:
+            continue
+        pair = str(name).upper()
+        entries, bad = event_entries([r if isinstance(r, dict) else {}
+                                      for r in (block.get("events") or [])])
+        problems.extend(f"{pair}: {b}" for b in bad)
+        for e in entries:
+            # Resolved for the pair, so a row typed as one number lands as
+            # that pair's adjustment -- which is where a total with no parts
+            # has always gone (``EventEntry.resolve``).
+            e = e.resolve(pair)
+            seen_pairs = True
+            row = at(as_utc(e.when), e.label)
+            for ccy, w in (e.weights or {}).items():
+                if not w:
+                    continue
+                prior = row.weights.get(ccy)
+                if prior is not None and abs(prior - w) > 1e-12:
+                    problems.append(
+                        f"{pair}: event {e.when:%Y-%m-%d %H:%M}Z weight {ccy} "
+                        f"{w * 100:.4g} disagrees with {prior * 100:.4g} from another "
+                        "pair; a currency weight is shared")
+                row.weights[ccy] = w
+            if e.adjust:
+                row.adjust[pair] = float(e.adjust)
+    if seen_pairs:
+        notes.append("the file has no event table, so one was rebuilt from its pairs' "
+                     "schedules; a currency weight is shared by every pair with that "
+                     "currency")
+    return list(rows.values()), problems, notes
 
 
 # --------------------------------------------------------------------------
@@ -243,14 +349,11 @@ def apply_block(surface, block: dict) -> list[str]:
                 problems.append(f"curve parameter {k}: {v!r} is not a number")
         problems.extend(set_curve_params(surface.atm, vals))
 
-    if "events" in block:
-        rows = [r if isinstance(r, dict) else {} for r in (block.get("events") or [])]
-        entries, bad = event_entries(rows)
-        problems.extend(bad)
-        # Replace, never merge: the saved schedule is the whole schedule, and
-        # adding to whatever the workbook already had would double every
-        # release that appears in both.
-        problems.extend(surface.atm.set_events(entries))
+    # ``events`` is deliberately not applied here.  An event is not a pair's
+    # to hold any more: a currency weight is shared, so the schedule comes
+    # from the document's one event table (``load``), and a pair block's
+    # ``events`` is the record of what that pair's schedule *was* -- which is
+    # what a re-mark of an event is diffed against (``remarks.SECTIONS``).
 
     if "atm_overwrites" in block:
         surface.atm.clear_overwrite()
@@ -272,6 +375,29 @@ def apply_block(surface, block: dict) -> list[str]:
                     surface.overwrite_param(name, str(tenor), float(value))
                 except (TypeError, ValueError):
                     problems.append(f"smile overwrite {name} {tenor}: {value!r} is not a number")
+
+    if "smile_term" in block:
+        surface.clear_param_terms()
+        for name, coeffs in (block.get("smile_term") or {}).items():
+            if name not in PARAM_NAMES:
+                problems.append(f"smile term structure: {name!r} is not a smile parameter "
+                                f"({', '.join(PARAM_NAMES)})")
+                continue
+            if not isinstance(coeffs, dict):
+                problems.append(f"smile term structure {name}: expected the three "
+                                f"coefficients, got {coeffs!r}")
+                continue
+            vals: dict[str, float] = {}
+            for coeff in TERM_COEFFS:
+                try:
+                    vals[coeff] = float(coeffs[coeff])
+                except (KeyError, TypeError, ValueError):
+                    problems.append(f"smile term structure {name}: {coeff} is missing or "
+                                    f"is not a number")
+                    break
+            else:
+                problems.extend(f"smile term structure: {m}"
+                                for m in surface.set_param_term(name, **vals))
 
     if "param_shifts" in block:
         shifts = {}
@@ -355,13 +481,17 @@ def apply_document(book, doc: dict, pairs=None) -> dict:
             continue
         applied.append(pair)
 
-    if "event_weights" in doc:
-        # Replace, like everything else here.  The weights feed Auto-load
-        # only; events already on a pair keep the parts they were given.
-        try:
-            book.econ.set_weights(doc.get("event_weights") or {})
-        except ValueError as exc:
-            problems.append(f"event weights: {exc}")
+    # The event table, once, for the whole book: a row is one release and its
+    # currency weights belong to every pair with that currency.  Applied
+    # after the pairs so it is the last word on every curve's schedule.
+    rows, bad, table_notes = event_table_from_doc(doc)
+    problems.extend(bad)
+    notes.extend(table_notes)
+    if rows or "event_table" in doc:
+        book.events.rows = rows
+        book.events.sort()
+        book.events.source = str(doc.get("saved") or "session file")
+        problems.extend(book.apply_events())
 
     untouched = [p for p in book.pairs if p.upper() not in by_upper]
     if untouched:
@@ -429,47 +559,60 @@ def export_workbook(doc: dict, workbook: str | Path, out: str | Path | None = No
 
     The workbook is the book of record and nothing else in this package
     writes to it (§2).  This is the one deliberate exception, and it is an
-    *export*: it is never run by a screen on its own, it writes a **copy**
-    beside the original (``<name>_marked.xlsx``) unless ``in_place`` says
-    otherwise, and it says what it wrote and what it could not.
+    *export*: it is never run off the live book, only off a session file
+    somebody saved first, and it says what it wrote and what it could not.
+    ``in_place`` (the marking screen's button, and ``--in-place``) writes
+    over the workbook itself; without it a **copy** goes beside the original
+    (``<name>_marked.xlsx``).  Writing over the original keeps the bytes it
+    replaced as ``<name>.bak-<stamp>.xlsx`` beside it, because openpyxl does
+    not carry images or charts through a round trip and an export is
+    otherwise not undoable.
 
     What goes where.  The curve parameters go into the PARAMS rows the
     reader already reads (a cross's ``corr_*`` into the same three cells the
-    workbook has always used for a correlation).  Events go onto PARAMS
-    event rows in the workbook's own clock (Hong Kong, ``event_tz_offset``
-    hours ahead of the file's UTC), weights into the currency columns and
-    the pair's adjustment into its own column; a row or a currency column
-    the sheet lacks is added.  The marks the workbook had no cell for -- ATM
+    workbook has always used for a correlation).  Events go onto the
+    **EVENTS** sheet, one row per release in the workbook's own clock (Hong
+    Kong, ``event_tz_offset`` hours ahead of the file's UTC): weights into
+    the currency columns and each pair's adjustment into its own column.  A
+    row, a column or the sheet itself is added if the workbook lacks it, and
+    the sheet is written whole -- the table is the book's, not any one
+    pair's.  The marks the workbook had no cell for -- ATM
     and smile overwrites, wing shifts, the anchor switch -- go into rows
     ``marketdata.overlay_label`` reads (``atm 1m``, ``slog25 3m``,
-    ``shift rho25``, ``anchor``), and the band treatment into a ``BANDS``
+    ``term rho10 decay``, ``shift rho25``, ``anchor``), and the band
+    treatment into a ``BANDS``
     sheet.  Every one of them is read back by ``ExcelSource``, so a workbook
     written here loads as the session it came from; writing a cell the tool
     would not read is the silent zero this project exists to remove.
 
-    A pair is replaced, never merged: its events, overwrites and shifts in
-    the file are the whole of what the workbook then holds for it.  The one
-    thing that cannot be replaced per pair is an event's *currency* weights,
-    which every pair with that currency shares -- the file's are written and
-    none are removed, and a weight two pairs in the file disagree on is
-    reported.
+    A pair is replaced, never merged: its overwrites and shifts in the file
+    are the whole of what the workbook then holds for it.  Events are not
+    per pair at all: the file's event table replaces the EVENTS sheet
+    outright, because a currency weight belongs to every pair with that
+    currency and a half-written table is a bump somebody else silently
+    inherits.  ``pairs`` narrows which pairs' *columns* are written, not
+    which events exist.
 
     Formulas and the other sheets are kept as they are; images and charts,
-    if any, are not (openpyxl does not carry them), which is the other reason
-    the default is a copy.  Returns ``{"written", "pairs", "problems",
-    "notes"}``.
+    if any, are not (openpyxl does not carry them), which is why an in-place
+    write keeps a backup and why the CLI's default is still a copy.  Returns
+    ``{"written", "backup", "pairs", "problems", "notes", "in_place"}``.
     """
     import openpyxl
     from datetime import timedelta
     from .marketdata import BANDS_SHEET, PARAM_ROWS, _norm, overlay_label
-    from .surface import PARAM_NAMES as _SMILE
+    from .surface import PARAM_NAMES as _SMILE, TERM_COEFFS as _TERM
 
     if not isinstance(doc, dict) or not isinstance(doc.get("pairs"), dict):
         raise SessionError("that is not a volkit session file: it has no 'pairs' object")
     src = Path(workbook)
     if not src.exists():
         raise SessionError(f"workbook not found: {src}")
-    dst = Path(out) if out else src.with_name(src.stem + EXPORT_SUFFIX + src.suffix)
+    # ``in_place`` is the destination, not just permission to be it: naming
+    # no output and asking for in place used to write ``_marked`` and report
+    # it as having gone into the workbook.
+    dst = Path(out) if out else (
+        src if in_place else src.with_name(src.stem + EXPORT_SUFFIX + src.suffix))
     if dst.resolve() == src.resolve() and not in_place:
         raise SessionError(
             f"{src.name} is the workbook itself; writing into it needs in_place "
@@ -519,7 +662,6 @@ def export_workbook(doc: dict, workbook: str | Path, out: str | Path | None = No
         return ncol[0]
 
     rows_by_key: dict[str, int] = {}
-    event_rows: dict[datetime, int] = {}
     overlay_rows: dict[tuple, int] = {}
     # Rows are appended after the last *labelled* one: ``max_row`` counts
     # formatted-but-empty rows, and a gap of blank labels is what the reader
@@ -533,17 +675,6 @@ def export_workbook(doc: dict, workbook: str | Path, out: str | Path | None = No
         key = PARAM_ROWS.get(_norm(label))
         if key is not None:
             rows_by_key[key] = r
-            continue
-        when = None
-        if isinstance(label, datetime):
-            when = label.replace(tzinfo=None, second=0, microsecond=0)
-        else:
-            try:
-                when = parse_datetime(str(label)).replace(tzinfo=None, second=0, microsecond=0)
-            except ValueError:
-                when = None
-        if when is not None:
-            event_rows[when] = r
             continue
         ov = overlay_label(label)
         if ov is not None:
@@ -567,15 +698,6 @@ def export_workbook(doc: dict, workbook: str | Path, out: str | Path | None = No
         overlay_rows[ov] = nrow[0]
         return nrow[0]
 
-    def event_row(when_local: datetime) -> int:
-        if when_local in event_rows:
-            return event_rows[when_local]
-        nrow[0] += 1
-        cell = ws.cell(row=nrow[0], column=1, value=when_local)
-        cell.number_format = "yyyy-mm-dd hh:mm"
-        event_rows[when_local] = nrow[0]
-        return nrow[0]
-
     def clear(rows, col: int) -> None:
         for r in rows:
             ws.cell(row=r, column=col, value=None)
@@ -589,10 +711,6 @@ def export_workbook(doc: dict, workbook: str | Path, out: str | Path | None = No
 
     wanted = {k.upper() for k in doc["pairs"]} if pairs is None else \
         {str(x).upper() for x in pairs}
-    weight_cells: dict[tuple[int, int], tuple[float, str]] = {}
-    #: pair -> column, and the event rows its own schedule named
-    scheduled: dict[str, tuple[int, set[int]]] = {}
-
     for raw_name, block in doc["pairs"].items():
         name = str(raw_name).upper()
         if name not in wanted:
@@ -624,37 +742,6 @@ def export_workbook(doc: dict, workbook: str | Path, out: str | Path | None = No
                 ws.cell(row=row_for(key, label), column=col, value=fv)
             wrote.append("curve")
 
-        # events ----------------------------------------------------------
-        if "events" in block:
-            rows = [r if isinstance(r, dict) else {} for r in (block.get("events") or [])]
-            entries, bad = event_entries(rows)
-            problems.extend(f"{name}: {b}" for b in bad)
-            clear(event_rows.values(), col)
-            named: set[int] = set()
-            for e in entries:
-                local = (e.when.astimezone(UTC) + tz_shift).replace(tzinfo=None, second=0,
-                                                                   microsecond=0)
-                r = event_row(local)
-                named.add(r)
-                if any(e.weights.values()):
-                    for ccy, w in e.weights.items():
-                        if not w:
-                            continue
-                        wcol = column_for(ccy, create=True)
-                        prior = weight_cells.get((r, wcol))
-                        if prior is not None and abs(prior[0] - w * 100.0) > 1e-9:
-                            problems.append(
-                                f"{name}: event {e.when:%Y-%m-%d %H:%M}Z weight {ccy} "
-                                f"{w * 100:.4g} disagrees with {prior[1]}'s {prior[0]:.4g}; "
-                                f"{name}'s was written last")
-                        ws.cell(row=r, column=wcol, value=w * 100.0)
-                        weight_cells[(r, wcol)] = (w * 100.0, name)
-                    ws.cell(row=r, column=col, value=(e.adjust or 0.0) * 100.0)
-                else:
-                    ws.cell(row=r, column=col, value=(e.bump or 0.0) * 100.0)
-            scheduled[name] = (col, named)
-            wrote.append(f"{len(entries)} event(s)")
-
         # overwrites, shifts, anchor ---------------------------------------
         if "atm_overwrites" in block:
             clear((r for ov, r in overlay_rows.items() if ov[0] == "atm"), col)
@@ -677,6 +764,29 @@ def export_workbook(doc: dict, workbook: str | Path, out: str | Path | None = No
                                 column=col, value=fv)
                         n += 1
             wrote.append(f"{n} smile overwrite(s)")
+        if "smile_term" in block:
+            clear((r for ov, r in overlay_rows.items() if ov[0] == "term"), col)
+            n = 0
+            for pname, coeffs in (block.get("smile_term") or {}).items():
+                if pname not in _SMILE:
+                    problems.append(f"{name}: smile term structure {pname!r} is not a smile "
+                                    f"parameter")
+                    continue
+                if not isinstance(coeffs, dict):
+                    problems.append(f"{name}: smile term structure {pname}: expected the "
+                                    f"three coefficients, got {coeffs!r}")
+                    continue
+                # All three or none: two thirds of a curve on the sheet is a
+                # set the reader would refuse, and a refusal on the way back
+                # in is a worse place to find out than here.
+                vals = [number(f"{name} smile term {pname} {c}", coeffs.get(c))
+                        for c in _TERM]
+                if any(v is None for v in vals):
+                    continue
+                for coeff, fv in zip(_TERM, vals):
+                    ws.cell(row=overlay_row(("term", pname, coeff)), column=col, value=fv)
+                n += 1
+            wrote.append(f"{n} smile term structure(s)")
         if "param_shifts" in block:
             clear((r for ov, r in overlay_rows.items() if ov[0] == "shift"), col)
             n = 0
@@ -708,50 +818,103 @@ def export_workbook(doc: dict, workbook: str | Path, out: str | Path | None = No
         written.append(name)
         notes.append(f"{name}: " + ", ".join(wrote))
 
-    # A currency weight is shared by every pair with that currency, so a
-    # pair whose saved schedule does *not* have an event that the sheet's
-    # weights would give it takes it anyway on reload.  The file's schedule
-    # is the whole schedule for that pair, so the pair's own cell cancels
-    # the legs -- after every pair's weights are down, because a weight
-    # written for the last pair reaches the first.  What is not done is
-    # zeroing the weight: it belongs to the other pairs too.
-    from .events import leg_weights, pair_bump
-    ccy_cols = {k: c for k, c in header.items() if len(k) == 3 and k.isalpha()}
-    for name, (col, named) in scheduled.items():
-        for when_local, r in event_rows.items():
-            if r in named:
-                continue
-            table = {}
-            for ccy, c in ccy_cols.items():
-                v = ws.cell(row=r, column=c).value
-                if isinstance(v, (int, float)) and v:
-                    table[ccy] = float(v)
-            if not table:
-                continue
-            total = pair_bump(leg_weights(table, name), name, 0.0)
-            if abs(total) < 1e-12:
-                continue
-            ws.cell(row=r, column=col, value=-total)
-            notes.append(f"{name}: the file has no event at {when_local:%Y-%m-%d %H:%M} "
-                         f"(sheet time) but the sheet's currency weights would give it "
-                         f"{total:.4g}; its own cell cancels them, since the weights belong "
-                         "to the other pairs too")
-    if weight_cells:
-        touched = sorted({ws.cell(row=1, column=c).value for (_, c) in weight_cells})
-        notes.append(f"currency weight(s) written for {', '.join(touched)}: a weight is "
-                     "shared, so a pair the file does not mention takes it too")
+    # -- EVENTS ------------------------------------------------------------
+    # The whole sheet, written once from the file's one table.  Not per pair:
+    # a currency weight belongs to every pair with that currency, so writing
+    # one pair's view of it would leave the rest of the column reading a
+    # number nobody marked.
+    rows, bad, table_notes = event_table_from_doc(doc)
+    problems.extend(bad)
+    notes.extend(table_notes)
+    if written and (rows or "event_table" in doc):
+        notes.append(_write_events_sheet(wb, rows, sorted(header), tz_shift))
 
+    backup = ""
     if not written:
         problems.append("nothing was written")
     else:
+        # Over the book of record: keep what it replaced.  ``blob`` is the
+        # file as it was read, so the backup is the bytes themselves and not
+        # a re-read that a second writer could have moved underneath us.
+        if dst.exists() and dst.resolve() == src.resolve():
+            bak = _backup_path(src)
+            with open(bak, "wb") as fh:
+                fh.write(blob)
+            backup = str(bak)
+            notes.append(f"the workbook as it was is kept at {bak.name}")
         _save_workbook(wb, dst, cached)
         n = sum(len(v) for v in cached.values())
         if n:
             notes.append(f"{n} formula cell(s) kept, with the values Excel last computed "
                          "for them; a formula reading a cell written here shows its old "
                          "value until Excel recalculates")
-    return {"written": str(dst) if written else "", "pairs": written,
-            "problems": problems, "notes": notes, "in_place": bool(in_place)}
+    return {"written": str(dst) if written else "", "backup": backup,
+            "pairs": written, "problems": problems, "notes": notes,
+            "in_place": bool(in_place)}
+
+
+def _backup_path(src: Path) -> Path:
+    """Where the bytes an in-place export replaces are kept.  Stamped to the
+    second in local time, like the session file's own ``saved``; two exports
+    inside one second do not overwrite each other's backup."""
+    stamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
+    bak = src.with_name(f"{src.stem}{BACKUP_INFIX}{stamp}{src.suffix}")
+    n = 2
+    while bak.exists():
+        bak = src.with_name(f"{src.stem}{BACKUP_INFIX}{stamp}-{n}{src.suffix}")
+        n += 1
+    return bak
+
+
+def _write_events_sheet(wb, rows, pairs, tz_shift) -> str:
+    """Write the whole EVENTS sheet: a row per release, a column per
+    currency and per pair.
+
+    Written whole rather than cell by cell.  A currency weight is shared by
+    every pair with that currency, so leaving an old row or an old column
+    behind would hand a pair a bump nobody in this session marked -- the
+    exact failure the sheet exists to prevent.  Times go in the workbook's
+    own clock (Hong Kong), which is what every event in this tool has always
+    been typed in and what ``ExcelSource`` reads back.
+
+    ``pairs`` is the PARAMS header, so a pair the workbook knows gets its
+    column even when no event adjusts it: an empty column is where the next
+    adjustment is typed, and a column that is not there is one nobody can.
+    """
+    from .marketdata import EVENTS_SHEET
+
+    ccys = sorted({c for r in rows for c in r.weights})
+    cols = list(ccys) + [p for p in pairs if len(p) == 6 and p.isalpha()]
+    # A named release keeps its name.  The column only appears when something
+    # is in it, and it goes second, which is where the reader looks for it.
+    labelled = any(r.label for r in rows)
+    first = 3 if labelled else 2
+    if EVENTS_SHEET in wb.sheetnames:
+        # Emptied in place rather than removed and remade: a sheet dropped
+        # and re-added moves to the end of the book, and where a trader keeps
+        # a tab is theirs.
+        ws = wb[EVENTS_SHEET]
+        ws.delete_rows(1, ws.max_row)
+        ws.delete_cols(1, ws.max_column)
+    else:
+        ws = wb.create_sheet(EVENTS_SHEET)
+    if labelled:
+        ws.cell(row=1, column=2, value="label")
+    for i, name in enumerate(cols, start=first):
+        ws.cell(row=1, column=i, value=name)
+    for r, row in enumerate(sorted(rows, key=lambda x: x.when), start=2):
+        local = (as_utc(row.when) + tz_shift).replace(tzinfo=None, second=0, microsecond=0)
+        cell = ws.cell(row=r, column=1, value=local)
+        cell.number_format = "yyyy-mm-dd hh:mm"
+        if labelled and row.label:
+            ws.cell(row=r, column=2, value=row.label)
+        for i, name in enumerate(cols, start=first):
+            v = row.weights.get(name) if name in row.weights else row.adjust.get(name)
+            if v:
+                ws.cell(row=r, column=i, value=float(v) * 100.0)
+    return (f"{EVENTS_SHEET}: {len(rows)} event(s) written whole, "
+            f"{len(ccys)} currency column(s) ({', '.join(ccys) or 'none'}); "
+            "the sheet is the book's table, not one pair's")
 
 
 def _write_band_row(wb, sheet: str, pair: str, request: dict) -> None:

@@ -29,7 +29,7 @@ from .marketdata import open_workbook
 from .history import (DYNAMICS_DAYS, Realized, SeriesStats, implied_stats, realized,
                       vol_dynamics)
 from .surface import VolSurface
-from .timeutil import Clock, parse_datetime, tenor_to_years
+from .timeutil import Clock, TenorError, parse_datetime, parse_tenor, tenor_to_years
 
 DEFAULT_LADDER = (-0.20, -0.15, -0.10, -0.05, 0.0, 0.05, 0.10, 0.15, 0.20)
 
@@ -121,7 +121,8 @@ class RollDown:
         strikes = [spot * (1.0 + x) for x in self.ladder]
         rows, index = [], []
         for near_tenor, far_tenor in zip(tenors[:-1], tenors[1:]):
-            t_near, t_far = tenor_to_years(near_tenor), tenor_to_years(far_tenor)
+            t_near = self.surface.tenor_years(near_tenor)
+            t_far = self.surface.tenor_years(far_tenor)
             f_near, f_far = self.forwards[near_tenor], self.forwards[far_tenor]
             scale = 1.0 / (t_far - t_near) if annualise and t_far > t_near else 1.0
             rows.append([
@@ -188,8 +189,15 @@ def price_indications(
 
         expiry = row.expiry
         if isinstance(expiry, str):
-            expiry = book.calendars.expiry_date(row.pair, expiry, book.clock.now.date()) \
-                if len(expiry) <= 4 else parse_datetime(expiry).date()
+            # A tenor is whatever ``parse_tenor`` reads, not whatever is short
+            # enough to look like one: "1week" and "10 days" are tenors and
+            # counting their characters called them dates.
+            try:
+                parse_tenor(expiry)
+            except TenorError:
+                expiry = parse_datetime(expiry, today=book.clock.now.date()).date()
+            else:
+                expiry = book.calendars.expiry_date(row.pair, expiry, book.clock.now.date())
 
         vol = float(surface.vol(strike / forward, expiry, method)) - spreads.get(key, 0.0)
         t = book.clock.years_to(datetime.combine(expiry, datetime.min.time()).replace(
@@ -279,15 +287,22 @@ def _target_legs(target: str) -> list[tuple[float, float, bool]]:
     raise ValueError(f"unknown target {target!r}; expected one of {sorted(TARGETS)}")
 
 
-def _forward_at(book, pair: str, t: float) -> tuple[float, bool, str]:
-    """Outright forward at ``t`` years, and whether it really came from a feed.
+def _forward_at(book, pair: str, t: float, expiry=None) -> tuple[float, bool, str]:
+    """Outright forward for an expiry, and whether it really came from a feed.
 
-    Through ``Book.market_level`` and not the feed directly, so every screen
-    that needs a level gets the same one -- including a cross the feed does
-    not quote but whose legs it does, which this used to refuse while the
+    Through ``Book.market_level_for`` and not the feed directly, so every
+    screen that needs a level gets the same one -- including a cross the feed
+    does not quote but whose legs it does, which this used to refuse while the
     marking screen's chart was scaling its axis by the very same triangle.
+
+    ``expiry`` is the option's expiry **date**, and given one the level is
+    read on that option's settlement date, which is the date a forward is
+    actually a price for.  A caller with only a year fraction -- the rolled
+    leg of a carry row, which is a horizon and not an expiry -- passes none
+    and gets the curve read at ``t``, which is the same axis placed nominally.
     """
-    level = book.market_level(pair, t)
+    level = (book.market_level(pair, t) if expiry is None
+             else book.market_level_for(pair, expiry))
     if not level["feed"]:
         return 1.0, False, "no forward feed for this pair"
     notes = []
@@ -295,7 +310,8 @@ def _forward_at(book, pair: str, t: float) -> tuple[float, bool, str]:
         notes.append(f"the feed does not quote {pair.upper()} itself, so the forward is "
                      f"the {level['via']} triangle")
     if level["extrapolated"]:
-        notes.append(f"the forward at {t:.4f}y is outside the quoted pillars and was held flat")
+        where = level.get("settle") or f"{t:.4f}y"
+        notes.append(f"the forward to {where} is outside the quoted pillars and was held flat")
     return float(level["forward"]), True, "; ".join(notes)
 
 
@@ -430,7 +446,8 @@ def carry_table(book, pair: str, *, horizon_days: float = 30.0, target: str = "a
                         forward_carry=nan, warnings=(why,))
 
     for tenor in (tenors or book.data.tenor_points):
-        t = tenor_to_years(tenor)
+        dates = book.fx_dates(pair, tenor)
+        t = surface.tenor_years(tenor)
         warn: list[str] = []
         t2 = t - h
         if t2 * 365.2425 < MIN_ROLLED_DAYS:
@@ -441,8 +458,17 @@ def carry_table(book, pair: str, *, horizon_days: float = 30.0, target: str = "a
             )))
             continue
         expiry, expiry2 = clock.datetime_from_years(t), clock.datetime_from_years(t2)
-        f1, from_feed, note = _forward_at(book, pair, t)
-        f2, _, note2 = _forward_at(book, pair, t2)
+        # **Both forwards on one axis.**  The row's whole content is the
+        # difference between them, so reading one on the option's settlement
+        # date and the other at a year fraction contaminates that difference
+        # with the gap between the two conventions -- a third of a pip here,
+        # which is the same order as the gamma carry being measured, and it
+        # turned a flat carry profile into a ragged one.  So the settlement
+        # date is put on the feed's axis once and the horizon is taken off it:
+        # the rolled leg is this same option a week later, not another option.
+        ts = book.settlement_years(pair, dates.expiry)
+        f1, from_feed, note = _forward_at(book, pair, ts, dates.expiry)
+        f2, _, note2 = _forward_at(book, pair, ts - h)
         for n in (note, note2):
             if n:
                 warn.append(n)
@@ -661,7 +687,7 @@ def fair_value_table(book, pair: str, hist=None, *,
         book, pair, horizon_days=horizon_days, target="atm", method=method, cut=cut)}
     for tenor in book.data.tenor_points:
         row = by_tenor.get(tenor)
-        t = tenor_to_years(tenor)
+        t = surface.tenor_years(tenor)
         warn: list[str] = []
         if row is None or not math.isfinite(row.roll):
             continue
@@ -852,7 +878,7 @@ def realized_table(book, pair: str, hist, *, lookback_days: float | None = None,
     surface = book[pair]
     out: list[RealizedRow] = []
     for tenor in book.data.tenor_points:
-        t = tenor_to_years(tenor)
+        t = surface.tenor_years(tenor)
         window = float(lookback_days) if lookback_days else t * 365.2425
         dyn_window = max(window, float(DYNAMICS_DAYS if dynamics_days is None
                                        else dynamics_days))
@@ -1061,7 +1087,7 @@ def triangle_table(book, pair: str, *, method: str | None = None, cut: str = "NY
 
     rows: list[TriangleRow] = []
     for tenor in (tenors or book.data.tenor_points):
-        t = tenor_to_years(tenor)
+        t = surface.tenor_years(tenor)
         expiry = book.clock.datetime_from_years(t)
         warn: list[str] = []
         rho = float(np.asarray(curve.correlation(t)))

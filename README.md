@@ -98,7 +98,7 @@ off the current marks and refresh as you type.
 | Input | Accepts |
 |---|---|
 | Pair | any pair in the book |
-| Expiry | a tenor (`1W`, `8d`, `3M`) resolved through spot and delivery on the pair's holiday calendar, or a date in most of the ways one is written (`2026-09-15`, `15Sep26`, `15 Sep 2026`, `September 15, 2026`, `2026/09/15`, `9/15/2026`, `20260915`). Whatever is typed, the box comes back holding the one standard date |
+| Expiry | a tenor (`1W`, `8d`, `3M`, with the unit spelled out if you write it that way — `1wk`, `3mth`, `2yr`, `10 days`) resolved through spot and delivery on the pair's holiday calendar, or a date in most of the ways one is written (`2026-09-15`, `15Sep26`, `15 Sep 2026`, `September 15, 2026`, `2026/09/15`, `9/15/2026`, `20260915`), the year optional (`15 Sep` is the next fifteenth of September, counted forward from the valuation date). Whatever is typed, the box comes back holding the one standard date |
 | Strike | a number, `ATM`, or a delta — `25d`, `10dp`, `-25d`. A bare `25d` takes its wing from the option type. Once it has been solved on the marks the box holds that absolute strike and says what it was asked as; type the request in again to solve it afresh |
 | Cut | `TK` / `NY` / `LDN` / `HK` |
 | Type | `C`, `P`, or `Auto` (call if the strike is above the forward). `Auto` comes back as the `C` or `P` it resolved to |
@@ -304,25 +304,38 @@ feed the pricing panel immediately:
    cross the same card marks the *correlation* term structure (initial, final,
    decay) and shows which legs and triangle signs it is built from. A rejected
    value leaves the curve untouched and says why.
-2. **Events** — a table of dated volatility bumps. **Auto-load** pulls the
-   scheduled economic releases for the pair's currencies over a chosen horizon;
-   every row is then editable, and rows can be added or deleted by hand. A row
-   holds each **leg's weight** (the event is weighted per currency) and the
-   pair's **adjustment**; the bump the curve is calibrated to is the two
+2. **Events** — the workbook's `EVENTS` sheet through this pair's eyes.
+   **Reload** puts back the rows as the workbook has them, discarding what the
+   session marked; every row is editable, and rows can be added or deleted by
+   hand. A row holds each **leg's weight** (the event is weighted per currency,
+   and that weight is **shared** by every pair with that currency) and the
+   pair's own **adjustment**; the bump the curve is calibrated to is the two
    weights added plus the adjustment, shown beside them and never typed over.
    Applying re-solves each event height so that bump is reproduced exactly. The
    *vol day* column shows which volatility day each bump actually prices into —
    the day rolls at 14:00 UTC, so a late release lands on the next one and is
    flagged.
 3. **ATM term structure** — per-tenor overwrites of the marked vol.
-4. **Smile parameters** — per-tenor `slog25`, `slog10`, `rho25`, `rho10`, and
-   the **anchor** switch, which lives here rather than over the ATM table
-   because what it anchors is the smile.
+4. **Smile parameters** — two tables and the **anchor** switch, which lives
+   here rather than over the ATM table because what it anchors is the smile.
+   The first is the **term structure** each of `slog25`, `slog10`, `rho25`,
+   `rho10` follows across expiries — `final − (final − initial) ×
+   e^(−decay × t)`, the same three coefficients the backbone has, fitted
+   across the quoted tenors and markable over. The second is the same four
+   parameters **per tenor**. A term structure moves the parameter at every
+   expiry and an overwrite pins one tenor, so the card counts them apart.
 
-Beside them is the **vol query**: an expiry, a strike, and the volatility
-there. It takes the pricing tab's own two boxes — a tenor or a date, and a
-number, `ATM` or a delta — and is read by the same functions on the server, so
-the two screens cannot understand `1M` or `25d` differently. There is no
+Beside them is the **vol query**: an expiry, a strike or a delta, and the
+volatility there. It takes the pricing tab's own boxes — a tenor or a date, and
+a number, `ATM` or a delta — and is read by the same functions on the server, so
+the two screens cannot understand `1M` or `25d` differently. A strike and a
+delta name one point on the smile and the desk has whichever the market gave
+it, so the card takes either: typing in one clears the other, and the
+resolution goes into the empty box's placeholder — greyed out, so nothing
+resolved can be mistaken for something typed or posted back as though it were.
+The delta comes back under the pair's own convention, which is why it is read
+on the server: `quick_vol` reads it at `F = 1`, because delta is a function of
+moneyness and so still answers for a pair the feed does not quote. There is no
 forward box: the level is the feed's outright at that expiry (through
 `Book.market_level`, the one place a level is read, so a cross quoted only
 through its legs is placed from them and the card names the triangle). Without
@@ -804,10 +817,10 @@ snapping forward would compare a Friday mark against the following Monday's.
 Each curve says which day it actually landed on.
 
 A pasted curve is `tenor atm [rr25 bf25 rr10 bf10]`, one line per tenor,
-everything after the at-the-money optional. Its unit is decided **once, from
-the at-the-money column**, and a paste whose levels straddle 1.0 is refused
-rather than guessed — the same rule the historical sheet and the broker run
-follow, and for the same reason.
+everything after the at-the-money optional. It is read in **volatility points,
+as written** — the level never decides a unit, so a managed pair's curve sitting
+below 1.0 stays where it was marked — the same rule the historical sheet and the
+broker run follow, and for the same reason.
 
 Two things the panel is careful about. A tenor a source does not quote is
 **blank, not absent**, so a short curve cannot read as agreement; and a curve
@@ -1037,12 +1050,49 @@ volkit monitor --watch EURUSD --watch USDJPY:history@-1m \
 volkit monitor EURUSD --compare surface --compare history:-30d --field rr25
 ```
 
+### The kACE feed
+
+The desk's pricing platform takes its volatilities through an XML poster
+page, and the message it takes used to be built in a spreadsheet out of
+volkit's daily CSV, a spread table and a row copied from Murex. `kace.py`
+builds it from the book: the **kACE feed** tab on the Vol marking panel's
+chart card, or `volkit kace PAIR`. One `<node>` per calendar day with the
+cumulative vol to that day's cut as `bid/offer`, then the O/N and quoted
+pillars with their risk reversals and butterflies; the pillar table on the
+tab is the check, **Copy XML** / **↓ feed XML** the message, **↓ clear XML**
+the `clearRate` message; the **scenario** box on the tab is the kACE
+scenario it all posts into (`--kace-scenario` on the command line).
+
+`kace_spreads.csv` (`pair,tenor,spread`) names the pillars posted for each
+pair and the ATM width at each — the tenors listed *are* the pillars, and a
+tenor with no mark behind it is refused by name. The header's credentials
+come from `--kace-user` / `--kace-password` (so `kace-user =` in
+`volkit.cfg`) or `VOLKIT_KACE_USER` / `VOLKIT_KACE_PASSWORD`; without a
+username the tab shows the table and withholds the message. `horDate` is the
+book's valuation date and the daily series runs to the last pillar, which
+are the two places the spreadsheet went quietly wrong. Conventions as the
+desk states them: RR is the base-currency call over the put, `S` is the
+butterfly, O/N is the one-day option.
+
+With `--kace-url` (the address the poster page itself posts to) the tab
+gains **Post feed** / **Post clear**, and `volkit kace PAIR --post` does the
+same from a shell: an HTTP `POST` with the message form-encoded as `xml=…`,
+exactly as the poster page and the desk's VBA send it, straight to the host
+through no proxy. The page posts the *request*, never the XML, so what
+reaches kACE is what the tool built. The reply is taken as success only in
+the one shape the poster page shows (a `gfi_message` with a `<response>`);
+anything else is a failure with the first line of what came back. Every
+post is a line in `kace_posts.jsonl` beside the workbook. `--kace-ca` /
+`--kace-insecure` for an internal certificate; `--dry-run` to see what would
+go. `claude/kace-export-design.md` has the history.
+
 ### Saving a session
 
 The workbook is the book of record and is **never written to**. Everything the
 Vol marking and Market maker panels do — a re-marked backbone, a correlation
 term structure, an event schedule, a tenor overwrite, a smile parameter
-overwrite, the market maker's wing shifts, the anchor switch, a band treatment
+overwrite, a marked smile term structure, the market maker's wing shifts, the
+anchor switch, a band treatment
 — lives on the loaded book, and **Reload workbook** discards all of it.
 
 That is the right default for a tool whose primary file is somebody else's
@@ -1089,16 +1139,24 @@ volkit session marks.json --to-workbook --in-place      # the workbook itself
 volkit session marks.json --to-workbook --pair USDJPY   # one pair only
 ```
 
-**Write to workbook copy** on the Vol marking panel does the first of these
-(after saving the marks); only the command can write in place. Curve
-parameters and events go into PARAMS -- weights into the currency columns,
-the pair's adjustment into its own -- and the marks the workbook had no cell
-for go into rows the tool reads back: `atm 1m` (an ATM overwrite, in points),
-`slog25 3m` (a smile parameter overwrite), `shift rho25` (a wing shift),
-`anchor`, and a `BANDS` sheet for the band treatment. A copy loads as the
-session it came from; formulas and their last values are kept, images and
-charts are not. A pair is replaced, not merged, and the report says every
-cell it touched and anything it could not write.
+**Write to workbook** on the Vol marking panel does the third of these: it
+saves the marks and then writes the *file* into the loaded workbook, asking
+first and keeping the workbook it replaced beside it as
+`vol_marks.bak-20260901-142530.xlsx`. What is exported is always the saved
+file, never the live book, so nothing reaches the book of record that is not
+already written down in the JSON beside it.
+
+Curve parameters and events go into PARAMS -- weights into the currency
+columns, the pair's adjustment into its own -- and the marks the workbook had
+no cell for go into rows the tool reads back: `atm 1m` (an ATM overwrite, in
+points), `slog25 3m` (a smile parameter overwrite), `term rho10 decay` (one
+coefficient of a marked parameter term structure), `shift rho25` (a wing
+shift), `anchor`, and a `BANDS` sheet for the band treatment. What it writes
+loads as the session it came from; formulas and their last values are kept,
+images and charts are not -- which is why an in-place write keeps the backup
+and why the plain `--to-workbook` still writes a copy. A pair is replaced,
+not merged, and the report says every cell it touched and anything it could
+not write.
 
 ### Exchange traded options
 
@@ -1107,11 +1165,13 @@ OTC mark. Each **panel is one expiry/underlying combination**; create as many
 as you want and they are remembered between sessions.
 
 Paste the exchange's strike and volatility columns straight in — tabs, commas
-or spaces, header row or not, percent or decimal, bid/ask or mid. Everything
-the parser infers is printed under the table and every line it cannot use is
-listed with the reason; nothing is dropped quietly. A table whose volatilities
-straddle 1.0 is refused rather than guessed, because 0.95 could be 95% or
-0.95% and guessing would move a mark silently.
+or spaces, header row or not, bid/ask or mid. Everything the parser infers is
+printed under the table and every line it cannot use is listed with the reason;
+nothing is dropped quietly. Volatilities are read **as written, in points**: a
+table sitting entirely below 1.0 is a managed pair rather than a table of
+decimals, and it says once that it read it that way. A table that really is in
+decimals is loaded by setting the volatility unit, which is something a person
+says and never an inference from the level.
 
 The fit is a vega-weighted least squares over `(alpha, rho, nu)` at fixed
 `beta`. Alpha is *profiled out* at each `(rho, nu)` by a bounded scalar search
@@ -1206,44 +1266,47 @@ rather than clipped away.
 
 ### Economic events
 
-Dates come from two places, neither of which needs a network connection:
+Every event lives on one sheet of the workbook: **`EVENTS`**. One row per
+release, and two kinds of column:
 
-* **Rules**, for releases whose timing is defined by one — US non-farm
-  payrolls is the first Friday at 08:30 New York (shifting a week when that
-  Friday is a holiday). Release times are stored in the releasing body's local
-  zone and converted through `zoneinfo`, so NFP is 13:30 UTC in winter and
-  12:30 UTC in summer rather than whichever was hard-coded.
-* **A dated table** at `volkit/data/econ_events.csv` for central bank
-  decisions, which are set by committee and cannot be derived. FOMC, ECB, BoE
-  and BoJ dates for 2026–27 ship with it. **Verify them before relying on
-  them** — banks publish provisionally — and edit the file to extend.
+* **A currency column** (`USD`, `EUR`, `JPY`, …) — what that release is worth
+  on that currency, in vol points. It is **shared**: every pair with that
+  currency takes it. A currency with no column weighs nothing.
+* **A pair column** (`USDJPY`, `EURUSD`, …) — that pair's own **adjustment**
+  on top of its two legs. A pair with no column, or a blank cell, adjusts
+  nothing.
 
-US CPI has no stable rule; a second-Wednesday generator exists but is off by
-default and flags itself as approximate.
+The first column is the release time in the workbook's own clock — **Hong Kong
+time**, which is what every event in this tool has always been typed in — and
+an optional `label` column names it. A row with no currency weights at all
+reads exactly as the old dated `PARAMS` rows did: the pair's cell is the whole
+bump.
 
-**Weights are per currency, not per pair.** `volkit/data/event_weights.csv`
-(`EVENT,CCY,WEIGHT`, vol points) says how much each release is worth on each
-currency; without a row an event weighs its default on the currency that
-releases it and nothing on any other. A pair's bump is its two legs' weights
-**added** (`events.superpose`: a bump is a variance increment over twice the
-volatility, so two bumps add to first order -- a root-sum-square would be the
-rule for two event *volatilities*, which a bump is not) plus whatever the
-pair marks on top in its own events table. So `FOMC,JPY,0.3` makes the Fed 1.8
-on USDJPY and leaves it 1.5 on EURUSD, and a weight on a currency that does not
-release the event puts the event on every pair with that leg. A weight of 0
-switches an event off for that currency.
+A pair's bump is its two legs' weights **added** (`events.superpose`: a bump is
+a variance increment over twice the volatility, so two bumps add to first order
+-- a root-sum-square would be the rule for two event *volatilities*, which a
+bump is not) plus its own adjustment. So a row with `USD 1.5`, `JPY 0.3` and
+`USDJPY 0.2` is 2.0 on USDJPY and 1.5 on EURUSD.
 
-The table can also be marked for a session without touching the file: the
-**Weights** button on the marking screen's Events card opens an optional card
-holding it (one row per release, one column per currency, **Apply** posts it
-whole), `--set EVENT:CCY=POINTS` does the same on the command line, and a saved
-session keeps it. Applying changes what **Auto-load** suggests from then on and
-nothing already on a pair's events table.
+Events used to be dated rows on `PARAMS`, and a dated row left there is now
+**reported** rather than read — one bump with two homes is how a weight comes
+to mean two things. There is also no shipped calendar and no rule-based
+generator any more: the desk's own sheet is the calendar.
+
+**Marking it.** The Events card on the marking screen shows the sheet through
+one pair's eyes — its two legs' weight columns and its own adjustment. A weight
+typed there is the sheet's, so it moves every pair with that currency, and the
+reply names them. The **Weights** button opens the currency side of the sheet
+whole (one row per release, one column per currency; **Apply** posts it and
+re-solves every pair it reaches, leaving each pair's adjustment column alone).
+Nothing is written to the workbook until an export asks for it by name
+(`volkit session --to-workbook`), which writes the whole `EVENTS` sheet from
+the session's one table.
 
 ```bash
-python3 -m volkit events USDJPY --horizon 1     # what would be auto-loaded, leg by leg
-python3 -m volkit events USDJPY --weights        # ... and the whole weight table
-python3 -m volkit events USDJPY --set FOMC:JPY=0.3   # the weights card, as a flag
+python3 -m volkit events                       # the whole EVENTS sheet
+python3 -m volkit events USDJPY                # ... through one pair's eyes, leg by leg
+python3 -m volkit events USDJPY --all          # ... including the rows that weigh nothing
 ```
 
 ## Run
@@ -1258,6 +1321,9 @@ python3 -m volkit smile  USDJPY 2024-05-28
 python3 -m volkit vol    USDJPY 2024-05-28 --strike 1.02 --forward 1.0   # a moneyness
 python3 -m volkit vol    USDJPY 5m --strike 25dp -v --feed files/market_feed.csv
 python3 -m volkit daily  USDJPY --horizon 1 --cut NY --out USDJPY_daily_vol
+python3 -m volkit kace   USDCNH --kace-user feeuser --out usdcnh_kace.xml   # the kACE feed message
+python3 -m volkit kace   USDCNH --clear --kace-user feeuser                # the clearRate message
+python3 -m volkit kace   USDCNH --post --kace-url https://pfcshkwapp01:8500/pricing  # send it, and record the outcome
 
 python3 -m volkit band   USDHKD --feed files/market_feed.csv --hazard 3
 
@@ -1428,21 +1494,20 @@ the same clock always gives the same numbers.
 
 | Module | Responsibility |
 |---|---|
-| `timeutil` | one day-count, one clock, tenor parsing |
+| `timeutil` | one day-count, one clock, tenor parsing (with the short-date codes O/N, T/N, S/N, S/W) |
 | `numerics` | bracketed solves, damped fixed points, panel integration |
-| `calendars` | holiday calendars, spot/expiry rolls, CSV overrides |
+| `calendars` | holiday calendars, the FX date construction (spot date, settlement date, expiry back from it), CSV overrides |
 | `timeweight` | intraday / weekend / holiday weighting |
 | `black` | Black-76, FX delta conventions, strike-from-delta |
 | `sabr` | Hagan 2002 lognormal SABR and its calibration |
 | `smile` | arbitrage-constrained SVI, vanna-volga, cached slices |
-| `events` | dated volatility bumps and height calibration |
+| `events` | dated volatility bumps and height calibration, and the one table they live in (the workbook's EVENTS sheet) |
 | `atm` | the ATM term structure |
 | `cross` | cross pairs from two legs and a correlation, and which two dollar pairs a cross name means |
 | `surface` | ATM + smile, greeks, delta strikes, RR / fly |
-| `marketdata` | validated Excel reader: CONFIG is two columns, and a cross names its own dollar legs |
+| `marketdata` | validated Excel reader: CONFIG is two columns, a cross names its own dollar legs, EVENTS is a row per release |
 | `book` | all pairs, built in dependency order |
 | `pricing` | multi-leg option strips, strike/expiry specs, per-leg error isolation |
-| `econ` | scheduled economic events: rules plus a dated central-bank table |
 | `exotics` | digitals, one-touch / no-touch, and the overhedge buffers |
 | `feed` | spot and forward points from a file, by tenor or by date, interpolated between pillars |
 | `banded` | managed / pegged pairs: Beta-on-band body with a hazard-rate jump leg, and how much notice the surface takes of it |
@@ -1475,13 +1540,11 @@ the same clock always gives the same numbers.
 * **A new data source** — produce a `MarketData` object; nothing below
   `marketdata` knows about Excel.
 * **A new holiday** — add a row to `files/holiday_overrides.csv`.
-* **A new economic event** — add a row to `volkit/data/econ_events.csv`, or a
-  generator to `RULE_GENERATORS` in `econ.py` for a rule-based release. New
-  releasing bodies need one line in `RELEASE_TIMES` giving currency, time zone
-  and local release time.
-* **An event's weight on another currency** — a row in
-  `volkit/data/event_weights.csv`; or, for one workbook, a currency column in
-  `PARAMS`.
+* **A new economic event** — add a row to the workbook's `EVENTS` sheet: the
+  release time in Hong Kong time, then a weight in each currency's column and
+  an adjustment in each pair's.
+* **An event's weight on another currency** — a column headed with that
+  currency on `EVENTS`. It reaches every pair with that leg.
 * **A different intraday profile** — pass `hourly_weight` / `session_hours`
   to `TimeWeighting`; holiday combinations are computed, not enumerated.
 * **A new output in the UI** — add a branch to `BookService.calc` and a name

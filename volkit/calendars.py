@@ -20,7 +20,7 @@ from pathlib import Path
 import numpy as np
 
 from . import paths
-from .timeutil import add_tenor, parse_datetime
+from .timeutil import UTC, add_tenor, normalise_tenor, parse_datetime, parse_tenor
 
 try:  # optional dependency; the built-in rules below are the fallback
     import holidays as _holidays_pkg
@@ -191,6 +191,45 @@ CURRENCY_CALENDARS: dict[str, tuple[str, ...]] = {
 }
 
 
+#: Currencies whose calendar must be open on any FX settlement date, whether
+#: or not they are in the pair.  Every FX trade settles through New York, so a
+#: US holiday cannot be a value date for EURJPY any more than for EURUSD.
+#:
+#: It does *not* stop the count.  The market convention is precise about this
+#: and the two halves are easy to conflate: for a pair with no dollar in it
+#: the two business days to spot are counted on the two currencies' own
+#: calendars, and US holidays are simply not looked at -- but the date that
+#: count lands on must then also be good in USD, and is rolled forward until
+#: it is.  Counting US holidays as well would push EURJPY spot out a day every
+#: Thanksgiving, which is not what the market does.
+SETTLEMENT_CURRENCIES: tuple[str, ...] = ("USD",)
+
+
+@dataclass(frozen=True)
+class FxDates:
+    """The four dates an FX option tenor resolves to, and how it got there.
+
+    A tenor is not a length of time, it is a **settlement date**: the market
+    adds the tenor to the spot date, adjusts that to a good value date, and
+    the option's expiry is then the spot lag back from it.  Both dates travel
+    together because a screen that shows one and computes the other from a
+    year fraction is a screen with two answers to one question -- and because
+    the *forward* an option is priced against is the forward to ``delivery``,
+    not to ``expiry`` (§4).
+
+    ``trade`` is the valuation date the whole construction hangs off, and it
+    comes from the book's clock, never from the machine.
+    """
+
+    pair: str
+    tenor: str          # canonically spelled, or the date as written
+    trade: date         # the valuation date
+    spot: date          # where a spot trade dealt today settles
+    expiry: date        # when the option expires
+    delivery: date      # when the option settles: the spot lag after expiry
+    rule: str = ""      # which construction produced it, in words
+
+
 @dataclass
 class CalendarSet:
     """Holiday lookup for currencies and pairs, with user overrides.
@@ -212,34 +251,51 @@ class CalendarSet:
         dates -= {d for d in self.removals.get(country, ()) if d.year == year}
         return frozenset(dates)
 
+    # -- which calendars ---------------------------------------------------
     def countries_for(self, ccy_or_pair: str) -> tuple[str, ...]:
-        """Calendars touched by a currency or a 6-letter pair."""
+        """Calendars touched by a currency or a 6-letter pair.
+
+        These are the *pair's own* calendars, and they are what decides
+        whether a day counts: the two business days to spot, the business
+        days back from delivery to expiry, and whether an option can expire
+        on a given date at all.  The settlement calendars are a superset --
+        see :meth:`settlement_countries`.
+        """
         s = ccy_or_pair.upper()
         out: list[str] = []
         for ccy in ({s[:3], s[3:6]} if len(s) >= 6 else {s[:3]}):
             out.extend(CURRENCY_CALENDARS.get(ccy, ()))
         return tuple(dict.fromkeys(out))
 
-    def is_holiday(self, ccy_or_pair: str, d: date | datetime) -> bool:
-        d = d.date() if isinstance(d, datetime) else d
-        return any(d in self._country_dates(c, d.year) for c in self.countries_for(ccy_or_pair))
+    def settlement_countries(self, ccy_or_pair: str) -> tuple[str, ...]:
+        """The pair's calendars plus the ones every value date must clear.
 
-    def holiday_countries(self, ccy_or_pair: str, d: date | datetime) -> tuple[str, ...]:
-        """Which calendars are shut on ``d`` -- drives the intraday weighting."""
-        d = d.date() if isinstance(d, datetime) else d
-        return tuple(c for c in self.countries_for(ccy_or_pair) if d in self._country_dates(c, d.year))
-
-    def is_business_day(self, ccy_or_pair: str, d: date | datetime) -> bool:
-        d = d.date() if isinstance(d, datetime) else d
-        return d.weekday() < 5 and not self.is_holiday(ccy_or_pair, d)
-
-    def roll(self, ccy_or_pair: str, d: date, convention: str = "modified_following") -> date:
-        """Roll a date to a good business day.
-
-        Default is modified following, the FX market standard.  The legacy
-        code rolled weekends *backwards* unconditionally, which is the
-        'preceding' convention; pass ``convention='preceding'`` to reproduce it.
+        A settlement date has to be a day the money can actually move, which
+        for FX means New York is open whatever the pair is.  The distinction
+        from :meth:`countries_for` is the whole of the spot-date convention
+        and is easy to lose: US holidays do not *stop the count*, they only
+        rule out the date the count lands on.  See ``SETTLEMENT_CURRENCIES``.
         """
+        out = list(self.countries_for(ccy_or_pair))
+        for ccy in SETTLEMENT_CURRENCIES:
+            out.extend(CURRENCY_CALENDARS.get(ccy, ()))
+        return tuple(dict.fromkeys(out))
+
+    # -- open days, on an explicit set of calendars ------------------------
+    #
+    # Everything below is written once against a tuple of countries and then
+    # exposed twice: on the pair's calendars for the counting, on the
+    # settlement calendars for the value dates.  Two copies of a roll loop is
+    # two places for a holiday rule to be applied to the wrong set.
+
+    def _is_open(self, countries: tuple[str, ...], d: date | datetime) -> bool:
+        d = d.date() if isinstance(d, datetime) else d
+        if d.weekday() >= 5:
+            return False
+        return not any(d in self._country_dates(c, d.year) for c in countries)
+
+    def _roll_open(self, countries: tuple[str, ...], d: date,
+                   convention: str = "modified_following") -> date:
         if convention == "preceding":
             step, modified = -1, False
         elif convention == "following":
@@ -250,42 +306,192 @@ class CalendarSet:
             raise ValueError(f"unknown roll convention {convention!r}")
         out = d
         for _ in range(400):
-            if self.is_business_day(ccy_or_pair, out):
+            if self._is_open(countries, out):
                 break
             out += timedelta(days=step)
         else:  # pragma: no cover
-            raise RuntimeError(f"could not roll {d} onto a business day for {ccy_or_pair}")
+            raise RuntimeError(f"could not roll {d} onto an open day for {countries}")
         if modified and out.month != d.month:
-            return self.roll(ccy_or_pair, d, "preceding")
+            return self._roll_open(countries, d, "preceding")
         return out
 
-    def add_business_days(self, ccy_or_pair: str, d: date, n: int) -> date:
+    def _add_open_days(self, countries: tuple[str, ...], d: date, n: int) -> date:
         step = 1 if n >= 0 else -1
         out = d
-        for _ in range(abs(n)):
+        for _ in range(abs(int(n))):
             out += timedelta(days=step)
-            while not self.is_business_day(ccy_or_pair, out):
+            while not self._is_open(countries, out):
                 out += timedelta(days=step)
         return out
 
+    # -- the pair's own calendars ------------------------------------------
+    def is_holiday(self, ccy_or_pair: str, d: date | datetime) -> bool:
+        d = d.date() if isinstance(d, datetime) else d
+        return any(d in self._country_dates(c, d.year) for c in self.countries_for(ccy_or_pair))
+
+    def holiday_countries(self, ccy_or_pair: str, d: date | datetime) -> tuple[str, ...]:
+        """Which calendars are shut on ``d`` -- drives the intraday weighting."""
+        d = d.date() if isinstance(d, datetime) else d
+        return tuple(c for c in self.countries_for(ccy_or_pair)
+                     if d in self._country_dates(c, d.year))
+
+    def is_business_day(self, ccy_or_pair: str, d: date | datetime) -> bool:
+        return self._is_open(self.countries_for(ccy_or_pair), d)
+
+    def is_settlement_day(self, ccy_or_pair: str, d: date | datetime) -> bool:
+        """Whether money can settle on ``d``: the pair's calendars **and** USD."""
+        return self._is_open(self.settlement_countries(ccy_or_pair), d)
+
+    def roll(self, ccy_or_pair: str, d: date, convention: str = "modified_following") -> date:
+        """Roll a date to a good business day on the pair's own calendars.
+
+        Default is modified following, the FX market standard.  The legacy
+        code rolled weekends *backwards* unconditionally, which is the
+        'preceding' convention; pass ``convention='preceding'`` to reproduce it.
+        """
+        return self._roll_open(self.countries_for(ccy_or_pair), d, convention)
+
+    def roll_settlement(self, ccy_or_pair: str, d: date,
+                        convention: str = "following") -> date:
+        """Roll a date to a good *value* date -- the pair's calendars and USD."""
+        return self._roll_open(self.settlement_countries(ccy_or_pair), d, convention)
+
+    def add_business_days(self, ccy_or_pair: str, d: date, n: int) -> date:
+        return self._add_open_days(self.countries_for(ccy_or_pair), d, n)
+
+    # -- the FX date construction ------------------------------------------
     def spot_lag(self, pair: str) -> int:
         """Settlement lag in business days.  USDCAD is T+1, the rest T+2."""
         return 1 if pair.upper() in {"USDCAD", "CADUSD"} else 2
 
     def spot_date(self, pair: str, today: date) -> date:
-        return self.add_business_days(pair, today, self.spot_lag(pair))
+        """Where a spot deal struck on ``today`` settles.
+
+        The count is on the pair's own calendars and the date it lands on is
+        then rolled forward to a day USD can settle too -- the two halves of
+        the market convention, in that order.  Doing it the other way round
+        (counting US holidays as business days for the pair) pushes EURJPY
+        spot out a day every Thanksgiving, which is not what the market does.
+        """
+        today = today.date() if isinstance(today, datetime) else today
+        landed = self._add_open_days(self.countries_for(pair), today, self.spot_lag(pair))
+        return self.roll_settlement(pair, landed, "following")
+
+    def last_settlement_day(self, pair: str, year: int, month: int) -> date:
+        """The last day of a month that ``pair`` can settle on."""
+        first_next = date(year + month // 12, month % 12 + 1, 1)
+        return self.roll_settlement(pair, first_next - timedelta(days=1), "preceding")
+
+    def is_month_end(self, pair: str, d: date) -> bool:
+        """Whether ``d`` is the last settlement day of its own month.
+
+        This is the trigger for the end-of-month rule: a tenor added to a spot
+        date that is the month's last good day settles on the *last good day*
+        of the target month, not on the same day number rolled.  Without it a
+        1M dealt off a 28-Feb spot settles 28-Mar while the market settles
+        31-Mar, and the option's expiry is then a business day early.
+        """
+        return d == self.last_settlement_day(pair, d.year, d.month)
+
+    def delivery_from_expiry(self, pair: str, expiry: date) -> date:
+        """The value date of an option expiring on ``expiry``: the spot lag on."""
+        expiry = expiry.date() if isinstance(expiry, datetime) else expiry
+        landed = self._add_open_days(self.countries_for(pair), expiry, self.spot_lag(pair))
+        return self.roll_settlement(pair, landed, "following")
+
+    def expiry_from_delivery(self, pair: str, delivery: date) -> date:
+        """The expiry of an option settling on ``delivery``: the spot lag back."""
+        delivery = delivery.date() if isinstance(delivery, datetime) else delivery
+        return self._add_open_days(self.countries_for(pair), delivery, -self.spot_lag(pair))
+
+    def fx_dates(self, pair: str, tenor: str, today: date,
+                 convention: str = "modified_following") -> FxDates:
+        """The trade, spot, expiry and delivery dates a tenor resolves to.
+
+        **The settlement date is derived first and the expiry comes from it**,
+        which is the market construction and the reason this returns four
+        dates rather than one.  Two branches, because the market has two:
+
+        * A **day** tenor (``1D``, and so ``O/N``, ``T/N``, ``S/N``) is an
+          *expiry* offset: the overnight expires on the next business day and
+          settles from that day's own spot.  Adding calendar days to the spot
+          date instead -- which is what this used to do -- collapses distinct
+          tenors onto one date, because the two business days subtracted at
+          the end swallow the weekend the addition just crossed.  Dealt on a
+          Wednesday, ``1D`` and ``2D`` both came back Thursday.
+
+        * A **week, month or year** tenor is a *delivery* offset: the tenor is
+          added to the spot date by calendar arithmetic, adjusted modified
+          following on the value-date calendars, and the expiry is the spot
+          lag back from it on the pair's own.  Month and year tenors also take
+          the **end-of-month rule** (:meth:`is_month_end`).
+
+        ``today`` is the book's valuation date.  Nothing here reads the
+        machine clock (§4).
+        """
+        pair = pair.upper()
+        today = today.date() if isinstance(today, datetime) else today
+        spot = self.spot_date(pair, today)
+        n, unit = parse_tenor(tenor)
+        label = normalise_tenor(tenor)
+
+        if unit == "d" and float(n).is_integer():
+            expiry = self._add_open_days(self.countries_for(pair), today, int(n))
+            if int(n) == 0:
+                expiry = self._roll_open(self.countries_for(pair), today, "following")
+            delivery = self.delivery_from_expiry(pair, expiry)
+            rule = (f"{int(n)} business day(s) after {today}, settling "
+                    f"{self.spot_lag(pair)} business day(s) later")
+            return FxDates(pair, label, today, spot, expiry, delivery, rule)
+
+        target = add_tenor(spot, tenor)
+        if unit in ("m", "y") and self.is_month_end(pair, spot):
+            delivery = self.last_settlement_day(pair, target.year, target.month)
+            rule = (f"end-of-month: {spot} is the last value date of its month, so {label} "
+                    f"settles on the last value date of {target:%B %Y}")
+        else:
+            delivery = self.roll_settlement(pair, target, convention)
+            rule = (f"{label} on the spot date {spot} is {target}, "
+                    f"{convention.replace('_', ' ')} to {delivery}")
+        expiry = self.expiry_from_delivery(pair, delivery)
+        return FxDates(pair, label, today, spot, expiry, delivery, rule)
+
+    def dates_for_expiry(self, pair: str, expiry: date, today: date) -> FxDates:
+        """The same bundle for an expiry given as a **date** rather than a tenor.
+
+        A desk types both into one box, and what comes out of it has to be the
+        same shape either way -- above all the delivery date, because that is
+        the date the forward is read on.
+        """
+        pair = pair.upper()
+        today = today.date() if isinstance(today, datetime) else today
+        expiry = expiry.date() if isinstance(expiry, datetime) else expiry
+        return FxDates(pair, expiry.isoformat(), today, self.spot_date(pair, today),
+                       expiry, self.delivery_from_expiry(pair, expiry),
+                       f"expiry as given; settles {self.spot_lag(pair)} business day(s) later")
 
     def expiry_date(self, pair: str, tenor: str, today: date,
                     convention: str = "modified_following") -> date:
-        """Option expiry for a tenor, derived from the delivery date.
+        """Option expiry for a tenor -- :meth:`fx_dates` for the whole bundle."""
+        return self.fx_dates(pair, tenor, today, convention).expiry
 
-        Spot is rolled forward, the tenor is added by calendar month, the
-        delivery date is rolled to a good business day, and the expiry is the
-        spot lag back from delivery -- the standard FX construction.
+    def delivery_date(self, pair: str, tenor: str, today: date,
+                      convention: str = "modified_following") -> date:
+        """Settlement date for a tenor -- what the forward to it is quoted to."""
+        return self.fx_dates(pair, tenor, today, convention).delivery
+
+    def expiry_years(self, pair: str, tenor: str, clock) -> float:
+        """Years from the valuation instant to a tenor's **calendar** expiry.
+
+        This is the one reading of "how long is a 1M option", and it goes
+        through the calendar rather than through ``timeutil.tenor_to_years``:
+        a 1M is however many days the pair's own holidays make it, and the
+        volatility it is marked at has to be the volatility it is priced at.
+        ``tenor_to_years`` survives as what it always was -- a sort key and a
+        nominal length, needing no pair and no clock.
         """
-        spot = self.spot_date(pair, today)
-        delivery = self.roll(pair, add_tenor(spot, tenor), convention)
-        return self.add_business_days(pair, delivery, -self.spot_lag(pair))
+        d = self.expiry_date(pair, tenor, clock.now.date())
+        return clock.years_to(datetime.combine(d, datetime.min.time()).replace(tzinfo=UTC))
 
     def add_overrides(self, country: str, dates, remove: bool = False) -> None:
         """Add (or suppress) calendar dates for a country at runtime."""

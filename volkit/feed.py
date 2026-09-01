@@ -345,12 +345,12 @@ class MarketFeed:
         for pair, spot in spots.items():
             feed.pairs[pair] = feed._build(pair, spot, pillars.pop(pair, []),
                                            dated.pop(pair, []), stated.get(pair), cal)
-        # Said only where it changes something.  A feed of tenor pillars is
-        # placed identically whatever day it was written on, so reporting the
-        # gap there is a line printed on every run that nothing turns on -- the
-        # quiet case has to stay quiet or the noisy one stops being read.  With
-        # a dated row in the file the gap moves the spot date, and with it the
-        # whole near side.
+        # Said wherever it changes something, which is now wherever there is
+        # a spot date at all: the day a feed is priced on sets the spot date,
+        # and the spot date is where every pillar -- dated *or* tenor -- is
+        # measured from now that a tenor pillar sits on its own delivery date.
+        # A file written last Tuesday and priced today really is a different
+        # curve, and that used to be absorbed silently.
         if stamp_note and any(p.spot_date for p in feed.pairs.values()):
             feed.notes.insert(0, stamp_note)
         for pair in sorted(set(pillars) | set(dated)):
@@ -389,8 +389,15 @@ class MarketFeed:
                cal: CalendarSet) -> PairFeed:
         """One pair's curve: the tenor pillars, and the dated rows placed."""
         notes: list[str] = []
+        # The spot date is derived whenever there is a valuation date to
+        # derive it from, and not only when a dated row forces the issue: it
+        # is the origin of the whole curve, and without it a *tenor* pillar
+        # cannot be placed on its own delivery date either -- which is what
+        # puts an option's forward on the option's own settlement date (§4).
         spot_date = stated
-        if date_rows and spot_date is None:
+        if spot_date is None and self.today is not None:
+            spot_date = cal.spot_date(pair, self.today)
+        if date_rows and stated is None:
             if self.today is None:
                 self.problems.append(
                     f"{pair}: {len(date_rows)} dated row(s) cannot be placed without a "
@@ -398,7 +405,6 @@ class MarketFeed:
                     f"'# asof: YYYY-MM-DD' line, or load the feed with a clock")
                 date_rows = []
             else:
-                spot_date = cal.spot_date(pair, self.today)
                 notes.append(f"spot date {spot_date}, {cal.spot_lag(pair)} business days "
                              f"after {self.today} on the {pair} calendar")
         elif date_rows:
@@ -427,11 +433,23 @@ class MarketFeed:
         values = [float(r[1]) for r in tenor_rows]
         if len(set(labels)) != len(labels):
             self.problems.append(f"{pair}: a tenor pillar is quoted twice ({', '.join(labels)})")
+        # Where each tenor pillar sits on the axis.  A broker's 1M swap points
+        # settle on the 1M *delivery* date, so that is where the pillar
+        # belongs: years from the spot date to that date, exactly the axis a
+        # dated row lands on.  ``tenor_to_years`` -- a nominal 30.44 days for
+        # a month that is 30 or 31 -- put the pillar up to a day and a half
+        # away from the date it is quoted to, and an option read at its own
+        # settlement date then interpolated between two pillars instead of
+        # landing on one.  Without a valuation date there is no delivery date
+        # to compute, and the nominal length is all there is.
         times = None
+        if labels and spot_date is not None and self.today is not None:
+            times = [self._pillar_years(pair, x, spot_date, cal) for x in labels]
         if far:
             # Once a dated pillar is in, every label carries its own year
             # fraction: a date has no tenor to be read back out of it.
-            times = [tenor_to_years(x) for x in labels]
+            if times is None:
+                times = [tenor_to_years(x) for x in labels]
             for when, value in far:
                 labels.append(when.isoformat())
                 values.append(value)
@@ -443,6 +461,22 @@ class MarketFeed:
         return PairFeed(pair=pair, spot=spot, tenors=labels, points=values,
                         pip=pip_divisor(pair), times=times, daily=near,
                         spot_date=spot_date, notes=notes)
+
+    def _pillar_years(self, pair: str, label: str, spot_date: date,
+                      cal: CalendarSet) -> float:
+        """A tenor pillar's place on the axis: years from spot to its delivery.
+
+        A label that will not resolve on the calendar keeps its nominal
+        length and says so, rather than taking the whole pair down: a feed
+        with one odd pillar in it is still a feed.
+        """
+        try:
+            delivery = cal.delivery_date(pair, label, self.today)
+        except (TenorError, ValueError) as exc:
+            self.notes.append(f"{pair}: {label} could not be placed on the calendar "
+                              f"({exc}); it is held at its nominal length")
+            return tenor_to_years(label)
+        return (delivery - spot_date).days / DAYS_IN_YEAR
 
     def __contains__(self, pair: str) -> bool:
         return pair.upper() in self.pairs

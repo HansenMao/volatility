@@ -110,6 +110,115 @@ convention is `RR = call vol − put vol`, verified by round-trip: calibrate to
 an RR, re-extract it from the fitted smile, and the two agree to 1e-8.
 **Sanity-check one live smile against a broker quote before going live.**
 
+### 1.6 A tenor is a settlement date — the FX date construction
+
+This is the largest of the date changes and it moves every tenor slightly.
+
+**What a tenor now resolves to.** The market builds an option's dates in one
+order and this now follows it:
+
+1. **Spot date** = trade date + the pair's spot lag (T+1 for USDCAD, T+2 for
+   the rest), counted on the *two currencies'* own calendars, and then rolled
+   forward to a day USD can settle on. US holidays do not stop the count for a
+   pair with no dollar in it — they only rule out the value date it lands on.
+   Counting them would push EURJPY spot out a day every Thanksgiving, which is
+   not what the market does. `CalendarSet.settlement_countries` is the seam.
+2. **Settlement (delivery) date** = spot + the tenor, adjusted **modified
+   following** on the value-date calendars, with the **end-of-month rule**: off
+   a spot date that is the last value date of its month, every month and year
+   tenor settles on the last value date of *its* month. Without that rule a 1M
+   dealt off a 28-Feb spot settles 28-Mar where the market settles 31-Mar.
+3. **Expiry** = the spot lag *back* from the settlement date, on the pair's own
+   calendars.
+
+**Day tenors go the other way, because that is what they mean.** `O/N` expires
+on the next business day and settles from that day's own spot; `8D` expires on
+the eighth business day. Adding calendar days to the spot date and subtracting
+the lag at the end — which is what this used to do — collapses the short
+tenors onto each other, because the two business days taken off swallow the
+weekend the addition just crossed. Dealt on a Wednesday, `1D` and `2D` both
+came back Thursday. `calendars.fx_dates` returns all four dates together.
+
+**Short-date codes are read.** `O/N`, `T/N`, `S/N` and `S/W` parse as tenors
+(`timeutil.parse_tenor`), spelled canonically by `timeutil.normalise_tenor`.
+
+**Where a tenor sits on the volatility axis moved with it.** A `1M` is no
+longer 0.083333 years; it is the years from the valuation clock to the 1M
+expiry date on the pair's own calendar. `calendars.expiry_years` is the one
+reading of it, reached through `AtmCurve.tenor_years` /
+`VolSurface.tenor_years` / `Book.tenor_years`. `timeutil.tenor_to_years`
+survives as what it always was — a nominal length and a sort key, needing no
+pair and no clock. This is the change that moves marked volatilities: a `1M`
+mark is now the volatility a `1M` option actually receives, which it was not
+before.
+
+Off `files/vol_marks.xlsx` at a 2026-09-01 12:00Z valuation:
+
+| Tenor | t before | t after | EURUSD ATM % | USDJPY ATM % |
+|---|---|---|---|---|
+| 1w | 0.019165 | 0.017796 | 5.8338 → 5.7827 | 5.7463 → 5.6955 |
+| 1m | 0.083333 | 0.080768 | 5.8985 → 5.8646 | 5.8479 → 5.8093 |
+| 2m | 0.166667 | 0.160168 | 5.8583 → 5.8991 | 5.8977 → 5.9338 |
+| 3m | 0.250000 | 0.247781 | 5.9098 → 5.8943 | 6.0211 → 6.0020 |
+| 1y | 1.000000 | 0.997967 | 6.0742 → 6.0704 | 6.5104 → 6.5058 |
+
+Under five hundredths of a volatility point, largest at the front where a day
+is a bigger share of the term. There is **no switch**: this is a date being
+computed correctly rather than a modelling choice, and a build that placed a
+tenor two ways would be a build with two answers for "where is 1M marked".
+To reconcile against an old figure, read the curve at `tenor_to_years(tenor)`
+directly — `VolSurface.atm.term_vol(tenor_to_years("1m"))` is exactly the old
+number.
+
+**The forward is now read on the settlement date.** A forward is a price for a
+value date, and an option's is its settlement date — two business days past
+its expiry, which on a one-week option is a fifth of its swap points. Two
+things changed together:
+
+* A **feed pillar is placed on its own delivery date**: a broker's 1M swap
+  points are the points to the 1M value date, so the pillar sits at the days
+  from the spot date to that date, not at a nominal 30.44-day month. The
+  axis was always "years from the spot date" (the `feed` module docstring);
+  the tenor pillars were the one thing not actually on it.
+* Every screen reads a level through **`Book.market_level_for(pair, expiry)`**,
+  which puts the option's settlement date on that same axis.
+  `Book.market_level(pair, t)` survives for the callers that genuinely have a
+  time and not an expiry. A caller may **state** that settlement date -- the
+  pricing screen's Settlement box, for a trade settling on a broken date --
+  and it is the date that is stated, never the placement: it still goes onto
+  the axis through `Book.settlement_years`, still as an offset. Nothing moves
+  unless somebody types one.
+
+One row needed care rather than a substitution. A **carry row's** content is
+the difference between two forwards — the option's now, and the same option a
+horizon later — so reading one on the settlement date and the other at a year
+fraction contaminates that difference with the gap between the two
+conventions. A third of a pip, which is the same order as the gamma carry
+being measured, and it turned a flat carry profile into a ragged one. Both are
+now read on the settlement axis, the rolled one a horizon back along it:
+`ts = Book.settlement_years(pair, expiry)`, then `ts` and `ts - h`. The rolled
+leg is this same option a week later, not another option.
+
+The consequence worth having: **at every quoted pillar the forward is now
+exactly the published swap points.** It used to interpolate between two of
+them, because the pillar was placed nominally and the query was made at the
+expiry.
+
+| | 1w | 1m | 2m | 3m | 6m | 1y |
+|---|---|---|---|---|---|---|
+| EURUSD, pips | +0.09 | +0.18 | +0.48 | +0.17 | +0.45 | +0.16 |
+| USDJPY, pips | −0.19 | −0.35 | −0.91 | −0.32 | −0.85 | −0.31 |
+
+A feed loaded without a valuation date has no spot date to place a pillar
+against and keeps the nominal placement, which is the only thing there is to
+fall back on. `feed.load_for` always passes the book's clock, so that is the
+degenerate case and not the working one.
+
+**The pricing screen shows the settlement date** on its own Results row, with
+the spot date and the rule that produced it on hover; the marking screen's vol
+query and `volkit vol --verbose` say it too, and `volkit tenors` prints the
+expiry and settlement date beside every pillar.
+
 ---
 
 ## 2. Bugs fixed that did not change correct results
@@ -533,37 +642,85 @@ and its absence is not an error — an empty bank simply means no quote gets a
 width until a rule exists or a fallback is typed, which the panel says outright
 rather than filling in a plausible default.
 
-## 4e. Event weights per currency — new, and moves nothing
+## 4e. Events live on their own sheet, weighted per currency
 
-An event used to be a bump on a pair: one cell per pair per event row, and one
-default per release for auto-load. It is now weighted **per currency**, and a
-pair's bump is its two legs' weights **added** plus an adjustment the pair
-marks on top: `bump = w[leg1] + w[leg2] + adjust`. The rule is one function,
+An event used to be a bump on a pair: one dated row on `PARAMS`, one cell per
+pair. It is now weighted **per currency**, and a pair's bump is its two legs'
+weights **added** plus an adjustment the pair marks on top:
+`bump = w[leg1] + w[leg2] + adjust`. The rule is one function,
 `events.superpose`, and it adds because a quoted bump is a variance increment
 over twice the day's volatility, so two of them add to first order; the exact
 variance rule reaches the sum for bumps small against the volatility, which is
 every real event on every real pair. Root-sum-square would be the rule for two
 event *volatilities*, and a bump is not one.
 
-Nothing moves:
+### The EVENTS sheet
 
-* A workbook with no currency column reads exactly as before: the pair's cell
-  is the whole bump (carried as the adjustment, with both legs at zero). The
-  shipped workbook's USDCNH rows are pinned that way.
-* The shipped `event_weights.csv` is examples, all commented out, and the
-  defaults weight each release on its releasing currency only, so auto-load
-  suggests the numbers it always did.
-* A session file written before this holds `bump` alone and loads as an
-  adjustment; a new one holds `weights`, `adjust` and `bump`.
+All of it lives on one sheet of the workbook, **`EVENTS`**: one row per
+release, timed in the workbook's own Hong Kong clock, with a column headed by
+each **currency** and a column headed by each **pair**.
 
-What changes is what can be marked. `FOMC,JPY,0.3` in the weights file (or a
-`JPY` column in `PARAMS`) puts the Fed at 1.8 on USDJPY and leaves it at 1.5
-on EURUSD; a weight on a currency that does not release the event puts the
-event on every pair with that leg. The events panel shows each leg's weight,
-the adjustment and their total, and posts the parts; a total that disagrees
-with its parts is refused rather than averaged. The weight table is an
-optional card behind the Events card's **Weights** button, saved with the
-session, and it feeds Auto-load only.
+| | `USD` | `JPY` | `USDJPY` | `EURUSD` |
+|---|---|---|---|---|
+| `2026-09-17 06:00` | 1.5 | 0.3 | 0.2 | |
+
+A currency column is **shared** — every pair with that currency takes it — and
+a pair column is that pair's **adjustment**, its alone. So that row is 2.0 on
+USDJPY and 1.5 on EURUSD. `events.EventBook` is the sheet in memory and is the
+one place an event is read from; a pair's schedule is *derived* from it
+(`EventBook.for_pair`) rather than kept beside it, so a weight cannot come to
+mean one thing on USDJPY and another on EURUSD.
+
+**A dated row left on `PARAMS` is reported, not read.** Two homes for one bump
+is how a weight comes to mean two things, so the reader names the row and tells
+you to move it. The three shipped workbooks were migrated: their two event rows
+moved from `PARAMS` to `EVENTS` unchanged.
+
+### What moved
+
+* Nothing, for a sheet whose events have no currency weights: the pair's cell
+  is the whole bump (carried as the adjustment, with both legs at zero). That
+  is what `vol_marks_legacy_format.xlsx` holds and it is pinned.
+* `files/vol_marks.xlsx` now carries currency weights on both of its event
+  rows (USD 1.0, EUR 0.9, GBP 2.0, CHF 1.0, AUD 3.0, NZD 4.0, CAD 2.0, CNH
+  0.2), which the pair cells sit on top of. Blanking those columns restores
+  the old bumps exactly.
+
+### What was removed
+
+The shipped economic calendar and its weight file are gone: `volkit/econ.py`,
+`volkit/data/econ_events.csv` and `volkit/data/event_weights.csv`, with the
+rule generators (`NFP` on the first Friday, a second-Wednesday `US CPI` proxy),
+the `RELEASE_TIMES` table and the whole notion of a *suggested* event. Nothing
+guesses a date any more and nothing ships one. The desk's own sheet is the
+calendar, and it is the only thing that can be wrong about a date.
+
+The **Auto-load** button on the Events card became **Reload**: this pair's rows
+as the workbook has them, replacing what the session marked. `volkit events`
+prints the sheet — whole, or through one pair's legs — instead of what
+auto-load would have pulled in; `--horizon`, `--weights` and
+`--set EVENT:CCY=POINTS` are gone with the calendar they addressed.
+
+### Marking it, and getting it back
+
+The Events card shows the sheet through one pair's eyes: its two legs' weight
+columns and its own **Adj**, and the total beside them. Because a weight is
+shared, typing one moves every pair with that currency — that is the point of
+the sheet, and it is never hidden: the message under the table names them. The
+**Weights** button opens the currency side whole; applying it re-solves every
+pair those currencies reach and leaves each pair's adjustment column alone.
+
+The session file carries the table once, at the top level as `event_table`
+(replacing `event_weights`), and each pair block keeps its resolved `events`
+for the record — that is what a re-mark of an event is diffed against. A file
+written before the table existed has one **rebuilt from the union of its
+pairs' schedules**, since a currency weight was shared even then; two pairs
+disagreeing about one are reported rather than averaged.
+
+`volkit session --to-workbook` writes the `EVENTS` sheet **whole**, from that
+one table, rather than pair by pair. The old export wrote one pair's view of a
+shared weight and then had to go back and cancel it in every other pair's
+column; a table written whole has nothing to cancel.
 
 ## 5. Things I did **not** change
 
@@ -919,6 +1076,72 @@ not that signal was counted.
 **To read the old figure**, take any signal's `z` off the attribution block or
 the cell detail and combine them at the same weights: the arithmetic is
 unchanged and the grid still reports every part of it.
+
+### F16. The same unit sniffing was still in every pasted market
+
+F13 took the level out of the unit decision for a historical *sheet*, and
+left it in four readers that take a paste: a broker run (`quotes.parse_quotes`
+on `auto`), the listed-option quote table (`listed.parse_quote_table` on
+`auto`), the pasted curve on the monitor's comparison panel
+(`curves.parse_pasted_curve`) and the market maker's pasted target curve.
+Each read a paste whose levels were all below 1.0 as **decimals**, and each
+refused a paste whose levels straddled 1.0 as ambiguous. Both are the same
+mistake F13 fixed: a managed pair marks its at-the-money at a third of a
+point, so its whole broker run, its whole listed table and its whole curve sit
+below 1.0, and a run showing a 0.35 at-the-money beside a G10 line at 8.20 was
+refused outright rather than read.
+
+A volatility is now **the number it was written as** in all four, on the one
+rule that a number is a number: 8.20 is 8.20 volatility points and 0.35 is
+0.35 of a point. A paste that really is in decimals is read by saying so --
+`vol_unit='decimal'`, which is the caller's word and never an inference. Where
+every level in a paste sits below 1.0 the reader says once, in its notes, that
+it read the paste as written and how to say otherwise. Nothing straddling 1.0
+is refused any more, because there is nothing left to be ambiguous about.
+
+**What moves.** Nothing in any paste whose levels are above 1.0, which is
+every G10 run and every shipped sample. A paste of a pegged or otherwise
+low-volatility pair moves by a factor of 100, into the right place: the
+market-maker fit and quote, the marking agent's target, the desk agent's
+widths and everything filed into the archive from a paste, the listed
+comparison, and the monitor's pasted curve. To get the old numbers back on a
+paste that really was in decimals, set the volatility unit to `decimal`; the
+pasted curve and the market maker's target curve have no such switch, because
+they are read in points and there is now nothing else they can be in.
+
+### F17. The expiry box refused a tenor spelled out, and a date without a year
+
+Two things a desk writes were refused by the parser rather than by anything
+about the market. A tenor's unit had to be a single letter, so `1wk`, `3mth`,
+`2yr` and `10 days` all came back as "cannot parse tenor" while `1W`, `3M`,
+`2Y` and `10D` worked; and a date had to carry a year, so `06 Nov` -- the way
+a date is written on a run sheet in the week you are trading it -- was not a
+date at all.
+
+Both are read now, everywhere a tenor or an expiry is read, because both go
+through the one reader each (`timeutil.parse_tenor`, `timeutil.parse_datetime`):
+the pricing screen's expiry box, the marking screen's vol query, a broker run,
+a request list, a chat file being ingested, and the indication rows in the
+analysis screen. A spelled-out unit is the tenor it names -- `1wk` *is* `1W`,
+and `normalise_tenor` still gives one spelling per pillar, so nothing acquires
+a second column. A year-less date is the **first** matching day on or after
+the reference date: on 1-Sep-2026 `06 Nov` is 6-Nov-2026 and `31 Aug` is
+31-Aug-2027. `29 Feb` is the one date whose next occurrence is not within a
+year, and it is answered rather than refused.
+
+The reference date is the **book's clock**, passed in (§4) and never the
+machine's, so the same box read twice reads the same way and a saved session
+reads back as it was written. With no clock behind the call a year-less string
+is refused by name, saying that is what is missing. Purely numeric year-less
+forms (`06/11`) stay refused: day-then-month in one country and
+month-then-day in another, with nothing in the string to say which.
+
+**What moves.** Nothing that already parsed: every spelling that worked before
+resolves to the same date, and the year-less and spelled-out forms were errors
+rather than numbers. What moves is that they are now expiries. One reading did
+change shape: `analytics` decided tenor-versus-date by counting characters
+(four or fewer was a tenor), which called `1week` a date; it now asks
+`parse_tenor`, like everywhere else.
 
 ## Verified correct
 

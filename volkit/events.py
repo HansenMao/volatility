@@ -23,7 +23,7 @@ from datetime import datetime, timedelta
 import numpy as np
 
 from .numerics import ConvergenceError, solve_scalar
-from .timeutil import Clock, as_utc
+from .timeutil import Clock, as_utc, parse_datetime
 
 # Currencies that share a calendar and a market for the purpose of an event
 # weight: a weight given to CNH is the CNY leg's too unless CNY was given its
@@ -125,7 +125,6 @@ def event_entries(rows) -> tuple[list[EventEntry], list[str]]:
     Returns the entries it could read and a message for each it could not,
     so one bad row is named rather than taking the schedule down.
     """
-    from .timeutil import parse_datetime
     entries: list[EventEntry] = []
     problems: list[str] = []
     for i, row in enumerate(rows, start=1):
@@ -169,6 +168,224 @@ def coerce_entry(item) -> EventEntry:
         return item
     when, bump, *rest = item
     return EventEntry(when, float(bump), str(rest[0]) if rest else "")
+
+
+@dataclass
+class EventRow:
+    """One dated release, as the workbook's EVENTS sheet holds it.
+
+    ``weights`` is what the release is worth on each *currency* and is
+    **shared**: every pair with that currency takes it, which is the whole
+    reason the sheet has currency columns.  ``adjust`` is each *pair*'s own
+    cell on top of its two legs, and is the only thing in the row that
+    belongs to one pair.  Both are in decimal volatility, like everything
+    else past the reader.
+    """
+
+    when: datetime                                            # UTC
+    label: str = ""
+    weights: dict[str, float] = field(default_factory=dict)   # currency -> decimal
+    adjust: dict[str, float] = field(default_factory=dict)    # pair -> decimal
+
+    def __post_init__(self) -> None:
+        self.when = as_utc(self.when)
+        self.weights = {str(c).upper(): float(v) for c, v in (self.weights or {}).items()}
+        self.adjust = {str(p).upper(): float(v) for p, v in (self.adjust or {}).items()}
+
+    def entry(self, pair: str) -> EventEntry:
+        """This row as one pair sees it: its legs' weights plus its own cell."""
+        pair = pair.upper()
+        return EventEntry(self.when, None, self.label, leg_weights(self.weights, pair),
+                          self.adjust.get(pair, 0.0)).resolve(pair)
+
+    def touches(self, pair: str) -> bool:
+        """Whether the row moves this pair at all.
+
+        A row can sit on the sheet and be nothing to a pair -- a Fed release
+        with no cell on EURGBP -- and it still belongs in the pair's panel,
+        because that is where its cell would be typed.  What it must not do
+        is reach the curve, where a zero bump is an event to calibrate.
+        """
+        e = self.entry(pair)
+        return bool(e.bump) or any(e.weights.values())
+
+    def copy(self) -> "EventRow":
+        return EventRow(self.when, self.label, dict(self.weights), dict(self.adjust))
+
+
+@dataclass
+class EventBook:
+    """Every event the book knows: the EVENTS sheet in memory.
+
+    This is the one place an event is read from.  A pair's schedule is
+    *derived* (``for_pair``) rather than kept beside it, so a currency weight
+    cannot come to mean one thing on USDJPY and another on EURJPY -- which is
+    exactly what two copies of the same number in two pair columns used to
+    allow.
+    """
+
+    rows: list[EventRow] = field(default_factory=list)
+    source: str = ""
+
+    def sort(self) -> None:
+        self.rows.sort(key=lambda r: r.when)
+
+    def copy(self) -> "EventBook":
+        """A table nothing else holds a row of.
+
+        The book's live table starts as the workbook's, and the two must not
+        be the same object: **Reload** is the workbook's rows again, and a
+        session that had been marking straight through the loaded copy would
+        have nothing to reload.
+        """
+        return EventBook([r.copy() for r in self.rows], self.source)
+
+    def currencies(self) -> list[str]:
+        """Every currency any row weighs, sorted."""
+        return sorted({c for r in self.rows for c in r.weights})
+
+    def row_at(self, when: datetime) -> EventRow | None:
+        """The row at this instant, to the minute.  Times are the row's identity."""
+        key = as_utc(when).replace(second=0, microsecond=0)
+        for r in self.rows:
+            if r.when.replace(second=0, microsecond=0) == key:
+                return r
+        return None
+
+    def for_pair(self, pair: str, *, touching_only: bool = False) -> list[EventEntry]:
+        """Every row as this pair sees it, in time order.
+
+        ``touching_only`` is what a curve wants -- an event whose bump is zero
+        and whose legs weigh nothing is not an event to calibrate -- while the
+        panel wants the whole sheet, blank cells included.
+        """
+        self.sort()
+        return [r.entry(pair) for r in self.rows
+                if not touching_only or r.touches(pair)]
+
+    def pairs_weighing(self, currency: str, pairs) -> list[str]:
+        """Which of ``pairs`` a weight on this currency reaches.
+
+        A currency is read through the same alias table a leg is
+        (``leg_weights``), so a weight on CNY reaches a CNH pair.
+        """
+        ccy = str(currency).upper()
+        out = []
+        for p in pairs:
+            legs = leg_weights({ccy: 1.0}, p)
+            if any(legs.values()):
+                out.append(p)
+        return out
+
+    # -- editing ---------------------------------------------------------
+    def set_pair(self, pair: str, entries, *, pairs=()) -> tuple[list[str], list[str]]:
+        """Put one pair's panel back onto the sheet.
+
+        The panel shows the whole sheet through one pair's eyes: its two legs'
+        currency columns and its own adjustment cell.  So a weight typed here
+        goes into the **shared** row and moves every other pair with that
+        currency, and a row deleted here is deleted from the sheet.  Neither
+        is hidden: both come back as notes naming the pairs that moved.
+
+        The row's other currencies are untouched -- they are not on this
+        panel, and a column nobody showed must not be cleared by a screen
+        that never held it.
+        """
+        pair = pair.upper()
+        legs = pair_legs(pair)
+        book_pairs = sorted({str(p).upper() for p in pairs} | self._adjust_pairs())
+        problems: list[str] = []
+        notes: list[str] = []
+        keep: list[EventRow] = []
+        seen: set[datetime] = set()
+        for entry in entries:
+            when = as_utc(entry.when).replace(second=0, microsecond=0)
+            if when in seen:
+                problems.append(
+                    f"two events at {when:%Y-%m-%d %H:%M}Z: a row is identified by its "
+                    "time, so one of them would overwrite the other")
+                continue
+            seen.add(when)
+            row = self.row_at(when)
+            if row is None:
+                row = EventRow(when, entry.label)
+            else:
+                row = row.copy()
+                row.when = when
+                if entry.label:
+                    row.label = entry.label
+            for ccy in legs:
+                w = float(entry.weights.get(ccy, 0.0))
+                moved = [p for p in self.pairs_weighing(ccy, book_pairs) if p != pair]
+                if w != row.weights.get(ccy, 0.0) and moved:
+                    notes.append(
+                        f"{when:%Y-%m-%d %H:%M}Z {ccy} {w * 100:g}: shared, so it moves "
+                        + ", ".join(moved))
+                if w:
+                    row.weights[ccy] = w
+                else:
+                    row.weights.pop(ccy, None)
+            if entry.adjust:
+                row.adjust[pair] = float(entry.adjust)
+            else:
+                row.adjust.pop(pair, None)
+            keep.append(row)
+        for row in self.rows:
+            if row.when.replace(second=0, microsecond=0) in seen:
+                continue
+            others = sorted(p for p in row.adjust if p != pair)
+            if row.weights or others:
+                notes.append(
+                    f"{row.when:%Y-%m-%d %H:%M}Z removed from the sheet"
+                    + (f", which also drops {', '.join(others)}" if others else "")
+                    + (f" and the weights {', '.join(sorted(row.weights))}" if row.weights else ""))
+        self.rows = keep
+        self.sort()
+        return problems, notes
+
+    def _adjust_pairs(self) -> set[str]:
+        return {p for r in self.rows for p in r.adjust}
+
+    def set_weights(self, rows) -> list[str]:
+        """Replace the currency side of the sheet, keeping every pair's cell.
+
+        ``rows`` is the weights panel posted whole: ``{"when", "label",
+        "weights"}`` with the weights in decimal volatility.  A row the panel
+        does not carry is gone from the sheet, adjustments and all -- the
+        panel shows every row, so an absent one was deleted.
+        """
+        problems: list[str] = []
+        fresh: list[EventRow] = []
+        seen: set[datetime] = set()
+        for i, item in enumerate(rows, start=1):
+            try:
+                raw = item["when"]
+                when = as_utc(raw if isinstance(raw, datetime) else parse_datetime(str(raw)))
+                when = when.replace(second=0, microsecond=0)
+            except (KeyError, TypeError, ValueError) as exc:
+                problems.append(f"weights row {i}: {exc}")
+                continue
+            if when in seen:
+                problems.append(f"weights row {i}: a second row at {when:%Y-%m-%d %H:%M}Z")
+                continue
+            seen.add(when)
+            old = self.row_at(when)
+            row = EventRow(when, str(item.get("label") or (old.label if old else "")),
+                           {}, dict(old.adjust) if old else {})
+            for ccy, w in (item.get("weights") or {}).items():
+                try:
+                    v = float(w or 0.0)
+                except (TypeError, ValueError):
+                    problems.append(f"weights row {i}: {ccy} {w!r} is not a number")
+                    continue
+                if v:
+                    row.weights[str(ccy).upper()] = v
+            fresh.append(row)
+        if not problems:
+            self.rows = fresh
+            self.sort()
+        return problems
+
 
 # Instantaneous-variance decay rate, per year.  At 5000/yr an event is spent
 # within a few hours, which is what confines it to its own volatility day.

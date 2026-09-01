@@ -32,6 +32,12 @@ from .timeutil import Clock, tenor_to_years
 # The four smile parameters carried across expiries.
 PARAM_NAMES = ("slog10", "slog25", "rho25", "rho10")
 
+#: The three coefficients of one parameter's term structure, in the order the
+#: marking screen shows them.  The same shape as the ATM backbone's initial /
+#: long-term / mean-reversion and a cross's correlation curve, so a desk that
+#: can read one can read all three.
+TERM_COEFFS = ("initial", "final", "decay")
+
 
 @dataclass
 class SmileMark:
@@ -119,6 +125,12 @@ class VolSurface:
     marks: list[SmileMark] = field(default_factory=list)
     fits: list[TenorFit] = field(default_factory=list)
     term: dict[str, ParamTermStructure] = field(default_factory=dict)
+    # A term structure the desk has marked, replacing the fitted one for that
+    # parameter.  Kept *beside* ``term`` rather than written into it so that a
+    # re-fit cannot quietly discard somebody's mark, and so the fitted shape
+    # stays visible underneath it as the placeholder on the marking screen --
+    # the same arrangement as the ATM curve's tenor overwrites.
+    term_marks: dict[str, ParamTermStructure] = field(default_factory=dict)
     anchor_tenors: bool = False
     # Set for managed / pegged pairs.  The lognormal smile below is not a valid
     # model outside a hard band, so queries there are flagged.
@@ -152,6 +164,15 @@ class VolSurface:
     def clock(self) -> Clock:
         return self.atm.clock
 
+    def tenor_years(self, tenor: str) -> float:
+        """Years to a quoted tenor's calendar expiry, through the ATM curve.
+
+        A mark is quoted against a tenor and priced against a date, and this
+        is where the two meet.  It delegates rather than computing, so a
+        surface and its own ATM curve can never place ``3M`` differently.
+        """
+        return self.atm.tenor_years(tenor)
+
     # -- calibration ------------------------------------------------------
     def fit_smiles(self, marks: list[SmileMark] | None = None,
                    only: list[str] | None = None, *,
@@ -172,7 +193,7 @@ class VolSurface:
         for mark in sorted(self.marks, key=lambda m: tenor_to_years(m.tenor)):
             if wanted and mark.tenor.upper() not in wanted:
                 continue
-            t = tenor_to_years(mark.tenor)
+            t = self.tenor_years(mark.tenor)
             atm_vol = self.atm.cut_vol(self.clock.datetime_from_years(t), "NY")
             if atm_vol <= 0:
                 atm_vol = self.atm.term_vol(t)
@@ -224,6 +245,22 @@ class VolSurface:
         return self
 
     # -- parameters at an arbitrary expiry --------------------------------
+    def param_curve(self, name: str) -> ParamTermStructure:
+        """The term structure in force for one smile parameter.
+
+        The marked one if there is one, the fitted one otherwise.  Every
+        reader of a parameter's shape goes through here, so a marked curve
+        cannot reach one caller and miss another.
+        """
+        if name not in PARAM_NAMES:
+            raise ValueError(f"unknown smile parameter {name!r}; expected one of {PARAM_NAMES}")
+        marked = self.term_marks.get(name)
+        if marked is not None:
+            return marked
+        if name not in self.term:
+            raise ValueError(f"{self.pair}: no smile term structure; run calibrate() first")
+        return self.term[name]
+
     def params_at(self, t: float) -> dict[str, float]:
         """The four smile parameters at ``t``.
 
@@ -233,9 +270,10 @@ class VolSurface:
         division by ``v2_c - v1_c`` that blew up whenever the term structure
         happened to be flat between two tenors.
         """
-        if not self.term:
+        if not self.term and not self.term_marks:
             raise ValueError(f"{self.pair}: no smile term structure; run calibrate() first")
-        out = {name: float(self.term[name](t)) for name in PARAM_NAMES}
+        curves = {name: self.param_curve(name) for name in PARAM_NAMES}
+        out = {name: float(curves[name](t)) for name in PARAM_NAMES}
         for name, ow in self.param_overwrites.items():
             if name in out and "curve" in ow:
                 out[name] = float(ow["curve"])
@@ -253,8 +291,8 @@ class VolSurface:
         t1, t2 = ts[i], ts[j]
         for name in PARAM_NAMES:
             v1, v2 = self._anchor_value(name, i), self._anchor_value(name, j)
-            c1, c2 = float(self.term[name](t1)), float(self.term[name](t2))
-            ct = float(self.term[name](t))
+            c1, c2 = float(curves[name](t1)), float(curves[name](t2))
+            ct = float(curves[name](t))
             denom = c2 - c1
             # Fall back to linear in time when the model curve is flat across
             # the interval, instead of dividing by (almost) zero.
@@ -286,13 +324,14 @@ class VolSurface:
     def shift_warnings(self) -> list[str]:
         """Flag shifts that the clamp in ``_shifted`` is silently absorbing."""
         out = []
-        if not self.param_shifts or not self.term:
+        if not self.param_shifts or (not self.term and not self.term_marks):
             return out
         ts = [f.t for f in self.fits] or [0.25]
         for name, delta in self.param_shifts.items():
             if name not in PARAM_NAMES or not delta:
                 continue
-            raw = [float(self.term[name](t)) + float(delta) for t in ts]
+            curve = self.param_curve(name)
+            raw = [float(curve(t)) + float(delta) for t in ts]
             if name.startswith("rho") and any(abs(v) > 0.999 for v in raw):
                 out.append(
                     f"{self.pair}: the {name} shift of {delta:+.4f} pushes rho past "
@@ -337,6 +376,82 @@ class VolSurface:
     def clear_param_overwrites(self) -> None:
         self.param_overwrites.clear()
         self._slices.clear()
+
+    # -- the parameter term structures, marked ----------------------------
+    def set_param_term(self, name: str, initial: float, final: float,
+                       decay: float) -> list[str]:
+        """Mark one smile parameter's whole term structure.
+
+        The three coefficients of ``final - (final - initial) * exp(-decay t)``,
+        in the raw units the parameter carries: a correlation strictly inside
+        (-1, 1), a volatility of volatility above zero, and a decay that is not
+        negative -- the same bound ``fit_param_term_structure`` puts on its
+        solver, and for the same reason, because a negative decay is a term
+        structure that explodes rather than settling.  Returns problems; a bad
+        set is rejected whole, so half a curve is never marked.
+        """
+        if name not in PARAM_NAMES:
+            return [f"unknown smile parameter {name!r}; expected one of {PARAM_NAMES}"]
+        vals = {"initial": initial, "final": final, "decay": decay}
+        problems = [f"the {name} {coeff} must be a finite number, got {v!r}"
+                    for coeff, v in vals.items()
+                    if not isinstance(v, (int, float)) or isinstance(v, bool)
+                    or not math.isfinite(float(v))]
+        if problems:
+            return problems
+        for coeff in ("initial", "final"):
+            v = float(vals[coeff])
+            if name.startswith("rho") and not -1.0 < v < 1.0:
+                problems.append(f"the {name} {coeff} is a correlation and must lie strictly "
+                                f"inside (-1, 1), got {v:g}; SABR is undefined at |rho| = 1")
+            if name.startswith("slog") and v <= 0.0:
+                problems.append(f"the {name} {coeff} is a volatility of volatility and must "
+                                f"be positive, got {v:g}")
+        if float(vals["decay"]) < 0.0:
+            problems.append(f"the {name} decay must not be negative, got {vals['decay']:g}; "
+                            f"a negative decay is a term structure that runs away with tenor "
+                            f"rather than settling")
+        if problems:
+            return problems
+        self.term_marks[name] = ParamTermStructure(float(initial), float(final), float(decay))
+        self._slices.clear()
+        return []
+
+    def clear_param_terms(self, name: str | None = None) -> None:
+        """Give one parameter, or all four, its fitted term structure back.
+
+        A name that is not a smile parameter is refused rather than quietly
+        clearing nothing: a clear that reports success and leaves the mark
+        standing is the failure this project exists to remove.
+        """
+        if name is None:
+            self.term_marks.clear()
+        else:
+            if name not in PARAM_NAMES:
+                raise ValueError(
+                    f"unknown smile parameter {name!r}; expected one of {PARAM_NAMES}")
+            self.term_marks.pop(name, None)
+        self._slices.clear()
+
+    def term_rows(self) -> list[dict]:
+        """Each parameter's term structure, fitted and as marked.
+
+        The fitted coefficients travel beside the marked ones so the screen
+        can show what the fit said underneath what somebody typed over it,
+        rather than losing it the moment the first coefficient is marked.
+        """
+        rows = []
+        for name in PARAM_NAMES:
+            fitted = self.term.get(name)
+            marked = self.term_marks.get(name)
+            rows.append({
+                "param": name,
+                "fitted": None if fitted is None else
+                {c: getattr(fitted, c) for c in TERM_COEFFS},
+                "marked": None if marked is None else
+                {c: getattr(marked, c) for c in TERM_COEFFS},
+            })
+        return rows
 
     # -- slices -----------------------------------------------------------
     def slice_at(self, expiry, method: str | None = None, cut: str = "TK",

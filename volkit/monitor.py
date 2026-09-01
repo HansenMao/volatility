@@ -12,7 +12,7 @@ workbook quotes against the surface fitted from them, or two dated rows of the
 historical workbook against each other.  Nothing here builds a curve itself;
 that would be a second place for a source to be added to only one screen.
 
-Four things are decided here.
+Five things are decided here.
 
 **A tile is a difference, and the difference is what it reports.**  The levels
 at both ends are carried too, because a change of half a point means different
@@ -32,6 +32,17 @@ day -- which is what a dated request does when the historical sheet has not
 been updated -- the tile reports it rather than showing a column of zeros that
 looks like a quiet market.
 
+**A big move is marked, and the size of one is a number somebody chose.**  A
+screen of sixteen tiles is a few hundred numbers and the eye has to find the
+handful that matter.  Each change is graded against one threshold in
+volatility points -- ``big`` -- and *every* field is graded on it, not only
+the one the screen has highlighted: what has moved may not be what was being
+watched.  The grade is decided here rather than in the browser so that the
+screen and ``volkit monitor`` mark the same cells, and it is a **grade, not a
+filter**: nothing is hidden, dropped or reordered by it, and a tile counts its
+big moves in its own heading so a panel scrolled past still says how much is
+in it.
+
 Everything here is in decimals, like ``curves.py``; the volatility points a
 human reads are converted once, by the screen or the command line that prints
 them.
@@ -40,6 +51,7 @@ them.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from math import isfinite
 
 from .curves import (CURVE_FIELDS, CURVE_KINDS, FIELD_LABELS, KIND_LABELS,
                      CurveError, CurveRequest, build_curve)
@@ -54,6 +66,37 @@ MAX_TILES = 16
 DEFAULT_NOW_KIND = "surface"
 DEFAULT_WAS_KIND = "history"
 DEFAULT_WAS_DATE = "-1w"
+
+#: What counts as a big move, in **volatility points**, until somebody says
+#: otherwise.  A quarter of a point is roughly where an overnight change in a
+#: G10 at-the-money stops being noise and starts being something to look at;
+#: it is a default and not a model constant, which is why the screen and the
+#: command line both let it be typed.  One threshold serves all five numbers:
+#: a risk reversal that has moved a quarter of a point has moved a great deal
+#: more, in its own terms, than an at-the-money that has, and that is the
+#: reading a desk wants rather than five separately tuned thresholds nobody
+#: can hold in their head.
+DEFAULT_BIG_MOVE = 0.25
+
+#: A change at least this many times the threshold is graded 2 rather than 1.
+#: Two tiers, because three shades of one colour stop being a signal.
+BIG_MOVE_STEP = 2.0
+
+
+def move_grade(change, big: float) -> int:
+    """How big a change is: 0 (ordinary), 1 (big), 2 (very big).
+
+    ``change`` and ``big`` are both in decimals, like everything else in this
+    module.  A threshold of zero grades nothing -- that is how the marking is
+    turned off, and zero means *off* rather than *mark everything*, because a
+    screen where every cell is marked is a screen with nothing marked.
+    """
+    if change is None or big <= 0.0:
+        return 0
+    size = abs(change)
+    if size >= big * BIG_MOVE_STEP:
+        return 2
+    return 1 if size >= big else 0
 
 
 @dataclass(frozen=True)
@@ -110,12 +153,19 @@ class TileResult:
     rows: list[dict] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    #: How many graded cells this tile holds, and how many of those are on the
+    #: second tier.  Counted here so a tile that is scrolled past, or whose
+    #: table the reader is not looking at, still says in its heading how much
+    #: has moved in it.
+    moved: int = 0
+    moved_hard: int = 0
 
     def as_dict(self) -> dict:
         return {"label": self.label, "pair": self.pair, "ok": self.ok,
                 "message": self.message, "now": self.now, "was": self.was,
                 "rows": self.rows, "warnings": list(self.warnings),
-                "notes": list(self.notes)}
+                "notes": list(self.notes),
+                "moved": self.moved, "moved_hard": self.moved_hard}
 
 
 def _end(curve) -> dict:
@@ -125,8 +175,12 @@ def _end(curve) -> dict:
 
 
 def run_tile(tile: Tile, book, history=None, *, cut: str = "NY",
-             method: str = "SVI") -> TileResult:
-    """Build both ends of one tile and difference them."""
+             method: str = "SVI", big: float = DEFAULT_BIG_MOVE / 100.0) -> TileResult:
+    """Build both ends of one tile, difference them, and grade the differences.
+
+    ``big`` is in decimals, like every other number here; the volatility
+    points somebody types are converted at the edge that read them.
+    """
     was_req, now_req = tile.requests()
     built = []
     for req in (was_req, now_req):
@@ -172,17 +226,29 @@ def run_tile(tile: Tile, book, history=None, *, cut: str = "NY",
 
     for tenor in tenors:
         np_, wp = now.at(tenor), was.at(tenor)
+        # The point's own place on the axis, which for a curve with a pair
+        # behind it is the tenor's calendar expiry and not its nominal
+        # length.  Two rows of one table have to be on one axis.
+        t = (np_.t if np_ is not None else
+             wp.t if wp is not None else tenor_to_years(tenor))
         row = {
-            "tenor": tenor, "t": tenor_to_years(tenor),
+            "tenor": tenor, "t": t,
             "now": {f: (None if np_ is None else np_.values.get(f)) for f in CURVE_FIELDS},
             "was": {f: (None if wp is None else wp.values.get(f)) for f in CURVE_FIELDS},
-            "change": {},
+            "change": {}, "grade": {},
             "message": "; ".join(x for x in ((np_.message if np_ else ""),
                                              (wp.message if wp else "")) if x),
         }
         for f in CURVE_FIELDS:
             a, b = row["now"][f], row["was"][f]
             row["change"][f] = None if a is None or b is None else a - b
+            # Every field is graded, not only the one the screen highlights:
+            # what has moved may not be what was being watched.
+            g = move_grade(row["change"][f], big)
+            row["grade"][f] = g
+            if g:
+                out.moved += 1
+                out.moved_hard += int(g > 1)
         if np_ is None:
             row["message"] = (row["message"] + "; " if row["message"] else "") + \
                 "the current curve does not quote this tenor"
@@ -205,6 +271,8 @@ class MonitorPanel:
     cut: str = "NY"
     method: str = "SVI"
     field: str = "atm"
+    #: The big-move threshold, in decimals.  Zero turns the grading off.
+    big: float = DEFAULT_BIG_MOVE / 100.0
 
     def __post_init__(self) -> None:
         if self.field not in CURVE_FIELDS:
@@ -213,6 +281,14 @@ class MonitorPanel:
         if len(self.tiles) > MAX_TILES:
             raise CurveError(
                 f"{len(self.tiles)} tiles were requested; a screen holds at most {MAX_TILES}")
+        # A threshold that cannot be compared against would grade nothing and
+        # say nothing about why, which is the silent zero this project exists
+        # to remove.
+        if not isfinite(self.big) or self.big < 0.0:
+            raise CurveError(
+                f"the big-move threshold must be a number and not negative; got {self.big!r} "
+                f"in decimals ({self.big * 100:g} volatility points). Zero turns the grading "
+                f"off")
 
     def run(self, book, history=None) -> dict:
         results = []
@@ -220,7 +296,8 @@ class MonitorPanel:
             if not tile.on:
                 continue
             try:
-                results.append(run_tile(tile, book, history, cut=self.cut, method=self.method))
+                results.append(run_tile(tile, book, history, cut=self.cut,
+                                        method=self.method, big=self.big))
             except Exception as exc:  # noqa: BLE001 - one tile keeps its place
                 results.append(TileResult(
                     label=tile.default_label(), pair=tile.pair, ok=False,
@@ -228,6 +305,11 @@ class MonitorPanel:
                     else f"{type(exc).__name__}: {exc}"))
         return {
             "cut": self.cut, "method": self.method, "field": self.field,
+            # Volatility points at the edge: `big` is decimals in here and
+            # what the screen and the command line print is what was typed.
+            "big": self.big * 100.0, "big_step": BIG_MOVE_STEP,
+            "moved": sum(r.moved for r in results),
+            "moved_hard": sum(r.moved_hard for r in results),
             "fields": [{"key": f, "label": FIELD_LABELS[f]} for f in CURVE_FIELDS],
             "tiles": [r.as_dict() for r in results],
         }
@@ -258,11 +340,21 @@ def panel_from_request(payload: dict | None) -> MonitorPanel:
     raw = payload.get("tiles") or []
     if not isinstance(raw, list):
         raise CurveError("'tiles' must be a list of monitor tiles")
+    big = payload.get("big")
+    if big is None or (isinstance(big, str) and not big.strip()):
+        big = DEFAULT_BIG_MOVE
+    try:
+        big = float(big)
+    except (TypeError, ValueError):
+        raise CurveError(f"the big-move threshold must be a number of volatility points; "
+                         f"got {payload.get('big')!r}") from None
     return MonitorPanel(
         tiles=tuple(tile_from_request(item) for item in raw),
         cut=str(payload.get("cut") or "NY"),
         method=str(payload.get("method") or "SVI"),
         field=str(payload.get("field") or "atm").strip().lower(),
+        # The one conversion: volatility points at this edge, decimals inside.
+        big=big / 100.0,
     )
 
 

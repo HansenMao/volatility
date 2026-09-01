@@ -51,7 +51,7 @@ VERDICTS = ("accepted", "edited", "rejected", "unprompted")
 #: The kinds of thing a snapshot holds, and what a change to each is called.
 #: These are the keys ``session.capture_pair`` writes.
 SECTIONS = ("curve", "param_shifts", "atm_overwrites", "smile_overwrites",
-            "events", "anchor_tenors", "band")
+            "smile_term", "events", "anchor_tenors", "band")
 
 #: Sections where a key that is simply absent means a real zero, so a knob
 #: appearing from nothing is a *move* of that size.  A missing smile shift is

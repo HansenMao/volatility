@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import math
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from .atm import AtmCurve, BackboneParams
@@ -23,12 +23,11 @@ from .black import DeltaConvention
 from .banded import Band, load_bands
 from .calendars import CalendarSet, DEFAULT_CALENDARS
 from .cross import CorrelationCurve, CrossAtmCurve, infer_leg_signs
-from .events import EventSchedule
-from .econ import EconCalendar
+from .events import EventBook, EventSchedule
 from .feed import MarketFeed
 from .marketdata import ExcelSource, MarketData, MarketDataError
 from .surface import VolSurface
-from .timeutil import Clock
+from .timeutil import DAYS_IN_YEAR, Clock, parse_datetime
 from .timeweight import TimeWeighting
 
 
@@ -45,7 +44,11 @@ class Book:
     # of how the two legs are quoted. Kept so the change can be A/B tested
     # against existing marks without editing the workbook -- see MIGRATION.md.
     legacy_cross_sign: bool = False
-    econ: EconCalendar = field(default_factory=EconCalendar.load)
+    #: The session's event table: the workbook's EVENTS sheet as loaded, then
+    #: whatever the screens have marked on it.  Every pair's schedule is
+    #: derived from it, so a currency weight moves every pair that has that
+    #: currency and cannot be one number here and another there.
+    events: EventBook = field(default_factory=EventBook)
     # Optional spot / forward feed.  When present, a pricing leg that leaves
     # spot blank is filled from it, with forward points interpolated to the
     # leg's own expiry rather than snapped to a standard tenor.
@@ -57,10 +60,10 @@ class Book:
     @classmethod
     def from_excel(cls, path: str | Path, clock: Clock | None = None, *,
                    legacy_cross_sign: bool = False, bands: str | Path | None = None,
-                   econ: EconCalendar | None = None, **kw) -> "Book":
+                   **kw) -> "Book":
         book = cls(data=ExcelSource(path, **kw).load(), clock=clock or Clock.utcnow(),
-                   legacy_cross_sign=legacy_cross_sign,
-                   econ=econ if econ is not None else EconCalendar.load())
+                   legacy_cross_sign=legacy_cross_sign)
+        book.events = book.data.events.copy()
         book.bands = book._default_bands(bands)
         return book
 
@@ -139,8 +142,112 @@ class Book:
             return tuple(getattr(spec, "legs", ()) or ()) or None
         return feed.level(pair, t, declared, trail)
 
-    def forward_at(self, pair: str, t: float) -> float | None:
-        """The outright forward from the feed, or None when there is no feed."""
+    def spot_date(self, pair: str) -> date:
+        """Where a spot trade in ``pair`` dealt today settles, on this clock."""
+        return self.calendars.spot_date(pair, self.clock.now.date())
+
+    def stated_date(self, value) -> date:
+        """A date a caller stated in words, on this book's clock.
+
+        ``timeutil.parse_datetime`` is the one timestamp reader, and the year
+        a date written without one means comes from the **book's** clock and
+        not from the machine -- the same rule the expiry box is read under.
+        """
+        if isinstance(value, datetime):
+            return value.date()
+        if isinstance(value, date):
+            return value
+        return parse_datetime(str(value), today=self.clock.now.date()).date()
+
+    def settlement_date(self, pair: str, expiry) -> date:
+        """Where an option expiring on ``expiry`` settles, on the pair's calendar."""
+        if isinstance(expiry, datetime):
+            expiry = expiry.date()
+        return self.calendars.delivery_from_expiry(pair, expiry)
+
+    def settlement_years(self, pair: str, expiry, settle=None) -> float:
+        """Where an option's settlement date sits on the feed's axis.
+
+        The feed's one axis is **years from the spot date** (``feed`` module
+        docstring), and this puts a settlement date on it: the days from this
+        book's own spot date to the option's, over the year length.  A 1M
+        pillar is placed by the feed the same way -- from its spot date to its
+        1M delivery date -- so a 1M option lands *on* the pillar rather than
+        between two of them.
+
+        An offset and not an absolute date, deliberately.  A feed file carries
+        its own spot date, and a file written last Tuesday and priced today
+        has one a few days behind this book's.  Read as an absolute date, a
+        3M option then asks the curve for a date three months past the file's
+        own three-month pillar -- or, with a file stamped a year out, falls
+        off the end of the curve entirely and comes back at spot.  Read as an
+        offset it asks for "the three-month point", which is what the pillar
+        is, and the staleness stays what it is: a note on the feed, not a
+        forward silently held flat.
+
+        ``settle`` is the settlement date **stated** rather than derived -- a
+        broken date, or a trade the desk has agreed to settle somewhere the
+        calendar would not have put it.  The placement is unchanged: it is
+        still this one piece of arithmetic and still an offset, which is the
+        point of the paragraph above.  What the caller may hold a second
+        opinion about is the *date*, never where a date lands.
+        """
+        d = self.settlement_date(pair, expiry) if settle is None else self.stated_date(settle)
+        return (d - self.spot_date(pair)).days / DAYS_IN_YEAR
+
+    def market_level_for(self, pair: str, expiry, settle=None) -> dict:
+        """The level an option expiring on ``expiry`` is priced against.
+
+        **This is what a screen should call.**  ``market_level`` reads the
+        curve at a time; this reads it where the option's own *settlement*
+        date sits, which is the date a forward is actually a price for.  The
+        two differ by the spot lag -- two business days of swap points, which
+        on a one-week option is a fifth of them.
+
+        ``spot_date`` and ``settle`` travel back with the level, because a
+        screen that shows a forward should be able to say what date it is a
+        forward to.  It takes the **expiry** and no year fraction: where a
+        settlement date lands on the feed's axis is not something a caller
+        gets to hold a second opinion about.
+
+        ``settle`` states the settlement date instead of deriving it, for the
+        one case the calendar cannot answer: a trade settling on a broken
+        date.  It is the date that moves, not the placement -- the level is
+        still read through ``settlement_years``, still as an offset from the
+        book's own spot date -- and it is a *date*, not a year fraction, so
+        there is still exactly one way a forward is placed.  ``settle`` comes
+        back in the answer either way, so a screen shows the date the level
+        was actually read on.
+        """
+        if isinstance(expiry, datetime):
+            expiry = expiry.date()
+        elif not isinstance(expiry, date):
+            raise TypeError(f"expiry must be a date or datetime, got {expiry!r}")
+        settle = (self.settlement_date(pair, expiry) if settle is None
+                  else self.stated_date(settle))
+        out = self.market_level(pair, self.settlement_years(pair, expiry, settle))
+        out["expiry"] = expiry.isoformat()
+        out["settle"] = settle.isoformat()
+        out["spot_date"] = self.spot_date(pair).isoformat()
+        return out
+
+    def tenor_years(self, pair: str, tenor: str) -> float:
+        """Years to a tenor's calendar expiry -- the one tenor-to-time reading."""
+        return self.calendars.expiry_years(pair, tenor, self.clock)
+
+    def fx_dates(self, pair: str, tenor: str):
+        """Trade, spot, expiry and settlement dates for a tenor on this book's clock."""
+        return self.calendars.fx_dates(pair, tenor, self.clock.now.date())
+
+    def forward_at(self, pair: str, t: float, expiry=None) -> float | None:
+        """The outright forward from the feed, or None when there is no feed.
+
+        ``expiry`` is the option's expiry date, and given one the forward is
+        the one to that option's settlement date.  Without one the curve is
+        read at ``t`` years, which is the same axis placed nominally.
+        """
+        if expiry is not None:
+            return self.market_level_for(pair, expiry)["forward"]
         return self.market_level(pair, t)["forward"]
 
     def _attach_band(self, name: str, surface: VolSurface) -> None:
@@ -152,7 +259,12 @@ class Book:
         """
         surface.band = self.bands.get(name.upper())
         if surface.band is not None:
-            surface.forward_lookup = lambda t, p=name: self.forward_at(p, t)
+            # A band is an absolute price range, so the forward that places it
+            # is the forward the option settles at -- the same one the strike
+            # axis is scaled by.  ``t`` comes back from a slice, so the expiry
+            # date it stands for is read off the same clock the slice was.
+            surface.forward_lookup = lambda t, p=name: self.forward_at(
+                p, t, expiry=self.clock.datetime_from_years(t).date())
 
     # -- construction -----------------------------------------------------
     def build_order(self) -> list[str]:
@@ -217,7 +329,7 @@ class Book:
             raise MarketDataError(f"no parameters loaded for {name!r}")
         weighting = TimeWeighting(name, calendars=self.calendars)
         events = EventSchedule()
-        for entry in params.events:
+        for entry in self.events.for_pair(name, touching_only=True):
             when = entry.when
             if when <= self.clock.now:
                 # A past event cannot be calibrated: its volatility day has
@@ -233,7 +345,7 @@ class Book:
 
         common = dict(
             pair=name, clock=self.clock, weighting=weighting, events=events,
-            tenor_points=tuple(self.data.tenor_points),
+            tenor_points=tuple(self.data.tenor_points), calendars=self.calendars,
         )
 
         if spec.is_cross:
@@ -323,9 +435,38 @@ class Book:
         """Re-read the source and rebuild, keeping the same valuation clock."""
         source = ExcelSource(path or self.data.source)
         self.data = source.load()
+        # A reload is the workbook's own table again, marks and all: the
+        # session's edits went with the surfaces they were made on.
+        self.events = self.data.events.copy()
         self.surfaces.clear()
         self.warnings.clear()
         return self.load_all()
+
+    def apply_events(self, pairs=None) -> list[str]:
+        """Put the event table back onto the pairs it moves and re-solve.
+
+        A currency weight is shared, so a row edited on one screen reaches
+        every pair with that currency; the caller does not get to choose
+        which, only to narrow the work to pairs already built.  Returns the
+        problems the curves raised, each named by its pair.
+        """
+        names = list(self.surfaces) if pairs is None else \
+            [str(p).upper() for p in pairs if str(p).upper() in self.surfaces]
+        problems: list[str] = []
+        for name in names:
+            surface = self.surfaces[name]
+            wanted = self.events.for_pair(name, touching_only=True)
+            # A weight reaches every pair with that currency, but most of them
+            # by nothing at all.  Re-solving a schedule that has not moved
+            # costs a calibration per event and buys nothing.
+            have = [(e.when, e.bump, e.label) for e in surface.atm.events.events]
+            if have == [(e.when, e.bump, e.label) for e in wanted
+                        if e.when > self.clock.now]:
+                continue
+            for msg in surface.atm.set_events(wanted):
+                problems.append(f"{name}: {msg}")
+            surface.invalidate()
+        return problems
 
     # -- access -----------------------------------------------------------
     def load_bands(self, path: str | Path) -> "Book":

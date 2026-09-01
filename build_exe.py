@@ -78,9 +78,7 @@ from volkit import screens  # noqa: E402  (after sys.path, so a copied tree work
 SCREENS_BUILD_DIR = ROOT / "build" / "screens"
 
 # Files that must exist in the source tree before a build means anything.  The
-# spec re-checks index.html; this checks the rest, because a build that quietly
-# omits the economic calendar produces an exe that looks fine until someone
-# asks for an event.
+# spec re-checks index.html; this checks the rest.
 REQUIRED_SOURCES = [
     "volkit.spec",
     "launcher.py",
@@ -88,8 +86,6 @@ REQUIRED_SOURCES = [
     "volkit/cli.py",
     "volkit/screens.py",
     "volkit/web/index.html",
-    "volkit/data/econ_events.csv",
-    "volkit/data/event_weights.csv",
 ]
 
 # The trader's own files.  Copied beside the exe rather than bundled: they are
@@ -100,6 +96,8 @@ USER_DATA = [
     "files/market_feed.csv",
     "files/bands.csv",
     "files/holiday_overrides.csv",
+    # The kACE feed's pillars and ATM widths, per pair (volkit/kace.py).
+    "files/kace_spreads.csv",
     # The startup settings file.  Staged, never bundled: the whole point of it
     # is to be edited beside the exe, and paths.find_data_file() looks there.
     "files/volkit.cfg",

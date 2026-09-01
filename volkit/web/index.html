@@ -83,6 +83,12 @@ table.grid td.cell input.fed{color:var(--muted);font-style:italic}
    that was computed here and one that was published must not read the same,
    which is the same rule `.fed` exists for. */
 table.grid td.cell input.imp{color:var(--muted)}
+/* A date box the pair's own calendar filled: the settlement date the tenor
+   was built from.  Same rule again -- it is a live box, it is the date the
+   forward is read on and the date the trade confirms against, so it is not
+   disabled; but a date the calendar produced and a broken date somebody
+   agreed must not read the same. */
+table.grid td.cell input.cal{color:var(--muted);font-style:italic}
 table.grid td.o{text-align:right;padding:0 9px;font-variant-numeric:tabular-nums;font-size:12px}
 table.grid td.o.big{font-weight:650;font-size:13px}
 table.grid td.err{color:var(--bad);font-size:11px;text-align:left;padding:0 9px;white-space:normal;line-height:1.25}
@@ -121,6 +127,18 @@ table.mark{width:100%}
 table.mark input{padding:3px 6px;text-align:right;background:var(--edit);border:1px solid transparent}
 table.mark input:hover{border-color:var(--line)}
 table.mark td{padding:2px 6px}
+/* With the overwrite column shut the ATM table is two columns, and a table
+   stretched across the card puts the tenor at one edge and its volatility at
+   the other -- a row a marker has to read across an inch of nothing.  Shut,
+   it is sized to its own contents and sits left; open, it goes back to
+   filling the card, because the third column is an input box that wants the
+   room. */
+table.mark.tight{width:auto;min-width:172px}
+table.mark.tight th:last-child,table.mark.tight td:last-child{padding-left:26px}
+/* The tenor a morning is read off.  Highlighted rather than moved or pinned:
+   it stays in the term structure it belongs to and the eye lands on it. */
+table.mark tr.key td{background:var(--head);font-weight:650;color:var(--ink)}
+table.mark tr.key td:first-child::before{content:'▸ ';color:var(--accent)}
 .chart{width:100%;height:322px;display:block}
 .chart text{fill:var(--muted);font-size:10px}
 .legend{display:flex;gap:14px;flex-wrap:wrap;color:var(--muted);font-size:11px;margin-top:6px}
@@ -250,6 +268,26 @@ table.ev .rm:hover{color:var(--bad)}
 .motile table{width:100%;font-size:11.5px}
 .motile th,.motile td{padding:3px 6px}
 .motile td.hi,.motile th.hi{background:var(--head)}
+/* A big move.  The grade is decided in monitor.py against one threshold in
+   volatility points and only shaded here: the sign keeps the colour it always
+   had and the grade adds weight and a wash behind it, so a marked cell says
+   which way it went and how far in the same glance.  Two tiers, because three
+   shades of one colour stop being a signal.  These sit after .hi and are more
+   specific than it on purpose -- a big move in the highlighted column must not
+   be flattened by the column's own shading. */
+.motile td.g1{font-weight:650}
+.motile td.g2{font-weight:700}
+.motile td.g1.pos{background:color-mix(in srgb,var(--good) 13%,transparent)}
+.motile td.g2.pos{background:color-mix(in srgb,var(--good) 26%,transparent)}
+.motile td.g1.neg{background:color-mix(in srgb,var(--bad) 13%,transparent)}
+.motile td.g2.neg{background:color-mix(in srgb,var(--bad) 26%,transparent)}
+/* The count in the tile's own heading: a table scrolled past, or one the eye
+   has not reached, still says how much has moved in it. */
+.mocount{font-weight:650;font-size:10.5px;letter-spacing:.04em;padding:1px 6px;
+  border-radius:20px;background:color-mix(in srgb,var(--warn) 20%,transparent);color:var(--warn)}
+/* A tile with nothing big in it carries no badge at all: emptying the text is
+   what hides it, so the painter has one thing to set and not two. */
+.mocount:empty{display:none}
 .motile td.lv{color:var(--muted)}
 .moempty{color:var(--muted);text-align:center;padding:38px 10px;border:1px dashed var(--line);
   border-radius:10px;grid-column:1/-1}
@@ -376,7 +414,7 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
     <input id="feedpath" placeholder="spot / forward feed CSV" style="width:230px">
     <button class="ghost" id="feedload" style="width:auto">Load feed</button>
     <button class="ghost" id="feedrefresh" style="width:auto"
-            title="re-read the feed file and put every market box back on it, at each leg's own expiry — including the levels you typed over">Refresh spot</button>
+            title="re-read the feed file and put every market box back on it, at each leg's own settlement date — including the levels you typed over">Refresh spot</button>
     <label style="margin:0;display:flex;align-items:center;gap:6px;width:auto;color:var(--muted)"
            title="look at the feed file's write time and light the pill when it has moved; nothing is re-read">
       <input type="checkbox" id="feedwatch" checked style="width:auto"> watch file
@@ -392,20 +430,46 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
   <details class="hint"><summary>How a leg is read</summary>
     <b>Strike</b> takes a number, <code>ATM</code>, or a delta — <code>25d</code>, <code>10dp</code>,
     <code>-25d</code>. A bare <code>25d</code> takes its wing from the option type.
-    <b>Expiry</b> takes a tenor (<code>1W</code>, <code>8d</code>, <code>3M</code>) or a date in
+    <b>Expiry</b> takes a tenor (<code>1W</code>, <code>8d</code>, <code>3M</code>, <code>2Y</code>,
+    and the unit spelled out — <code>1wk</code>, <code>3mth</code>, <code>2yr</code>,
+    <code>10 days</code>),
+    one of the short-date codes (<code>O/N</code>, <code>T/N</code>, <code>S/N</code>,
+    <code>S/W</code>), or a date in
     most of the ways one is written (<code>2026-09-15</code>, <code>15Sep26</code>,
     <code>15 Sep 2026</code>, <code>September 15, 2026</code>, <code>2026/09/15</code>,
     <code>9/15/2026</code>, <code>20260915</code>) — and whatever you type it comes back as the
-    one standard date. A tenor is resolved through spot and the delivery date on the pair's own
-    holiday calendar, once, so the leg then holds that date rather than drifting with the clock.
+    one standard date. <b>The year is optional</b>: <code>15 Sep</code> is the next fifteenth of
+    September, counted forward from the valuation date, so a date already gone this year is next
+    year's.
+    <br><b>A tenor is a settlement date first.</b> It is added to the spot date, adjusted
+    modified-following on the value-date calendars (with the end-of-month rule: off a spot that
+    is its month's last value date, every month tenor settles on the last value date of its
+    own month), and the <b>expiry is the spot lag back from it</b> on the pair's own holiday
+    calendar — the market's construction, and the reason <b>Settlement</b> is the anchor
+    rather than a consequence. Day tenors go the other way, because that is what
+    they mean: <code>O/N</code> expires on the next business day and <code>8d</code> on the
+    eighth, each settling the spot lag later. Resolved once, so the leg holds the date rather
+    than drifting with the clock.
+    <br><b>Settlement</b> is that date, and it is a box: the date this option pays on, the
+    date the desk confirms against, and the date the forward under it is a forward
+    <i>to</i>. It fills itself from the pair's own calendar — the spot lag past the expiry,
+    two business days for most pairs and one for USDCAD — and shows greyed while it is the
+    calendar's. Type a date over it for a trade that settles somewhere the calendar would not
+    have put it, and the forward is read <i>there</i> instead; the expiry does not move, so
+    the volatility and the time to expiry are untouched. <b>Empty the box to hand it back to
+    the calendar.</b> A date before the expiry is refused, and one that is not a value date
+    for the pair is taken and said out loud.
     <b>Spot</b>, <b>Swap</b> and <b>Forward</b> are three boxes holding one identity —
     <code>forward = spot + swap / pip</code>. Spot and the swap points come from the feed at
-    this leg's own expiry, and so does the outright under them; all three are shown greyed
+    <b>this leg's own settlement date</b> — not its expiry: a forward is a price for a value
+    date, and the two are a spot lag apart, which on a one-week option is a fifth of the
+    points. The outright under them comes from the same place; all three are shown greyed
     while they are the feed's, and it is the outright that is priced. Type in any of them and
     the third follows — type a swap and the forward moves, type a forward and the swap moves
     to match. Empty a box to hand it back to the feed.
     <br><b>The Results rows repeat none of this.</b> What the pricer resolved is written back
     into the boxes above and is then what is priced — the expiry as the one standard date,
+    the settlement date the calendar built from it,
     <code>ATM</code> or <code>25d</code> as the absolute strike it solved to on the marks, and
     <code>Auto</code> as <code>C</code> or <code>P</code>. Type <code>25d</code> in again to
     solve the strike afresh against the marks as they now stand.
@@ -427,7 +491,10 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
     Buffers are applied <i>against</i> you: selling gets the conservative shift, buying the
     other way.
     <br><b>Refresh spot</b> re-reads the feed file from disk, puts <i>every</i> market box back
-    on the feed at each leg’s own expiry — the levels you typed over included — and re-prices.
+    on the feed at each leg’s own settlement date — the levels you typed over included — and
+    re-prices. It takes back the <i>market</i> and nothing else: a settlement date you have
+    typed is a term of the trade, not a level, and stays where you put it. The
+    <b>Market</b> row says what is left of the feed in each leg afterwards.
     It says how many legs it took back, because a hand-marked level that is now the file’s
     should not change in silence. A leg the feed has no pair for, or whose expiry will not
     resolve, is reported and left exactly as it was. A cross the file quotes only through its
@@ -476,20 +543,26 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
           <button class="ghost" id="sessload">Load marks</button>
           <button class="ghost" id="sesssavepair">Save this pair</button>
           <button class="ghost" id="sessexport"
-            title="save the marks, then write the session file into a copy of the workbook beside it: PARAMS cells, event rows and weights, 'atm 1m' / 'slog25 3m' / 'shift rho25' / 'anchor' rows and a BANDS sheet. The loaded workbook is not touched; 'volkit session --to-workbook --in-place' is the command that does that">Write to workbook copy</button>
+            title="save the marks, then write the session file into the loaded workbook: PARAMS cells, event rows and weights, 'atm 1m' / 'slog25 3m' / 'term rho10 decay' / 'shift rho25' / 'anchor' rows and a BANDS sheet. The workbook it replaces is kept beside it as <name>.bak-<stamp>.xlsx">Write to workbook</button>
         </div>
+        <div id="sessconfirm" class="hide" style="display:flex;gap:8px;align-items:center;margin-top:9px;padding:8px 10px;border:1px solid var(--line);border-radius:6px"></div>
         <div class="msg" id="sessmsg"></div>
         <details class="hint"><summary>What a session file holds</summary>Everything this session has marked — curve parameters, the correlation
           term structure, events, ATM and smile overwrites, the market maker's wing shifts, the
           anchor switch and the band treatment — written to a file <b>beside</b> the workbook.
-          The workbook itself is never written to by a screen. Start volkit with
-          <code>--session &lt;file&gt;</code>, or press <b>Load marks</b>, to put them back;
-          <b>Reload workbook</b> still discards everything and returns to the quotes on disk.
-          <b>Write to workbook copy</b> saves the marks and then writes them into a copy of the
-          workbook (<code>_marked</code> added to its name) in the cells the tool reads them
-          back from, so that copy can be opened in Excel, checked, and adopted as the book of
-          record — or overwritten in place from a shell with
-          <code>volkit session --to-workbook --in-place</code>.</details>
+          Marking a curve never touches the workbook: what a screen writes goes into this file.
+          Start volkit with <code>--session &lt;file&gt;</code>, or press <b>Load marks</b>, to
+          put them back; <b>Reload workbook</b> still discards everything and returns to the
+          quotes on disk.
+          <b>Write to workbook</b> saves the marks first and then writes <b>the file</b> into
+          the loaded workbook — PARAMS curve rows, event rows and currency weights, and the
+          <code>atm 1m</code> / <code>slog25 3m</code> / <code>term rho10 decay</code> /
+          <code>shift rho25</code> / <code>anchor</code> rows and <code>BANDS</code> sheet the reader reads back — so
+          nothing reaches the workbook that is not already written down in the session file.
+          It asks before it writes, and keeps the workbook it replaced beside it as
+          <code>&lt;name&gt;.bak-&lt;stamp&gt;.xlsx</code>: openpyxl does not carry images or
+          charts through, so that backup is the way back. A copy instead of the original is
+          <code>volkit session --to-workbook</code>.</details>
       </section>
     </div>
 
@@ -517,6 +590,7 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
           <button data-t="smile" class="on">Smile</button>
           <button data-t="term">Term structure</button>
           <button data-t="daily">Daily vols</button>
+          <button data-t="kace">kACE feed</button>
           <div class="grow"></div>
           <label style="margin:0;display:flex;align-items:center;gap:6px;width:auto;font-size:11px">
             expiry <input type="date" id="chartexpiry" style="width:auto;padding:3px 6px"></label>
@@ -536,8 +610,18 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
         <div id="msmilebody" class="hide">
           <label style="display:flex;align-items:center;gap:7px;margin:0 0 9px">
             <input type="checkbox" id="manchor" style="width:auto"> anchor the smile to quoted tenors</label>
+          <!-- The curve each parameter follows between the quoted tenors, in
+               the same three coefficients as the ATM backbone.  Above the
+               per-tenor grid because it is what that grid is read against. -->
+          <div class="scroll"><table class="mark" id="mterm"></table></div>
+          <div class="hint" style="margin:6px 0 12px">The shape each parameter follows across
+            expiries: <code>final &minus; (final &minus; initial) &times; e<sup>&minus;decay&nbsp;&times;&nbsp;t</sup></code>,
+            the same three coefficients the backbone has. The placeholders are what the fit read
+            off the quoted tenors; a row is marked as a whole, so a box left blank takes its
+            fitted value, and emptying all three gives the row back to the fit.</div>
           <div class="scroll"><table class="mark" id="msmile"></table></div>
-          <div class="row" style="margin-top:9px"><button class="danger" id="mclearsmile">Clear smile overwrites</button></div>
+          <div class="row" style="margin-top:9px"><button class="danger" id="mclearsmile">Clear smile overwrites</button>
+            <button class="danger" id="mclearterm">Clear term structures</button></div>
           <div class="hint">Type into a shaded cell and press Enter to overwrite; clear the
             cell to revert to the fitted value.</div>
         </div>
@@ -556,29 +640,45 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
 
     <!-- column 3: one question of the surface, and the events on it -->
     <div class="mcol">
-      <!-- The vol query.  Two boxes and one number: "where is the 3M 25 delta
-           marked".  The strike and the expiry are the pricing screen's own
-           vocabulary and are read by the same functions on the server, and the
-           forward is the feed's at this expiry rather than a third box that
-           can be left stale.  It prices nothing -- no notional, no option
+      <!-- The vol query.  Three boxes and one number: "where is the 3M 25
+           delta marked".  The strike and the expiry are the pricing screen's
+           own vocabulary and are read by the same functions on the server, and
+           the forward is the feed's at this expiry rather than a box that
+           can be left stale.  Strike and delta are the same point on the smile
+           asked two ways and only one of them is ever the request, so typing
+           in one clears the other and the resolution goes into the empty box's
+           placeholder.  It prices nothing -- no notional, no option
            type, no premium, no greek -- because everything else on a pricing
            row is noise around the one number a marker is asking for. -->
       <section class="card">
         <h2>Vol query <span class="grow"></span>
           <span class="meta" id="vqlevel"></span></h2>
-        <div class="row">
-          <div><label>Expiry</label><input id="vqexpiry" placeholder="1M, 8d, 15Sep26"></div>
-          <div><label>Strike</label><input id="vqstrike" placeholder="ATM, 1.0850, 25d"></div>
+        <div class="row"><div><label>Expiry</label>
+          <input id="vqexpiry" placeholder="1M, 8d, 15Sep26"></div></div>
+        <!-- Two ways of naming one point on the smile, side by side and
+             labelled as the alternatives they are.  Only one of them is ever
+             the request; the other carries what it resolved to, greyed out. -->
+        <div class="row" style="margin-top:2px">
+          <div><label>Strike</label><input id="vqstrike" placeholder="ATM or 1.0850"></div>
+          <div><label>&hellip; or delta</label><input id="vqdelta" placeholder="25, 10p, -25"></div>
         </div>
         <div class="row" style="margin-top:9px"><button id="vqrun">Read the vol</button></div>
         <div class="out" id="vqout"><div class="v">&mdash;</div><div class="d"></div></div>
-        <details class="hint"><summary>How the two boxes are read</summary>
+        <details class="hint"><summary>How the boxes are read</summary>
           The pair, the cut and the interpolation are the ones above.
-          <b>Expiry</b> takes a tenor (<code>1W</code>, <code>8d</code>, <code>3M</code>) or a date
-          in any of the ways one is written, and <b>Strike</b> takes a number, <code>ATM</code>,
-          or a delta &mdash; <code>25d</code>, <code>10dp</code>, <code>-25d</code>; a bare
-          <code>25d</code> is the call wing. Both are the pricing screen's boxes, read by the
-          same code, so the two cannot understand one another differently.
+          <b>Expiry</b> takes a tenor (<code>1W</code>, <code>8d</code>, <code>3M</code>,
+          <code>1wk</code>, <code>3mth</code>) or a date in any of the ways one is written, with
+          the year optional (<code>15 Sep</code> is the next one of it), and <b>Strike</b> takes
+          a number or <code>ATM</code>.
+          <b>Delta</b> is the same point on the smile asked for the other way round &mdash;
+          <code>25</code>, <code>10p</code>, <code>-25</code>, or the pricing screen's own
+          <code>25d</code> / <code>10dp</code>; a bare delta is the call wing.
+          <b>Fill in either one</b>: typing in one box clears the other, and the answer puts what
+          it resolved to into the empty box's greyed-out hint, so the strike and the delta of the
+          volatility being read are both on the card whichever way it was asked for.
+          Expiry and strike are the pricing screen's boxes, read by the same code, so the two
+          screens cannot understand one another differently; the delta comes back under the
+          pair's own convention (premium adjusted for a USD-base pair).
           <br>The <b>forward comes from the market feed</b> at this expiry, which is what puts an
           absolute strike on the same axis as the marks &mdash; and a cross the file quotes only
           through its legs is placed from them, by the same triangle that prices it. With no feed
@@ -599,32 +699,30 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
 
       <section class="card">
         <h2>Events <span class="grow"></span>
-          <button class="ghost" id="ewtoggle" title="the weight each release puts on each currency" style="font-size:11px;padding:2px 7px">Weights</button>
-          <select id="ehorizon" style="width:auto;padding:2px 5px;font-size:11px">
-            <option value="0.25">3m</option><option value="0.5">6m</option>
-            <option value="1" selected>1y</option><option value="2">2y</option>
-          </select></h2>
+          <button class="ghost" id="ewtoggle" title="the weight each release puts on each currency" style="font-size:11px;padding:2px 7px">Weights</button></h2>
         <div class="row">
-          <button class="ghost" id="eload">Auto-load</button>
+          <button class="ghost" id="eload" title="this pair's rows as the workbook's EVENTS sheet has them">Reload</button>
           <button class="ghost" id="eadd">+ Row</button>
           <button id="eapply">Apply</button>
         </div>
         <div class="scroll" style="margin-top:9px"><table class="ev" id="etable"></table></div>
         <div class="msg" id="emsg"></div>
-        <details class="hint"><summary>How a bump is built</summary>Times are <b>Hong Kong time</b> (UTC+8); the model works in UTC and converts.
+        <details class="hint"><summary>How a bump is built</summary>Every event lives on the <b>EVENTS</b> sheet of the workbook: one row per
+          release, a column per currency and a column per pair. Times are <b>Hong Kong time</b>
+          (UTC+8); the model works in UTC and converts.
           Bumps are vol points over the <b>24 hours following the release</b>. A bump is
-          the pair's two legs' <b>weights added</b> -- each event is weighted per currency in
-          <code>volkit/data/event_weights.csv</code> -- plus the pair's own <b>Adj</b> on top;
-          only the parts are typed, the total is shown.
+          the pair's two legs' <b>weights added</b> -- and a currency weight is <b>shared</b>, so
+          typing one here moves every pair with that currency -- plus this pair's own
+          <b>Adj</b> on top; only the parts are typed, the total is shown.
           The <b>day</b> column shows which volatility day the effect mostly lands in.
-          Auto-loaded dates come from the published central-bank calendars shipped with
-          volkit plus the NFP rule; verify them, and edit
-          <code>volkit/data/econ_events.csv</code> to extend.</details>
+          <b>Reload</b> puts back this pair's rows as the workbook has them, discarding what
+          the session marked. Nothing is written to the workbook until an export asks for
+          it by name.</details>
       </section>
 
-      <!-- Optional: the per-currency weight table behind Auto-load.  Off until
-           asked for; the browser owns it and posts it whole.  Nothing here
-           touches an event already on a pair. -->
+      <!-- Optional: the currency side of the EVENTS sheet.  Off until asked
+           for; the browser owns it and posts it whole.  Every pair's own
+           adjustment column is left alone -- this card cannot see it. -->
       <section class="card hide" id="ewcard">
         <h2>Event weights <span class="grow"></span>
           <input id="ewccy" placeholder="+ CCY" maxlength="3" style="width:56px;font-size:11px;padding:2px 5px;text-transform:uppercase">
@@ -635,11 +733,10 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
         </div>
         <div class="scroll" style="margin-top:9px"><table class="ev" id="ewtable"></table></div>
         <div class="msg" id="ewmsg"></div>
-        <details class="hint"><summary>What a weight does</summary>What each release is worth on each <b>currency</b>, in vol points; the
-          releasing currency is marked <b>·</b>. A pair's bump is its two legs added plus its own
-          adjustment. Applying changes what <b>Auto-load</b> suggests from now on and nothing already
-          on a pair's events table; a saved session keeps the table, the shipped
-          <code>volkit/data/event_weights.csv</code> is the default.</details>
+        <details class="hint"><summary>What a weight does</summary>The currency side of the <b>EVENTS</b> sheet: what each release is worth on each
+          <b>currency</b>, in vol points, one row per release. A pair's bump is its two legs added
+          plus its own adjustment, so a weight here is <b>shared</b> -- applying it re-solves every
+          pair with that currency. Each pair's own adjustment column is left exactly as it is.</details>
       </section>
     </div>
   </div>
@@ -665,8 +762,10 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
   <details class="hint"><summary>How a panel is read, and what it does not correct for</summary>
     One panel is one <b>expiry / underlying</b> combination. Paste the exchange's strike and
     volatility columns into the box — tabs, commas or spaces, with or without a header row,
-    percent or decimal, bid/ask or mid. Every column choice the parser makes is reported under
-    the table, and every line it cannot use is listed with the reason.
+    bid/ask or mid. Volatilities are read in <b>points, as written</b> — a table that sits
+    below 1.0 is a managed pair, not a table of decimals — unless <b>Vol unit</b> says decimal.
+    Every column choice the parser makes is reported under the table, and every line it cannot
+    use is listed with the reason.
     <br><b>Contract</b> is free text. The codes this build knows (<code>6E</code>,
     <code>6J</code>, …) are offered as you type and bring their FX pair, their strike
     direction and their standard contract size with them; anything else is taken as typed,
@@ -957,6 +1056,8 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
     <div class="f"><label>Cut</label><select id="mocut" style="width:74px"></select></div>
     <div class="f"><label>Interp</label><select id="momethod" style="width:94px"></select></div>
     <div class="f"><label>Highlight</label><select id="mofield" style="width:150px"></select></div>
+    <div class="f"><label>Big move (vol pts)</label>
+      <input id="mobig" style="width:96px" placeholder="0.25" title="Every change at or over this is shaded, in all five columns; twice it is shaded harder. 0 turns it off."></div>
     <div class="acts">
       <button id="moadd">+ Panel</button>
       <button class="ghost" id="modup">Duplicate last</button>
@@ -1012,9 +1113,9 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
     chosen above, the <i>workbook quotes</i> that went into it, one dated row of the historical
     workbook, or a curve pasted in — one line per tenor,
     <code>1M 8.20 -0.35 0.22 -0.60 0.75</code>, with the columns in the order of the
-    <b>Show</b> menu and anything after the first optional. A pasted curve's unit is decided once
-    from its at-the-money column and <i>refused</i> if the levels straddle 1.0, because 0.35 is
-    an ordinary risk reversal in points and an ordinary at-the-money in decimals.
+    <b>Show</b> menu and anything after the first optional. A pasted curve is read in
+    <b>volatility points, as written</b>: 8.20 is 8.20 points and 0.35 is a third of one, which
+    is what a managed pair marks. The level never decides a unit here.
     <b>Dates</b> take <code>latest</code>, a date, or an offset back from the last row
     (<code>-30d</code>, <code>-3m</code>); the row used is the last one <i>on or before</i> what
     was asked for, and the curve says which day it landed on. A tenor a source does not quote is
@@ -1247,9 +1348,11 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
     one tenor quoted twice is one live price and two observations of how wide it is shown. A
     time-only line takes the last date above it; a run with no date anywhere is ordered as one
     day, and says so, because that ordering is wrong across midnight.
-    <br><b>Conventions the paste decides once.</b> The volatility unit comes from the whole paste's
-    at-the-money and outright lines, never line by line &mdash; a small risk reversal read on its
-    own looks exactly like a decimal at-the-money. A risk reversal with a direction word
+    <br><b>Conventions the paste decides once.</b> A volatility is read as the number it was
+    written as, in <b>points</b>: 8.20 is 8.20 points and 0.35 is a third of one, which is what a
+    managed pair marks. The level never decides a unit, and a paste that mixes the two sizes is
+    read rather than refused; a paste that really is in decimals is read by setting <b>Vol unit</b>
+    to decimal, one scale for the whole paste and never line by line. A risk reversal with a direction word
     (<code>EUR call over</code>) is resolved against the pair; one without is read in the book's
     own convention, and the paste says so. An unqualified <code>fly</code> means whichever
     butterfly the selector above says, and the market strangle is the one the workbook marks.
@@ -1279,6 +1382,14 @@ const post=(p,b)=>api(p,{method:'POST',headers:{'Content-Type':'application/json
 const qs=o=>new URLSearchParams(o).toString();
 const esc=s=>String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');
 const num=(v,d=4)=>(v==null||!isFinite(v))?'—':v.toLocaleString(undefined,{minimumFractionDigits:d,maximumFractionDigits:d});
+/* A volatility is read to two decimals, on every screen and in every table.
+   `vnum` is the one place that says so -- the desk quotes vol to a hundredth
+   of a point and a column of six figures is six figures to scan past -- and
+   `vsgn` is the same for a difference between two of them.  What is *typed*
+   keeps its full precision: an overwrite box holds the mark as it was marked,
+   not as it is displayed, so nothing is rounded by being looked at. */
+const VOLDP=2;
+const vnum=v=>num(v,VOLDP);
 let STATE={}, PANEL='pricing', TAB='smile', LEGS=[], RESULT=null, MARKS=null;
 /* Which screens this build has.  The server decides -- a build can be made
    without a tab (build_exe.py --exclude-tab) and then its routes are refused,
@@ -1315,6 +1426,27 @@ function methodFor(pair,cur){
    to the first pair would take a trader off the pair they were marking --
    the same silent change the feed pill exists to prevent.  ``dflt`` is only
    the opening choice, for the first boot when nothing is selected yet. */
+/* Which cuts a screen offers.  The model still knows all four -- `atm.CUTS`
+   is the one declaration and `volkit vol --cut LDN` still answers -- but this
+   desk marks and reads on Tokyo and New York, and a selector carrying two
+   more is two more ways to read the wrong column by accident.  Filtered here,
+   in one place, rather than at the six selectors: a cut the server sends that
+   this list does not name simply does not appear.  Widening it again is this
+   one line. */
+const SHOWN_CUTS=['TK','NY'];
+function cutList(){
+  const all=STATE.cuts||[];
+  const shown=all.filter(c=>SHOWN_CUTS.indexOf(c)>=0);
+  // Never empty: a build whose CUTS were renamed would otherwise lose the
+  // control altogether, which is worse than showing one too many.
+  return shown.length?shown:all;
+}
+const MARKING_PAIR='USDCNH';
+function markingPair(){
+  const all=STATE.pairs||[];
+  return all.indexOf(MARKING_PAIR)>=0?MARKING_PAIR
+    : all.filter(p=>p.slice(3).toUpperCase()==='CNH')[0];
+}
 function fillSel(id,list,dflt){
   const el=$(id); if(!el)return;
   list=list||[];
@@ -1361,7 +1493,12 @@ const PIP={JPY:100};
 function defaultLeg(from){
   if(from)return{...from};
   const pair=(STATE.pairs||['USDJPY'])[0];
-  /* Spot, the swap and the outright start empty and are filled from the
+  /* `settle` is the settlement date, filled from the pair's own calendar and
+     overwritable: `settlesrc` is `calc` while it is the calendar's and
+     `typed` once somebody has put a broken date in it, which is the same
+     two-state rule the market boxes below are held under, and emptying the
+     box is the same way back.
+     Spot, the swap and the outright start empty and are filled from the
      feed at this leg's own expiry; type over any of them and the third is
      worked out from the other two.  `spotsrc`
      and `fwdsrc` are how the screen remembers which boxes are still the
@@ -1377,6 +1514,7 @@ function defaultLeg(from){
      priced. */
   return{label:'',pair:pair,product:'vanilla',expiry:'1M',cut:'TK',
     method:methodFor(pair,(STATE.methods||['SVI'])[0]),type:'C',strike:'ATM',barrier:'',
+    settle:'',settlesrc:'calc',
     spot:'',swap:'',forward:'',pip:'',spotsrc:'feed',fwdsrc:'feed',strikeask:'',
     notional:'1',side:'buy',ramp:'0',overhedge:'none',buffer:'0'};
 }
@@ -1418,7 +1556,8 @@ function syncMarket(L){
 const VANILLA=['vanilla'], STRIKED=['vanilla','digital'], TOUCH=['one_touch','no_touch'];
 const IN=[
  ['pair','Pair','pair'],['product','Product','product'],
- ['expiry','Expiry','text'],['cut','Cut','cut'],['type','Type','type',STRIKED],
+ ['expiry','Expiry','text'],['settle','Settlement','text'],
+ ['cut','Cut','cut'],['type','Type','type',STRIKED],
  ['strike','Strike','text',STRIKED],['barrier','Barrier','text',TOUCH],
  ['spot','Spot','text'],['swap','Swap (pts)','text'],['forward','Forward','text'],
  ['notional','Notional (m)','text'],['side','Side','side'],['method','Interp','method'],
@@ -1438,8 +1577,13 @@ const dash=v=>(v===0||v==null||!isFinite(v))?'—':null;
    which half of one it had to fill in. */
 const OUT=[
  ['days','Days',v=>num(v,1)],
+ /* The settlement date is an input box now -- it is the date the desk
+    confirms against and the one thing about a leg's dates the calendar
+    cannot always answer -- so it is not repeated here.  The one thing left
+    of the market is `market_source`, which is not a level but the screen
+    saying which half of one is still the feed's. */
  ['market_source','Market',v=>esc(v)],
- ['vol','Vol %',v=>num(v,4),'big'],['atm_vol','ATM vol %',v=>num(v,4)],
+ ['vol','Vol %',v=>vnum(v),'big'],['atm_vol','ATM vol %',v=>vnum(v)],
  ['barrier_used','Barrier after buffer',v=>dash(v)??num(v,5),'',TOUCH],
  ['premium_dom','Price (term / unit)',v=>num(v,6)],
  ['premium_pct_base','Price % (of base / payout)',v=>num(v,4)],
@@ -1461,7 +1605,7 @@ function ctl(kind,i,key,val){
   const a=`data-i="${i}" data-k="${key}"`;
   const opts=(list,v)=>list.map(o=>`<option${String(o)===String(v)?' selected':''}>${esc(o)}</option>`).join('');
   if(kind==='pair')  return `<select ${a}>${opts(STATE.pairs||[],val)}</select>`;
-  if(kind==='cut')   return `<select ${a}>${opts(STATE.cuts||[],val)}</select>`;
+  if(kind==='cut')   return `<select ${a}>${opts(cutList(),val)}</select>`;
   if(kind==='method')return `<select ${a}>${opts(methodsFor((LEGS[i]||{}).pair),val)}</select>`;
   if(kind==='type')  return `<select ${a}>${opts(['C','P','Auto'],val)}</select>`;
   if(kind==='product')return `<select ${a}>${opts(STATE.products||['vanilla'],val)}</select>`;
@@ -1475,7 +1619,9 @@ function ctl(kind,i,key,val){
    which is simply somebody's.  One rule, read by the painter and by `setBox`
    alike, so a box written into while somebody is typing in the next cell
    cannot end up labelled differently from the same box after a repaint. */
-const FEEDTIP='from the feed, at this leg’s expiry — type over it to price your own';
+const FEEDTIP='from the feed, to this leg’s settlement date — type over it to price your own';
+const CALTIP='the pair’s own calendar: the spot lag past the expiry — type over it for a '
+  +'broken date, and the forward is read there instead';
 function boxClass(L,key){
   /* A strike that was asked for as `ATM` or `25d` and is now the number it
      solved to.  It is a live box and it is what the next price uses, so it
@@ -1485,6 +1631,13 @@ function boxClass(L,key){
   if(key==='strike')return L.strikeask
     ?['imp','solved from '+L.strikeask+' on these marks — type '+L.strikeask
        +' in again to solve it afresh']:null;
+  /* The settlement date the tenor was built from, until somebody puts a
+     broken date in it.  Emptying the box hands it back to the calendar, the
+     same way emptying a market box hands it back to the feed. */
+  if(key==='settle')return L.settlesrc==='typed'
+    ?['imp','settling away from the calendar\u2019s own date — the forward is read here. '
+      +'Empty the box to settle on the pair\u2019s calendar']
+    :['cal',CALTIP];
   if(key==='spot')return L.spotsrc==='typed'?null:['fed',FEEDTIP];
   if(key==='swap'){
     if(L.fwdsrc==='feed')return ['fed',FEEDTIP];
@@ -1535,7 +1688,7 @@ function renderGrid(){
       if(!applies(only,L)){h+=`<td class="na" title="${esc(prodOf(L))} does not use this">·</td>`;return}
       const v=r[k]; let c='o '+(cls||'');
       if((cls||'').includes('sign')&&typeof v==='number')c+=v>0?' pos':(v<0?' neg':'');
-      h+=`<td class="${c}">${fmt(v)}</td>`;});
+      h+=`<td class="${c}">${fmt(v,r)}</td>`;});
     h+='<td class="spacer"></td></tr>';});
   h+='</tbody>';
   g.innerHTML=h;
@@ -1572,6 +1725,12 @@ function loadLegs(){
     // the swap is read with -- and `points` is dropped, because the server
     // reads that name and a stored zero would pin every forward to spot.
     if(L.strikeask===undefined)L.strikeask='';
+    /* A leg saved before the settlement date was a box has neither the date
+       nor the flag.  Both start on the calendar's side: the next resolve
+       fills the box, and a stored leg must never come back claiming a broken
+       date nobody typed. */
+    if(L.settle===undefined)L.settle='';
+    if(!L.settlesrc)L.settlesrc=String(L.settle||'').trim()?'typed':'calc';
     if(L.swap===undefined){
       const sp=parseFloat(L.spot), fw=parseFloat(L.forward);
       L.swap=(isFinite(sp)&&isFinite(fw))?pts((fw-sp)*pipFor(L)):'';
@@ -1602,7 +1761,8 @@ function setBox(i,k,v){
   if(v!==undefined&&el.value!==v)el.value=v;
   const c=boxClass(LEGS[i]||{},k);
   if(c){el.className=c[0];el.title=c[1]}
-  else if(k==='spot'||k==='swap'||k==='forward'){el.className='';el.removeAttribute('title')}
+  else if(k==='settle'||k==='spot'||k==='swap'||k==='forward'){
+    el.className='';el.removeAttribute('title')}
 }
 const MKTBOX=['spot','swap','forward'];
 function applyLegRows(rows,force){
@@ -1612,6 +1772,21 @@ function applyLegRows(rows,force){
     const who='#'+(q.index+1)+' '+(L.label||L.pair);
     if(q.expiry&&q.expiry!==L.expiry){L.expiry=q.expiry;setBox(q.index,'expiry',q.expiry)}
     if(!q.expiry){bad.push(who+': '+q.error);return}
+    /* The settlement date, on the same rule as the market boxes below: while
+       it is the calendar's it is rewritten whenever the expiry or the pair
+       moves, and once somebody has typed a broken date in it, it is theirs.
+       `settle_default` is what the calendar would have said, so the box has
+       somewhere to go back to the moment it is emptied -- the page never
+       rebuilds the construction, which lives on the pair's own holidays and
+       is the server's to run.
+       `Refresh spot` does not take this box back: it is the market it puts
+       back on the feed, and a settlement date somebody agreed with a
+       counterparty is a term of the trade and not a level. */
+    if(q.settle_default)L.settle_default=q.settle_default;
+    if(L.settlesrc!=='typed'&&q.settle_default&&q.settle_default!==L.settle){
+      L.settle=q.settle_default; setBox(q.index,'settle',L.settle);
+    }
+    if(q.settle_note)bad.push(who+': '+q.settle_note);
     // No market for this pair is the ordinary state of a screen with no feed
     // loaded, and the feed pill already says so; it is only worth a line
     // when somebody has just pressed the button that promises to fill it.
@@ -1651,7 +1826,8 @@ function applyLegRows(rows,force){
 async function resolveLegs(force){
   if(!LEGS.length)return [];
   try{
-    const r=await post('/api/legs',{legs:LEGS.map(L=>({pair:L.pair,expiry:L.expiry}))});
+    const r=await post('/api/legs',{legs:LEGS.map(L=>(
+      {pair:L.pair,expiry:L.expiry,settle:L.settle,settlesrc:L.settlesrc}))});
     return applyLegRows(r.legs,force);
   }catch(e){return ['the legs could not be resolved: '+e.message]}
 }
@@ -1719,6 +1895,15 @@ $('#pgrid').addEventListener('change',async e=>{
   if(k==='spot')L.spotsrc=t.value.trim()?'typed':'feed';
   if(k==='swap')L.fwdsrc=t.value.trim()?'swap':'feed';
   if(k==='forward')L.fwdsrc=t.value.trim()?'forward':'feed';
+  // A settlement date typed in is a broken date somebody means; emptying the
+  // box hands it back to the pair's calendar, which is the only way back and
+  // so the documented one.  The default goes straight back in rather than
+  // waiting for the resolve below, so the box is never briefly empty.
+  if(k==='settle'){
+    L.settlesrc=t.value.trim()?'typed':'calc';
+    if(L.settlesrc==='calc'&&L.settle_default)L.settle=L.settle_default;
+    setBox(+i,'settle',L.settle);
+  }
   if(MKTBOX.indexOf(k)>=0){syncMarket(L);MKTBOX.forEach(x=>setBox(+i,x,L[x]));}
   // BAND is only a method on a pegged pair; moving a leg off one must not
   // leave it holding a method its new pair cannot be marked with.  And a
@@ -1727,6 +1912,10 @@ $('#pgrid').addEventListener('change',async e=>{
   // hands both boxes back to the feed rather than carrying the number over.
   if(k==='pair'){L.method=methodFor(L.pair,L.method);
     L.spot='';L.swap='';L.forward='';L.pip='';L.spotsrc='feed';L.fwdsrc='feed';
+    // The settlement date is the old pair's calendar -- or a broken date
+    // agreed for a trade in it -- and USDCAD settles a day before USDJPY
+    // does off the same expiry.  Back to the new pair's own.
+    L.settle='';L.settle_default='';L.settlesrc='calc';
     // And a strike this screen solved belongs to the pair it solved it on --
     // 150.446 is a considered strike on USDJPY and nonsense on EURUSD, the
     // same trap the two level boxes are cleared for.  The *request* goes
@@ -1739,7 +1928,7 @@ $('#pgrid').addEventListener('change',async e=>{
   // decides which calendar the expiry is read on, so either one moves all
   // three boxes.  The boxes are written straight into rather than repainted:
   // the next cell may already have somebody typing in it.
-  if(k==='pair'||k==='expiry'||MKTBOX.indexOf(k)>=0){
+  if(k==='pair'||k==='expiry'||k==='settle'||MKTBOX.indexOf(k)>=0){
     const bad=await resolveLegs(false);
     if(bad.length)$('#pstatus').innerHTML='<span style="color:var(--warn)">'+esc(bad.join(' · '))+'</span>';
   }
@@ -1807,9 +1996,14 @@ async function refreshFeed(){
   const el=$('#feedstatus'); el.innerHTML='<span class="spin"></span> re-reading the feed…';
   try{
     const r=await post('/api/feed/refresh',
-      {legs:LEGS.map(L=>({pair:L.pair,expiry:L.expiry}))});
+      {legs:LEGS.map(L=>(
+        {pair:L.pair,expiry:L.expiry,settle:L.settle,settlesrc:L.settlesrc}))});
     STATE.feed=r.feed; showFeed(r.feed);
-    const typed=LEGS.filter(L=>L.spotsrc==='typed'||L.fwdsrc==='typed').length;
+    // `fwdsrc` has three values and two of them are somebody's: a typed swap
+    // and a typed outright are the same statement made two ways.  Counting
+    // only the word `typed` -- which it has not been since the swap box
+    // arrived -- reported none of them.
+    const typed=LEGS.filter(L=>L.spotsrc==='typed'||L.fwdsrc!=='feed').length;
     const bad=applyLegRows(r.legs,true);
     await priceAll();
     const took=typed?`feed re-read · ${typed} leg${typed>1?'s':''} put back on the feed`
@@ -1913,7 +2107,15 @@ function markingVisible(){
   $('#matmowrow').classList.toggle('hide',!$('#matmowshow').checked);
   $('#msmilebody').classList.toggle('hide',!$('#msmileshow').checked);
 }
+/* The tenor the term structure is read against.  One name, matched however
+   the workbook spells it (`1M`, `1m`, `1 M`), so a sheet that writes its
+   tenors in lower case still gets the highlight. */
+const KEY_TENOR='1M';
+function isKeyTenor(t){return String(t||'').replace(/\s+/g,'').toUpperCase()===KEY_TENOR}
 const SMILEP=['slog25','slog10','rho25','rho10'];
+/* The three coefficients of one parameter's term structure, in the order the
+   model declares them (surface.TERM_COEFFS). */
+const TERMC=['initial','final','decay'];
 /* The curve column is gone: what is read off this table is the marked cut
    volatility, and the fitted curve underneath it said nothing about the mark
    in the row beside it. */
@@ -1922,18 +2124,40 @@ function paintMarks(){
   const ow=$('#matmowshow').checked;
   const nown=MARKS.atm.filter(r=>r.overwrite!=null).length;
   $('#matmowcount').textContent=(!ow&&nown)?`· ${nown} marked`:'';
+  // Two columns want to sit beside each other; three want the whole card.
+  $('#matm').className='mark'+(ow?'':' tight');
   $('#matm').innerHTML=`<thead><tr><th>Tenor</th><th>${esc(MARKS.cut)} cut %</th>`+
     (ow?'<th>Overwrite %</th>':'')+`</tr></thead><tbody>`+
-    MARKS.atm.map(r=>`<tr><td>${esc(r.tenor)}`+
+    MARKS.atm.map(r=>`<tr${isKeyTenor(r.tenor)?' class="key"':''}><td>${esc(r.tenor)}`+
       ((!ow&&r.overwrite!=null)?' <span class="owdot" title="overwritten">&bull;</span>':'')+
-      `</td><td>${num(r.cut,4)}</td>`+
+      `</td><td>${vnum(r.cut)}</td>`+
       (ow?`<td><input data-m="atm" data-tenor="${esc(r.tenor)}" value="${r.overwrite==null?'':(r.overwrite*100).toFixed(4)}"
-        placeholder="${num(r.curve,4)}"></td>`:'')+'</tr>').join('')+'</tbody>';
+        placeholder="${vnum(r.curve)}"></td>`:'')+'</tr>').join('')+'</tbody>';
   const P=SMILEP;
   const sow=MARKS.smile.reduce((a,r)=>a+P.filter(p=>r[p+'_ow']!=null).length,0), sn=[];
+  /* Put the curves in the same order as the grid beneath them: the server
+     sends them in the model's own order, and two tables in one card that
+     list the four parameters differently are two tables a marker has to
+     read twice. */
+  const byparam={};(MARKS.term||[]).forEach(r=>{byparam[r.param]=r});
+  const term=P.filter(p=>byparam[p]).map(p=>byparam[p]), smarked=term.filter(r=>r.marked).length;
   if(MARKS.anchor)sn.push('anchored');
   if(sow)sn.push(`${sow} overwritten`);
+  /* A shut card still says what has been marked, and a marked term structure
+     is a mark like any other: it replaces the fitted curve everywhere, not
+     just at a tenor, so it is the one this heading must not swallow. */
+  if(smarked)sn.push(`${smarked} curve${smarked===1?'':'s'} marked`);
   $('#msmilenote').textContent=$('#msmileshow').checked?'':sn.join(' · ');
+  /* Four rows always come back -- the parameters exist whether or not the
+     pair has quotes behind them -- so the empty state is "nothing fitted and
+     nothing marked", not "no rows". */
+  const anyterm=term.some(r=>r.fitted||r.marked);
+  $('#mterm').innerHTML=`<thead><tr><th>Parameter</th>${TERMC.map(c=>`<th>${c}</th>`).join('')}</tr></thead><tbody>`+
+    (anyterm?term.map(r=>`<tr><td>${esc(r.param)}${r.marked?' <span class="owdot" title="marked">&bull;</span>':''}</td>`+
+      TERMC.map(c=>`<td><input data-m="term" data-param="${esc(r.param)}" data-coeff="${c}"
+        value="${r.marked==null?'':r.marked[c].toFixed(4)}"
+        placeholder="${r.fitted==null?'':r.fitted[c].toFixed(4)}"></td>`).join('')+'</tr>').join('')
+     :`<tr><td colspan="4" class="meta">no smile term structure for this pair</td></tr>`)+'</tbody>';
   $('#msmile').innerHTML=`<thead><tr><th>Tenor</th>${P.map(p=>`<th>${p}</th>`).join('')}</tr></thead><tbody>`+
     (MARKS.smile.length?MARKS.smile.map(r=>`<tr><td>${esc(r.tenor)}${r.ok?'':' <span class="pill bad">fit</span>'}</td>`+
       P.map(p=>`<td><input data-m="smile" data-param="${p}" data-tenor="${esc(r.tenor)}"
@@ -1947,12 +2171,30 @@ async function loadMarks(){
 }
 $('#matmowshow').onchange=()=>{markingVisible();saveMarking();paintMarks()};
 $('#msmileshow').onchange=()=>{markingVisible();saveMarking();paintMarks()};
+/* A term structure is marked as a whole row: three coefficients are one
+   curve, and a server that took them one at a time would spend two of the
+   three requests holding a shape nobody asked for.  A box left blank takes
+   the fitted value it is showing as its placeholder; all three blank is the
+   row being given back to the fit. */
+function termBody(param){
+  const boxes=TERMC.map(c=>document.querySelector(
+    '#mterm input[data-param="'+param+'"][data-coeff="'+c+'"]'));
+  const typed=boxes.map(b=>b.value.trim());
+  if(typed.every(v=>v===''))return null;
+  const body={};
+  TERMC.forEach((c,i)=>{body[c]=typed[i]===''?boxes[i].placeholder:typed[i]});
+  return body;
+}
 async function applyMark(el){
   const o=mq(), v=el.value.trim();
   try{
     if(el.dataset.m==='atm'){
       if(v==='')await post('/api/overwrite',{pair:o.pair,kind:'clear_atm',tenor:el.dataset.tenor});
       else await post('/api/overwrite',{pair:o.pair,kind:'atm',tenor:el.dataset.tenor,value:parseFloat(v)});
+    }else if(el.dataset.m==='term'){
+      const body=termBody(el.dataset.param);
+      if(body===null)await post('/api/overwrite',{pair:o.pair,kind:'clear_smile_term',param:el.dataset.param});
+      else await post('/api/overwrite',Object.assign({pair:o.pair,kind:'smile_term',param:el.dataset.param},body));
     }else{
       if(v==='')await post('/api/overwrite',{pair:o.pair,kind:'clear_smile'});
       else await post('/api/overwrite',{pair:o.pair,kind:'smile',param:el.dataset.param,
@@ -1965,6 +2207,8 @@ document.addEventListener('change',e=>{if(e.target.dataset&&e.target.dataset.m)a
 $('#mclearatm').onclick=async()=>{await post('/api/overwrite',{pair:mq().pair,kind:'clear_atm'});
   await loadMarks();await redraw();schedulePrice()};
 $('#mclearsmile').onclick=async()=>{await post('/api/overwrite',{pair:mq().pair,kind:'clear_smile'});
+  await loadMarks();await redraw();schedulePrice()};
+$('#mclearterm').onclick=async()=>{await post('/api/overwrite',{pair:mq().pair,kind:'clear_smile_term'});
   await loadMarks();await redraw();schedulePrice()};
 $('#manchor').onchange=async e=>{await post('/api/overwrite',{pair:mq().pair,kind:'anchor',value:e.target.checked});
   await redraw();schedulePrice()};
@@ -2002,7 +2246,7 @@ async function drawSmile(){
       <span><i style="background:${C2}"></i>risk-neutral density</span>
       <span><i style="background:${C3};height:8px;width:8px;border-radius:50%"></i>quoted deltas</span></div>
     <div class="scroll" style="margin-top:12px"><table style="width:100%"><thead><tr><th>Point</th><th>${K.label}</th><th>Vol %</th></tr></thead>
-    <tbody>${d.points.map(r=>`<tr><td>${esc(r.label)}</td><td>${num(K.k(r.k),K.dp)}</td><td>${num(r.v,4)}</td></tr>`).join('')}</tbody></table></div>
+    <tbody>${d.points.map(r=>`<tr><td>${esc(r.label)}</td><td>${num(K.k(r.k),K.dp)}</td><td>${vnum(r.v)}</td></tr>`).join('')}</tbody></table></div>
     ${d.warnings.length?`<div class="hint" style="color:var(--warn)">⚠ ${esc(d.warnings.join(' · '))}</div>`:''}`;
   // A density is per unit of the axis, so dividing it by the forward makes it
   // small; the right axis needs enough places to still show it.
@@ -2020,7 +2264,7 @@ async function drawTerm(){
   p.innerHTML=`<div id="c1"></div><div class="legend"><span><i style="background:${C1}"></i>marked ATM vol (%)</span>
       <span><i style="background:${C2}"></i>${esc(o.cut)} cut vol (%)</span></div>
     ${d.events.length?`<h2 style="margin-top:16px">Events</h2><table style="width:100%"><thead><tr><th>When (${EVTZ.label})</th><th>Quoted bump %</th><th>Solved height</th></tr></thead>
-      <tbody>${d.events.map(e=>`<tr><td>${esc(evLocal(e.when).replace('T',' '))}</td><td>${num(e.bump,3)}</td>
+      <tbody>${d.events.map(e=>`<tr><td>${esc(evLocal(e.when).replace('T',' '))}</td><td>${vnum(e.bump)}</td>
       <td>${e.height==null?'—':num(e.height,6)}</td></tr>`).join('')}</tbody></table>`:''}`;
   chart($('#c1'),[{pts:d.curve.map(r=>[r.t,r.vol]),color:C1},
     {pts:d.curve.map(r=>[r.t,r.cut]),color:C2,dash:1,w:1.5},
@@ -2038,7 +2282,7 @@ async function drawDaily(){
     <div id="c1"></div><div class="legend"><span><i style="background:${C2}"></i>daily vol (%)</span>
       <span><i style="background:${C1}"></i>cumulative / term vol (%)</span></div>
     <div class="scroll" style="margin-top:12px"><table style="width:100%"><thead><tr><th>Date</th><th>Daily %</th><th>Cumulative %</th></tr></thead>
-      <tbody>${s.map(r=>`<tr><td>${esc(r.date)}</td><td>${num(r.daily,4)}</td><td>${num(r.cumulative,4)}</td></tr>`).join('')}</tbody></table></div>`;
+      <tbody>${s.map(r=>`<tr><td>${esc(r.date)}</td><td>${vnum(r.daily)}</td><td>${vnum(r.cumulative)}</td></tr>`).join('')}</tbody></table></div>`;
   chart($('#c1'),[{pts:s.map(r=>[x(r),r.daily]),color:C2,type:'bar'},
     {pts:s.map(r=>[x(r),r.cumulative]),color:C1,w:2}],
     {r:16,ldp:2,xfmt:v=>new Date(t0+v*864e5).toISOString().slice(2,7)});
@@ -2053,37 +2297,161 @@ async function loadRRFly(){
   if(!d.rows.length){el.innerHTML='<tr><td class="meta">no smile quotes for this pair</td></tr>';return}
   // A tenth of a vol point is about a broker tick; a hundredth is noise.
   const cls=v=>v==null?'':(Math.abs(v)<0.01?'diff-ok':(Math.abs(v)<0.10?'diff-warn':'diff-bad'));
-  const cell=(v,d_)=>`<td class="dq">${v==null?'—':num(v,4)}</td>`+
-    `<td class="dq ${cls(d_)}" title="quoted ${d_==null?'':num(v-d_,4)}">${d_==null?'—':(d_>0?'+':'')+num(d_,3)}</td>`;
+  const cell=(v,d_)=>`<td class="dq">${v==null?'—':vnum(v)}</td>`+
+    `<td class="dq ${cls(d_)}" title="quoted ${d_==null?'':vnum(v-d_)}">${d_==null?'—':vsgn(d_)}</td>`;
   el.innerHTML='<thead><tr><th>Tenor</th><th>RR 25</th><th>Δ</th><th>BF 25</th><th>Δ</th>'+
     '<th>RR 10</th><th>Δ</th><th>BF 10</th><th>Δ</th></tr></thead><tbody>'+
     d.rows.map(r=>`<tr><td>${esc(r.tenor)}</td>`+
       cell(r.rr25,r.rr25_d)+cell(r.bf25,r.bf25_d)+
       cell(r.rr10,r.rr10_d)+cell(r.bf10,r.bf10_d)+'</tr>').join('')+'</tbody>';
 }
-const DRAW={smile:drawSmile,term:drawTerm,daily:drawDaily};
+/* -------------------------- the kACE feed ---------------------------
+   The marked surface as the RATE_FEED message the pricing platform's XML
+   poster takes -- what the XML_poster workbook used to build out of the daily
+   CSV, a spread table and a row copied from Murex.  One call returns the
+   pillar table and the message together, so the table on the screen and the
+   text on the clipboard cannot be two different messages.  Nothing here
+   posts: the message is copied or downloaded and pasted into the poster
+   page, which is stage 1 of claude/kace-export-design.md. */
+let KACE_SRC='marks';
+/* The scenario is typed on the tab: it is the one field of the message a
+   desk changes day to day (a test scenario before the live one).  Kept per
+   browser in localStorage as a convenience, seeded from the server's
+   start-up default the first time; the server refuses a blank one. */
+let KACE_SCN=null;
+function kaceScenario(){
+  if(KACE_SCN===null){try{KACE_SCN=localStorage.getItem('volkit.kace.scenario')}catch(e){KACE_SCN=null}
+    if(!KACE_SCN)KACE_SCN=(STATE.kace||{}).scenario||'Xyz'}
+  return KACE_SCN}
+function setKaceScenario(v){KACE_SCN=v;try{localStorage.setItem('volkit.kace.scenario',v)}catch(e){}}
+async function drawKace(){
+  const p=$('#panes');p.innerHTML='<div class="meta"><span class="spin"></span> building the feed…</div>';
+  const o=mq(),K=STATE.kace||{},scn=kaceScenario();
+  if(K.error){p.innerHTML=`<div class="out err"><div class="v">${esc(K.error)}</div></div>`;return}
+  const q={pair:o.pair,cut:o.cut,method:o.method,source:KACE_SRC,scenario:scn};
+  const d=await api('/api/kace?'+qs(q));
+  const dl=(q,label)=>`<a href="/api/export/kace?${qs(q)}" style="color:var(--accent);font-weight:600;text-decoration:none">${label}</a>`;
+  p.innerHTML=`<div style="display:flex;gap:10px;align-items:center;margin-bottom:8px;flex-wrap:wrap">
+      <b>${esc(d.pair)}</b><span class="meta">horDate ${esc(d.hor_date)} · ${d.days} days ${esc(d.first_day)} to ${esc(d.last_day)} · ${d.nodes} nodes · ${esc(d.cut)} cut</span>
+      <div class="grow"></div>
+      <label style="margin:0;display:flex;align-items:center;gap:5px;width:auto;font-size:11px" title="the kACE scenario the vols are posted into; goes into the message and the file name">scenario
+        <input id="kacescn" value="${esc(scn)}" style="width:7em;padding:3px 6px"></label>
+      <label style="margin:0;display:flex;align-items:center;gap:5px;width:auto;font-size:11px" title="the quoted marks are what the sheet posted; fitted is what the surface returns at each pillar">wings
+        <select id="kacesrc" style="width:auto;padding:3px 6px">${(K.sources||['marks','fitted']).map(x=>`<option value="${x}"${x===KACE_SRC?' selected':''}>${x}</option>`).join('')}</select></label>
+      ${d.xml?`<button id="kacecopy" style="width:auto;padding:5px 12px;font-size:12px">Copy XML</button>`:''}
+      ${d.xml?dl(q,'↓ feed XML'):''}
+      ${d.xml?dl({...q,clear:1},'↓ clear XML'):''}
+      ${d.xml&&K.url?`<button id="kacepost" style="width:auto;padding:5px 12px;font-size:12px">Post feed</button>
+        <button id="kacepostclear" class="danger" style="width:auto;padding:5px 12px;font-size:12px">Post clear</button>`:''}</div>
+    ${d.xml_error?`<div class="out err" style="margin-bottom:8px"><div class="v">${esc(d.xml_error)}</div></div>`:''}
+    <div id="kaceconfirm" class="hide" style="display:flex;gap:8px;align-items:center;margin-bottom:8px;padding:8px 10px;border:1px solid var(--line);border-radius:6px"></div>
+    <div id="kaceresult"></div>
+    <div class="scroll"><table style="width:100%"><thead><tr><th>Pillar</th><th>Expiry</th><th>Spread</th><th>ATM bid</th><th>ATM offer</th><th>25d RR</th><th>10d RR</th><th>25d fly</th><th>10d fly</th><th>Wings</th></tr></thead>
+      <tbody>${d.pillars.map(r=>`<tr><td>${esc(r.tenor)}</td><td>${esc(r.expiry)}</td><td>${num(r.spread,2)}</td><td>${vnum(r.bid)}</td><td>${vnum(r.offer)}</td>
+        <td>${vnum(r.rr25)}</td><td>${vnum(r.rr10)}</td><td>${vnum(r.fly25)}</td><td>${vnum(r.fly10)}</td><td class="meta">${esc(r.wings)}</td></tr>`).join('')}</tbody></table></div>
+    ${d.notes.length?`<div class="meta" style="margin-top:8px">${d.notes.map(n=>'· '+esc(n)).join('<br>')}</div>`:''}
+    <div class="meta" style="margin-top:8px">Spread table: ${esc(K.spreads||'')}. RR is the base-currency call vol minus the put vol; S is the butterfly.
+      ${K.url?`Posts go to <b>${esc(K.url)}</b>${K.insecure?' (certificate not checked)':''}, the way the XML poster page sends them, and are recorded in ${esc(K.log||'')}.`:'No post address is set (kace-url in volkit.cfg, or --kace-url): copy or download the message and paste it into the kACE XML poster.'}</div>
+    ${(K.posts||[]).length?`<div class="scroll" style="margin-top:8px"><table style="width:100%"><thead><tr><th>Posted</th><th>Pair</th><th>Scenario</th><th>What</th><th>Nodes</th><th>Outcome</th></tr></thead>
+      <tbody>${K.posts.slice().reverse().map(r=>`<tr><td>${esc(String(r.at||'').replace('T',' ').slice(0,16))}</td><td>${esc(r.pair)}</td><td>${esc(r.scenario)}</td><td>${r.clear?'clear':'feed'}</td><td>${r.nodes??'—'}</td>
+        <td style="color:${r.ok?'inherit':'var(--bad)'}">${esc(r.message||'')}</td></tr>`).join('')}</tbody></table></div>`:''}
+    <div id="kacemsg" class="meta" style="margin-top:6px"></div>`;
+  /* Posting: the page sends the *request* -- pair, cut, wings, scenario,
+     feed or clear -- never the XML, so what reaches kACE is exactly what the
+     table above was built from.  One inline confirmation, no browser
+     dialog; the clear is the destructive one and says so. */
+  const confirmPost=(clear)=>{
+    const c=$('#kaceconfirm');c.classList.remove('hide');
+    c.innerHTML=`<span>${clear?`<b>Clear every ${esc(d.pair)} vol</b> from scenario <b>${esc(d.scenario)}</b>`:`Post <b>${d.nodes} nodes</b> for <b>${esc(d.pair)}</b> into scenario <b>${esc(d.scenario)}</b>`} at ${esc(K.url)}?</span>
+      <div class="grow"></div><button id="kacego" ${clear?'class="danger"':''} style="width:auto;padding:5px 12px;font-size:12px">${clear?'Clear':'Post'}</button>
+      <button id="kaceno" style="width:auto;padding:5px 12px;font-size:12px;background:transparent;color:var(--muted);border:1px solid var(--line)">Cancel</button>`;
+    $('#kaceno').onclick=()=>c.classList.add('hide');
+    $('#kacego').onclick=async()=>{
+      const go=$('#kacego');go.disabled=true;go.textContent='sending…';
+      try{const r=await post('/api/kace/post',{...q,clear:clear?1:''});
+        c.classList.add('hide');
+        $('#kaceresult').innerHTML=r.ok?`<div class="meta" style="margin-bottom:8px">✓ ${esc(r.message)} — ${clear?'clear':'feed'} for ${esc(r.pair)}, scenario ${esc(r.scenario)}, message ${esc(r.hash)}${r.logged?', recorded':''}</div>`
+          :`<div class="out err" style="margin-bottom:8px"><div class="v">${esc(r.message)}</div>${r.reply?`<pre style="margin:6px 0 0;font-size:11px;white-space:pre-wrap;max-height:160px;overflow:auto">${esc(r.reply.slice(0,1500))}</pre>`:''}</div>`;
+        STATE.kace=Object.assign({},STATE.kace,{posts:r.posts||[]});
+      }catch(e){c.classList.add('hide');$('#kaceresult').innerHTML=`<div class="out err" style="margin-bottom:8px"><div class="v">${esc(e.message)}</div></div>`}
+    }};
+  const pb=$('#kacepost');if(pb)pb.onclick=()=>confirmPost(false);
+  const pc=$('#kacepostclear');if(pc)pc.onclick=()=>confirmPost(true);
+  $('#kacesrc').onchange=e=>{KACE_SRC=e.target.value;redraw()};
+  const sb=$('#kacescn');
+  const commit=()=>{const v=sb.value.trim();if(v===kaceScenario())return;
+    if(!v){sb.value=kaceScenario();$('#kacemsg').textContent='the scenario cannot be blank';return}
+    setKaceScenario(v);redraw()};
+  sb.onchange=commit;sb.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();commit()}};
+  const cp=$('#kacecopy');if(cp)cp.onclick=async()=>{
+    try{await navigator.clipboard.writeText(d.xml);$('#kacemsg').textContent=`copied ${d.nodes} nodes to the clipboard`}
+    catch(e){$('#kacemsg').textContent='the browser refused the clipboard: use the download instead ('+e.message+')'}};
+}
+const DRAW={smile:drawSmile,term:drawTerm,daily:drawDaily,kace:drawKace};
 async function redraw(){if(PANEL!=='marking')return;
   try{await DRAW[TAB]()}catch(e){$('#panes').innerHTML=`<div class="out err"><div class="v">${esc(e.message)}</div></div>`}
   loadRRFly(); refreshVQ();}
 
 /* -------------------------- the vol query --------------------------
-   Two boxes and one number.  The pair, the cut and the interpolation are the
-   card above's; the expiry and the strike are the pricing screen's own
+   Three boxes and one number.  The pair, the cut and the interpolation are
+   the card above's; the expiry and the strike are the pricing screen's own
    vocabulary and go to the server to be read by the same functions that read
    a pricing leg, so the two screens cannot understand `1M` or `25d`
    differently.  The forward is `Book.market_level`'s -- the one place a level
-   is read -- so there is no third box here to be left stale.
+   is read -- so there is no fourth box here to be left stale.
 
-   What was resolved is written back into the box it was asked in, which is
-   the pricing screen's rule and for the same reason: showing one number as an
-   input above and an answer below is two places for it to disagree.  It is
-   written back only on a run somebody asked for, never under a cursor: a
-   redraw refreshes the number and leaves the boxes exactly as they are. */
+   Strike and Delta are two ways of naming one point on the smile, and the
+   desk has whichever of them the market gave it.  Only one of the two is ever
+   the request: typing in one clears the other, so there is never a filled-in
+   box that is being ignored.  What the request resolved to goes into the
+   *other* box's placeholder -- greyed out, so it cannot be mistaken for
+   something that was typed, and cannot be posted back as though it had been.
+   The one number and the line under it carry both readings either way.
+
+   The boxes keep the request rather than the resolution, which is where this
+   card parts from the pricing screen on purpose: re-solving `25d` against
+   marks that have just moved is the whole point of the card.  A redraw
+   refreshes the answer and leaves every box exactly as it is. */
 let VQR=null;
+/* "25", "25p", "-25" are how a delta is said; `pricing.parse_strike` wants the
+   `d` in the middle.  Putting it there is the only difference between this box
+   and the strike box -- the grammar itself stays on the server, so `10dp` and
+   `-25d` typed in here are passed through and read exactly as they are on the
+   pricing screen. */
+function vqDeltaText(raw){
+  const t=String(raw||'').trim(); if(!t)return '';
+  const m=/^(-?)\s*(\d+(?:\.\d+)?)\s*([cp])?$/i.exec(t);
+  return m?(m[1]+m[2]+'d'+(m[3]||'')):t;
+}
+/* Which box holds the request, and what it says.  Delta wins when it has
+   something in it: the two are cleared against each other as they are typed,
+   so the only way both arrive filled is a browser restoring its own form
+   values on a refresh, and one of them has to win rather than refuse. */
+function vqAsk(){
+  const d=vqDeltaText($('#vqdelta').value);
+  if(d)return d;
+  const k=$('#vqstrike').value.trim();
+  return k||'ATM';
+}
+const VQ_HINT={strike:'ATM or 1.0850',delta:'25, 10p, -25'};
+/* The resolution, shown where the request is not.  A strike with no feed
+   behind it has no level to show, so the moneyness is what goes there and
+   says so; the delta always has one, because delta is a function of
+   moneyness and needs no level at all. */
+function vqHints(r){
+  const ks=$('#vqstrike'), ds=$('#vqdelta');
+  if(!r||r.error){ks.placeholder=VQ_HINT.strike; ds.placeholder=VQ_HINT.delta; return}
+  ks.placeholder=r.scaled?num(r.strike,6):('K/F '+num(r.strike_ratio,6));
+  ds.placeholder=r.delta==null?VQ_HINT.delta
+    :(sgn(r.delta,VOLDP)+(r.delta_is_call?' call':' put'));
+}
 function vqLevel(r){
   if(!r||r.error)return '';
   if(r.forward_source==='feed')
-    return 'forward '+num(r.forward,6)
+    /* To the settlement date, because that is the date a forward is a price
+       for -- and saying which date is what makes it checkable against a
+       broker's own screen. */
+    return 'forward '+num(r.forward,6)+(r.settle?' to '+r.settle:'')
       +(r.derived?' · via the '+r.via+' triangle':'')
       +(r.extrapolated?' · extrapolated':'');
   if(r.forward_source==='typed')return 'forward '+num(r.forward,6)+' as given';
@@ -2092,14 +2460,24 @@ function vqLevel(r){
 function vqShow(){
   const o=$('#vqout'); if(!o)return;
   $('#vqlevel').textContent=vqLevel(VQR);
+  vqHints(VQR);
   if(!VQR){o.className='out';o.innerHTML='<div class="v">&mdash;</div><div class="d"></div>';return}
   if(VQR.error){o.className='out err';o.innerHTML='<div class="v">'+esc(VQR.error)+'</div>';return}
   const r=VQR, wing=r.is_call==null?'':(r.is_call?' call':' put');
   const where=r.scaled?('strike '+num(r.strike,6)):('K/F '+num(r.strike_ratio,6));
+  /* Both readings of the one point, whichever of the two was asked for: the
+     answer to "where is the 25 delta" is a strike as much as it is a
+     volatility, and the desk quotes the other one back. */
+  const dtxt=r.delta==null?'':(sgn(r.delta,VOLDP)+'\u0394 '+(r.delta_is_call?'call':'put')
+    +(r.premium_adjusted?' (premium adjusted)':''));
   o.className='out';
-  o.innerHTML='<div class="v">'+num(r.vol,4)+'<span style="font-size:14px;font-weight:400"> %</span></div>'
-    +'<div class="d">'+esc(r.pair+' '+r.expiry)+' · '+esc(r.strike_spec+wing)+' &rarr; '+esc(where)
-    +' · ATM '+num(r.atm_vol,4)+'</div>'
+  o.innerHTML='<div class="v">'+vnum(r.vol)+'<span style="font-size:14px;font-weight:400"> %</span></div>'
+    +'<div class="d">'+esc(r.pair+' '+r.expiry)
+    +(r.settle?'<span title="'+esc('spot date '+(r.spot_date||'')+'; '+(r.settle_rule||''))
+      +'"> (settles '+esc(r.settle)+')</span>':'')
+    +' · '+esc(r.strike_spec+wing)+' &rarr; '+esc(where)
+    +(dtxt?' · '+esc(dtxt):'')
+    +' · ATM '+vnum(r.atm_vol)+'</div>'
     +(r.warnings||[]).map(w=>'<div class="d" style="color:var(--warn)">! '+esc(w)+'</div>').join('');
 }
 /* Only the last run asked for may land.  Enter fires the key handler and then
@@ -2119,7 +2497,7 @@ async function runVQ(spin){
     // re-solving `25d` against marks that have just moved is the whole point.
     // What it resolved to is reported under them instead.
     r=await api('/api/vol?'+qs({pair:o.pair,cut:o.cut,method:o.method,expiry:ex,
-                                strike:$('#vqstrike').value.trim()||'ATM'}));
+                                strike:vqAsk()}));
   }catch(e){r={error:e.message}}
   if(seq!==VQSEQ)return;
   VQR=r; vqShow();
@@ -2127,10 +2505,16 @@ async function runVQ(spin){
 /* Ask the same question again as the marks move. */
 function refreshVQ(){if(VQR&&!VQR.error)runVQ(false)}
 $('#vqrun').onclick=()=>runVQ(true);
-['#vqexpiry','#vqstrike'].forEach(id=>{
+['#vqexpiry','#vqstrike','#vqdelta'].forEach(id=>{
   $(id).onkeydown=e=>{if(e.key==='Enter')runVQ(true)};
   $(id).onchange=()=>runVQ(true);
 });
+/* One request at a time.  Strike and delta name the same point, so the moment
+   one is typed into the other stops being the question -- cleared as it is
+   typed rather than at the run, so what is on the screen is what will be
+   asked and there is never a filled box being quietly ignored. */
+$('#vqstrike').oninput=()=>{if($('#vqstrike').value.trim())$('#vqdelta').value=''};
+$('#vqdelta').oninput=()=>{if($('#vqdelta').value.trim())$('#vqstrike').value=''};
 
 /* ---------------------- curve parameters ---------------------- */
 const PLABEL={initial_vol:'Initial vol %',long_term_vol:'Long-term vol %',mean_reversion:'Mean reversion',
@@ -2181,14 +2565,14 @@ const EVTZ={label:'HKT',offset:'+08:00',minutes:480};
 let EVLEGS=['','']; 
 function evRow(e){const w={};EVLEGS.forEach(c=>{w[c]=(+((e.weights||{})[c]||0)).toFixed(3)});
   return {when:evLocal(e.when),weights:w,adjust:(+(e.adjust||0)).toFixed(3),label:e.label||'',
-    vol_day:e.vol_day,rolls_over:e.rolls_over,height:e.height,approximate:e.approximate}}
+    vol_day:e.vol_day,rolls_over:e.rolls_over,height:e.height}}
 function evTotal(e){return EVLEGS.reduce((t,c)=>t+(+e.weights[c]||0),0)+(+e.adjust||0)}
 function evLocal(utc){const d=new Date(utc.length>16?utc:utc+'Z');
   return new Date(d.getTime()+EVTZ.minutes*6e4).toISOString().slice(0,16)}
 function evPost(local){return /[Zz]|[+-]\d\d:?\d\d$/.test(local)?local:local+EVTZ.offset}
 function renderEvents(){
   const t=$('#etable');
-  if(!EVENTS.length){t.innerHTML='<tr><td class="meta" style="padding:8px">No events. Auto-load or add a row.</td></tr>';return}
+  if(!EVENTS.length){t.innerHTML='<tr><td class="meta" style="padding:8px">No events on the EVENTS sheet. Add a row, or Reload the workbook\'s.</td></tr>';return}
   t.innerHTML=`<thead><tr><th>When (${EVTZ.label})</th>${EVLEGS.map(c=>`<th title="weight on ${c}, vol points">${esc(c)}</th>`).join('')}<th title="the pair's adjustment on top of its legs, vol points">Adj</th><th title="the bump the curve is calibrated to: both legs added, plus the adjustment">Bump %</th><th>Label</th><th>Vol day</th><th></th></tr></thead><tbody>`+
     EVENTS.map((e,i)=>`<tr>
       <td><input data-ev="${i}" data-f="when" value="${esc(e.when)}" style="width:132px"></td>
@@ -2208,19 +2592,18 @@ $('#etable').addEventListener('click',e=>{const i=e.target.dataset.rm;
   if(i!==undefined){EVENTS.splice(+i,1);renderEvents()}});
 $('#eadd').onclick=()=>{const d=new Date((STATE.valuationMs||Date.now())+7*864e5);
   EVENTS.push(evRow({when:d.toISOString(),adjust:1.0,label:'',vol_day:null}));renderEvents()};
+/* Reload: this pair's rows as the *workbook* has them, replacing what the
+   session has marked.  It replaces rather than merges on purpose -- the sheet
+   is one table and half of it is not a table.  Nothing is applied until
+   Apply, so a reload can be looked at and abandoned. */
 $('#eload').onclick=async()=>{
-  const m=$('#emsg');m.className='msg';m.innerHTML='<span class="spin"></span> loading calendar…';
+  const m=$('#emsg');m.className='msg';m.innerHTML='<span class="spin"></span> reading the workbook…';
   try{
-    const d=await api('/api/events/suggest?'+qs({pair:mq().pair,horizon:$('#ehorizon').value}));
-    const have=new Set(EVENTS.map(e=>e.when));
-    let added=0, approx=0;
-    d.events.forEach(e=>{ const when=evLocal(e.when); if(have.has(when))return;
-      EVENTS.push(evRow({when:e.when,weights:e.weights,adjust:0,label:e.name,vol_day:e.vol_day,
-        rolls_over:false,approximate:e.approximate}));
-      added++; if(e.approximate)approx++;});
+    const d=await api('/api/events/workbook?'+qs({pair:mq().pair}));
+    EVENTS=d.events.map(evRow);
     EVENTS.sort((a,b)=>a.when<b.when?-1:1); renderEvents();
     m.className='msg ok';
-    m.textContent=`added ${added} event${added===1?'':'s'}${approx?` (${approx} with approximate dates)`:''} — review, then Apply`;
+    m.textContent=`${EVENTS.length} row${EVENTS.length===1?'':'s'} from ${d.source||'the workbook'} — review, then Apply`;
   }catch(e){m.className='msg bad';m.textContent=e.message}
 };
 $('#eapply').onclick=async()=>{
@@ -2230,40 +2613,54 @@ $('#eapply').onclick=async()=>{
       ({when:evPost(e.when),weights:e.weights,adjust:e.adjust,label:e.label}))});
     EVENTS=r.events.map(evRow);
     renderEvents();
-    m.className=r.problems.length?'msg warn':'msg ok';
-    m.textContent=r.problems.length?r.problems.join('; '):`${EVENTS.length} event heights solved`;
+    /* A shared weight moves other pairs.  That is the point of the sheet and
+       it is never hidden: the notes name every pair a weight reached. */
+    const said=(r.problems||[]).concat(r.notes||[]);
+    m.className=(r.problems||[]).length?'msg warn':'msg ok';
+    m.textContent=said.length?said.join('; '):`${EVENTS.length} event heights solved`;
     await loadMarks(); await redraw(); schedulePrice();
   }catch(e){m.className='msg bad';m.textContent=e.message}
 };
 
 
 /* ---------------------- event weights (optional card) ---------------------- */
-let EW=null;   /* {events:[{name,currency,weights}], currencies:[...]} -- the browser's */
+/* The currency side of the EVENTS sheet, whole: a row is one release, a
+   column is one currency.  Each pair's own adjustment column is not here and
+   is not touched -- this card cannot see it, so it must not clear it.  The
+   browser owns the panel and posts it whole, like every other one. */
+let EW=null;   /* {events:[{when,label,weights,pairs}], currencies:[...]} */
 function renderWeights(){
   const t=$('#ewtable'); if(!EW)return;
-  t.innerHTML=`<thead><tr><th>Event</th>${EW.currencies.map(c=>`<th>${esc(c)}</th>`).join('')}</tr></thead><tbody>`+
-    EW.events.map((e,i)=>`<tr><td>${esc(e.name)}</td>${EW.currencies.map(c=>
-      `<td><input class="n" data-ew="${i}" data-c="${esc(c)}" value="${(+(e.weights[c]||0)).toFixed(2)}" style="width:48px"${c===e.currency?' title="releasing currency"':''}>${c===e.currency?'<span class="meta"> ·</span>':''}</td>`).join('')}</tr>`).join('')+'</tbody>';
+  if(!EW.events.length){t.innerHTML='<tr><td class="meta" style="padding:8px">No events on the sheet.</td></tr>';return}
+  t.innerHTML=`<thead><tr><th>When (${EVTZ.label})</th><th>Label</th>${EW.currencies.map(c=>`<th>${esc(c)}</th>`).join('')}<th title="pairs with an adjustment of their own on this row">Adjusted</th></tr></thead><tbody>`+
+    EW.events.map((e,i)=>`<tr><td class="meta">${esc(evLocal(e.when).replace('T',' '))}</td>
+      <td><input data-ew="${i}" data-f="label" value="${esc(e.label||'')}" style="width:84px"></td>${EW.currencies.map(c=>
+      `<td><input class="n" data-ew="${i}" data-c="${esc(c)}" value="${(+(e.weights[c]||0)).toFixed(2)}" style="width:48px"></td>`).join('')}
+      <td class="meta">${esc((e.pairs||[]).join(' ')||'—')}</td></tr>`).join('')+'</tbody>';
 }
 async function loadWeights(){
   const m=$('#ewmsg');m.className='msg';
   try{EW=await api('/api/events/weights');renderWeights();
-    m.textContent=EW.source?`from ${EW.source}`:'defaults (no event_weights.csv)';}
+    m.textContent=EW.source?`from ${EW.source}`:'the session\'s table';}
   catch(e){m.className='msg bad';m.textContent=e.message}
 }
 $('#ewtoggle').onclick=async()=>{const c=$('#ewcard');c.classList.toggle('hide');
   if(!c.classList.contains('hide')&&!EW)await loadWeights()};
 $('#ewreload').onclick=loadWeights;
 $('#ewtable').addEventListener('change',e=>{const i=e.target.dataset.ew;
-  if(i!==undefined)EW.events[+i].weights[e.target.dataset.c]=e.target.value});
+  if(i===undefined)return;
+  if(e.target.dataset.f==='label')EW.events[+i].label=e.target.value;
+  else EW.events[+i].weights[e.target.dataset.c]=e.target.value});
 $('#ewadd').onclick=()=>{const c=$('#ewccy').value.trim().toUpperCase();
   if(!EW||c.length!==3||!/^[A-Z]{3}$/.test(c)){$('#ewmsg').className='msg bad';$('#ewmsg').textContent='a currency is three letters';return}
   if(EW.currencies.indexOf(c)<0)EW.currencies.push(c); $('#ewccy').value='';renderWeights()};
 $('#ewapply').onclick=async()=>{
   const m=$('#ewmsg');m.className='msg';m.innerHTML='<span class="spin"></span> applying…';
-  const weights={}; EW.events.forEach(e=>{weights[e.name]={};EW.currencies.forEach(c=>{weights[e.name][c]=+(e.weights[c]||0)})});
-  try{EW=await post('/api/events/weights',{weights});renderWeights();
-    m.className='msg ok';m.textContent='applied — Auto-load now uses these; rows already on the events table are unchanged';}
+  const rows=EW.events.map(e=>{const w={};EW.currencies.forEach(c=>{w[c]=+(e.weights[c]||0)});
+    return {when:e.when+'Z',label:e.label||'',weights:w}});
+  try{EW=await post('/api/events/weights',{weights:rows});renderWeights();
+    m.className='msg ok';m.textContent='applied — every pair with these currencies re-solved';
+    await loadMarks(); await redraw(); schedulePrice();}
   catch(e){m.className='msg bad';m.textContent=e.message}
 };
 
@@ -2298,6 +2695,7 @@ function defaultPanel(from){
    are chosen from the magnitude rather than fixed. */
 function kdp(x){x=Math.abs(x)||1;return Math.min(8,Math.max(2,5-Math.floor(Math.log10(x))))}
 const sgn=(v,d)=>(v==null||!isFinite(v))?'—':(v>=0?'+':'')+v.toFixed(d);
+const vsgn=v=>sgn(v,VOLDP);
 /* A parameter that was typed reads exactly like one the market implied
    unless it is marked where it is shown. */
 function heldtag(f,k){return ((f.fixed||[]).indexOf(k)>=0)?' <i class="etoheld">held</i>':''}
@@ -2356,7 +2754,7 @@ function efield(pan,i,f){
   }else if(kind==='weighting'){
     el='<select '+a+'>'+optlist(((STATE.listed&&STATE.listed.weightings)||['vega']).map(x=>[x,x]),cur)+'</select>';
   }else if(kind==='cut'){
-    el='<select '+a+'>'+optlist((STATE.cuts||['NY']).map(x=>[x,x]),cur)+'</select>';
+    el='<select '+a+'>'+optlist((cutList().length?cutList():['NY']).map(x=>[x,x]),cur)+'</select>';
   }else if(kind==='method'){
     el='<select '+a+'>'+optlist(methodsFor(pan.pair).map(x=>[x,x]),cur)+'</select>';
   }else if(kind==='volunit'){
@@ -2414,10 +2812,10 @@ function paintPanel(i){
     '<span><i style="background:'+C2+'"></i>pasted market</span>'+
     (c?'<span><i style="background:'+C3+'"></i>'+esc(c.pair)+' vol mark</span>':'')+'</div>'+
     '<div class="etostat">'+
-      '<span>vol at forward <b>'+num(f.atm_vol,4)+'%</b></span>'+
-      (c?'<span>marked ATM <b>'+num(c.book_atm,4)+'%</b></span>':'')+
-      '<span>weighted RMSE <b>'+num(f.rmse,4)+'</b> vol pts</span>'+
-      '<span>worst <b>'+sgn(f.max_error,4)+'</b> at '+num(f.max_error_strike,dp)+'</span>'+
+      '<span>vol at forward <b>'+vnum(f.atm_vol)+'%</b></span>'+
+      (c?'<span>marked ATM <b>'+vnum(c.book_atm)+'%</b></span>':'')+
+      '<span>weighted RMSE <b>'+vnum(f.rmse)+'</b> vol pts</span>'+
+      '<span>worst <b>'+vsgn(f.max_error)+'</b> at '+num(f.max_error_strike,dp)+'</span>'+
       '<span>alpha <b>'+num(f.alpha,6)+'</b>'+heldtag(f,'alpha')+'</span>'+
       '<span>rho <b>'+sgn(f.rho,4)+'</b>'+heldtag(f,'rho')+'</span>'+
       '<span>nu <b>'+num(f.volvol,4)+'</b>'+heldtag(f,'volvol')+'</span>'+
@@ -2444,9 +2842,9 @@ function paintPanel(i){
     (c?'<th>Mark %</th><th>Fit−mark</th>':'')+'</tr></thead><tbody>';
   d.rows.forEach(r=>{
     q+='<tr><td>'+num(r.strike,dp)+'</td><td>'+num(r.moneyness,4)+'</td>'+
-       '<td>'+num(r.market_vol,4)+'</td><td>'+num(r.fit_vol,4)+'</td>'+
-       '<td'+cls(r.fit_diff)+'>'+sgn(r.fit_diff,4)+'</td>'+
-       (c?'<td>'+num(r.book_vol,4)+'</td><td'+cls(r.book_diff)+'>'+sgn(r.book_diff,4)+'</td>':'')+'</tr>';});
+       '<td>'+vnum(r.market_vol)+'</td><td>'+vnum(r.fit_vol)+'</td>'+
+       '<td'+cls(r.fit_diff)+'>'+vsgn(r.fit_diff)+'</td>'+
+       (c?'<td>'+vnum(r.book_vol)+'</td><td'+cls(r.book_diff)+'>'+vsgn(r.book_diff)+'</td>':'')+'</tr>';});
   q+='</tbody></table></div></div>';
 
   let a='';
@@ -2454,16 +2852,16 @@ function paintPanel(i){
     a='<div><h2 style="margin:0 0 8px">At the '+esc(c.pair)+' delta strikes</h2><table><thead><tr>'+
       '<th>Point</th><th>Listed K</th><th>Mark %</th><th>Listed %</th><th>Diff</th></tr></thead><tbody>';
     c.anchors.forEach(x=>{a+='<tr><td>'+esc(x.label)+'</td><td>'+num(x.listed_strike,dp)+'</td>'+
-      '<td>'+num(x.book_vol,4)+'</td><td>'+num(x.fit_vol,4)+'</td>'+
-      '<td'+cls(x.diff)+'>'+sgn(x.diff,4)+'</td></tr>';});
+      '<td>'+vnum(x.book_vol)+'</td><td>'+vnum(x.fit_vol)+'</td>'+
+      '<td'+cls(x.diff)+'>'+vsgn(x.diff)+'</td></tr>';});
     a+='<tr class="sep"><td colspan="5">read off both curves at those strikes</td></tr>';
     ['rr25','fly25','rr10','fly10'].forEach(k=>{
       if(c.rr_book[k]==null)return;
       const dd=c.rr_listed[k]-c.rr_book[k];
-      a+='<tr><td>'+k+'</td><td></td><td>'+num(c.rr_book[k],4)+'</td><td>'+num(c.rr_listed[k],4)+
-         '</td><td'+cls(dd)+'>'+sgn(dd,4)+'</td></tr>';});
-    a+='<tr><td>ATM</td><td>'+num(d.forward,dp)+'</td><td>'+num(c.book_atm,4)+'</td><td>'+
-       num(f.atm_vol,4)+'</td><td'+cls(c.atm_diff)+'>'+sgn(c.atm_diff,4)+'</td></tr>';
+      a+='<tr><td>'+k+'</td><td></td><td>'+vnum(c.rr_book[k])+'</td><td>'+vnum(c.rr_listed[k])+
+         '</td><td'+cls(dd)+'>'+vsgn(dd)+'</td></tr>';});
+    a+='<tr><td>ATM</td><td>'+num(d.forward,dp)+'</td><td>'+vnum(c.book_atm)+'</td><td>'+
+       vnum(f.atm_vol)+'</td><td'+cls(c.atm_diff)+'>'+vsgn(c.atm_diff)+'</td></tr>';
     a+='</tbody></table><div class="etonote">The mark column is the marked '+esc(c.pair)+
        ' surface (cut '+esc(c.cut)+', '+esc(c.method)+') at forward '+num(c.forward_fx,kdp(c.forward_fx))+
        '. Labels follow the FX pair\'s convention'+(d.underlying.invert?
@@ -2619,7 +3017,7 @@ function paintG(){
         return}
       h+='<tr><td>'+r.line+'</td><td>'+esc(r.panel)+'</td><td>'+num(r.strike,kdp(r.strike))+'</td>'+
          '<td>'+(r.type==='call'?'C':'P')+'</td><td'+cls(r.quantity)+'>'+gnum(r.quantity,0)+'</td>'+
-         '<td>'+num(r.vol,4)+'</td>'+gcell(r,'premium',0)+
+         '<td>'+vnum(r.vol)+'</td>'+gcell(r,'premium',0)+
          GCOLS.map(c=>gcell(r[which],c[0],c[2])).join('')+'</tr>';
       if(r.error)h+='<tr><td></td><td colspan="'+(6+GCOLS.length)+'" class="wmsg">'+esc(r.error)+'</td></tr>';
     });
@@ -2633,7 +3031,7 @@ function paintG(){
       h+='<tr class="sep"><td></td><td>'+esc(g.panel)+'</td><td colspan="3">'+
          esc(g.underlying)+' · '+esc(String(g.expiry).replace('T',' ').slice(0,16))+'Z · '+
          g.n+' line(s) · size '+gnum(g.contract_size,0)+'</td>'+
-         '<td>'+num(g.atm_vol,4)+'</td>'+gcell(g,'premium',0)+
+         '<td>'+vnum(g.atm_vol)+'</td>'+gcell(g,'premium',0)+
          GCOLS.map(c=>gcell(g[which],c[0],c[2])).join('')+'</tr>';
     });
     (d.contracts||[]).filter(c=>c.panels>1).forEach(c=>{
@@ -2728,8 +3126,8 @@ function tblHtml(head,rows,cls){
   return '<table'+(cls?' class="'+cls+'"':'')+'><thead><tr>'+head+'</tr></thead><tbody>'+
     body+'</tbody></table>';
 }
-const anPct=(v,d=3)=>(v==null||!isFinite(v))?'—':(v*100).toFixed(d);
-const anSgn=(v,d=3)=>(v==null||!isFinite(v))?'—':((v*100>=0?'+':'')+(v*100).toFixed(d));
+const anPct=(v,d=VOLDP)=>(v==null||!isFinite(v))?'—':(v*100).toFixed(d);
+const anSgn=(v,d=VOLDP)=>(v==null||!isFinite(v))?'—':((v*100>=0?'+':'')+(v*100).toFixed(d));
 const anRaw=(v,d=3)=>(v==null||!isFinite(v))?'—':((v>=0?'+':'')+v.toFixed(d));
 /* A premium, in basis points of the forward it is a premium on -- so it is divided by that
    forward first: 0.019 JPY on a 150 forward is 1.3bp of notional, not 192 of anything.
@@ -2893,7 +3291,7 @@ function renderShape(d){
         '</td><td>'+esc(r.dynamics_source||'—')+
         (r.dynamics_days==null?'':' <small>'+num(r.dynamics_days,0)+'d</small>')+
         '</td><td>'+
-        (r.implied_shape_error==null?'—':num(r.implied_shape_error*100,4))+'</td></tr>'))+
+        (r.implied_shape_error==null?'—':vnum(r.implied_shape_error*100))+'</td></tr>'))+
     '</div></div>'+
     '<div class="ankey"><span><b>&rho;</b> is the spot/volatility correlation a risk reversal is '+
     'paid for; <b>&nu;</b> the vol of vol a butterfly is paid for. Marked is the (&rho;, &nu;) a '+
@@ -3382,6 +3780,14 @@ const BFIELDS=[
  ['blend','Band weight %'],
  ['delta','Wing delta'],
 ];
+const BANDFREE_PARAMS=[
+ ['hazard','hazard'],
+ ['weak_share','weak share'],
+ ['weak_jump','weak jump'],
+ ['strong_jump','strong jump'],
+ ['weak_vol','weak vol'],
+ ['strong_vol','strong vol'],
+];
 function bandPaired(){return isBanded($('#mpair').value)}
 function bandPayload(){
   const out={pair:$('#mpair').value,cut:$('#mcut').value,mode:$('#bandmode').value,
@@ -3440,20 +3846,28 @@ function renderBand(){
   let f='<div class="bandgrid">'+
     '<div class="f" style="grid-column:span 2"><label>Treatment</label>'+
       '<select id="bandmode">'+optlist(modes.map(m=>[m,mlab[m]||m]),t.mode)+'</select></div>'+
-    BFIELDS.map(x=>'<div class="f"><label>'+esc(x[1])+'</label>'+
+    BFIELDS.map(x=>x[0]==='delta'?
+      '<div class="f"><label>'+esc(x[1])+'</label>'+
+      '<div style="display:flex;align-items:center;gap:6px">'+
+      '<input id="bf-delta" value="'+esc(t.delta==null?'':t.delta)+'" style="width:56px">'+
+      '<label style="display:flex;align-items:center;gap:4px;margin:0;width:auto;'+
+        'color:var(--muted);font-size:10.5px;white-space:nowrap" title="solve the hazard from '+
+        'the wings at this delta, live, on every reprice"><input type="checkbox" id="bandsolve"'+
+        (t.solve_hazard?' checked':'')+' style="width:auto"> solve hazard</label></div></div>' :
+      '<div class="f"><label>'+esc(x[1])+'</label>'+
       '<input id="bf-'+x[0]+'" value="'+esc(t[x[0]]==null?'':t[x[0]])+'"'+
       (x[0]==='lower'||x[0]==='upper'?' placeholder="policy"':'')+'></div>').join('')+
     '</div>'+
     '<div class="row" style="margin-top:10px;align-items:center">'+
       '<button id="bandapply">Apply</button>'+
-      '<label style="display:flex;align-items:center;gap:6px;margin:0;width:auto;'+
-        'color:var(--muted);font-size:11px"><input type="checkbox" id="bandsolve"'+
-        (t.solve_hazard?' checked':'')+' style="width:auto"> solve the hazard from the wings</label>'+
       '<button id="bandfit" class="ghost" title="Every tenor at once, both wings at both deltas; '+
         'fills the boxes above and marks nothing until Apply">Fit from the wings</button>'+
-      '<input id="bandfree" value="'+esc(BANDFREE)+'" style="width:170px" '+
-        'title="which break parameters to free: hazard, weak_share, weak_jump, strong_jump, '+
-        'weak_vol, strong_vol">'+
+      '<div style="display:flex;flex-wrap:wrap;gap:4px 10px;align-items:center">'+
+        BANDFREE_PARAMS.map(x=>'<label style="display:flex;align-items:center;gap:4px;margin:0;'+
+          'width:auto;color:var(--muted);font-size:11px;white-space:nowrap"><input type="checkbox" '+
+          'class="bandfreebox" value="'+x[0]+'"'+(BANDFREE.split(",").indexOf(x[0])>=0?' checked':'')+
+          ' style="width:auto"> '+esc(x[1])+'</label>').join('')+
+      '</div>'+
     '</div>'+
     '<div id="bandfitout"></div>'+
     '<div class="meta" style="margin-top:8px">'+esc(d.describe||'')+'</div>';
@@ -3491,7 +3905,9 @@ async function fitBand(){
      fit (the jump sizes, the post-break vols, the edges); the answer is
      written back into the boxes and the report goes beside them, and the
      surface does not move until Apply -- break risk is a marked input. */
-  const body=bandPayload(); body.free=$('#bandfree').value; BANDFREE=body.free;
+  const body=bandPayload();
+  body.free=$$('.bandfreebox:checked').map(x=>x.value).join(',');
+  BANDFREE=body.free;
   $('#banderr').innerHTML='';
   $('#bandstatus').innerHTML='<span class="spin"></span> fitting every tenor…';
   try{
@@ -3508,7 +3924,7 @@ async function fitBand(){
       (fit.condition==fit.condition&&fit.condition!=null?'; condition '+num(fit.condition,1):'')+'</div>';
     h+=(d.warnings||[]).map(w=>'<div class="etowarn">! '+esc(w)+'</div>').join('');
     const hz=(d.hazard_by_tenor||[]).map(x=>'<tr><td>'+esc(x.tenor)+'</td><td>'+
-      (x.hazard==null?'—':anPct(x.hazard,4))+'</td><td>'+(x.rmse==null?'':num(x.rmse*100,4))+
+      (x.hazard==null?'—':anPct(x.hazard,4))+'</td><td>'+(x.rmse==null?'':vnum(x.rmse*100))+
       '</td><td style="text-align:left;color:var(--muted);white-space:normal">'+esc(x.note||'')+'</td></tr>');
     const res=[];
     (d.rows||[]).forEach(r=>{
@@ -3637,8 +4053,8 @@ function paintCompare(d){
     let line='<tr><td>'+esc(t)+'</td>';
     d.curves.forEach(c=>{
       const v=cmpValue(c,t,'values',d.field), dv=cmpValue(c,t,'diffs',d.field);
-      line+='<td class="grp">'+anPct(v,4)+'</td>'+
-        (c.is_base?'':'<td'+cls(dv)+'>'+anSgn(dv,4)+'</td>');});
+      line+='<td class="grp">'+anPct(v)+'</td>'+
+        (c.is_base?'':'<td'+cls(dv)+'>'+anSgn(dv)+'</td>');});
     return line+'</tr>';});
   host.innerHTML='<div class="antop"><div><div class="cmpchart"></div>'+
     '<div class="legend">'+live.map((c,i)=>'<span><i style="background:'+
@@ -3732,20 +4148,33 @@ async function sessLoad(){
 $('#sesssave').onclick=()=>sessSave(false);
 $('#sesssavepair').onclick=()=>sessSave(true);
 $('#sessload').onclick=sessLoad;
-/* Save first, then export the file: what lands in the copy is what the
-   session file says, so the two cannot disagree. The route writes a copy
-   only; in-place is a typed command. */
+/* Save first, then export the file: what reaches the workbook is what the
+   session file says, so the two cannot disagree and nothing lands in the
+   book of record that is not written down beside it. The route writes the
+   loaded workbook in place and keeps what it replaced; one inline
+   confirmation, the house idiom, no browser dialog. */
 async function sessExport(){
-  $('#sessmsg').className='msg';
-  $('#sessmsg').innerHTML='<span class="spin"></span> writing the marks, then the workbook copy…';
-  try{
-    const saved=await post('/api/session/save',{path:sessPath()});
-    const r=await post('/api/session/export',{path:saved.written});
-    const bits=['written into '+r.written+' — '+r.workbook+' is unchanged'];
-    (r.notes||[]).forEach(n=>bits.push(n));
-    (r.problems||[]).forEach(n=>bits.push('! '+n));
-    sessShow(saved,bits.join(' · '),!!(r.problems&&r.problems.length));
-  }catch(e){sessShow(null,e.message,true)}
+  const c=$('#sessconfirm');c.classList.remove('hide');
+  c.innerHTML=`<span>Write the saved marks into <b>${esc(STATE.source||'the workbook')}</b>?
+      A copy of it as it is now is kept beside it.</span>
+    <div class="grow"></div><button id="sessgo" style="width:auto;padding:5px 12px;font-size:12px">Write</button>
+    <button id="sessno" style="width:auto;padding:5px 12px;font-size:12px;background:transparent;color:var(--muted);border:1px solid var(--line)">Cancel</button>`;
+  $('#sessno').onclick=()=>c.classList.add('hide');
+  $('#sessgo').onclick=async()=>{
+    const go=$('#sessgo');go.disabled=true;go.textContent='writing…';
+    $('#sessmsg').className='msg';
+    $('#sessmsg').innerHTML='<span class="spin"></span> writing the marks, then the workbook…';
+    try{
+      const saved=await post('/api/session/save',{path:sessPath()});
+      const r=await post('/api/session/export',{path:saved.written});
+      c.classList.add('hide');
+      const bits=['written into '+r.written];
+      if(r.backup)bits.push('what it replaced is at '+r.backup);
+      (r.notes||[]).forEach(n=>bits.push(n));
+      (r.problems||[]).forEach(n=>bits.push('! '+n));
+      sessShow(saved,bits.join(' · '),!!(r.problems&&r.problems.length));
+    }catch(e){c.classList.add('hide');sessShow(null,e.message,true)}
+  };
 }
 $('#sessexport').onclick=sessExport;
 
@@ -3775,12 +4204,19 @@ function moPayload(){return{
   tiles:MO.map(t=>({pair:t.pair,was_kind:t.was_kind,was_date:t.was_date,
                     now_kind:t.now_kind,now_date:t.now_date,label:t.label,on:!!t.on})),
   cut:$('#mocut').value, method:$('#momethod').value,
-  field:$('#mofield').value||'atm'};}
+  field:$('#mofield').value||'atm', big:moBig()};}
+/* What counts as a big move, in volatility points.  An empty box is the
+   server's own default rather than nothing: a threshold that had quietly
+   become zero would leave a screen with no marks on it and no reason why. */
+function moBig(){const t=($('#mobig').value||'').trim();
+  return t===''?moBigDefault():t}
+function moBigDefault(){const d=(STATE.monitor||{}).big; return d==null?0.25:d}
 function saveMO(){try{localStorage.setItem('volkit.monitor',
-  JSON.stringify({tiles:MO,field:$('#mofield').value}))}catch(e){}}
+  JSON.stringify({tiles:MO,field:$('#mofield').value,big:$('#mobig').value}))}catch(e){}}
 function loadMO(){
   let v=null; try{v=JSON.parse(localStorage.getItem('volkit.monitor')||'null')}catch(e){}
   if(v&&Array.isArray(v.tiles)){MO=v.tiles.map(moDefault); if(v.field)$('#mofield').value=v.field}
+  if(v&&v.big!=null&&v.big!=='')$('#mobig').value=v.big;
 }
 function moPairs(){
   const h=(STATE.history||{}).pairs||[];
@@ -3811,7 +4247,8 @@ function moHead(t,i){
 }
 function moTileShell(t,i){
   return '<div class="motile" data-tile="'+i+'">'+
-    '<h3><span>'+esc(t.label||(t.pair||'—'))+'</span><span class="grow"></span>'+
+    '<h3><span>'+esc(t.label||(t.pair||'—'))+'</span>'+
+      '<span class="mocount"></span><span class="grow"></span>'+
       '<label style="margin:0;width:auto;color:var(--muted);font-size:11px">'+
       '<input type="checkbox" data-t="'+i+'" data-k="on"'+(t.on?' checked':'')+
       ' style="width:auto"> on</label>'+
@@ -3827,7 +4264,7 @@ function renderTiles(){
     'A panel is one pair and two points in time.</div>';
   if(MOR)paintMonitor(MOR);
 }
-function moCell(v,dp){return (v==null||!isFinite(v))?'—':((v*100>=0?'+':'')+(v*100).toFixed(dp))}
+function moCell(v,dp){return (v==null||!isFinite(v))?'—':((v*100>=0?'+':'')+(v*100).toFixed(dp==null?VOLDP:dp))}
 function paintMonitor(d){
   const keys=(d.fields||[]).map(f=>f.key), hi=d.field;
   let n=-1;
@@ -3835,11 +4272,18 @@ function paintMonitor(d){
     const node=$('#molist').querySelector('[data-tile="'+i+'"]');
     if(!node)return;
     const body=node.querySelector('.mobody');
+    const badge=node.querySelector('.mocount');
+    badge.textContent='';
     if(!t.on){body.innerHTML='<div class="annone">off</div>';return}
     n+=1;
     const r=(d.tiles||[])[n];
     if(!r){body.innerHTML='<div class="annone">not built</div>';return}
     node.querySelector('h3 span').textContent=r.label;
+    /* A shut or scrolled-past tile still says how much moved in it. */
+    if(r.moved){
+      badge.textContent=r.moved+' big'+(r.moved_hard?' · '+r.moved_hard+' ≫':'');
+      badge.title=r.moved+' change(s) at or over '+num(d.big,2)+' vol points'+
+        (r.moved_hard?', '+r.moved_hard+' of them at or over '+num(d.big*d.big_step,2):'')}
     if(!r.ok){body.innerHTML='<div class="etoerr">! '+esc(r.message)+'</div>';return}
     let head='<th>Tenor</th>';
     keys.forEach(k=>{head+='<th'+(k===hi?' class="hi"':'')+'>'+
@@ -3849,12 +4293,18 @@ function paintMonitor(d){
       let line='<tr><td'+(row.message?' title="'+esc(row.message)+'"':'')+'>'+esc(row.tenor)+
         (row.message?' <span style="color:var(--warn)">·</span>':'')+'</td>';
       keys.forEach(k=>{const v=row.change[k];
-        /* one class attribute, not two: the highlight and the sign share it */
+        /* one class attribute, not three: the highlight, the sign and the
+           size of the move share it.  The grade comes from the server so the
+           screen and `volkit monitor` mark the same cells, and it is applied
+           to every column, not only the highlighted one -- what has moved may
+           not be what was being watched. */
         const c=(k===hi?['hi']:[]);
         if(v!=null&&isFinite(v)&&v!==0)c.push(v>0?'pos':'neg');
-        line+='<td'+(c.length?' class="'+c.join(' ')+'"':'')+'>'+moCell(v,3)+'</td>'});
+        const g=(row.grade||{})[k];
+        if(g)c.push('g'+g);
+        line+='<td'+(c.length?' class="'+c.join(' ')+'"':'')+'>'+moCell(v)+'</td>'});
       const w=row.was[hi], nw=row.now[hi];
-      line+='<td class="lv">'+anPct(w,3)+'</td><td class="lv">'+anPct(nw,3)+'</td>';
+      line+='<td class="lv">'+anPct(w)+'</td><td class="lv">'+anPct(nw)+'</td>';
       return line+'</tr>';});
     body.innerHTML='<div class="moends">was <b>'+esc(r.was.source||r.was.kind_label)+
       '</b><br>now <b>'+esc(r.now.source||r.now.kind_label)+'</b></div>'+
@@ -3873,6 +4323,9 @@ async function runMonitor(){
     paintMonitor(MOR);
     const h=STATE.history||{};
     $('#mostatus').textContent=MOR.tiles.length+' panel(s) · cut '+MOR.cut+' · '+MOR.method+
+      (MOR.big>0?' · '+MOR.moved+' change(s) of '+num(MOR.big,2)+' vol points or more'+
+        (MOR.moved_hard?', '+MOR.moved_hard+' of '+num(MOR.big*MOR.big_step,2)+' or more':'')
+        :' · big moves not marked')+
       (h.loaded?' · history '+h.source:' · no historical workbook loaded');
   }catch(e){
     $('#mostatus').innerHTML='<span style="color:var(--bad)">'+esc(e.message)+'</span>';
@@ -3886,6 +4339,10 @@ $('#modup').onclick=()=>{if(!MO.length)return;
 $('#moclear').onclick=()=>{MO=[];MOR=null;saveMO();renderTiles();$('#mostatus').textContent=''};
 $('#morun').onclick=()=>{runMonitor();runCompare()};
 $('#mofield').onchange=()=>{saveMO();if(MOR)paintMonitor(MOR);else runMonitor()};
+/* The threshold is graded on the server, so a new one is a new run, not a
+   repaint of the one already on the screen. */
+$('#mobig').oninput=()=>{saveMO();scheduleMonitor()};
+$('#mobig').onchange=()=>{saveMO();runMonitor()};
 ['#mocut','#momethod'].forEach(id=>{$(id).onchange=()=>{runMonitor();scheduleCompare()}});
 $('#mopair').onchange=()=>{saveMO()};
 $('#mohistload').onclick=()=>loadHistory('#mohist','#mostatus');
@@ -4120,7 +4577,7 @@ function paintMM(){
        screen is a silent zero with better manners. */
     (sh.superseded||[]).map(x=>'<div class="etonote">· line '+x.line+
       ' superseded by line '+x.replaced_by+': '+esc(x.describe)+' '+
-      num(x.bid,4)+'/'+num(x.ask,4)+(x.timestamp?' at '+esc(x.timestamp):'')+
+      vnum(x.bid)+'/'+vnum(x.ask)+(x.timestamp?' at '+esc(x.timestamp):'')+
       '</div>').join('');
 }
 
@@ -4193,11 +4650,11 @@ function paintMarket(d){
     h+='<tr><td>'+esc(r.describe)+(r.label?' <small>'+esc(r.label)+'</small>':'')+'</td>'+
        (timed?'<td class="mmv">'+esc(r.timestamp||'—')+'</td>':'')+
        '<td class="mmv">'+(r.size==null?'—':num(r.size,0)+'mm')+'</td>'+
-       '<td class="mmv">'+num(r.market_bid,4)+'</td><td class="mmv">'+num(r.market_ask,4)+'</td>'+
-       '<td class="mmv">'+num(r.model_before,4)+'</td>'+
-       '<td class="mmv"><b>'+num(r.model_after,4)+'</b></td>'+
-       '<td class="mmv"'+cls(r.model_move)+'>'+sgn(r.model_move,4)+'</td>'+
-       (ag?('<td class="mmv">'+num((ag.get(r.line)||{}).archive_width,3)+'</td>'+
+       '<td class="mmv">'+vnum(r.market_bid)+'</td><td class="mmv">'+vnum(r.market_ask)+'</td>'+
+       '<td class="mmv">'+vnum(r.model_before)+'</td>'+
+       '<td class="mmv"><b>'+vnum(r.model_after)+'</b></td>'+
+       '<td class="mmv"'+cls(r.model_move)+'>'+vsgn(r.model_move)+'</td>'+
+       (ag?('<td class="mmv">'+vnum((ag.get(r.line)||{}).archive_width)+'</td>'+
             '<td>'+(ag.has(r.line)?agentTag(ag.get(r.line)):'—')+'</td>'):'')+
        '<td>'+mmVerdictTag(r)+'</td></tr>';
     const suggestion=ag&&ag.has(r.line)&&['tight','wide','no rule'].indexOf(
@@ -4232,22 +4689,22 @@ function paintQuote(d){
     (ag?'<th>Archive</th><th>Agent</th>':'')+
     '<th>Their market</th><th>Verdict</th></tr></thead><tbody>';
   sh.rows.forEach(r=>{
-    const theirs=(r.market_bid==null)?'—':(num(r.market_bid,4)+' / '+num(r.market_ask,4));
+    const theirs=(r.market_bid==null)?'—':(vnum(r.market_bid)+' / '+vnum(r.market_ask));
     h+='<tr><td>'+esc(r.describe)+(r.label?' <small>'+esc(r.label)+'</small>':'')+'</td>'+
        '<td class="mmv">'+(r.size==null?'—':num(r.size,0)+'mm')+'</td>'+
-       '<td class="mmv">'+num(r.model,4)+'</td>'+
-       '<td class="mmv">'+sgn(r.skew_fair,3)+'</td>'+
-       '<td class="mmv">'+sgn(r.skew_axe,3)+'</td>'+
-       '<td class="mmv">'+sgn(r.skew_bank,3)+'</td>'+
-       '<td class="mmv"'+cls(r.skew_total)+'>'+sgn(r.skew_total,3)+(r.skew_capped?' *':'')+'</td>'+
+       '<td class="mmv">'+vnum(r.model)+'</td>'+
+       '<td class="mmv">'+vsgn(r.skew_fair)+'</td>'+
+       '<td class="mmv">'+vsgn(r.skew_axe)+'</td>'+
+       '<td class="mmv">'+vsgn(r.skew_bank)+'</td>'+
+       '<td class="mmv"'+cls(r.skew_total)+'>'+vsgn(r.skew_total)+(r.skew_capped?' *':'')+'</td>'+
        /* Asked live: the premium two-way is the answer and the volatility
           two-way it came off sits under it in small type. */
-       '<td class="mmv"><b>'+(r.premium_bid!=null?num(r.premium_bid,4):num(r.our_bid,4))+'</b>'+
-         (r.premium_bid!=null?'<br><small>'+num(r.our_bid,4)+' vol</small>':'')+'</td>'+
-       '<td class="mmv"><b>'+(r.premium_ask!=null?num(r.premium_ask,4):num(r.our_ask,4))+'</b>'+
-         (r.premium_ask!=null?'<br><small>'+num(r.our_ask,4)+' vol · '+esc(r.premium_label)+'</small>':'')+'</td>'+
-       '<td class="mmv">'+num(r.width,3)+'</td>'+
-       (ag?('<td class="mmv">'+num((ag.get(r.line)||{}).archive_width,3)+'</td>'+
+       '<td class="mmv"><b>'+(r.premium_bid!=null?num(r.premium_bid,4):vnum(r.our_bid))+'</b>'+
+         (r.premium_bid!=null?'<br><small>'+vnum(r.our_bid)+' vol</small>':'')+'</td>'+
+       '<td class="mmv"><b>'+(r.premium_ask!=null?num(r.premium_ask,4):vnum(r.our_ask))+'</b>'+
+         (r.premium_ask!=null?'<br><small>'+vnum(r.our_ask)+' vol · '+esc(r.premium_label)+'</small>':'')+'</td>'+
+       '<td class="mmv">'+vnum(r.width)+'</td>'+
+       (ag?('<td class="mmv">'+vnum((ag.get(r.line)||{}).archive_width)+'</td>'+
             '<td>'+(ag.has(r.line)?agentTag(ag.get(r.line)):'—')+'</td>'):'')+
        '<td class="mmv">'+theirs+'</td>'+
        '<td>'+mmVerdictTag(r)+'</td></tr>';
@@ -4278,8 +4735,8 @@ function paintCurve(d){
     host.innerHTML='<div class="annone">'+esc((d.unavailable||{}).curve||'not fitted')+'</div>';return}
   $('#mmcurvehead').textContent=c.evidence+' · free: '+c.free.join(', ');
   const names=c.rows.map(r=>r.tenor);
-  let h='<div class="mmstat"><span>weighted RMSE <b>'+num(c.rmse,4)+'</b> vol pts</span>'+
-    '<span>worst <b>'+sgn(c.max_error,4)+'</b> at '+esc(c.max_error_tenor)+'</span>'+
+  let h='<div class="mmstat"><span>weighted RMSE <b>'+vnum(c.rmse)+'</b> vol pts</span>'+
+    '<span>worst <b>'+vsgn(c.max_error)+'</b> at '+esc(c.max_error_tenor)+'</span>'+
     '<span>'+c.evaluations+' evaluations, '+num(c.seconds,2)+'s</span>'+
     /* A fit run inside the house judgement and one run outside it must not
        read the same, so the range is stated only when it was overridden. */
@@ -4292,10 +4749,10 @@ function paintCurve(d){
     '<span><i style="background:'+C3+'"></i>as it was</span></div></div><div>'+
     '<table><thead><tr><th>Tenor</th><th>Target</th><th>Was</th><th>Now</th><th>Miss</th>'+
     '<th>Moved</th></tr></thead><tbody>'+
-    c.rows.map(r=>'<tr><td>'+esc(r.tenor)+'</td><td class="mmv">'+num(r.target,4)+'</td>'+
-      '<td class="mmv">'+num(r.before,4)+'</td><td class="mmv">'+num(r.after,4)+'</td>'+
-      '<td class="mmv"'+cls(r.diff)+'>'+sgn(r.diff,4)+'</td>'+
-      '<td class="mmv"'+cls(r.moved)+'>'+sgn(r.moved,4)+'</td></tr>').join('')+
+    c.rows.map(r=>'<tr><td>'+esc(r.tenor)+'</td><td class="mmv">'+vnum(r.target)+'</td>'+
+      '<td class="mmv">'+vnum(r.before)+'</td><td class="mmv">'+vnum(r.after)+'</td>'+
+      '<td class="mmv"'+cls(r.diff)+'>'+vsgn(r.diff)+'</td>'+
+      '<td class="mmv"'+cls(r.moved)+'>'+vsgn(r.moved)+'</td></tr>').join('')+
     '</tbody></table><table style="margin-top:10px"><thead><tr><th>Parameter</th><th>Was</th>'+
     '<th>Now</th></tr></thead><tbody>'+
     Object.keys(c.after).map(k=>'<tr><td>'+esc(k)+(c.free.indexOf(k)<0?' <small>(pinned)</small>':'')+
@@ -4317,8 +4774,8 @@ function paintWings(d){
   $('#mmwinghead').textContent=w.inside_before+' → '+w.inside_after+' of '+w.quotes+
     ' wing quote(s) inside their market';
   host.innerHTML='<div class="mmstat">'+
-    '<span>worst miss <b>'+num(w.worst_before,4)+'</b> → <b>'+num(w.worst_after,4)+'</b> vol pts</span>'+
-    '<span>mid pull <b>'+num(w.mid_pull,3)+'</b></span>'+
+    '<span>worst miss <b>'+vnum(w.worst_before)+'</b> → <b>'+vnum(w.worst_after)+'</b> vol pts</span>'+
+    '<span>mid pull <b>'+vnum(w.mid_pull)+'</b></span>'+
     '<span>'+w.evaluations+' evaluations, '+w.slices+' smile fits, '+num(w.seconds,2)+'s</span>'+
     '<span>'+esc(w.message)+'</span></div>'+
     '<table><thead><tr><th>Smile parameter</th><th>Shift was</th><th>Shift now</th>'+
@@ -4581,9 +5038,9 @@ function paintAgent(){
       '<th>We would show</th><th>Archive</th><th>Seen</th><th>Verdict</th></tr></thead><tbody>';
     rows.forEach(r=>{
       h+='<tr><td>'+esc(r.describe)+(r.superseded?' <small>superseded</small>':'')+'</td>'+
-         '<td class="mmv">'+num(r.market_width,3)+'</td>'+
-         '<td class="mmv">'+num(r.bank_width,3)+'</td>'+
-         '<td class="mmv">'+num(r.archive_width,3)+'</td>'+
+         '<td class="mmv">'+vnum(r.market_width)+'</td>'+
+         '<td class="mmv">'+vnum(r.bank_width)+'</td>'+
+         '<td class="mmv">'+vnum(r.archive_width)+'</td>'+
          '<td class="mmv">'+(r.archive_observations||0)+' / '+(r.archive_sources||0)+'</td>'+
          '<td>'+agentTag(r)+'</td></tr>';
       if(r.note)h+='<tr><td class="mmwhy" colspan="6">'+esc(r.note)+
@@ -4603,8 +5060,8 @@ function paintAgent(){
       '<th>Newest</th></tr></thead><tbody>'+
     w.map(x=>'<tr><td>'+esc((x.delta!=null?num(x.delta*100,0)+'d ':'')+
         x.instrument.toUpperCase())+'</td><td>'+esc(x.bucket)+'</td>'+
-      '<td class="mmv">'+(x.enough?'<b>'+num(x.median,3)+'</b>':'—')+'</td>'+
-      '<td class="mmv">'+num(x.low,3)+' – '+num(x.high,3)+'</td>'+
+      '<td class="mmv">'+(x.enough?'<b>'+vnum(x.median)+'</b>':'—')+'</td>'+
+      '<td class="mmv">'+vnum(x.low)+' – '+vnum(x.high)+'</td>'+
       '<td class="mmv">'+x.observations+'</td><td class="mmv">'+x.sources+'</td>'+
       '<td class="mmv">'+(x.newest_days<1?'today':num(x.newest_days,0)+'d')+'</td></tr>'+
       (x.enough?'':'<tr><td class="mmwhy" colspan="7">'+esc(x.why_not)+'</td></tr>')).join('')+
@@ -4682,17 +5139,17 @@ function paintMark(){
   /* what the fit did */
   const f=p.fit, w=p.wings;
   h+='<div class="mmstat">';
-  if(f)h+='<span>curve: <b>'+f.rows.length+'</b> target(s), rmse <b>'+num(f.rmse,4)+'</b>, worst <b>'+
-    sgn(f.max_error,4)+'</b> at '+esc(f.max_error_tenor)+(f.converged?'':' <span style="color:var(--bad)">did not converge</span>')+'</span>';
+  if(f)h+='<span>curve: <b>'+f.rows.length+'</b> target(s), rmse <b>'+vnum(f.rmse)+'</b>, worst <b>'+
+    vsgn(f.max_error)+'</b> at '+esc(f.max_error_tenor)+(f.converged?'':' <span style="color:var(--bad)">did not converge</span>')+'</span>';
   else h+='<span>curve: not fitted</span>';
   if(w)h+='<span>wings: <b>'+w.inside_before+' → '+w.inside_after+'</b> inside, worst <b>'+
-    sgn(w.worst_after,4)+'</b>'+(w.converged?'':' <span style="color:var(--bad)">did not converge</span>')+'</span>';
+    vsgn(w.worst_after)+'</b>'+(w.converged?'':' <span style="color:var(--bad)">did not converge</span>')+'</span>';
   else h+='<span>wings: left alone</span>';
   h+='</div>';
   if(f&&f.rows.length)h+='<div class="mmwide"><table><thead><tr><th>Tenor</th><th>Target</th><th>Was</th>'+
     '<th>Proposed</th><th>Source</th></tr></thead><tbody>'+f.rows.map(r=>'<tr><td>'+esc(r.tenor)+
-    '</td><td class="mmv">'+num(r.target,4)+'</td><td class="mmv">'+num(r.before,4)+'</td><td class="mmv"><b>'+
-    num(r.after,4)+'</b></td><td class="mmwhy">'+esc(r.source)+'</td></tr>').join('')+'</tbody></table></div>';
+    '</td><td class="mmv">'+vnum(r.target)+'</td><td class="mmv">'+vnum(r.before)+'</td><td class="mmv"><b>'+
+    vnum(r.after)+'</b></td><td class="mmwhy">'+esc(r.source)+'</td></tr>').join('')+'</tbody></table></div>';
   /* the move, knob by knob, with the learned nudge marked where it applied */
   const corr=new Map((p.corrections||[]).map(x=>[x.knob,x]));
   if((p.changes||[]).length){
@@ -4712,8 +5169,8 @@ function paintMark(){
         ' archived market(s) with the surface inside</span>':'')+'</div>';
     const moved=(c.rows||[]).filter(r=>r.improved||r.worsened);
     if(moved.length)h+='<table><thead><tr><th>Archived market</th><th>Was</th><th>Proposed</th><th>After</th>'+
-      '<th></th></tr></thead><tbody>'+moved.map(r=>'<tr><td>'+esc(r.describe)+'</td><td class="mmv">'+num(r.before,3)+
-      '</td><td class="mmv">'+num(r.after,3)+'</td><td class="mmv">'+(r.inside_after?'inside':sgn(r.gap_after,3)+' outside')+
+      '<th></th></tr></thead><tbody>'+moved.map(r=>'<tr><td>'+esc(r.describe)+'</td><td class="mmv">'+vnum(r.before)+
+      '</td><td class="mmv">'+vnum(r.after)+'</td><td class="mmv">'+(r.inside_after?'inside':vsgn(r.gap_after)+' outside')+
       '</td><td><span class="mmtag '+(r.worsened?'thru':'in')+'">'+(r.worsened?'broke':'fixed')+'</span></td></tr>').join('')+
       '</tbody></table>';
     (c.notes||[]).forEach(n=>{h+='<div class="etonote">· '+esc(n)+'</div>'});
@@ -4943,14 +5400,20 @@ async function boot(){
   applyScreens();
   if(has('marking')){
     // Kept, not reset: boot() runs again after every workbook reload.
-    fillSel('#mpair',STATE.pairs||[]);
-    fillSel('#mcut',STATE.cuts||[],'TK');
+    // The marking screen opens on the managed pair this desk marks first --
+    // named here and not in the workbook, because CONFIG's order is the
+    // order every other screen reads it in and this is a preference about
+    // one screen.  `fillSel` keeps whatever is already chosen, so this is
+    // the value on a cold load and changes nothing on a reload; a build
+    // whose workbook has no CNH pair falls back to the first pair as before.
+    fillSel('#mpair',STATE.pairs||[],markingPair());
+    fillSel('#mcut',cutList(),'TK');
     setMethodSel('#mmethod',$('#mpair').value);
     loadMarking();
   }
   if(has('analysis')){
     fillSel('#anpair',STATE.pairs||[]);
-    fillSel('#ancut',STATE.cuts||[],'NY');
+    fillSel('#ancut',cutList(),'NY');
     setMethodSel('#anmethod',$('#anpair').value);
     const AN=STATE.analysis||{};
     $('#antarget').innerHTML=(AN.targets||[{key:'atm',label:'at-the-money'}]).map(x=>
@@ -4967,20 +5430,24 @@ async function boot(){
   if(has('monitor')){
     const MOS=STATE.monitor||{};
     fillSel('#mopair',STATE.pairs||[]);
-    fillSel('#mocut',STATE.cuts||[],'NY');
+    fillSel('#mocut',cutList(),'NY');
     setMethodSel('#momethod',null);
     const flds=(MOS.fields||[{key:'atm',label:'at-the-money'}]).map(x=>
       '<option value="'+esc(x.key)+'">'+esc(x.label)+'</option>').join('');
     $('#mofield').innerHTML=flds;
     $('#cmpfield').innerHTML=flds;
     if((STATE.history||{}).source)$('#mohist').value=STATE.history.source;
+    /* The default threshold is the model's own, read off /api/state, so the
+       box and `volkit monitor --big` start from one number. */
+    $('#mobig').value=moBigDefault();
+    $('#mobig').placeholder=String(moBigDefault());
     loadMO(); renderTiles();
     loadCmp(); renderCmp();
   }
   if(has('mm')){
     const MMS=STATE.marketmaker||{};
     fillSel('#mmpair',STATE.pairs||[]);
-    fillSel('#mmcut',STATE.cuts||[],'NY');
+    fillSel('#mmcut',cutList(),'NY');
     setMethodSel('#mmmethod',$('#mmpair').value);
     fillSel('#mmsource',MMS.target_sources||['overwrites']);
     $('#mmfly').innerHTML=(MMS.fly_conventions||['market']).map(x=>

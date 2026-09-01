@@ -21,15 +21,15 @@ ONEFILE = os.environ.get("VOLKIT_ONEFILE", "") not in ("", "0", "false", "no")
 
 # Bundled, read-only resources.  The paths on the right must match what volkit
 # expects at runtime, relative to paths.resource_dir(): STATIC_DIR is
-# volkit/web, and the economic calendar is read from volkit/data.  Globbed
-# rather than listed so a new page fragment or calendar file cannot be added
-# to the source tree and silently left out of the build.
+# volkit/web.  Globbed rather than listed so a new page fragment cannot be
+# added to the source tree and silently left out of the build.  volkit/data
+# holds nothing in the source tree now -- events live on the workbook's own
+# EVENTS sheet -- but the screens manifest is written into it below.
 # SPECPATH, not the working directory: PyInstaller may be invoked from
 # anywhere, and a relative glob would then quietly match nothing.
 ROOT = Path(SPECPATH)
 datas = [(str(p), "volkit/web") for p in (ROOT / "volkit/web").glob("*")
          if p.is_file() and not p.name.startswith(".")]
-datas += [(str(p), "volkit/data") for p in (ROOT / "volkit/data").glob("*.csv")]
 
 # A build may be made without some of the screens (build_exe.py --exclude-tab).
 # It writes the manifest and names it here; volkit/screens.py is the only thing

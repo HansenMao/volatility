@@ -293,7 +293,10 @@ def read_chat(path, *, archive: arch.Archive, model=None, pair: str = "",
             continue
         res.pairs.append(block_pair) if block_pair not in res.pairs else None
         try:
-            run = qmod.parse_quotes(body, pair=block_pair, fly_convention=fly_convention)
+            # A year-less expiry in a chat file is read forward from the
+            # file's own timestamp, which is when somebody wrote it.
+            run = qmod.parse_quotes(body, pair=block_pair, fly_convention=fly_convention,
+                                    today=when.date())
         except qmod.QuoteError as exc:
             res.skipped.append(f"{block_pair}: the block could not be read ({exc})")
             continue
@@ -321,7 +324,7 @@ def read_chat(path, *, archive: arch.Archive, model=None, pair: str = "",
             continue
         try:
             second = qmod.parse_quotes(extraction.text, pair=block_pair,
-                                       fly_convention=fly_convention)
+                                       fly_convention=fly_convention, today=when.date())
         except qmod.QuoteError as exc:
             res.skipped.append(f"{block_pair}: what the model wrote was not a market ({exc})")
             continue

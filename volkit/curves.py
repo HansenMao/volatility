@@ -130,16 +130,24 @@ class Curve:
         return None
 
 
-def _point(tenor: str, values: dict[str, float | None], message: str = "") -> CurvePoint:
+def _point(tenor: str, values: dict[str, float | None], message: str = "",
+           t: float | None = None) -> CurvePoint:
     """One point, carrying every field -- the ones it has not got as ``None``.
 
     Filled out rather than sparse, so a source that cannot produce a field is
     a blank cell in the same row as the others rather than a missing key the
     front end has to guess about.
+
+    ``t`` is where the tenor actually falls on this pair's calendar, and a
+    source that has a pair passes it: a curve read off a surface must be
+    plotted at the same place the surface was read at.  A pasted curve has no
+    pair behind it and falls back to the tenor's nominal length, which is the
+    only thing there is to fall back on.
     """
     full: dict[str, float | None] = {f: None for f in CURVE_FIELDS}
     full.update({k: v for k, v in values.items() if k in full})
-    return CurvePoint(tenor=tenor, t=tenor_to_years(tenor), values=full, message=message)
+    return CurvePoint(tenor=tenor, t=tenor_to_years(tenor) if t is None else float(t),
+                      values=full, message=message)
 
 
 # --------------------------------------------------------------------------
@@ -159,7 +167,7 @@ def surface_curve(book, pair: str, *, cut: str = "NY", method: str | None = None
                   source=f"fitted surface, {method or surface.method} at the {cut} cut",
                   asof=book.clock.now.isoformat())
     for tenor in book.data.tenor_points:
-        t = tenor_to_years(tenor)
+        t = surface.tenor_years(tenor)
         expiry = book.clock.datetime_from_years(t)
         values: dict[str, float | None] = {}
         why = ""
@@ -173,7 +181,7 @@ def surface_curve(book, pair: str, *, cut: str = "NY", method: str | None = None
                 values[f"bf{tag}"] = float(surface.strangle(expiry, d, method, cut))
             except Exception as exc:  # noqa: BLE001
                 why = why or f"{tag}d wing: {type(exc).__name__}: {exc}"
-        curve.points.append(_point(tenor, values, why))
+        curve.points.append(_point(tenor, values, why, t))
     return curve
 
 
@@ -198,7 +206,7 @@ def marks_curve(book, pair: str) -> Curve:
         return curve
     for mark in marks:
         try:
-            t = tenor_to_years(mark.tenor)
+            t = surface.tenor_years(mark.tenor)
         except TenorError as exc:
             curve.warnings.append(str(exc))
             continue
@@ -206,7 +214,7 @@ def marks_curve(book, pair: str) -> Curve:
             "atm": float(surface.atm.term_vol(t)),
             "rr25": float(mark.rr_25), "bf25": float(mark.st_25),
             "rr10": float(mark.rr_10), "bf10": float(mark.st_10),
-        }))
+        }, t=t))
     return curve
 
 
@@ -318,16 +326,12 @@ def parse_pasted_curve(text: str, *, label: str = "pasted curve") -> Curve:
                          "'1M 8.20' or '1M 8.20 -0.35 0.22 -0.60 0.75'")
         return curve
 
-    levels = [nums[0] for _, _, nums in rows]
-    lo, hi = min(levels), max(levels)
-    if lo < 1.0 <= hi:
-        curve.ok = False
-        curve.message = (f"the at-the-money levels straddle 1.0 ({lo:g} to {hi:g}), so the "
-                         "paste could be in volatility points or in decimals; it is refused "
-                         "rather than guessed")
-        return curve
-    divisor, unit = (100.0, "volatility points") if hi >= 1.0 else (1.0, "decimals")
-    curve.source = f"pasted curve, {len(rows)} tenor(s), read as {unit}"
+    # A pasted curve is in volatility points, as written.  The level is not
+    # evidence of the unit (§4): a managed pair's whole curve sits below 1.0
+    # and reading that as decimals put it on the monitor at a hundred times
+    # its mark.  There is nothing else this paste can be in.
+    divisor = 100.0
+    curve.source = f"pasted curve, {len(rows)} tenor(s), read as volatility points"
     for _, tenor, nums in rows:
         values = {name: nums[k] / divisor
                   for k, name in enumerate(CURVE_FIELDS) if k < len(nums)}

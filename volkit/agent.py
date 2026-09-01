@@ -872,7 +872,8 @@ class SuggestPanel:
         if pasted:
             try:
                 run_ = parse_quotes(self.text, pair=pair, vol_unit=self.vol_unit,
-                                    fly_convention=self.fly_convention)
+                                    fly_convention=self.fly_convention,
+                                    today=clock.now.date())
             except QuoteError as exc:
                 out["warnings"].append(str(exc))
                 if not asked:
@@ -886,7 +887,8 @@ class SuggestPanel:
             from .quotes import instrument_key, parse_requests
             try:
                 reqs = parse_requests(self.request_text, pair=pair,
-                                      fly_convention=self.fly_convention)
+                                      fly_convention=self.fly_convention,
+                                      today=clock.now.date())
             except (QuoteError, ValueError) as exc:
                 out["warnings"].append(f"request box: {exc}")
                 return out
@@ -1135,7 +1137,7 @@ def file_paste(archive: arch.Archive, payload: dict, *, clock,
     if not str(panel.text or "").strip():
         raise AgentError("there is nothing pasted to file")
     run_ = parse_quotes(panel.text, pair=panel.pair, vol_unit=panel.vol_unit,
-                        fly_convention=panel.fly_convention)
+                        fly_convention=panel.fly_convention, today=clock.now.date())
     day = clock.now.replace(hour=0, minute=0, second=0, microsecond=0)
     observations = arch.from_quotes(
         run_, pair=panel.pair, source="chat", origin="pasted on the market-maker screen",

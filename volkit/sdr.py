@@ -174,7 +174,9 @@ def read_sdr(path, *, pairs=None, known_pairs=None, source: str = "sdr",
         return _read_zip(path, out, want=want, known=known, source=source, origin=origin)
     try:
         handle = open_text(path, newline="")
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
+        # ``open_text`` reads and decodes before it hands back a handle, so a
+        # file in no readable encoding fails here rather than mid-parse.
         raise SdrError(f"cannot open the dissemination file {path}: {exc}") from None
     with handle as fh:
         _read_handle(fh, out, want=want, known=known, source=source, origin=origin,

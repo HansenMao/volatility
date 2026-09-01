@@ -20,12 +20,12 @@ from pathlib import Path
 # choices, and a parser cannot be built from a module imported inside a
 # function.  All three are stdlib-only, so this does not drag the numeric
 # stack into anything that did not already have it.
-from . import (archive, config, consult, dtcc, llm, marketmaker, marking, paths,
+from . import (archive, config, consult, dtcc, kace, llm, marketmaker, marking, paths,
                remarks, rules, screens, session, synthesis)
 from .book import Book
 from .marketdata import ExcelSource, MarketDataError
 from .pricing import expiry_datetime, quick_vol
-from .timeutil import UTC, Clock, parse_datetime, tenor_to_years
+from .timeutil import UTC, Clock, parse_datetime
 
 #: Every subcommand name, whether or not this build registers it.  Used before
 #: the parser exists, to tell a configuration file's command from its options.
@@ -66,6 +66,16 @@ def _curve_fields():
 def _history_days() -> float:
     from .relvalue import HISTORY_DAYS
     return HISTORY_DAYS
+
+
+def _default_big_move() -> float:
+    """The monitor's big-move threshold, declared once in ``monitor.py``.
+
+    The screen reads the same constant off ``/api/state``, so the command
+    line and the browser cannot drift into marking different cells.
+    """
+    from .monitor import DEFAULT_BIG_MOVE
+    return DEFAULT_BIG_MOVE
 
 
 def _weights(pairs) -> dict[str, float]:
@@ -200,7 +210,9 @@ def cmd_check(args) -> int:
           f"({sum(1 for p in data.pairs.values() if p.is_cross)} crosses)")
     print(f"  tenors  : {', '.join(data.tenor_points)}")
     print(f"  quotes  : {sum(len(m) for m in data.marks.values())} across {len(data.marks)} sheets")
-    print(f"  events  : {sum(len(p.events) for p in data.params.values())}")
+    ccys = data.events.currencies()
+    print(f"  events  : {len(data.events.rows)} on the EVENTS sheet"
+          + (f", weighted on {', '.join(ccys)}" if ccys else ""))
     for note in data.notes:
         print(f"    . {note}")
     if data.problems:
@@ -216,11 +228,13 @@ def cmd_tenors(args) -> int:
     book = _book(args, [args.pair])
     surface = book[args.pair]
     print(f"{args.pair}  (valuation {book.clock.now:%Y-%m-%d %H:%M}Z, cut {args.cut})")
-    print(f"  {'tenor':<6}{'curve %':>10}{'cut %':>10}")
+    print(f"  {'tenor':<6}{'curve %':>10}{'cut %':>10}  {'expiry':<10}  {'settles':<10}")
     for tenor in book.data.tenor_points:
-        t = tenor_to_years(tenor)
+        d = book.fx_dates(args.pair, tenor)
+        t = surface.tenor_years(tenor)
         cut = surface.atm.cut_vol(book.clock.datetime_from_years(t), args.cut)
-        print(f"  {tenor:<6}{surface.atm.term_vol(t) * 100:>10.4f}{cut * 100:>10.4f}")
+        print(f"  {tenor:<6}{surface.atm.term_vol(t) * 100:>10.4f}{cut * 100:>10.4f}"
+              f"  {d.expiry:%Y-%m-%d}  {d.delivery:%Y-%m-%d}")
     return 0
 
 
@@ -234,6 +248,62 @@ def cmd_daily(args) -> int:
     else:
         print("\n".join(lines))
     return 0
+
+
+def cmd_kace(args) -> int:
+    """The kACE feed message, off the same book the screen would build it from.
+
+    The summary goes to stderr and the message to stdout (or --out), so
+    ``volkit kace USDCNH > usdcnh.xml`` writes a file that is nothing but the
+    message, and the notes are still read.  A message that cannot be built is
+    an error and a non-zero exit, never a partial file.
+    """
+    book = _book(args, [args.pair])
+    user, password = kace.credentials(args.kace_user, args.kace_password)
+    scenario = args.kace_scenario or kace.DEFAULT_SCENARIO
+    if args.clear:
+        pair = args.pair.upper()
+        if pair not in book.pairs:
+            raise ValueError(f"unknown pair {pair}")
+        text = kace.clear_message(pair, book.clock.now.date(), user, password,
+                                  scenario=scenario, timestamp=book.clock.now)
+        print(f"clearRate for {pair} in scenario {scenario}, horDate "
+              f"{book.clock.now.date():%d %b %Y}", file=sys.stderr)
+    else:
+        table = kace.SpreadTable.load(args.kace_spreads)
+        feed = kace.build(book, args.pair, table, cut=args.cut, source=args.source,
+                          method=args.method)
+        s = feed.summary()
+        print(f"{s['pair']}: {s['days']} days {s['first_day']} to {s['last_day']}, "
+              f"{len(s['pillars'])} pillars, {s['nodes']} nodes; horDate {s['hor_date']}, "
+              f"{s['cut']} cut, wings from {s['source']}, scenario {scenario}", file=sys.stderr)
+        print(f"  {'tenor':<6}{'expiry':<12}{'bid':>9}{'offer':>9}{'25RR':>9}{'10RR':>9}"
+              f"{'25FLY':>9}{'10FLY':>9}  wings", file=sys.stderr)
+        for p in s["pillars"]:
+            print(f"  {p['tenor']:<6}{p['expiry']:<12}{p['bid']:>9.4f}{p['offer']:>9.4f}"
+                  f"{p['rr25']:>9.4f}{p['rr10']:>9.4f}{p['fly25']:>9.4f}{p['fly10']:>9.4f}"
+                  f"  {p['wings']}", file=sys.stderr)
+        for note in s["notes"]:
+            print(f"  . {note}", file=sys.stderr)
+        text = feed.xml(user, password, scenario=scenario, timestamp=book.clock.now)
+    if args.out:
+        paths.write_text(args.out, text)
+        print(f"wrote {text.count('<node ')} nodes to {args.out}", file=sys.stderr)
+    elif not args.post:
+        sys.stdout.write(text)
+    if not args.post:
+        return 0
+    entry = kace.post_feed(text, pair=args.pair, scenario=scenario, clear=bool(args.clear),
+                           hor_date=book.clock.now.date(), nodes=text.count("<node "),
+                           url=kace.settings(args.kace_url), log=kace.PostLog.at(args.kace_log),
+                           when=book.clock.now, ca=args.kace_ca, insecure=args.kace_insecure,
+                           dry_run=bool(args.dry_run))
+    print(entry["message"], file=sys.stderr)
+    if entry.get("logged"):
+        print(f"recorded in {entry['logged']} (message {entry['hash']})", file=sys.stderr)
+    if args.dry_run:
+        return 0
+    return 0 if entry.get("ok") else 1
 
 
 def cmd_vol(args) -> int:
@@ -252,11 +322,17 @@ def cmd_vol(args) -> int:
         where = (f"strike {r['strike']:.6f}" if r["scaled"]
                  else f"K/F {r['strike_ratio']:.6f} (no feed: the smile is read in "
                       "strike/forward)")
-        print(f"  {r['pair']}  expiry {r['expiry']}  t={r['t']:.5f}y  "
-              f"cut={r['cut']}  method={r['method']}")
+        print(f"  {r['pair']}  expiry {r['expiry']}  settles {r['settle']}  "
+              f"t={r['t']:.5f}y  cut={r['cut']}  method={r['method']}")
+        print(f"  spot date {r['spot_date']}; {r['settle_rule']}")
         print(f"  {r['strike_spec']}{wing} -> {where}   (K/F {r['strike_ratio']:.6f})")
+        # The strike and the delta name one point on the smile; the card shows
+        # both and so does this, whichever of the two was asked for.
+        print(f"  delta {r['delta']:+.2f} "
+              f"({'call' if r['delta_is_call'] else 'put'}, "
+              f"{'premium adjusted' if r['premium_adjusted'] else 'unadjusted'})")
         if r["forward_source"] == "feed":
-            print(f"  spot {r['spot']:.6f}  forward {r['forward']:.6f}"
+            print(f"  spot {r['spot']:.6f}  forward {r['forward']:.6f} to {r['settle']}"
                   + (f"  (the {r['via']} triangle; the feed does not quote "
                      f"{r['pair']} itself)" if r["derived"] else "")
                   + ("  (extrapolated beyond the feed's pillars)"
@@ -275,17 +351,19 @@ def cmd_smile(args) -> int:
     surface = book[args.pair]
     expiry = expiry_datetime(book, args.pair, args.expiry)
     sl = surface.slice_at(expiry, args.method, args.cut)
-    print(f"{args.pair}  expiry {expiry:%Y-%m-%d}  t={sl.t:.5f}y  method={args.method}")
+    print(f"{args.pair}  expiry {expiry:%Y-%m-%d}  settles "
+          f"{book.settlement_date(args.pair, expiry):%Y-%m-%d}  t={sl.t:.5f}y  "
+          f"method={args.method}")
     # The same scale the marking screen's chart uses: with a feed the strikes
     # are printed as levels, without one they stay in K/F and the heading says
     # so.  The smile is fitted in moneyness either way.
-    level = book.market_level(args.pair, sl.t)
+    level = book.market_level_for(args.pair, expiry.date())
     scale = level["forward"] if level["feed"] else 1.0
     print(f"  {'point':<10}{'strike' if level['feed'] else 'K/F':>12}{'vol %':>10}")
     for row in surface.smile_table(expiry, method=args.method, cut=args.cut):
         print(f"  {row['label']:<10}{row['strike'] * scale:>12.6f}{row['vol'] * 100:>10.4f}")
     if level["feed"]:
-        print(f"  spot {level['spot']:.6f}  forward {scale:.6f}"
+        print(f"  spot {level['spot']:.6f}  forward {scale:.6f} to {level['settle']}"
               + (f"  (the {level['via']} triangle; the feed does not quote "
                  f"{args.pair.upper()} itself)" if level["derived"] else "")
               + ("  (extrapolated beyond the feed's pillars)"
@@ -786,26 +864,37 @@ def cmd_monitor(args) -> int:
             print(f"  . {p}", file=sys.stderr)
 
     panel = monitor_mod.MonitorPanel(tiles=tuple(tiles), cut=args.cut, method=args.method,
-                                     field=args.field)
+                                     field=args.field, big=args.big / 100.0)
     r = panel.run(book, history)
     from .curves import CURVE_FIELDS, FIELD_LABELS
     keys = list(CURVE_FIELDS)
     print(f"monitor — valuation {book.clock.now:%Y-%m-%d %H:%M}Z, cut {args.cut}, "
           f"{args.method}; changes in volatility points")
+    # The same grading the screen shades cells with, in the only marking a
+    # terminal has.  A column is still 11 wide: 9 for the number, 2 for the
+    # mark, so the header keeps its place.
+    marks = {0: "", 1: "*", 2: "**"}
+    if r["big"] > 0:
+        print(f"  {r['moved']} big move(s) at or over {r['big']:g} volatility points, marked *"
+              f"; {r['moved_hard']} of them at or over {r['big'] * r['big_step']:g}, marked **")
     for tile in r["tiles"]:
-        print(f"\n{tile['label']}")
+        print(f"\n{tile['label']}"
+              + (f"  [{tile['moved']} big]" if tile.get("moved") else ""))
         if not tile["ok"]:
             print(f"  UNAVAILABLE: {tile['message']}")
             continue
         print(f"  was: {tile['was']['source'] or tile['was']['kind_label']}")
         print(f"  now: {tile['now']['source'] or tile['now']['kind_label']}")
-        print(f"  {'tenor':<7}" + "".join(f"{k:>11}" for k in keys)
-              + f"   {FIELD_LABELS[args.field]} was -> now")
+        # Nine columns for the number and two for the mark, header included,
+        # so a starred row and a plain one line up under the same heading.
+        print(f"  {'tenor':<7}" + "".join(f"{k:>9}  " for k in keys)
+              + f" {FIELD_LABELS[args.field]} was -> now")
         for row in tile["rows"]:
             line = f"  {row['tenor']:<7}"
             for k in keys:
                 v = row["change"][k]
-                line += "—".rjust(11) if v is None else f"{v * 100:>+11.4f}"
+                line += ("—".rjust(9) + "  " if v is None else
+                         f"{v * 100:>+9.4f}{marks[row['grade'][k]]:<2}")
             was, now = row["was"][args.field], row["now"][args.field]
             line += ("   " + ("—" if was is None else f"{was * 100:.4f}") + " -> "
                      + ("—" if now is None else f"{now * 100:.4f}"))
@@ -1312,7 +1401,7 @@ def cmd_validate(args) -> int:
         if surface is None or not marks:
             continue
         for mark in marks:
-            t = tenor_to_years(mark.tenor)
+            t = surface.tenor_years(mark.tenor)
             atm = surface.atm.cut_vol(book.clock.datetime_from_years(t), "NY") or surface.atm.term_vol(t)
             for wing, rr, st, d in (("25d", mark.rr_25, mark.st_25, 0.25),
                                     ("10d", mark.rr_10, mark.st_10, 0.10)):
@@ -1331,38 +1420,42 @@ def cmd_validate(args) -> int:
 
 
 def cmd_events(args) -> int:
-    """List the scheduled economic events volkit would auto-load for a pair."""
-    from datetime import timedelta
-    book = Book.from_excel(args.workbook, _clock(args))
-    start = book.clock.now
-    end = start + timedelta(days=args.horizon * 365.2425)
+    """Print the workbook's EVENTS table, whole or through one pair's eyes."""
     from .events import pair_legs
-    for item in args.set:
-        # EVENT:CCY=POINTS, the panel's cell as a flag; applied for this run.
-        try:
-            lhs, val = item.split("=", 1)
-            key, ccy = lhs.rsplit(":", 1)
-            book.econ.set_weight(key, ccy, float(val))
-        except ValueError as exc:
-            print(f"--set wants EVENT:CCY=POINTS, got {item!r}: {exc}", file=sys.stderr)
-            return 2
-    rows = book.econ.for_pair(args.pair, start, end)
-    a, b = pair_legs(args.pair)
-    print(f"{args.pair}: {len(rows)} scheduled events to {end:%Y-%m-%d}  "
-          f"(source {book.econ.source})")
-    print(f"  weights per currency from "
-          f"{book.econ.weights_source or 'the defaults (no event_weights.csv)'}; "
-          f"bump = {a} + {b}, before any adjustment the pair marks on top")
-    print(f"  {'event':<8}{'when (UTC)':<20}{a:>6}{b:>6}{'bump':>7}  note")
-    for e in rows:
-        note = "date is a rule of thumb, verify" if e.approximate else e.source
-        print(f"  {e.name:<8}{e.when:%Y-%m-%d %H:%M}    {e.weights[a]:>5.2f} {e.weights[b]:>5.2f} "
-              f"{e.bump:>6.2f}  {note}")
-    if args.weights:
-        print("\n  weight table (vol points):")
-        for key in book.econ.known_events():
-            w = book.econ.weights_for(key)
-            print(f"    {key:<8}" + "  ".join(f"{c} {v:g}" for c, v in w.items()))
+    book = Book.from_excel(args.workbook, _clock(args))
+    table = book.events
+    ccys = table.currencies()
+    print(f"{len(table.rows)} event(s) from {table.source or args.workbook}; "
+          f"weights on {', '.join(ccys) or 'no currency'}")
+    if args.pair is None:
+        # The sheet as it is: a row per release, its currency weights, and
+        # which pairs put an adjustment on top.
+        head = "  " + f"{'when (UTC)':<18}" + "".join(f"{c:>7}" for c in ccys) + "  adjusted"
+        print(head)
+        for row in sorted(table.rows, key=lambda r: r.when):
+            cells = "".join(f"{row.weights.get(c, 0.0) * 100:>7.2f}" for c in ccys)
+            adj = ", ".join(f"{p} {v * 100:+g}" for p, v in sorted(row.adjust.items()) if v)
+            label = f"  {row.label}" if row.label else ""
+            print(f"  {row.when:%Y-%m-%d %H:%M}  {cells}  {adj or '-'}{label}")
+        return 0
+
+    pair = args.pair.upper()
+    if pair not in book.data.pairs:
+        print(f"{pair} is not in {book.data.source}; it holds "
+              f"{', '.join(sorted(book.data.pairs))}", file=sys.stderr)
+        return 2
+    a, b = pair_legs(pair)
+    print(f"  {pair}: bump = {a} + {b} + this pair's own adjustment")
+    print(f"  {'when (UTC)':<18}{a:>7}{b:>7}{'adj':>7}{'bump':>7}  label")
+    shown = 0
+    for e in table.for_pair(pair):
+        if not args.all and not (e.bump or any(e.weights.values())):
+            continue
+        shown += 1
+        print(f"  {e.when:%Y-%m-%d %H:%M}  {e.weights[a] * 100:>6.2f} {e.weights[b] * 100:>6.2f} "
+              f"{(e.adjust or 0.0) * 100:>6.2f} {(e.bump or 0.0) * 100:>6.2f}  {e.label}")
+    if shown < len(table.rows) and not args.all:
+        print(f"  ({len(table.rows) - shown} row(s) weigh nothing on {pair}; --all shows them)")
     return 0
 
 
@@ -1394,6 +1487,9 @@ def cmd_session(args) -> int:
             if block.get("smile_overwrites"):
                 bits.append(f"{sum(len(v) for v in block['smile_overwrites'].values())} "
                             "smile overwrite(s)")
+            if block.get("smile_term"):
+                bits.append(f"{len(block['smile_term'])} marked term structure(s) "
+                            f"({', '.join(sorted(block['smile_term']))})")
             if block.get("param_shifts"):
                 bits.append(f"{len(block['param_shifts'])} wing shift(s)")
             if block.get("events"):
@@ -1403,15 +1499,16 @@ def cmd_session(args) -> int:
             if block.get("band"):
                 bits.append(f"band {block['band'].get('mode')}")
             print(f"  {name:<9}{', '.join(bits) or 'curve only'}")
-        if doc.get("event_weights"):
-            ew = doc["event_weights"]
-            marked = sum(1 for row in ew.values() for v in row.values() if v)
-            print(f"  event weights: {len(ew)} event(s), {marked} weighted cell(s)")
+        if doc.get("event_table"):
+            et = doc["event_table"]
+            marked = sum(1 for row in et for v in (row.get("weights") or {}).values() if v)
+            print(f"  event table: {len(et)} event(s), {marked} currency weight(s)")
         return 0
 
     if args.to_workbook is not None:
         # The one deliberate exception to "nothing writes to the workbook":
-        # an export, off a session *file*, into a copy unless --in-place.
+        # an export, off a session *file*, into a copy unless --in-place --
+        # which keeps the workbook it replaced beside it.
         doc = session_mod.load(path)
         out = session_mod.export_workbook(
             doc, args.workbook, args.to_workbook or None,
@@ -1419,6 +1516,8 @@ def cmd_session(args) -> int:
         if out["written"]:
             print(f"{path}: written into {out['written']}"
                   + (" (in place)" if out["in_place"] else f" -- {args.workbook} is unchanged"))
+            if out["backup"]:
+                print(f"  . the workbook as it was is kept at {out['backup']}")
         for note in out["notes"]:
             print(f"  . {note}")
         for problem in out["problems"]:
@@ -1459,7 +1558,15 @@ def cmd_serve(args) -> int:
           dtcc_proxy=getattr(args, "proxy", None),
           dtcc_direct=bool(getattr(args, "no_proxy", False)),
           journal_path=getattr(args, "journal", None),
-          rules_path=getattr(args, "rules", None))
+          rules_path=getattr(args, "rules", None),
+          kace_spreads_path=getattr(args, "kace_spreads", None),
+          kace_user=getattr(args, "kace_user", None),
+          kace_password=getattr(args, "kace_password", None),
+          kace_scenario=getattr(args, "kace_scenario", None) or kace.DEFAULT_SCENARIO,
+          kace_url=getattr(args, "kace_url", None),
+          kace_ca=getattr(args, "kace_ca", None),
+          kace_insecure=bool(getattr(args, "kace_insecure", False)),
+          kace_log_path=getattr(args, "kace_log", None))
     return 0
 
 
@@ -1703,7 +1810,8 @@ def cmd_agent(args) -> int:
         from .quotes import QuoteError, parse_quotes
         text = sys.stdin.read() if args.file in (None, "-") else paths.read_text(args.file)
         try:
-            run_ = parse_quotes(text, pair=pair, fly_convention=args.fly)
+            run_ = parse_quotes(text, pair=pair, fly_convention=args.fly,
+                                today=clock.now.date())
         except QuoteError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 2
@@ -2099,8 +2207,12 @@ def cmd_mark(args) -> int:
                 if len(bits) < 2:
                     continue
                 try:
+                    # On the pair's calendar, like every other tenor in this
+                    # package: a pasted target curve is a curve of this pair's
+                    # own expiries, and pinning it at a nominal year fraction
+                    # would target a slice a day away from the one it names.
                     targets.append(CurveTarget(tenor=bits[0].upper(),
-                                               t=tenor_to_years(bits[0]),
+                                               t=book.tenor_years(pair, bits[0]),
                                                vol=float(bits[1]) / 100.0, source="pasted"))
                 except (ValueError, KeyError) as exc:
                     print(f"  ! target line {n}: {exc}", file=sys.stderr)
@@ -2170,6 +2282,35 @@ def build_parser() -> argparse.ArgumentParser:
     # Everything a marker may move about a managed band.  Percentages, because
     # that is how they are read on the screen; BandTreatment.from_request does
     # the one conversion into decimals.
+    # The kACE feed's settings, on both the command and the server: where the
+    # spread table is, and what the message header carries.  A password on a
+    # command line is a password in a shell history, so the environment is
+    # read when the option is not given.
+    kace_opts = argparse.ArgumentParser(add_help=False)
+    kace_opts.add_argument("--kace-spreads",
+                           help=f"the 'pair,tenor,spread' table naming the pillars and the "
+                                f"ATM widths (default: {kace.SPREADS_FILENAME} beside the "
+                                f"workbook)")
+    kace_opts.add_argument("--kace-user", help=f"the feed username in the message header "
+                                               f"(default: {kace.ENV_USER} in the environment)")
+    kace_opts.add_argument("--kace-password", help=f"the feed password in the message header "
+                                                   f"(default: {kace.ENV_PASSWORD})")
+    kace_opts.add_argument("--kace-scenario", default=kace.DEFAULT_SCENARIO,
+                           help="the kACE scenario the message posts into")
+    kace_opts.add_argument("--kace-url",
+                           help=f"where the message is posted: the address the XML poster "
+                                f"page itself posts to, e.g. https://host:8500/... (default: "
+                                f"{kace.ENV_URL} in the environment; without one the message "
+                                f"can be written and copied, not posted)")
+    kace_opts.add_argument("--kace-ca", metavar="PEM",
+                           help="the CA bundle that signs the kACE server's certificate, when "
+                                "it is not one this machine trusts")
+    kace_opts.add_argument("--kace-insecure", action="store_true",
+                           help="post over https without checking the server's certificate")
+    kace_opts.add_argument("--kace-log",
+                           help=f"where every post is recorded, one JSON line each (default: "
+                                f"{kace.POST_LOG_FILENAME} beside the workbook)")
+
     band_opts = argparse.ArgumentParser(add_help=False)
     band_opts.add_argument("--band-mode", choices=list(_band_modes()),
                            help="warn (default), off, or mixture. --method BAND implies mixture")
@@ -2225,17 +2366,19 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--to-workbook", nargs="?", const="", metavar="OUT",
                    help="write the file's marks into the workbook's own cells: curve "
                         "parameters and events into PARAMS, overwrites, wing shifts and "
-                        "the anchor into 'atm 1m' / 'slog25 3m' / 'shift rho25' / 'anchor' "
+                        "the anchor into 'atm 1m' / 'slog25 3m' / 'term rho10 decay' / "
+                        "'shift rho25' / 'anchor' "
                         "rows, the band treatment into a BANDS sheet. Written to OUT, or "
                         f"to a copy beside the workbook ('{session.EXPORT_SUFFIX}' added "
                         "to its name) -- never into the workbook itself unless --in-place")
     s.add_argument("--in-place", action="store_true",
-                   help="with --to-workbook: overwrite the workbook itself")
+                   help="with --to-workbook: write the workbook itself, keeping "
+                        "what it replaced as <name>.bak-<stamp>.xlsx beside it")
     s.add_argument("--pair", help="one pair only (default: every pair in the book)")
     s.add_argument("--note", default="", help="a line recorded in the file")
     s.set_defaults(func=cmd_session)
 
-    s = add_command("serve", parents=[common], help="run the local web interface")
+    s = add_command("serve", parents=[common, kace_opts], help="run the local web interface")
     s.add_argument("--host", default="127.0.0.1")
     s.add_argument("--port", type=int, default=8765)
     s.add_argument("--no-browser", action="store_true")
@@ -2524,14 +2667,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("pair", nargs="?", help="default: every pair")
     s.set_defaults(func=cmd_validate)
 
-    s = add_command("events", parents=[common], help="scheduled economic events for a pair")
-    s.add_argument("pair")
-    s.add_argument("--horizon", type=float, default=1.0, help="years")
-    s.add_argument("--weights", action="store_true",
-                   help="also print every event's weight on every currency it is weighted on")
-    s.add_argument("--set", action="append", default=[], metavar="EVENT:CCY=POINTS",
-                   help="mark one event's weight on one currency for this run, e.g. "
-                        "--set FOMC:JPY=0.3 (the weights card on the marking screen)")
+    s = add_command("events", parents=[common],
+                    help="the workbook's EVENTS table, whole or for one pair")
+    s.add_argument("pair", nargs="?",
+                   help="default: the whole table, one row per release")
+    s.add_argument("--all", action="store_true",
+                   help="with a pair, also show rows that weigh nothing on it -- "
+                        "the blank cells where an adjustment would be typed")
     s.set_defaults(func=cmd_events)
 
     s = add_command("tenors", parents=[common], help="print the ATM term structure")
@@ -2546,6 +2688,29 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--field", default="cumulative", choices=["cumulative", "daily"])
     s.add_argument("--out", help="output file (default: stdout)")
     s.set_defaults(func=cmd_daily)
+
+    s = add_command("kace", parents=[common, kace_opts],
+                       help="the marked surface as a kACE RATE_FEED message, to paste into "
+                            "the XML poster (replaces the XML_poster workbook)")
+    s.add_argument("pair")
+    s.add_argument("--out", help="write the message here (default: stdout; the summary "
+                                 "always goes to stderr)")
+    s.add_argument("--clear", action="store_true",
+                   help="the clearRate message that wipes the pair's vols from the "
+                        "scenario, instead of the feed")
+    s.add_argument("--source", default="marks", choices=list(kace.SOURCES),
+                   help="where the wings come from: the quoted marks (what the sheet "
+                        "posted), or what the fitted surface returns at each pillar")
+    s.add_argument("--cut", default="NY", help="the cut the daily series is integrated to")
+    s.add_argument("--method", default="SVI", choices=list(_methods()),
+                   help="smile interpolation for --source fitted")
+    s.add_argument("--post", action="store_true",
+                   help="send the message to --kace-url the way the poster page does, and "
+                        "record the outcome in the post log; the message is still written "
+                        "to --out when that is given")
+    s.add_argument("--dry-run", action="store_true",
+                   help="with --post: say what would be sent and where, and send nothing")
+    s.set_defaults(func=cmd_kace)
 
     s = add_command("band", parents=[common, band_opts],
                        help="the managed-band read-out for a pegged pair")
@@ -2565,8 +2730,9 @@ def build_parser() -> argparse.ArgumentParser:
     s = add_command("vol", parents=[common, band_opts],
                        help="volatility for a strike and expiry")
     s.add_argument("pair")
-    s.add_argument("expiry", help="a tenor (1W, 8d, 3M) or a date (2024-05-28, "
-                                  "28May24, 5/28/2024)")
+    s.add_argument("expiry", help="a tenor (1W, 8d, 3M, 1wk, 3mth) or a date "
+                                  "(2024-05-28, 28May24, 5/28/2024), the year "
+                                  "optional: '28 May' is the next one of it")
     s.add_argument("--strike", default="ATM",
                    help="a number, 'ATM', or a delta like '25d', '10dp', '-25d' -- the "
                         "pricing screen's own strike box. A bare '25d' takes the call, "
@@ -2650,6 +2816,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--history", default=_default_history(),
                    help="historical workbook: one sheet per pair, one row per date")
     s.add_argument("--vol-unit", default="auto", choices=["auto", "percent", "decimal"])
+    s.add_argument("--big", type=float, default=_default_big_move(), metavar="POINTS",
+                   help="what counts as a big move, in volatility points: every change at or "
+                        "over it is marked '*' and one at or over twice it '**', in all five "
+                        "columns. 0 turns the marking off (default: %(default)g)")
     s.add_argument("--cut", default="NY")
     s.add_argument("--method", default="SVI")
     s.set_defaults(func=cmd_monitor)
@@ -2704,8 +2874,9 @@ def build_parser() -> argparse.ArgumentParser:
     s = add_command("smile", parents=[common, band_opts],
                        help="print the smile at one expiry")
     s.add_argument("pair")
-    s.add_argument("expiry", help="a tenor (1W, 8d, 3M) or a date (2024-05-28, "
-                                  "28May24, 5/28/2024)")
+    s.add_argument("expiry", help="a tenor (1W, 8d, 3M, 1wk, 3mth) or a date "
+                                  "(2024-05-28, 28May24, 5/28/2024), the year "
+                                  "optional: '28 May' is the next one of it")
     s.add_argument("--method", default="SVI", choices=list(_methods()))
     s.add_argument("--cut", default="TK")
     s.add_argument("--feed", default=_default_feed(),
@@ -2754,26 +2925,9 @@ def _requested_screens(argv: list[str]) -> list[str]:
 
 
 def _utf8_streams() -> None:
-    """Speak UTF-8 on the standard streams, whatever the machine's locale is.
-
-    The tables printed here are full of em dashes and greek letters, and a
-    tile's label carries an arrow.  Interactively Windows writes them through
-    the console's own Unicode call and all is well, but the moment the output
-    is piped or redirected Python falls back to the locale encoding -- cp1252
-    on the desk -- and a single arrow ends the run with a UnicodeEncodeError
-    instead of a table.  A redirected *input* is the same story: a broker run
-    saved out of a chat window is UTF-8, and read as cp1252 the quotes come
-    back as mojibake.  ``errors="replace"`` on the way in, because a byte this
-    tool cannot read is one bad character on one line and is visible there,
-    not a reason to refuse a whole run.
-    """
-    for stream, errors in ((sys.stdin, "replace"), (sys.stdout, "strict"),
-                           (sys.stderr, "strict")):
-        try:
-            stream.reconfigure(encoding="utf-8", errors=errors)
-        except (AttributeError, ValueError, OSError):
-            pass          # not a real stream (a test's StringIO, or a pipe
-                          # somebody has already wrapped); nothing to do.
+    """The streams speak UTF-8.  Said once, in ``paths``, beside the file
+    encoding, so the launcher can call it before it imports anything heavy."""
+    paths.use_utf8_streams()
 
 
 def main(argv=None) -> int:
@@ -2799,6 +2953,13 @@ def main(argv=None) -> int:
     except (config.ConfigError, screens.ScreenError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+
+    # A file that was not UTF-8 was still read, and says so.  Printed here
+    # rather than raised, because the file is the one the desk actually saved
+    # -- but a file read in an encoding nobody chose must not be silent about
+    # it either.
+    for note in paths.ENCODING_NOTES:
+        print(f"note: {note}", file=sys.stderr)
 
     problems = preflight.run()
     if any("not installed" in p or "time zone database" in p for p in problems):

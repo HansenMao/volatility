@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import math
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime
 
 from . import black, exotics
@@ -111,6 +111,79 @@ def resolve_strike(surface, text, slice_, forward: float, expiry_dt, *,
     return ratio, ratio * forward, StrikeSpec("delta", spec.value, side_is_call, True, spec.text)
 
 
+def leg_dates(book, pair: str, text, settle=None):
+    """The FX date bundle behind one leg's expiry box.
+
+    A tenor is resolved on the pair's calendar -- spot date, settlement date,
+    and the expiry back from it -- and a date typed straight in is taken as
+    the expiry, with the same settlement lag applied to it.  One function, so
+    the settlement date a leg *shows* and the settlement date its forward is
+    read on are the same date; and so a screen never has to know which of the
+    two spellings somebody used.
+
+    ``settle`` is a settlement date **stated** rather than derived, and is the
+    one thing about a leg's dates the calendar cannot be asked for: a broken
+    date, a trade the counterparty settles a day late, a corporate date agreed
+    away from the standard lag.  It moves the settlement date and nothing
+    else -- the expiry is what the option is worth time on, and it stays where
+    it was typed -- and because this is the one construction, the date the
+    screen shows and the date the forward is read on move together.  A blank
+    hands the leg back to the calendar, which is how every other overridable
+    box on this screen is handed back.
+
+    A stated date **before the expiry** is refused: an option cannot settle
+    before it is exercised, and a forward read there would be a forward to a
+    date the trade has not reached.  A stated date the calendar would not
+    settle on is allowed and *reported* -- that is exactly the case the box
+    exists for, and it is the desk's to make, not this function's to refuse.
+    """
+    if isinstance(text, datetime):
+        dates = book.calendars.dates_for_expiry(pair, text.date(), book.clock.now.date())
+    elif isinstance(text, date):
+        dates = book.calendars.dates_for_expiry(pair, text, book.clock.now.date())
+    else:
+        s = str(text).strip()
+        if not s:
+            raise ValueError("expiry is required")
+        try:
+            parse_tenor(s)
+        except ValueError:
+            dates = book.calendars.dates_for_expiry(
+                pair, parse_datetime(s, today=book.clock.now.date()).date(),
+                book.clock.now.date())
+        else:
+            dates = book.calendars.fx_dates(pair, s, book.clock.now.date())
+    if settle is None or (isinstance(settle, str) and not settle.strip()):
+        return dates
+    stated = book.stated_date(settle)
+    if stated < dates.expiry:
+        raise ValueError(
+            f"the settlement date {stated.isoformat()} is before the expiry "
+            f"{dates.expiry.isoformat()}; an option settles on or after the day it "
+            "expires. Empty the box to settle on the pair's own calendar")
+    return replace(dates, delivery=stated,
+                   rule=f"settlement date as typed; the calendar would settle this expiry "
+                        f"on {dates.delivery.isoformat()}")
+
+
+def settlement_note(book, pair: str, dates, stated: bool) -> str:
+    """What is worth saying out loud about a *stated* settlement date.
+
+    Only ever about a date somebody typed: one the calendar produced is
+    already a value date by construction, and a note on every leg is a note
+    nobody reads.  A stated date that is not a value date for the pair is the
+    thing to say -- it is deliverable only by agreement -- and it is a note
+    and not a refusal, because a broken date is precisely what the box is
+    there to hold.
+    """
+    if not stated:
+        return ""
+    if book.calendars.is_settlement_day(pair, dates.delivery):
+        return ""
+    return (f"{dates.delivery.isoformat()} is not a value date for {pair.upper()}; "
+            "the forward is read there anyway")
+
+
 def expiry_datetime(book, pair: str, text) -> datetime:
     """A typed expiry as an instant: a tenor on the calendar, or a date as given.
 
@@ -118,7 +191,9 @@ def expiry_datetime(book, pair: str, text) -> datetime:
     through spot and the delivery date on the pair's own calendar, as the
     market does, and anything else is handed to ``timeutil.parse_datetime``,
     which reads the tabular formats, the spellings a person types
-    (``28May24``, ``28 May 2024``, ``2024/05/28``) and ISO 8601.
+    (``28May24``, ``28 May 2024``, ``2024/05/28``) and ISO 8601.  A date with
+    no year on it (``28 May``) is the next one of it, resolved forward from
+    the book's clock.
 
     A time of day survives.  A tenor has none and lands at midnight UTC; a
     string that carried one keeps it, because an option struck at a cut is
@@ -134,8 +209,9 @@ def expiry_datetime(book, pair: str, text) -> datetime:
     try:
         parse_tenor(s)
     except ValueError:
-        return parse_datetime(s)
-    return datetime.combine(book.calendars.expiry_date(pair, s, book.clock.now.date()),
+        # The book's clock says which year a date written without one means.
+        return parse_datetime(s, today=book.clock.now.date())
+    return datetime.combine(leg_dates(book, pair, s).expiry,
                             datetime.min.time()).replace(tzinfo=UTC)
 
 
@@ -161,11 +237,21 @@ def resolve_legs(book, rows) -> list[dict]:
     price: it is called while somebody is still typing, and it must not wait
     for a smile.
 
-    The level is ``Book.market_level``, the one place a level is read, so a
+    The level is ``Book.market_level_for``, so it is read **on the leg's own
+    settlement date** -- the date the forward is actually a price for -- and a
     cross the feed quotes only through its legs answers here exactly as it
     does when the leg is priced.  Asking the feed for the pair *by name*, as
     this screen's fill button used to, refused EURJPY off a file quoting both
     of its legs while the pricing beneath it went through perfectly well.
+
+    The spot date and the settlement date come back with it, because a screen
+    that shows a forward should be able to say what date it is a forward to,
+    and because the settlement date is the one the desk confirms a trade on.
+    The settlement date is also an **input**: a row may state one, and then it
+    is that date the level is read on.  ``settle_default`` is the date the
+    calendar would have produced, which is what a box holding an override is
+    handed back to when it is emptied -- so the screen never has to rebuild
+    the construction to know what the default was.
 
     A row that cannot be resolved keeps its place and carries the reason, and
     a row whose expiry resolved but whose market did not keeps the expiry:
@@ -173,20 +259,36 @@ def resolve_legs(book, rows) -> list[dict]:
     """
     out: list[dict] = []
     for i, row in enumerate(rows or []):
+        # A settlement date is an override only when it was *stated*.  The
+        # screen fills the box with the calendar's own date and flags it
+        # `calc`, exactly as it fills spot from the feed, so the date being
+        # in the box is not evidence anybody chose it.  A caller that sends a
+        # date and no flag -- the API, a script -- means it.
+        settle_in = str(row.get("settle") or "").strip()
+        stated = (str(row.get("settlesrc") or "typed").strip().lower() == "typed"
+                  and bool(settle_in))
         r: dict = {"index": i, "pair": str(row.get("pair") or "").upper(),
                    "text": str(row.get("expiry") or ""), "expiry": "",
+                   "spot_date": "", "settle": "", "settle_default": "",
+                   "settle_rule": "", "settle_stated": stated, "settle_note": "",
                    "days": None, "years": None, "spot": None, "forward": None,
                    "points": None, "pip": None, "extrapolated": False,
-                   "feed": False, "derived": False, "via": "", "error": ""}
+                   "feed": False, "derived": False, "via": "",
+                   "error": ""}
         try:
             if not r["pair"]:
                 raise ValueError("the leg has no currency pair")
-            expiry = resolve_expiry(book, r["pair"], r["text"])
+            dates = leg_dates(book, r["pair"], r["text"], settle_in if stated else None)
+            expiry = dates.expiry
             when = datetime.combine(expiry, datetime.min.time()).replace(tzinfo=UTC)
             t = book.clock.years_to(when)
             r.update(expiry=expiry.isoformat(), years=t,
+                     spot_date=dates.spot.isoformat(), settle=dates.delivery.isoformat(),
+                     settle_default=book.settlement_date(r["pair"], expiry).isoformat(),
+                     settle_rule=dates.rule,
+                     settle_note=settlement_note(book, r["pair"], dates, stated),
                      days=(when - book.clock.now).total_seconds() / 86400.0)
-            level = book.market_level(r["pair"], t)
+            level = book.market_level_for(r["pair"], expiry, dates.delivery)
             if not level["feed"]:
                 raise ValueError(
                     f"the feed does not quote {r['pair']}"
@@ -223,21 +325,32 @@ def quick_vol(book, pair: str, expiry, strike="ATM", *,
     to say either: the volatility there is one number for the call and the
     put, which is `quotes._settle_side`'s rule in the other direction.
 
-    **The forward comes from the feed**, through ``Book.market_level``, which
-    is the one place a level is read (and so a cross the feed quotes only
-    through its legs is answered from them, with ``via`` naming the triangle).
+    **The forward comes from the feed**, through ``Book.market_level_for``,
+    which reads it on the expiry's own **settlement date** (and so a cross the
+    feed quotes only through its legs is answered from them, with ``via``
+    naming the triangle).
     That is what puts an absolute strike on the same axis as the marks, which
     are in moneyness.  Without a feed the smile is still perfectly readable in
     ``K/F`` -- ``ATM`` and a delta are moneyness questions and need no level
     at all -- so those answer and say the axis they answered on, exactly as
     the smile chart does; an **absolute** strike is the one that cannot be
     placed, and it is refused by name rather than quietly read as a ratio.
+
+    The answer carries **both readings of the one point**: the strike, and the
+    ``delta`` there under the pair's own convention.  A strike and a delta are
+    two ways of naming the same place on the smile and a desk has whichever
+    of them the market gave it, so the card takes either and reports the
+    other.  The delta is read at ``F = 1`` because it is a function of
+    moneyness alone, which is what lets it come back for a pair the feed does
+    not quote at all; a request that did not name a wing is answered on the
+    call, which is ``resolve_strike``'s rule for a bare ``25d`` said once more.
     """
     surface = book[pair]
+    dates = leg_dates(book, pair, expiry)
     expiry_dt = expiry_datetime(book, pair, expiry)
     slice_ = surface.slice_at(expiry_dt, method, cut)
     t = slice_.t
-    level = book.market_level(pair, t)
+    level = book.market_level_for(pair, expiry_dt.date())
     spec = parse_strike(strike)
     if forward is not None and float(forward) <= 0:
         raise ValueError(f"forward must be positive, got {forward!r}")
@@ -265,6 +378,17 @@ def quick_vol(book, pair: str, expiry, strike="ATM", *,
         surface, strike, slice_, forward, expiry_dt, method=method, cut=cut)
     vol = float(surface.vol(ratio, expiry_dt, method, cut))
 
+    # The other half of the one question: a strike and a delta name the same
+    # point on the smile, and the card asks in whichever of the two the desk
+    # has to hand.  The delta is read here rather than in the page because the
+    # convention is the pair's own (`VolSurface.conv` -- premium adjusted for a
+    # USD-base pair) and a browser has no business knowing which.  Delta is a
+    # function of moneyness, so it is read at `F = 1`: it comes back for a pair
+    # with no feed exactly as it does for one with a level.
+    delta_is_call = bool(spec.is_call) if spec.kind == "delta" else True
+    delta_pct = float(black.delta(1.0, ratio, vol, t, delta_is_call,
+                                  surface.conv)) * 100.0
+
     warnings = list(slice_.warnings)
     if scaled:
         warnings += surface.band_check(absolute, forward, method)
@@ -274,12 +398,16 @@ def quick_vol(book, pair: str, expiry, strike="ATM", *,
             else expiry_dt.strftime("%Y-%m-%d %H:%M"))
     return {
         "pair": pair.upper(), "expiry": when, "expiry_text": str(expiry),
+        "spot_date": dates.spot.isoformat(), "settle": dates.delivery.isoformat(),
+        "settle_rule": dates.rule,
         "days": (expiry_dt - book.clock.now).total_seconds() / 86400.0, "t": t,
         "vol": vol * 100.0, "atm_vol": slice_.atm_vol * 100.0,
         "strike": absolute if scaled else None, "strike_ratio": ratio,
         "strike_spec": spec.text, "strike_kind": spec.kind,
         "is_call": spec.is_call if spec.kind == "delta" else None,
         "side_explicit": side_asked,
+        "delta": delta_pct, "delta_is_call": delta_is_call,
+        "premium_adjusted": bool(surface.conv),
         "scaled": scaled, "cut": cut, "method": method or surface.method,
         "forward_source": source,
         "spot": float(level["spot"]) if source == "feed" else None,
@@ -315,6 +443,20 @@ class OptionLeg:
     overhedge: str = "none"       # none | extend | bend_front | bend_back
     buffer_pct: float = 0.0       # barrier shift, % of barrier
     conservative: bool = True     # overhedge priced against the seller
+    # -- dates and provenance, appended so the positional order above keeps
+    #    meaning what it has always meant --
+    #: A settlement date stated rather than derived: a broken date, or a trade
+    #: settling somewhere the pair's calendar would not have put it.  Blank
+    #: takes the calendar's own (``leg_dates``).
+    settle: str = ""
+    #: Where the levels in ``spot`` / ``forward`` came from, when the caller
+    #: knows and this module cannot tell.  The screen fills both boxes from
+    #: the feed and then posts what is in them, so a filled box is not
+    #: evidence anybody typed it; ``"feed"`` or ``"typed"`` says which, and
+    #: blank leaves ``market_source`` to the old inference -- a box left empty
+    #: was the feed's, a box with something in it was somebody's.
+    spot_source: str = ""
+    forward_source: str = ""
 
 
 @dataclass
@@ -326,6 +468,9 @@ class LegResult:
     pair: str = ""
     error: str = ""
     expiry: str = ""
+    spot_date: str = ""             # where a spot trade dealt today settles
+    settle: str = ""                # where this option settles: the spot lag on
+    settle_rule: str = ""           # how that date was arrived at
     days: float = 0.0
     t: float = 0.0
     spot: float = 0.0
@@ -367,7 +512,7 @@ def price_leg(book, leg: OptionLeg) -> LegResult:
                          error=f"{type(exc).__name__}: {exc}")
 
 
-def _resolve_market(book, leg: OptionLeg, t: float):
+def _resolve_market(book, leg: OptionLeg, expiry: date, settle: date | None = None):
     """Spot and the outright forward for a leg: what the leg says, else the feed.
 
     The pricing screen shows **one box each** for spot and the forward and
@@ -388,10 +533,21 @@ def _resolve_market(book, leg: OptionLeg, t: float):
     ``forward_points=0`` wants the forward *at* spot.  Nothing else can tell
     those two apart.
 
-    Through ``Book.market_level``, which is the one place a level is read, so
-    a cross the feed quotes only through its legs fills a blank box here
-    exactly as it scales the marking screen's strike axis.  ``via`` names the
-    legs when that happened and is empty when the pair was quoted itself.
+    Through ``Book.market_level_for``, so the forward is the one to **this
+    leg's settlement date** and a cross the feed quotes only through its legs
+    fills a blank box here exactly as it scales the marking screen's strike
+    axis.  ``via`` names the legs when that happened and is empty when the
+    pair was quoted itself.  ``settle`` is that date when the leg stated one
+    rather than taking the calendar's.
+
+    **What is priced is still what is in the box**, always.  ``spot_source``
+    and ``forward_source`` change no number: they are the screen saying which
+    of the levels it filled from the feed and which somebody typed over, which
+    is a fact only the screen has -- it fills the boxes and then posts them,
+    so by the time a leg arrives here a feed level and a hand-marked one look
+    identical.  Without them the row read ``typed`` for every leg on a screen
+    that had never been typed into, which is a provenance label that says
+    nothing.
     """
     spot = float(leg.spot) if leg.spot else None
     forward = float(leg.forward) if leg.forward else None
@@ -400,7 +556,7 @@ def _resolve_market(book, leg: OptionLeg, t: float):
     used_spot = used_fwd = False
     via = ""
     if spot is None or (forward is None and points is None):
-        level = book.market_level(leg.pair, t)
+        level = book.market_level_for(leg.pair, expiry, settle)
         if level["feed"]:
             via = level["via"]
             if pip is None:
@@ -424,9 +580,20 @@ def _resolve_market(book, leg: OptionLeg, t: float):
         raise ValueError(
             f"forward is not positive: spot {spot:.6g}, forward {forward:.6g}"
         )
-    source = ("feed" if used_spot and used_fwd else
-              "spot from the feed" if used_spot else
-              "forward from the feed" if used_fwd else "typed")
+    said_spot = (leg.spot_source or "").strip().lower()
+    said_fwd = (leg.forward_source or "").strip().lower()
+    # A box the caller says is the feed's is the feed's, whatever is in it; a
+    # box that was blank was filled from the feed just above and is the
+    # feed's whatever the caller says.  Neither can be talked out of.
+    spot_fed = used_spot or said_spot == "feed"
+    fwd_fed = used_fwd or said_fwd == "feed"
+    source = ("feed" if spot_fed and fwd_fed else
+              # The outright box then holds a typed spot plus the feed's own
+              # swap points, which is not the feed's outright and should not
+              # claim to be.
+              "swap from the feed" if fwd_fed and said_fwd == "feed" else
+              "spot from the feed" if spot_fed else
+              "forward from the feed" if fwd_fed else "typed")
     return spot, forward, pip, source, via
 
 
@@ -435,11 +602,16 @@ def _price_leg(book, leg: OptionLeg) -> LegResult:
     if product not in PRODUCTS:
         raise ValueError(f"unknown product {product!r}; expected one of {PRODUCTS}")
     surface = book[leg.pair]
-    expiry = resolve_expiry(book, leg.pair, leg.expiry)
+    # A stated settlement date moves the date the forward is read on and
+    # nothing else: `t` and the slice come off the expiry, which is what the
+    # option is worth time on.
+    dates = leg_dates(book, leg.pair, leg.expiry, leg.settle)
+    expiry = dates.expiry
     expiry_dt = datetime.combine(expiry, datetime.min.time()).replace(tzinfo=UTC)
     sl = surface.slice_at(expiry_dt, leg.method, leg.cut)
     t = sl.t
-    spot, forward, pip, market_source, feed_via = _resolve_market(book, leg, t)
+    spot, forward, pip, market_source, feed_via = _resolve_market(
+        book, leg, expiry, dates.delivery)
 
     def vol_at(K_abs: float, *, fwd: float = None, shift: float = 0.0) -> float:
         """Smile vol for an absolute strike, optionally on a shifted surface."""
@@ -448,11 +620,16 @@ def _price_leg(book, leg: OptionLeg) -> LegResult:
     common = dict(
         ok=True, label=leg.label or f"{leg.pair} {expiry:%d%b%y}",
         pair=leg.pair, expiry=expiry.strftime("%Y-%m-%d"),
+        spot_date=dates.spot.isoformat(), settle=dates.delivery.isoformat(),
+        settle_rule=dates.rule,
         days=(expiry_dt - book.clock.now).total_seconds() / 86400.0, t=t,
         spot=spot, forward=forward, atm_vol=sl.atm_vol * 100.0,
         product=product, market_source=market_source,
         feed_used=market_source != "typed", warnings=list(sl.warnings),
     )
+    note = settlement_note(book, leg.pair, dates, bool(str(leg.settle or "").strip()))
+    if note:
+        common["warnings"] = list(common["warnings"]) + [note]
     if feed_via:
         common["warnings"] = list(common["warnings"]) + [
             f"the feed does not quote {leg.pair.upper()}; spot and the outright forward "

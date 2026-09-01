@@ -1,8 +1,8 @@
 """Startup environment checks, with messages that say what to do.
 
-The one that matters is the time zone database.  Since cut times, the weekly
-market close and the economic calendar are all resolved through ``zoneinfo``,
-and Windows ships no IANA database at all, a Windows build without the
+The one that matters is the time zone database.  Since cut times and the
+weekly market close are resolved through ``zoneinfo``, and Windows ships no
+IANA database at all, a Windows build without the
 ``tzdata`` package fails at the first cut calculation with an error that gives
 no hint of the cause.  Better to say so at startup.
 """
@@ -33,8 +33,8 @@ def check_timezones() -> list[str]:
         f"the time zone database is unavailable ({len(missing)} of "
         f"{len(REQUIRED_ZONES)} zones missing, e.g. {missing[0]}). "
         f"Windows ships no IANA database, so install it with:  pip install tzdata"
-        f"\n  Without it, cut times, the weekly market close and the economic "
-        f"calendar cannot be resolved."
+        f"\n  Without it, cut times and the weekly market close cannot be "
+        f"resolved."
     ]
 
 

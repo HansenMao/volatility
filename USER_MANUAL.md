@@ -23,6 +23,15 @@ port       = 8900
 enable-tab = analysis
 ```
 
+**Chinese (or any non-ASCII) in a path or a setting** works. Save the file as
+**UTF-8** if you can — Notepad's *Save as* has an **Encoding** box for it —
+because a UTF-8 file reads the same on every machine. If you save it the way
+Notepad saves by default (*ANSI*), the tool still reads it, using this
+machine's own code page, and prints a `note:` line saying so; re-save it as
+UTF-8 and the note goes away. Notepad's *Unicode* (UTF-16) is read too. The
+same goes for `bands.csv`, `holiday_overrides.csv` and every other text file
+here.
+
 Whatever it read is printed at the top of the console, so you can always see
 which settings are in force. If you start the tool from a command prompt with
 any options of your own the file is ignored entirely — the two never apply half
@@ -48,6 +57,7 @@ source):
 | `bands.csv` | managed/pegged trading bands | no |
 | `volkit.cfg` | startup settings, read when the exe is double-clicked | no |
 | `holiday_overrides.csv` | extra holiday dates | no |
+| `kace_spreads.csv` | the kACE feed: which tenors are posted, and the ATM width at each | only for the kACE feed |
 | `mm_knowledge.json` | the market maker's knowledge bank — widths, floors, notes | created when you first save one |
 
 If the tool cannot find the workbook, pass it: `volkit.exe -w C:\path\to\vol_marks.xlsx`
@@ -126,14 +136,54 @@ are remembered between sessions. Prices refresh as you type unless you untick
 | Field | Accepts |
 |---|---|
 | Product | `vanilla`, `digital`, `one_touch`, `no_touch` |
-| Expiry | a tenor — `1W`, `8d`, `3M` — resolved through spot and delivery on the pair's holiday calendar, or a date written any of the usual ways: `2026-09-15`, `15Sep26`, `15 Sep 2026`, `September 15, 2026`, `2026/09/15`, `9/15/2026`, `20260915`. However you type it, the box comes back holding the one standard date, so what is priced is what you can read |
+| Expiry | a tenor — `1W`, `8d`, `3M`, `2Y` — or a short-date code — `O/N`, `T/N`, `S/N`, `S/W` — resolved on the pair's holiday calendar (see **How a tenor resolves** below), or a date written any of the usual ways: `2026-09-15`, `15Sep26`, `15 Sep 2026`, `September 15, 2026`, `2026/09/15`, `9/15/2026`, `20260915`. However you type it, the box comes back holding the one standard date, so what is priced is what you can read |
 | Strike | a number, `ATM`, or a delta — `25d`, `10dp`, `-25d`. A bare `25d` takes its wing from the option Type. Once the marks have solved it the box holds that absolute strike and its tooltip says what you asked for; type the request in again to solve it afresh |
+| Settlement | the date this option pays on and the date the forward under it is a forward *to*. It fills itself from the pair's own calendar — the spot lag past the expiry — and is shown *greyed* while it is the calendar's. Type a date over it for a trade settling somewhere the calendar would not have put it, and the forward is read there instead; the expiry does not move. Empty the box to hand it back to the calendar |
 | Barrier | level for touch products; the volatility is read *at the barrier* |
 | Type | `C`, `P`, or `Auto` (call if the strike is above the forward). `Auto` comes back as the `C` or `P` it resolved to |
-| Spot / Swap / Forward | three boxes holding one identity: `forward = spot + swap / pip`. All three are filled from the feed at this leg's own expiry, all three are yours to type over, and typing in any of them moves the third. The **outright** is what is priced |
+| Spot / Swap / Forward | three boxes holding one identity: `forward = spot + swap / pip`. All three are filled from the feed **at this leg's own settlement date**, all three are yours to type over, and typing in any of them moves the third. The **outright** is what is priced |
 | Notional / Side | millions of base (payout, for touch products). Buy or sell flips the signed amounts *and* which way an overhedge buffer is applied |
 | Digital ramp % | width of the call spread replicating a digital, as % of strike |
 | Overhedge / Buffer % | barrier shift: `extend`, `bend_front`, `bend_back` |
+
+**The settlement date is an input, not an answer.** Everything about a leg's
+dates the calendar can work out, it works out — and the settlement date is
+the one it sometimes cannot, because a broken date is something two
+counterparties agree and not something a holiday table knows. So the box is
+filled from the calendar, says so by showing greyed, and takes a date typed
+over it. A date **before the expiry** is refused: an option settles on or
+after the day it is exercised. A date that is **not a value date** for the
+pair is taken and said out loud in the status line — that is precisely the
+case the box exists for, and it is yours to make, not the tool's to refuse.
+Hover the box for the spot date and the rule that produced the date in it.
+
+**Refresh spot does not take this box back.** It puts every *market* box on
+the feed; a settlement date you have agreed is a term of the trade, not a
+level.
+
+**How a tenor resolves.** A tenor is a settlement date first and an expiry
+second, which is the market's own construction:
+
+1. The **spot date** is the trade date plus the pair's spot lag — T+1 for
+   USDCAD, T+2 for everything else — counted on the two currencies' own
+   holiday calendars, then rolled forward to a day New York can settle on.
+   US holidays rule out a value date; they do not stop the count, so EURJPY
+   spot does not move a day every Thanksgiving.
+2. The **settlement date** is the tenor added to the spot date, adjusted
+   modified following, with the **end-of-month rule**: off a spot that is the
+   last value date of its month, every month tenor settles on the last value
+   date of its own month. A 1M off a 28-Feb spot settles 31-Mar, not 28-Mar.
+3. The **expiry** is the spot lag back from the settlement date.
+
+**Day tenors go the other way**, because that is what they mean: `O/N`
+expires on the next business day and settles from that day's own spot, and
+`8d` expires on the eighth business day. So `8d` is eleven or twelve calendar
+days out, not eight — and `1d`, `2d` and `3d` are three different dates.
+
+**The forward is the forward to the settlement date**, not to the expiry.
+The two are a spot lag apart, which on a one-week option is a fifth of its
+swap points. One consequence you can check against a broker: at a quoted
+pillar the forward is now exactly spot plus the published swap points.
 
 **You only see the rows your products use.** A vanilla has no barrier, no
 ramp and no overhedge; a touch has no strike and no Type, because which side
@@ -150,10 +200,11 @@ in one leg cannot widen the leg beside it and shift the whole grid under your
 cursor.
 
 **The market boxes fill themselves.** Spot, the swap points and the outright
-forward all come from the feed at the leg's own expiry, and they are shown
-*greyed* while they are still the feed's numbers. Change the pair or the
-expiry and they are re-read — the swap points are interpolated to the expiry,
-so a forward left behind from the old one is simply the wrong forward. Type
+forward all come from the feed at the leg's own settlement date, and they are
+shown *greyed* while they are still the feed's numbers. Change the pair or the
+expiry and they are re-read — the swap points are interpolated to the new
+settlement date, so a forward left behind from the old one is simply the wrong
+forward. Type
 over any of them and it turns black: it is yours from then on, it is priced
 exactly as it stands, and nothing refills it except **Refresh spot**. Empty
 the box to hand it back to the feed — and moving the leg to another pair hands
@@ -167,6 +218,12 @@ the forward shown is the feed's *own* published outright rather than the two
 rounded boxes above it added up — they carry different precisions, and on a
 cross the file quotes only through its legs the sum lands a digit off what
 was published.
+
+The **Market** row under Results is the one thing left of the market there,
+and it is not a level: it is the screen saying how much of each leg is still
+the feed's — `feed`, `spot from the feed`, `swap from the feed`,
+`forward from the feed`, or `typed`. Press **Refresh spot** and it goes back
+to `feed` with the boxes, because the boxes went back with it.
 
 **The Results rows repeat none of the inputs.** What the pricer works out
 goes back into the box you asked in, and it is then what is priced: the
@@ -190,7 +247,7 @@ rewritten during the day. Three controls in the toolbar:
 
 | Control | What it does |
 |---|---|
-| **Refresh spot** | re-reads the feed file, puts *every* market box back on the feed at each leg's own expiry — the levels you typed over included — and re-prices. It says how many legs it took back |
+| **Refresh spot** | re-reads the feed file, puts *every* market box back on the feed at each leg's own settlement date — the levels you typed over included — and re-prices. It says how many legs it took back |
 | **watch file** | checks every fifteen seconds whether the file has been rewritten, and marks the feed pill when it has. It only *tells* you; nothing is re-read |
 | **auto-load** | re-reads the feed for you whenever it changes. Only the feed — the workbook stays on its button, because reloading it discards this session's marks (§1). Greyed out when no feed file is loaded |
 
@@ -220,7 +277,10 @@ Monte Carlo standard error in the **MC std error** row.
 
 ### Vol marking
 
-Three columns.
+Three columns. The tab opens on **USDCNH** — the pair this desk marks first —
+and every other tab still opens on the workbook's own first pair. Changing the
+pair and reloading the workbook keeps whatever you chose: a reload does not
+move the screen.
 
 **Left** — the curve itself, the band under it, and what a session keeps:
 * **Curve parameters** — the backbone: initial vol, long-term vol, mean
@@ -234,15 +294,21 @@ Three columns.
 
 **Middle** — the marks the curve produces, and the picture of them:
 * **ATM term structure** — the marked volatility at each tenor, at the cut on
-  the card to its left. There is **no curve column**: the fitted curve
-  underneath a mark says nothing about the mark in the row beside it, and this
-  is the table a volatility is read off. The per-tenor **overwrite** column is
-  shut until you tick **overwrites** in the heading, which also brings back
-  *Clear ATM overwrites*. A tenor that *is* overwritten carries a **·** beside
+  the card to its left. The **1M row is highlighted**: it is the tenor the rest
+  of the curve is read against, and it is marked where it stands rather than
+  moved or pinned out of the term structure it belongs to. There is **no curve
+  column**: the fitted curve underneath a mark says nothing about the mark in
+  the row beside it, and this is the table a volatility is read off. The
+  per-tenor **overwrite** column is shut until you tick **overwrites** in the
+  heading, which also brings back *Clear ATM overwrites*. Shut, the table is
+  two columns and sits at its own width so the tenor and its volatility are
+  beside each other; open, it fills the card, because the third column is a box
+  that wants the room. A tenor that *is* overwritten carries a **·** beside
   its name while the column is shut, and the heading counts them — a mark you
   cannot see would be worse than a column you did not want.
 * **Charts** — smile (with the risk-neutral density), term structure, daily
-  vols. The expiry box beside the tabs drives the smile chart.
+  vols, and the **kACE feed** (below). The expiry box beside the tabs drives
+  the smile chart.
 
   When the **feed covers the pair**, the smile chart is drawn in real strikes:
   the axis, the point table and the density are scaled by that expiry's
@@ -252,11 +318,34 @@ Three columns.
   is fitted in moneyness either way — this changes the axis, never a
   volatility.
 * **Smile parameters** — shut until you tick the box in its heading; the
-  heading then says whether the smile is **anchored** and how many parameters
-  are overwritten, so nothing marked is out of sight without saying so. Open,
-  it is per-tenor `slog25`, `slog10`, `rho25`, `rho10`: type into a shaded cell
-  and press Enter to overwrite, clear it to revert. The **anchor** tick box
-  lives here, with the smile it anchors, rather than over the ATM table.
+  heading then says whether the smile is **anchored**, how many parameters are
+  overwritten and how many curves are marked, so nothing marked is out of
+  sight without saying so. The **anchor** tick box lives here, with the smile
+  it anchors, rather than over the ATM table. Open, the card is two tables:
+
+  * **the term structure** — the shape each of the four parameters follows
+    across expiries, `final − (final − initial) × e^(−decay × t)`, the same
+    three coefficients the ATM backbone has. The placeholders are what the fit
+    read off the quoted tenors; type over them to mark the curve itself. A row
+    is marked **as a whole** — a box you leave blank takes its fitted value,
+    and emptying all three gives that row back to the fit. A correlation must
+    stay strictly inside (−1, 1), a `slog` above zero and a decay at zero or
+    above; a set that breaks one of those is refused whole, with the number
+    you typed quoted back, rather than half applied. **Clear term structures**
+    hands all four back at once.
+  * **the per-tenor grid** — `slog25`, `slog10`, `rho25`, `rho10` at each
+    quoted tenor: type into a shaded cell and press Enter to overwrite, clear
+    it to revert. An overwrite pins one tenor; a marked term structure moves
+    the parameter at *every* expiry, which is why the shut heading counts them
+    separately.
+
+  With **anchor** on, the parameters are pinned to the quoted tenors and the
+  term structure only shapes the curve *between* them, so a marked curve moves
+  less than it looks like it should — that is the anchor doing what it says,
+  not the mark being ignored.
+
+  Both travel in the session file, and into the workbook on **Write to
+  workbook** as `slog25 3m` and `term rho10 decay` rows.
 * **Implied vs quoted** — risk reversals and butterflies read back off the
   fitted smile against the quotes that went in. They differ because the smile
   is fitted per tenor and then given a parameter term structure of its own;
@@ -265,16 +354,29 @@ Three columns.
 **Right** — the curve, the marks it produces, and the events on it:
 
 **Right** — one question of the surface, and the events on it:
-* **Vol query** — two boxes and one number: *where is the 3M 25 delta marked?*
-  **Expiry** takes a tenor (`1W`, `8d`, `3M`) or a date in any of the ways one
-  is written; **Strike** takes a number, `ATM`, or a delta — `25d`, `10dp`,
-  `-25d`, a bare `25d` being the call wing. They are the **pricing tab's own
-  boxes**, read by the same code on the server, so the two screens cannot
-  understand `1M` or `25d` differently. The pair, cut and interpolation are the
-  ones on the card above.
+* **Vol query** — three boxes and one number: *where is the 3M 25 delta marked?*
+  **Expiry** takes a tenor (`1W`, `8d`, `3M`, `O/N`, and the unit spelled out —
+  `1wk`, `3mth`, `2yr`, `10 days`) or a date in any of the ways one is written,
+  with the year optional (`15 Sep` is the next fifteenth of September); **Strike** takes a number or `ATM`; **Delta** takes `25`, `10p`,
+  `-25`, or the pricing tab's own `25d` / `10dp` / `-25d`, a bare delta being
+  the call wing. Expiry and strike are the **pricing tab's own boxes**, read by
+  the same code on the server, so the two screens cannot understand `1M` or
+  `25d` differently. The pair, cut and interpolation are the ones on the card
+  above.
 
-  There is **no forward box**: the level is the market feed's outright at that
-  expiry, which is what puts an absolute strike on the same axis as the marks
+  **Fill in a strike or a delta, not both.** They name the same point on the
+  smile and you have whichever the market gave you, so typing in one clears
+  the other — and the answer puts what it resolved to into the empty box as a
+  greyed-out hint. Ask for the 25 delta and the strike appears in the strike
+  box's hint; type a strike and its delta appears in the delta box's hint. The
+  answer line carries both either way. A hint is not an entry: nothing
+  resolved is ever posted back as though you had typed it. The delta comes
+  back under the **pair's own convention** — premium adjusted for a USD-base
+  pair, which is why a premium-adjusted at-the-money reads a shade under 50.
+
+  There is **no forward box**: the level is the market feed's outright to that
+  expiry's **settlement date** — the answer line says which date — which is
+  what puts an absolute strike on the same axis as the marks
   (they are in strike/forward), and a cross the file quotes only through its
   legs is placed from them by the same triangle that prices it — the card names
   the triangle when that happens. With no feed for the pair, `ATM` and a delta
@@ -294,16 +396,18 @@ Three columns.
   re-solving is the whole point. Move a mark and the same question is asked
   again of the surface as it now stands.
   `volkit vol PAIR EXPIRY --strike 25dp` is the same call.
-* **Events** — dated volatility bumps. **Auto-load** pulls scheduled economic
-  releases for the pair's currencies; edit, add or delete rows, then **Apply**
-  to re-solve the heights. Each row shows the event's weight on **each leg**
-  and the pair's **Adj** on top; the **Bump** beside them is the three added
-  and is what the curve takes. The **When** column is in **Hong Kong time**
+* **Events** — the workbook's **EVENTS** sheet through this pair's eyes.
+  **Reload** puts back the rows as the workbook has them; edit, add or delete
+  rows, then **Apply** to re-solve the heights. Each row shows the event's
+  weight on **each leg** and the pair's **Adj** on top; the **Bump** beside
+  them is the three added and is what the curve takes. A leg's weight is
+  **shared** — typing it moves every pair with that currency, and the message
+  under the table says which. The **When** column is in **Hong Kong time**
   (UTC+8, no daylight saving); the model works in UTC and converts at the
   edge, so the day the bump prices into is still the UTC volatility day.
-* **Event weights** — behind the **Weights** button on the Events card: what
-  each release is worth on each currency. It changes what **Auto-load**
-  suggests and nothing already on a pair.
+* **Event weights** — behind the **Weights** button on the Events card: the
+  currency side of the same sheet, whole. Applying it re-solves every pair
+  with those currencies and leaves each pair's own Adj alone.
 
 Everything here feeds the pricing tab immediately.
 
@@ -406,11 +510,13 @@ the chart and the tables appear on the right.
 | Alpha / Rho / Nu (hold) | leave **blank** to fit them. Type a number and that parameter is held there and the others are fitted around it |
 | Weighting | `vega` (default) makes a quarter of a vol point at the money count for more than a quarter of a point in a 5-delta wing, which is what the book actually feels. `equal` treats every strike alike; `table` uses a weight column from your paste |
 | Book cut / Book interp | which marked surface to compare against |
-| Vol unit | leave on `auto` unless the paste is refused as ambiguous |
+| Vol unit | leave on `auto`, which reads the table in volatility points as written. Set `decimal` only if the table really is in decimals |
 | K col / Vol col | 1-based column numbers, if the headers are not recognised |
 
-**The paste** takes tabs, commas or spaces, with or without a header row,
-percent or decimal, and a bid/ask pair as well as a mid. Underneath the tables
+**The paste** takes tabs, commas or spaces, with or without a header row, and a
+bid/ask pair as well as a mid. Volatilities are read **as written, in points** —
+a table sitting below 1.0 is a managed pair, not a table of decimals — unless
+**Vol unit** says decimal. Underneath the tables
 you get a line for every choice the parser made and a line for every row it
 threw away, with the reason. If a strike appears twice — the exchange lists a
 call and a put at each — the out-of-the-money one is kept, because the
@@ -867,6 +973,17 @@ day it landed on.
 beside the changes. The changes themselves are always all five, so a panel set
 to at-the-money still shows you a wing that has moved.
 
+**Big move (vol pts)** is what makes a screenful of panels readable. Every
+change at or over it is shaded in the colour of its sign, and one at or over
+*twice* it is shaded harder — in **all five columns**, not just the highlighted
+one, because what has moved may not be what you were watching. The default is
+a quarter of a point; type your own, or `0` to turn the shading off. A panel
+whose table you have not reached carries the count in its own heading (*3 big*),
+and the line above the panels counts the screen.
+
+The same threshold is `volkit monitor --big`, where a shaded cell is marked
+`*` and a doubly shaded one `**`.
+
 Three things worth knowing:
 
 * If both ends land on the **same row** — which is what happens when the history
@@ -1174,6 +1291,90 @@ then **Save bank**.
 
 ---
 
+### Sending the marks to kACE
+
+The **kACE feed** tab on the charts card is what the `XML_poster` workbook
+used to do: the marked surface as the `RATE_FEED` message the kACE **XML
+poster** page takes. There is no spreadsheet step any more — no daily CSV to
+rename and paste, no expiry dates or wing row to copy from Murex, no formulas.
+
+What it shows is the **pillar table**: for O/N and each quoted tenor, the
+expiry date off the pair's calendar, the ATM bid and offer (the cumulative
+vol to that day's cut, less and plus half the spread), the 25d and 10d risk
+reversals and butterflies, and where the wings came from. The notes under it
+say anything the message leaves out — the current quoting day, whose
+cumulative vol is not yet a whole day, and that O/N borrows the 1W wings.
+Read it before you send: it is the check the workbook never gave you.
+
+The **scenario** box is the kACE scenario the vols are posted into. Type
+one and press Enter: it goes into the message, into the clear message, and
+into the file name of the download, and the browser remembers it for next
+time. It starts as whatever `kace-scenario =` in `volkit.cfg` says (`Xyz` if
+nothing does), and it cannot be blank.
+
+Then **Copy XML** puts the whole message on the clipboard, **↓ feed XML**
+downloads it, and **↓ clear XML** downloads the `clearRate` message that
+wipes the pair from the scenario first. Open the poster page, *Clear*, paste,
+*Send*, and read the processing time back as before. The **wings** box picks
+between the **quoted marks** (what the sheet posted; the desk's `RR` and `ST`
+marks as they stand) and **fitted** (what the smile actually returns at each
+pillar once it has a term structure — the *Implied vs quoted* card's other
+column, including anything the market-maker tab shifted).
+
+Three things to know:
+
+* **`kace_spreads.csv` decides what is posted.** One row per pair and tenor:
+  `USDCNH,1W,0.8` means the 1W pillar is posted with a 0.8 vol-point ATM
+  width. The tenors listed for a pair are exactly its pillars, so a pair with
+  no rows cannot be posted, and a tenor listed with no marks behind it in the
+  workbook is refused by name. A day between two pillars takes the earlier
+  pillar's width; a day before the O/N expiry takes O/N's — the sheet's rule.
+* **The header needs the feed username and password.** Put `kace-user =` and
+  `kace-password =` lines in `volkit.cfg` (or set `VOLKIT_KACE_USER` and
+  `VOLKIT_KACE_PASSWORD` in the environment). Without them the tab still shows
+  the table and says what is missing; it will not build a message with a
+  blank name for kACE to refuse later. `kace-scenario =` sets what the
+  scenario box starts as; the command line's `--kace-scenario` sets it for
+  `volkit kace`.
+* **`horDate` is the valuation date of the book**, and the daily series runs
+  past the last pillar however far that is. The sheet used `TODAY()` and a
+  fixed one-year series, and a 1Y expiry that fell past the end went out as
+  the text `#N/A`.
+
+Conventions: a risk reversal is the **base-currency call vol minus the put
+vol** (kACE's *$ call* column for a USD pair), `S` is the **butterfly**, and
+**O/N** is the one-day option, expiring on the next business day.
+
+**Posting from the tab.** Set the address the poster page itself posts to —
+`kace-url = https://pfcshkwapp01:8500/pricing` in `volkit.cfg` (or
+`VOLKIT_KACE_URL`); the shipped `volkit.cfg` already says so — and two more
+buttons appear: **Post feed** and **Post clear**. Each asks
+once, on the tab, what it is about to do (*Post 413 nodes for USDCNH into
+scenario LIVE at …?*) and then sends the message the way the poster page
+and the old VBA did: an HTTP `POST` with the XML form-encoded as `xml=…`.
+What is sent is exactly the message the table above was built from — the
+page never sends XML to the tool, only the request, so nothing can reach
+kACE that the tool did not build from the book you are looking at. The
+reply is read the way the poster page shows it: a `gfi_message` with a
+`processingTime` and a `<response>` is success and the time is shown;
+anything else — a login page, an error element, an HTTP failure — is shown
+in red with the first line of what came back, and nothing is assumed.
+
+Every post, taken or refused, is one line in `kace_posts.jsonl` beside the
+workbook: when, pair, scenario, feed or clear, node count, a hash of the
+message, and the outcome. The last ten show under the table, so *did we
+send kACE this morning* has an answer.
+
+If the server's certificate is not one the desk machine trusts (an internal
+`https` address usually is not), the failure says so: name the desk's CA
+bundle with `kace-ca = path.pem`, or `kace-insecure = true` to post without
+checking it. The post goes straight to the host, through no proxy, whatever
+the machine's proxy settings say — kACE is on the desk's own network.
+
+On the command line: `volkit kace USDCNH --post` (add `--dry-run` to see
+what would be sent and where without sending it). The exit code is non-zero
+when kACE did not take the message.
+
 ### Saving your marks
 
 Nothing you do on the **Vol marking** or **Market maker** tab is written back to
@@ -1210,14 +1411,21 @@ To start with a file already on: `volkit.exe --session marks.json`, or an
 The file is plain JSON and readable. Volatility numbers in it are in
 **volatility points**, exactly as the screen shows them.
 
-**Write to workbook copy** goes one step further: it saves the marks and then
-writes them into a *copy* of the workbook beside it (`_marked` added to the
-name) -- curve parameters and events into PARAMS, and the overwrites, wing
-shifts, anchor switch and band treatment into rows and a `BANDS` sheet the tool
-reads back. Open the copy in Excel, check it, and adopt it as the book of
-record when you are happy; the loaded workbook is not touched. From a shell,
-`volkit session marks.json --to-workbook --in-place` writes into the workbook
-itself. The message lists every pair written and anything it could not write.
+**Write to workbook** goes one step further: it saves the marks and then
+writes them into the workbook you loaded -- curve parameters and events into
+PARAMS, and the overwrites, wing shifts, anchor switch and band treatment into
+rows and a `BANDS` sheet the tool reads back. It asks before it writes, and it
+always writes the *saved file*, so what lands in the workbook is exactly what
+you can open and read in the JSON beside it.
+
+The workbook it replaces is kept beside it, stamped with the time --
+`vol_marks.bak-20260901-142530.xlsx`. Keep it: the tool rewrites the file
+through a spreadsheet library that carries formulas and their last values but
+**not images or charts**, so if the workbook has a chart in it, that backup is
+the way back. To look at the result before adopting it instead, run
+`volkit session marks.json --to-workbook` from a shell -- that writes a copy
+(`_marked` added to the name) and leaves the workbook alone. The message lists
+every pair written and anything it could not write.
 
 ---
 
@@ -1233,28 +1441,32 @@ worth so much on the dollar; a desk may also give it something on the yen.
 USDJPY then takes the two added, EURUSD takes only the dollar's, and the
 **Adj** box on the row is the pair's own view on top — a release that is the
 same news to both legs and should not count twice, a pegged pair that takes a
-fraction of everything. The table of weights is
-`volkit/data/event_weights.csv` (`EVENT,CCY,WEIGHT`; a weight of 0 switches an
-event off for that currency); in the workbook, a `PARAMS` column headed by a
-currency does the same job and the pair's cell on the row is its adjustment.
-The row shows the parts and the total; type the parts.
+fraction of everything. The row shows the parts and the total; type the parts.
 
-The **Weights** button on the Events card opens the table itself — one row per
-release, one column per currency, **Add column** for a currency it does not
-show yet. **Apply** keeps it for the session (a saved session keeps it too;
-no file is written) and changes what **Auto-load** suggests from then on;
-rows already on a pair's events table are not touched.
+All of it lives on one sheet of the workbook, **EVENTS**:
 
-Auto-loaded dates come from two places, neither needing a network:
+| | `USD` | `JPY` | `USDJPY` | `EURUSD` |
+|---|---|---|---|---|
+| `2026-09-17 06:00` | 1.5 | 0.3 | 0.2 | |
 
-* **Rules** — US non-farm payrolls is the first Friday at 08:30 New York,
-  shifting a week when that Friday is a holiday.
-* **A published table** — `econ_events.csv` carries FOMC, ECB, BoE and BoJ
-  dates. **Verify these**: central banks publish provisionally, and BoJ's
-  calendar is only partly filled. Edit the file to extend it.
+One row per release, timed in **Hong Kong time** like everything else here. A
+three-letter column is a **currency weight** and is shared by every pair with
+that currency; a six-letter column is that **pair's adjustment** and is its
+alone. An optional `label` column names the release. A row with no currency
+weights at all is read the old way: the pair's cell is the whole bump.
 
-Release times are stored in the releasing body's local zone, so NFP is 13:30Z
-in winter and 12:30Z in summer automatically.
+The **Weights** button on the Events card opens the currency side of the sheet
+— one row per release, one column per currency, **Add column** for a currency
+it does not show yet. **Apply** keeps it for the session (a saved session keeps
+it too) and re-solves every pair those currencies reach; each pair's own **Adj**
+column is untouched, because this card cannot see it.
+
+Nothing is written back to the workbook until you ask for it by name:
+`volkit session --to-workbook` writes the whole `EVENTS` sheet from the
+session's table (into a *copy*, unless `--in-place`).
+
+There is no shipped calendar and nothing pulls dates off a network — the sheet
+is the calendar, and it is the desk's.
 
 Warnings you may see, and what they mean:
 
@@ -1396,6 +1608,15 @@ here if the range is genuinely defended.
 **`holiday_overrides.csv`** — `country,date[,remove]`. Lunar-calendar holidays
 (Chinese New Year and similar) must be listed here; they cannot be derived.
 
+**`kace_spreads.csv`** — `pair,tenor,spread`: the pillars the kACE feed posts
+for a pair and the ATM bid/offer width at each, in volatility points. The
+tenors listed are the pillars. See *Sending the marks to kACE* above.
+
+**`kace_posts.jsonl`** — every message posted to kACE, one JSON line each,
+written by the tool: when, pair, scenario, feed or clear, node count, a hash
+of the message, and what kACE said. Read by the kACE feed tab; safe to
+archive or delete.
+
 **`vol_session.json`** — your saved marks (see *Saving your marks* above).
 Written by the tool, not by hand, though it is readable and can be edited if you
 know what you are doing: volatility numbers in it are in **volatility points**,
@@ -1419,7 +1640,12 @@ volkit smile  USDJPY 2026-11-23           the smile at one expiry
 volkit vol    USDJPY 2026-11-23 --strike 152 --forward 149.9
 volkit vol    USDJPY 5m --strike 25dp --feed market_feed.csv -v
 volkit daily  USDJPY --horizon 1 --out USDJPY_daily_vol
-volkit events USDJPY --horizon 1          what auto-load would pull in, leg by leg
+volkit kace   USDCNH --out usdcnh_kace.xml   the kACE RATE_FEED message, to paste into the poster
+volkit kace   USDCNH --clear --out clear.xml the clearRate message for the pair
+volkit kace   USDCNH --source fitted         wings off the fitted surface instead of the marks
+volkit kace   USDCNH --post --kace-url https://pfcshkwapp01:8500/pricing   send it the way the poster page does
+volkit kace   USDCNH --post --dry-run        what would be sent, and where, sending nothing
+volkit events USDJPY                      the EVENTS sheet, through one pair's legs
 volkit events USDJPY --weights            ... and every event's weight on every currency
 volkit events USDJPY --set FOMC:JPY=0.3   mark a weight for this run (the Weights card)
 volkit validate USDJPY                    hunt for competing smile calibrations
@@ -1436,6 +1662,7 @@ volkit monitor EURUSD --history vol_history.xlsx
 volkit monitor --watch EURUSD --watch USDJPY:history@-1m --history vol_history.xlsx
                                           two panels, the second against a month ago
 volkit monitor EURUSD --compare surface --compare history:-30d
+volkit monitor EURUSD --history vol_history.xlsx --big 0.5   # only half-point moves marked
 volkit mark propose EURUSD --target curve.txt --out p.json
                                           plan and run the marking fit, and save what it proposes
 volkit mark record EURUSD --proposal p.json --verdict edited
@@ -2042,15 +2269,15 @@ the fact list, and the first line says which it was.
 | *a hazard of …/yr … already implies an at-the-money of at least …* | the opposite: the marked break risk alone is worth more than the quote. Lower the hazard or the jumps |
 | *has no managed band* | the BAND method only applies to pairs in `bands.csv` |
 | *is hidden in this build* | the screen is there but off. Start with `--enable-tab NAME`, or add `enable-tab = NAME` to `volkit.cfg` |
+| *is not UTF-8; it was read as …* | the file was saved in this machine's own encoding, not UTF-8. It **was** read — nothing is lost — but re-save it as UTF-8 (Notepad: *Save as*, Encoding: UTF-8) so it reads the same on another machine |
+| *is not UTF-8; save it as UTF-8* | the file is in an encoding this machine cannot read either. Open it in Notepad and *Save as* with Encoding UTF-8 |
 | *was excluded from this build* | the screen is not there at all; nothing switches it on. You need a build that has it |
 | *volkit.cfg could not be read: line N* | a settings line with no `=`. One setting a line, `name = value` |
 | *unrecognized arguments: --frobnicate* | a misspelled setting name in `volkit.cfg`. The options are those of the command it names |
 | *N distinct parameter sets reprice these quotes* | the smile is not uniquely determined. Run `volkit validate` |
 | *only N% of its spike prices into…* | an event sits near the day roll (legacy event mode only) |
 | A leg shows a red error | read it — errors are never replaced by a zero |
-| *cannot tell whether these volatilities are percent or decimals* | the pasted table straddles 1.0. Set **Vol unit** rather than let it guess |
-| *the level quotes straddle 1.0* | the same, on a pasted broker run. Fix the paste or set **Vol unit** |
-| *the at-the-money levels straddle 1.0* | the same again, on a curve pasted into the comparison panel |
+| *read as volatility points, as written* | every level in the paste sits below 1.0. It was **not** rescaled — that is what a managed pair marks. Set **Vol unit** to decimal only if the paste really is in decimals |
 | *the historical workbook has no sheet for X* | that pair is not in the history file, so no dated curve can be read for it |
 | *no width rule in the bank matches this quote* | add a rule in the knowledge bank, or type a **fallback width**. The tool will not invent one |
 | *N wing quote(s) cannot determine M free smile parameter(s)* | untick smile parameters, or quote more of the smile |
@@ -2077,12 +2304,20 @@ the fact list, and the first line says which it was.
 ## 7. Things to know before trusting a number
 
 * Premiums are undiscounted; there is no rate curve.
+* **Every volatility on a screen is shown to two decimal places** — the marks,
+  the query, the risk reversals and butterflies, the fit misses and the widths.
+  What you *type* is not rounded: an overwrite box holds the mark to four
+  decimals, as it was marked, so nothing is rounded by being looked at, and the
+  command line and the CSV exports carry their full precision.
+* **The cut selectors offer Tokyo and New York.** The model still knows the
+  London and Hong Kong cuts and `--cut LDN` still answers on the command line;
+  the screens leave them off because this desk does not mark on them, and a
+  selector carrying four is two more ways to read the wrong column by accident.
 * Cut times resolve through their local time zone, so the NY cut is 15:00Z in
   winter and 14:00Z in summer. `dst_aware_cuts=False` restores the old fixed
   hours if you need to reconcile against historic marks.
 * Cross pairs use the correct triangle sign, which differs from the previous
   tool for AUDJPY, EURJPY, EURCNH and GBPCNH. See `MIGRATION.md`.
-* Auto-loaded central bank dates are provisional. Check them.
 * For pegged pairs the probability of the peg breaking is a **marked input**,
   not something inferred from a butterfly. The probability of ending *outside*
   the band is an output, and it is never zero: the peg can break, and pretending
