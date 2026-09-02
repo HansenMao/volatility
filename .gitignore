@@ -12,3 +12,10 @@ legacy/
 
 # the BGC/GFI FIX specification: a vendor document, 2MB, kept locally
 BGC_&_GFI_FIX_Specification_for_FX_v1_4_3.pdf
+
+# scratch directory for things on their way out; never source
+_to_delete/
+
+# the timestamped workbook backups the session export leaves beside the
+# workbook (see session.py) — desk output, not source
+files/vol_marks.bak-*.xlsx
