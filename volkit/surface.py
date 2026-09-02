@@ -15,7 +15,7 @@ non-differentiable ``sqrt`` of squared error.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 from scipy.optimize import least_squares
@@ -31,6 +31,96 @@ from .timeutil import Clock, tenor_to_years
 
 # The four smile parameters carried across expiries.
 PARAM_NAMES = ("slog10", "slog25", "rho25", "rho10")
+
+#: The four quotes one tenor of a pair's sheet holds, in the order a marker
+#: reads them: each wing's risk reversal beside its own market strangle.  The
+#: workbook's own columns (``marketdata.SMILE_COLUMNS``) and the fields of
+#: :class:`SmileMark`; named here so the marking screen, the session file and
+#: the workbook writer all mean the same four things by "the quotes".
+QUOTE_FIELDS = ("rr_25", "st_25", "rr_10", "st_10")
+
+#: How each is labelled where a person reads it -- the sheet's own headings.
+QUOTE_LABELS = {"rr_25": "RR 25d", "st_25": "ST 25d",
+                "rr_10": "RR 10d", "st_10": "ST 10d"}
+
+#: The two wings a ratio can derive, and the quote each one produces.  The
+#: 10-delta only: a desk marks the 25-delta wing and carries the 10-delta at a
+#: multiple of it, never the other way round.
+RATIO_WINGS = {"st": "st_10", "rr": "rr_10"}
+
+#: The tab the multipliers live on.  They used to live in the pair sheets'
+#: own formulas -- ``ST 10D`` was ``=ST 25D * 3.25`` and ``RR 10D`` was
+#: ``=RR 25D * 1.85``, a different multiple per pair and per tenor -- which
+#: made the workbook a small spreadsheet model rather than a table of numbers.
+#: A tool that writes a quote into such a sheet leaves the wing beside it
+#: holding a value computed from the number that has just been replaced, and
+#: the next person to open the file in Excel gets a wing that moved on its
+#: own.  The multiples are data now, and the wings are derived here.
+WING_RATIOS_SHEET = "WING_RATIOS"
+
+
+@dataclass(frozen=True)
+class WingRatio:
+    """How one tenor's 10-delta wings follow its 25-delta ones.
+
+    ``None`` is not "one": it is *no ratio*, meaning that wing is quoted in
+    its own right at this tenor.  The two are different answers and the
+    difference is the whole point of the tab -- a desk that types a 10-delta
+    is saying the relationship does not hold there.
+    """
+
+    st: float | None = None
+    rr: float | None = None
+
+    def get(self, wing: str) -> float | None:
+        if wing not in RATIO_WINGS:
+            raise ValueError(f"unknown wing {wing!r}; expected one of {', '.join(RATIO_WINGS)}")
+        return self.st if wing == "st" else self.rr
+
+    def with_wing(self, wing: str, value: float | None) -> "WingRatio":
+        return (replace(self, st=value) if wing == "st" else replace(self, rr=value))
+
+
+def check_ratio(wing: str, tenor: str, value: float) -> float:
+    """One multiplier, refused here rather than at the fit.
+
+    Positive, because a 10-delta wing has the sign of the 25-delta it is
+    taken from: a negative multiple turns a put-over smile into a call-over
+    one at the wing alone, which is not a ratio anybody means.
+    """
+    v = float(value)
+    if not math.isfinite(v) or v <= 0:
+        raise ValueError(f"{wing} wing ratio at {tenor}: a multiple of the 25-delta is "
+                         f"positive, got {value!r}")
+    return v
+
+
+def load_wing_ratios(path) -> dict[str, dict[str, WingRatio]]:
+    """Read the workbook's ``WING_RATIOS`` tab: pair, tenor, st, rr.
+
+    ``{PAIR: {TENOR: WingRatio}}``.  An absent tab is ``{}`` -- a workbook
+    that has not been migrated yet quotes all four wings itself, which is what
+    every workbook did before this tab existed.  A blank cell is no ratio for
+    that wing at that tenor, which is different from the row being absent only
+    in that somebody wrote it down.
+    """
+    from . import configsheets
+
+    rows = configsheets.read_rows(path, WING_RATIOS_SHEET, required=("pair", "tenor"))
+    if rows is None:
+        return {}
+    out: dict[str, dict[str, WingRatio]] = {}
+    for row in rows:
+        pair, tenor = row.text("pair").upper(), row.text("tenor").upper()
+        if not pair or not tenor:
+            continue
+        ratio = WingRatio()
+        for wing in RATIO_WINGS:
+            value = row.real(wing)
+            if value is not None:
+                ratio = ratio.with_wing(wing, check_ratio(wing, f"{pair} {tenor}", value))
+        out.setdefault(pair, {})[tenor] = ratio
+    return out
 
 #: The three coefficients of one parameter's term structure, in the order the
 #: marking screen shows them.  The same shape as the ATM backbone's initial /
@@ -147,6 +237,25 @@ class VolSurface:
     # or None.
     forward_lookup: object | None = None
     param_overwrites: dict[str, dict[str, float]] = field(default_factory=dict)
+    # A quote typed on the marking screen, replacing the one the workbook's
+    # sheet holds for that tenor -- ``{TENOR: {field: value}}`` in decimals.
+    # Kept *beside* ``marks`` and applied at fit time (:meth:`quoted_marks`)
+    # for the same reason the parameter overwrites are kept beside the fits:
+    # a reload, or the book handing this surface the workbook's marks again,
+    # must not quietly discard what somebody typed, and the sheet's own
+    # number has to stay visible underneath it as the placeholder.  A tenor
+    # the sheet does not quote at all can be created here, and is fitted once
+    # all four of its quotes are filled in.
+    quote_overwrites: dict[str, dict[str, float]] = field(default_factory=dict)
+    # The workbook's ``WING_RATIOS`` tab, for this pair: ``{TENOR: WingRatio}``.
+    # Where one is set the 10-delta wing is *derived* from the 25-delta and
+    # the sheet's own 10-delta column is not read.
+    wing_ratios: dict[str, WingRatio] = field(default_factory=dict)
+    # A ratio the screen has changed, in the same layering as the quotes: the
+    # tab's number stays underneath as the placeholder, and an explicit
+    # ``None`` here is a wing somebody has taken off the ratio and quoted in
+    # its own right at that tenor.  ``{TENOR: {"st": v | None, "rr": ...}}``.
+    ratio_overwrites: dict[str, dict[str, float | None]] = field(default_factory=dict)
     # Additive adjustments to the four smile parameters, applied across the
     # whole curve.  An overwrite *replaces* a parameter and so flattens its
     # term structure; a shift moves the level and keeps the shape, which is
@@ -173,6 +282,220 @@ class VolSurface:
         """
         return self.atm.tenor_years(tenor)
 
+    # -- the quotes, as marked --------------------------------------------
+    def effective_ratio(self, tenor: str) -> WingRatio:
+        """The multipliers in force at one tenor: the screen's over the tab's."""
+        key = str(tenor).upper()
+        ratio = self.wing_ratios.get(key, WingRatio())
+        for wing, value in self.ratio_overwrites.get(key, {}).items():
+            ratio = ratio.with_wing(wing, value)
+        return ratio
+
+    def overwrite_ratio(self, tenor: str, wing: str, value: float | None) -> None:
+        """Set, or take off, one wing's multiplier at one tenor.
+
+        ``None`` takes the wing off the ratio: it is then quoted in its own
+        right and the box beside it on the screen is what is used.
+        """
+        if wing not in RATIO_WINGS:
+            raise ValueError(f"unknown wing {wing!r}; expected one of {', '.join(RATIO_WINGS)}")
+        key = str(tenor).upper()
+        self.ratio_overwrites.setdefault(key, {})[wing] = (
+            None if value is None else check_ratio(wing, key, value))
+
+    def clear_ratio_overwrite(self, tenor: str | None = None,
+                              wing: str | None = None) -> None:
+        """Give a multiplier, a tenor, or every change back to the tab."""
+        if tenor is None:
+            self.ratio_overwrites.clear()
+            return
+        key = str(tenor).upper()
+        if wing is None:
+            self.ratio_overwrites.pop(key, None)
+            return
+        edits = self.ratio_overwrites.get(key)
+        if edits is not None:
+            edits.pop(wing, None)
+            if not edits:
+                self.ratio_overwrites.pop(key, None)
+
+    def ratio_rows(self) -> list[dict]:
+        """One row per tenor the ratios or the quotes reach: tab, screen, both."""
+        tenors = {m.tenor.upper() for m in self.marks} | set(self.wing_ratios) \
+            | set(self.quote_overwrites) | set(self.ratio_overwrites)
+        rows = []
+        for tenor in tenors:
+            sheet = self.wing_ratios.get(tenor, WingRatio())
+            live = self.effective_ratio(tenor)
+            row = {"tenor": tenor, "marked": False}
+            for wing in RATIO_WINGS:
+                row[wing] = live.get(wing)
+                row[wing + "_sheet"] = sheet.get(wing)
+                if wing in self.ratio_overwrites.get(tenor, {}) and \
+                        live.get(wing) != sheet.get(wing):
+                    row["marked"] = True
+            rows.append(row)
+        return sorted(rows, key=lambda r: tenor_to_years(r["tenor"]))
+
+    def quoted_marks(self) -> list[SmileMark]:
+        """The sheet's quotes with the screen's edits on them.
+
+        What :meth:`fit_smiles` actually fits.  ``marks`` stays exactly as the
+        workbook gave it and every edit lives in ``quote_overwrites``, so
+        clearing a box gives that quote back to the sheet without a reload and
+        the sheet's number can be shown underneath the typed one.
+
+        A tenor that exists only as an edit is a tenor the sheet does not
+        quote yet.  It is fitted once all four of its quotes are there and
+        reported until then, because half a smile is not a smile and a tenor
+        that quietly did not fit is the silent absence this project refuses.
+        """
+        by_tenor = {m.tenor.upper(): m for m in self.marks}
+        out: list[SmileMark] = []
+        for mark in self.marks:
+            edits = self.quote_overwrites.get(mark.tenor.upper())
+            out.append(self._derive(replace(mark, **edits) if edits else mark))
+        for tenor, edits in self.quote_overwrites.items():
+            if tenor in by_tenor:
+                continue
+            # A wing a ratio derives does not have to be typed: with a ratio
+            # row a new tenor is two numbers, not four.
+            ratio = self.effective_ratio(tenor)
+            derived = {RATIO_WINGS[w] for w in RATIO_WINGS if ratio.get(w) is not None}
+            missing = [f for f in QUOTE_FIELDS if f not in edits and f not in derived]
+            if missing:
+                self.warnings.append(
+                    f"{self.pair} {tenor}: the sheet does not quote this tenor and "
+                    f"{', '.join(QUOTE_LABELS[f] for f in missing)} "
+                    f"{'is' if len(missing) == 1 else 'are'} still blank, so it was not "
+                    f"fitted; a tenor is quoted by all four of its numbers or by none")
+                continue
+            values = {f: edits.get(f, 0.0) for f in QUOTE_FIELDS}
+            out.append(self._derive(SmileMark(tenor=tenor, **values)))
+        return sorted(out, key=lambda m: tenor_to_years(m.tenor))
+
+    def _derive(self, mark: SmileMark) -> SmileMark:
+        """The 10-delta wings a ratio is set for, taken from the 25-delta.
+
+        Applied *after* the typed quotes and not before, because a ratio is
+        the last word on a wing it governs: the alternative is a screen where
+        the 10-delta box and the ratio beside it both claim the same number
+        and the fit quietly picks one.  Typing a 10-delta takes that wing off
+        its ratio (:meth:`overwrite_quote`), which is how the box wins.
+        """
+        ratio = self.effective_ratio(mark.tenor)
+        changes = {}
+        for wing, target in RATIO_WINGS.items():
+            factor = ratio.get(wing)
+            if factor is not None:
+                changes[target] = getattr(mark, target.replace("_10", "_25")) * factor
+        return replace(mark, **changes) if changes else mark
+
+    def overwrite_quote(self, tenor: str, field_name: str, value: float) -> None:
+        """Type one quote over the sheet's, for one tenor.
+
+        The same two checks the workbook reader makes on the cell this
+        replaces (``marketdata._load_marks``): a number, and a strangle above
+        zero.  Refused here rather than at the fit, where it would come back
+        as a convergence failure that names neither the tenor nor the box.
+
+        Typing a **10-delta** wing that a ratio governs takes it off that
+        ratio at this tenor, because otherwise the two would both claim the
+        wing and the ratio, applied last, would win over the box that was just
+        typed into -- a number that goes back to what it was the moment you
+        leave the field.  Clearing the box puts the ratio back.
+        """
+        if field_name not in QUOTE_FIELDS:
+            raise ValueError(f"unknown quote {field_name!r}; expected one of "
+                             f"{', '.join(QUOTE_FIELDS)}")
+        v = float(value)
+        if not math.isfinite(v):
+            raise ValueError(f"{QUOTE_LABELS[field_name]} at {tenor}: {value!r} is not a number")
+        if field_name.startswith("st_") and v <= 0:
+            raise ValueError(f"{QUOTE_LABELS[field_name]} at {tenor}: a market strangle is "
+                             f"positive, got {v * 100:.4g}")
+        try:
+            tenor_to_years(tenor)
+        except Exception as exc:  # noqa: BLE001 - the tenor is the thing being reported
+            raise ValueError(f"{tenor!r} is not a tenor this book can place ({exc})") from None
+        key = str(tenor).upper()
+        self.quote_overwrites.setdefault(key, {})[field_name] = v
+        wing = next((w for w, f in RATIO_WINGS.items() if f == field_name), None)
+        if wing is not None and self.effective_ratio(key).get(wing) is not None:
+            self.overwrite_ratio(key, wing, None)
+
+    def clear_quote_overwrite(self, tenor: str | None = None,
+                              field_name: str | None = None) -> None:
+        """Give a quote, a tenor, or every edit back to the sheet.
+
+        A 10-delta wing taken off its ratio by being typed into goes back onto
+        it here: the two moves are one decision and they are undone together.
+        """
+        if tenor is None:
+            self.quote_overwrites.clear()
+            for tenor_key in list(self.ratio_overwrites):
+                for wing in list(self.ratio_overwrites[tenor_key]):
+                    if self.ratio_overwrites[tenor_key][wing] is None:
+                        self.clear_ratio_overwrite(tenor_key, wing)
+            return
+        key = str(tenor).upper()
+        wings = ([w for w, f in RATIO_WINGS.items() if f == field_name]
+                 if field_name is not None else list(RATIO_WINGS))
+        for wing in wings:
+            if self.ratio_overwrites.get(key, {}).get(wing, "keep") is None:
+                self.clear_ratio_overwrite(key, wing)
+        if field_name is None:
+            self.quote_overwrites.pop(key, None)
+            return
+        edits = self.quote_overwrites.get(key)
+        if edits is not None:
+            edits.pop(field_name, None)
+            if not edits:
+                self.quote_overwrites.pop(key, None)
+
+    def quote_rows(self) -> list[dict]:
+        """One row per tenor: the sheet's quotes, the typed ones, and both.
+
+        Every tenor the sheet quotes and every tenor somebody has typed into,
+        so a tenor that exists only as an edit is on the screen that created
+        it.  ``marked`` is *different from the sheet*, not merely typed: a
+        value typed back onto the number that was already there is not a mark
+        and must not carry a dot that says the row was changed.
+        """
+        sheet = {m.tenor.upper(): m for m in self.marks}
+        fitted = {f.tenor.upper() for f in self.fits}
+        # What the fit is actually using, derivation included, so the box a
+        # wing is read from shows the number the smile was built on.
+        live = {m.tenor.upper(): m for m in self.quoted_marks()}
+        names = list(sheet) + [t for t in self.quote_overwrites if t not in sheet]
+        rows = []
+        for tenor in names:
+            base, edits = sheet.get(tenor), self.quote_overwrites.get(tenor, {})
+            ratio = self.effective_ratio(tenor)
+            row = {"tenor": tenor, "quoted": base is not None, "fitted": tenor in fitted,
+                   "marked": False}
+            for f in QUOTE_FIELDS:
+                b = getattr(base, f) if base is not None else None
+                o = edits.get(f)
+                wing = next((w for w, name in RATIO_WINGS.items() if name == f), None)
+                factor = ratio.get(wing) if wing else None
+                on_ratio = factor is not None
+                if on_ratio and tenor in live:
+                    value = getattr(live[tenor], f)
+                elif on_ratio:
+                    value = None
+                else:
+                    value = o if o is not None else b
+                row[f] = value
+                row[f + "_sheet"] = b
+                # A derived wing is not typed and not the sheet's either: the
+                # screen shows it read-only with the multiple that made it.
+                row[f + "_derived"] = factor if on_ratio else None
+                if not on_ratio and o is not None and (b is None or abs(o - b) > 1e-12):
+                    row["marked"] = True
+            rows.append(row)
+        return sorted(rows, key=lambda r: tenor_to_years(r["tenor"]))
+
     # -- calibration ------------------------------------------------------
     def fit_smiles(self, marks: list[SmileMark] | None = None,
                    only: list[str] | None = None, *,
@@ -190,7 +513,9 @@ class VolSurface:
         keep = [f for f in self.fits if wanted and f.tenor.upper() not in wanted]
         results: list[TenorFit] = []
         prev25 = prev10 = None
-        for mark in sorted(self.marks, key=lambda m: tenor_to_years(m.tenor)):
+        # The sheet's quotes with the marking screen's edits on them, which is
+        # the only thing that is ever fitted; ``marks`` stays the workbook's.
+        for mark in self.quoted_marks():
             if wanted and mark.tenor.upper() not in wanted:
                 continue
             t = self.tenor_years(mark.tenor)
@@ -537,7 +862,7 @@ class VolSurface:
         if self.band is None:
             raise ValueError(
                 f"{self.pair} has no managed band, so there is no barrier to treat; "
-                f"the BAND method applies to pegged pairs listed in bands.csv")
+                f"the BAND method applies to pegged pairs listed on the PEG_BANDS tab")
         band = self.band_treatment.effective_band(self.band)
         if band.contains(forward):
             return band
@@ -555,7 +880,7 @@ class VolSurface:
         if not band.contains(absolute):
             raise ValueError(
                 f"{self.pair}: the {t:.4f}-year forward of {absolute:.5f} is outside the band "
-                f"[{band.lower:g}, {band.upper:g}]. Either the peg has moved and bands.csv is "
+                f"[{band.lower:g}, {band.upper:g}]. Either the peg has moved and PEG_BANDS is "
                 f"stale, or the feed is wrong; the band model cannot be calibrated to a forward "
                 f"it does not contain")
         return self.band_treatment.scaled(self.band, forward / absolute)
@@ -568,7 +893,7 @@ class VolSurface:
         self._slices.clear()
         out = list(treatment.warnings())
         if self.band is None and treatment.mode != "warn":
-            out.append(f"{self.pair} has no band in bands.csv, so this treatment does nothing")
+            out.append(f"{self.pair} has no band on the PEG_BANDS tab, so this treatment does nothing")
         return out
 
     # -- the pricing surface ----------------------------------------------
@@ -651,15 +976,22 @@ class VolSurface:
                             bracket=(-atm * 0.5, atm * 2.0), what="market strangle")
 
     # -- greeks -----------------------------------------------------------
-    def smile_delta(self, spot: float, strike: float, expiry, is_call: bool = True,
+    def smile_delta(self, fwd: float, strike: float, expiry, is_call: bool = True,
                     method: str | None = None, cut: str = "TK", bump: float = 1e-3,
                     *, conv: DeltaConvention | bool | None = None) -> float:
-        """Delta including the smile's reaction to spot, by central difference.
+        """Delta including the smile's reaction to the forward, centrally.
 
         The smile is a function of ``strike / forward``, so moving the forward
         under a fixed strike moves the volatility that strike is marked at:
         this is ``black.delta + vega * dsigma/dF``, and a test pins it against
         exactly that.
+
+        The level bumped is the **forward** -- it is what Black-76 is priced
+        off and what the smile's own ratio is taken against.  The argument was
+        called ``spot`` and the pricing screen took that at its word and
+        handed it spot, which on any pair with forward points is a different
+        option from the one the row above was priced on: a 3M EURUSD ATM came
+        back at a 44 delta.  Every other caller was already passing a forward.
 
         ``conv`` overrides the surface's own delta convention.  It exists for
         one caller: ``analytics.carry_table`` values a **term currency** P&L,
@@ -671,13 +1003,41 @@ class VolSurface:
         """
         use = self.conv if conv is None else conv
         sl = self.slice_at(expiry, method, cut)
-        up, dn = spot * (1.0 + bump), spot * (1.0 - bump)
+        up, dn = fwd * (1.0 + bump), fwd * (1.0 - bump)
         pv_up = float(black.price(up, strike, float(sl.vol(strike / up)), sl.t, is_call,
                                   foreign_premium=bool(use)))
         pv_dn = float(black.price(dn, strike, float(sl.vol(strike / dn)), sl.t, is_call,
                                   foreign_premium=bool(use)))
-        d_spot = (up - dn) if not bool(use) else (up - dn) / spot
-        return (pv_up - pv_dn) / d_spot
+        d_fwd = (up - dn) if not bool(use) else (up - dn) / fwd
+        return (pv_up - pv_dn) / d_fwd
+
+    def smile_gamma(self, fwd: float, strike: float, expiry, is_call: bool = True,
+                    method: str | None = None, cut: str = "TK", bump: float = 0.01,
+                    *, conv: DeltaConvention | bool | None = None) -> float:
+        """Change in the smile delta for a ``bump`` relative move in the forward.
+
+        The delta this differences is :meth:`smile_delta`, so the smile moves
+        with spot here too: what comes back is the whole gamma a desk carries,
+        ``dDelta/dS`` along the smile rather than at a frozen volatility, and
+        it inherits the surface's delta convention rather than choosing a
+        second one.
+
+        The bump is a *relative* move and defaults to the one per cent a desk
+        quotes its gamma over, so the number is the delta difference per one
+        such move, taken centrally.  Multiplied by a notional it is the cash
+        gamma: how much base the hedge has to be moved by when spot moves one
+        per cent.  A finite move is the point rather than a limitation -- the
+        one per cent is what is being asked about, and taking it as a limit
+        would answer a slightly different question about a curve that is not
+        quadratic over that distance.
+        """
+        if not bump > 0:
+            raise ValueError(f"smile gamma bump must be positive, got {bump!r}")
+        up = self.smile_delta(fwd * (1.0 + bump), strike, expiry, is_call,
+                              method, cut, conv=conv)
+        dn = self.smile_delta(fwd * (1.0 - bump), strike, expiry, is_call,
+                              method, cut, conv=conv)
+        return (up - dn) / 2.0
 
     def density(self, strike_ratio: float, expiry, method: str | None = None,
                 cut: str = "TK", bump: float = 1e-3) -> float:

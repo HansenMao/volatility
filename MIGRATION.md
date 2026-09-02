@@ -1391,7 +1391,7 @@ number is the outright forward at the expiry, taken from the spot/forward feed.
 * a slice in moneyness divides the band by the feed's outright;
 * with **no feed**, it refuses and names the feed. A guessed level would put a
   hard barrier in the wrong place, which is worse than no answer. So does a
-  forward the band does not contain — either the peg has moved and `bands.csv`
+  forward the band does not contain — either the peg has moved and `PEG_BANDS`
   is stale, or the feed is wrong, and both are worth knowing.
 
 `BAND` is then an interpolation method like `SVI` or `VV25`, available anywhere
@@ -1424,9 +1424,12 @@ bounds are now computed and the message names the one that was missed.
 
 ## Using it
 
-Bands live in `files/bands.csv` — they are policy, not market data. They are
-loaded automatically now (`Book.from_excel` finds the file beside the exe or in
-`files/`) rather than only when `Book.load_bands` was called by hand, so a
+Bands live on the workbook's `PEG_BANDS` tab — they are policy, not market
+data. They started as `files/bands.csv` and moved into the workbook with the
+other settings (see `volkit/configsheets.py`), so a desk copies one file and
+gets the marks and the policy that goes with them. They are loaded
+automatically (`Book.from_excel` reads the tab of the workbook it was given)
+rather than only when `Book.load_bands` was called by hand, so a
 pegged pair is flagged on every screen instead of on whichever one remembered
 to ask. Only USDHKD ships enabled. USDCNY is deliberately excluded: its ±2% limit is around
 a *daily fixing*, so it is a moving band, not a fixed range an option can be

@@ -18,6 +18,19 @@ for the reasoning behind it. Read this file when working in the area above.
   re-ran a 12-parameter optimisation per strike query.
 - **Use `scipy.special` ufuncs** (`ndtr`, `ndtri`, `log_ndtr`), not
   `scipy.stats.norm`, in inner loops. That alone was a 13x calibration speedup.
+- **A smile greek is differenced on the forward.** `VolSurface.smile_delta`
+  and `smile_gamma` bump the level Black-76 is priced off and the level the
+  smile's own strike ratio is taken against, and that is the *forward*: the
+  first argument is named `fwd` for that reason. It was named `spot`, and the
+  pricing screen took the name at its word and handed it spot, which on any
+  pair with forward points asks about a different option from the one the row
+  above was priced on -- a 3M EURUSD ATM came back a 44.6 delta against a
+  Black 50.0, and a USDJPY ATM a 29.3 against 50.0. Every other caller
+  (`analytics.carry_table`, the relative-value tables) was already passing a
+  forward, so nothing but that one row was wrong and nothing but that one row
+  moved. The tests that pin the smile delta against `black.delta + vega *
+  dsigma/dF` pass a forward too, which is why they never saw it.
+
 - **The smile chart's strike axis is a scale, not a model change.** When the
   feed covers the pair, `/api/smile` carries `spot` / `forward` from the one
   lookup the band model uses (`Book.market_level`) and the page multiplies the
@@ -436,8 +449,8 @@ for the reasoning behind it. Read this file when working in the area above.
   the *locale* encoding -- cp1252 on the desk machine. Reading
   `volkit/web/index.html` with that default is what stopped the Windows build,
   at the test suite, with `'charmap' codec can't decode byte 0x81`, and the
-  same default sat under `volkit.cfg`, the holiday overrides, `bands.csv` and
-  the published feed. Reading strips a byte order mark (`utf-8-sig`, because
+  same default sat under `volkit.cfg`, `market_feed.csv` and the published
+  feed. Reading strips a byte order mark (`utf-8-sig`, because
   Notepad and Excel both write one and it is not part of the first key or the
   first pair name); writing never adds one.
 

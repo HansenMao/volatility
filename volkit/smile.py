@@ -319,7 +319,7 @@ class SmileSlice:
             if band is None:
                 raise ValueError(
                     "the BAND method prices a managed band and this pair has none; "
-                    "add it to bands.csv, or pick one of "
+                    "add it to the workbook's PEG_BANDS tab, or pick one of "
                     + ", ".join(LOGNORMAL_INTERPOLATORS))
             # The wings only *report* against the mixture unless the hazard is
             # being solved from them, but which pair of anchors they came from

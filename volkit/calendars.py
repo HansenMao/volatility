@@ -19,7 +19,6 @@ from pathlib import Path
 
 import numpy as np
 
-from . import paths
 from .timeutil import UTC, add_tenor, normalise_tenor, parse_datetime, parse_tenor
 
 try:  # optional dependency; the built-in rules below are the fallback
@@ -228,6 +227,10 @@ class FxDates:
     expiry: date        # when the option expires
     delivery: date      # when the option settles: the spot lag after expiry
     rule: str = ""      # which construction produced it, in words
+
+
+#: The workbook tab extra holiday dates are maintained on.
+HOLIDAYS_SHEET = "HOLIDAYS"
 
 
 @dataclass
@@ -503,18 +506,33 @@ class CalendarSet:
         }
         target.setdefault(country.upper(), set()).update(parsed)
 
-    def load_overrides_csv(self, path: str | Path) -> int:
-        """Load ``country,date[,remove]`` rows.  Blank lines and ``#`` ignored."""
+    def load_overrides_sheet(self, path: str | Path | None = None) -> int | None:
+        """Load the workbook's ``HOLIDAYS`` tab: ``country, date, remove`` rows.
+
+        Lunar-calendar holidays are published a year at a time and cannot be
+        derived from any rule, so they are listed rather than computed, and
+        they are listed **in the workbook** -- the same file as the marks
+        whose expiries they move.  A tab that is not there is not an error:
+        ``None`` says so, and a desk whose currencies are all rule-derived
+        never needs one.
+
+        Returns the number of rows applied.
+        """
+        from . import configsheets
+
+        book = Path(path) if path else configsheets.default_workbook()
+        rows = configsheets.read_rows(book, HOLIDAYS_SHEET, required=("country", "date"))
+        if rows is None:
+            return None
         count = 0
-        for line in paths.read_text(path).splitlines():
-            line = line.split("#", 1)[0].strip()
-            if not line:
+        for row in rows:
+            country = row.text("country").upper()
+            if not country:
                 continue
-            parts = [p.strip() for p in line.split(",")]
-            if len(parts) < 2:
-                raise ValueError(f"bad holiday override row {line!r}: expected 'country,date'")
-            remove = len(parts) > 2 and parts[2].lower() in {"1", "true", "remove", "y", "yes"}
-            self.add_overrides(parts[0], [parts[1]], remove=remove)
+            day = row.day("date")
+            if day is None:
+                raise ValueError(f"{HOLIDAYS_SHEET} row {row.number}: {country} has no date")
+            self.add_overrides(country, [day], remove=row.flag("remove"))
             count += 1
         return count
 

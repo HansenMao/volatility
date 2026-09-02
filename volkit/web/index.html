@@ -138,6 +138,9 @@ table.mark.tight th:last-child,table.mark.tight td:last-child{padding-left:26px}
 /* The tenor a morning is read off.  Highlighted rather than moved or pinned:
    it stays in the term structure it belongs to and the eye lands on it. */
 table.mark tr.key td{background:var(--head);font-weight:650;color:var(--ink)}
+/* A quote a ratio derives: shown, not typed, with the multiple that made it. */
+table.mark td.derived{color:var(--muted);text-align:right}
+table.mark td.derived .x{margin-left:6px;font-size:10px;opacity:.75}
 table.mark tr.key td:first-child::before{content:'▸ ';color:var(--accent)}
 .chart{width:100%;height:322px;display:block}
 .chart text{fill:var(--muted);font-size:10px}
@@ -473,8 +476,13 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
     <code>ATM</code> or <code>25d</code> as the absolute strike it solved to on the marks, and
     <code>Auto</code> as <code>C</code> or <code>P</code>. Type <code>25d</code> in again to
     solve the strike afresh against the marks as they now stand.
-    Premiums are per unit of base notional in the term currency, undiscounted — this model
-    carries no rate curve. Amounts scale by the notional in millions.
+    <b>Price (pips)</b> is the vanilla premium the way it is quoted: the term currency per
+    unit of base through the pair's own pip — 10,000 on most pairs, 100 on a yen pair —
+    undiscounted, this model carrying no rate curve. An exotic's price is a fraction of its
+    payout rather than a price per unit of base, so it is shown as a percentage instead.
+    <b>Smile cash gamma</b> is the base, in millions, the delta hedge moves by for a one per
+    cent move in spot, taken along the smile like the delta above it.
+    Amounts scale by the notional in millions.
     <br><b>Product</b>: <code>vanilla</code>, <code>digital</code> (European, pays at expiry),
     <code>one_touch</code> / <code>no_touch</code> (continuous monitoring; price is a fraction
     of the payout, so <i>Notional</i> is the payout in millions).
@@ -533,6 +541,40 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
         <div id="bandbody"></div>
       </section>
 
+      <!-- The workbook itself: the pairs it builds and the tabs that
+           configure it.  Not marks, so not part of the session -- these are
+           written into the workbook and the book is read again on top of
+           them, which is why the card says so on the button rather than
+           leaving a person to find out. -->
+      <section class="card">
+        <h2><label style="margin:0;display:flex;align-items:center;gap:6px;width:auto;font-size:inherit;font-weight:inherit">
+            <input type="checkbox" id="cfgshow" style="width:auto"> Workbook</label>
+          <span class="grow"></span><span class="meta" id="cfgnote"></span></h2>
+        <div id="cfgbody" class="hide">
+          <div class="hint" style="margin-bottom:9px">The pairs this workbook builds and the
+            tabs that configure it. These are not marks: a change here is written into the
+            workbook and the book is read again on top of it, so <b>save your marks first</b>
+            — a reload drops anything the workbook does not hold. What it replaces is kept
+            beside it as <code>&lt;name&gt;.bak-&lt;stamp&gt;.xlsx</code>.</div>
+          <label>Pairs</label>
+          <div class="scroll"><table class="mark" id="cfgpairs"></table></div>
+          <div class="row" style="margin-top:9px;flex-wrap:wrap;gap:6px">
+            <input id="cfgnewpair" placeholder="USDSGD" style="width:104px;text-transform:uppercase">
+            <input id="cfgnewatm" placeholder="ATM %" style="width:88px"
+              title="the level its curve starts flat at, in vol points — or, for a cross, the correlation between its dollar legs">
+            <button id="cfgaddpair" style="width:auto;padding:5px 12px;font-size:12px">Add pair</button>
+          </div>
+          <div class="hint" style="margin-top:6px">A new pair is created with a flat curve at
+            the level you give and an empty quote sheet; mark its quotes on the table above.
+            A cross takes a <b>correlation</b> between its dollar legs instead. Removing a
+            pair takes it out of <code>CONFIG</code> only — its column and its sheet stay, so
+            adding it back finds what it had.</div>
+          <div id="cfgtabs" style="margin-top:14px"></div>
+          <div id="cfgconfirm" class="hide" style="display:flex;gap:8px;align-items:center;margin-top:9px;padding:8px 10px;border:1px solid var(--line);border-radius:6px"></div>
+          <div class="msg" id="cfgmsg"></div>
+        </div>
+      </section>
+
       <section class="card">
         <h2>Saved marks <span class="grow"></span>
           <span class="meta" id="sesswhen"></span></h2>
@@ -543,12 +585,13 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
           <button class="ghost" id="sessload">Load marks</button>
           <button class="ghost" id="sesssavepair">Save this pair</button>
           <button class="ghost" id="sessexport"
-            title="save the marks, then write the session file into the loaded workbook: PARAMS cells, event rows and weights, 'atm 1m' / 'slog25 3m' / 'term rho10 decay' / 'shift rho25' / 'anchor' rows and a BANDS sheet. The workbook it replaces is kept beside it as <name>.bak-<stamp>.xlsx">Write to workbook</button>
+            title="save the marks, then write the session file into the loaded workbook: PARAMS cells, event rows and weights, 'atm 1m' / 'slog25 3m' / 'term rho10 decay' / 'shift rho25' / 'anchor' rows, a BANDS sheet, and any re-quoted RR / ST into the pair sheet's own cells. The workbook it replaces is kept beside it as <name>.bak-<stamp>.xlsx">Write to workbook</button>
         </div>
         <div id="sessconfirm" class="hide" style="display:flex;gap:8px;align-items:center;margin-top:9px;padding:8px 10px;border:1px solid var(--line);border-radius:6px"></div>
         <div class="msg" id="sessmsg"></div>
         <details class="hint"><summary>What a session file holds</summary>Everything this session has marked — curve parameters, the correlation
-          term structure, events, ATM and smile overwrites, the market maker's wing shifts, the
+          term structure, events, ATM and smile overwrites, any quote re-typed on the ATM term
+          structure table, the market maker's wing shifts, the
           anchor switch and the band treatment — written to a file <b>beside</b> the workbook.
           Marking a curve never touches the workbook: what a screen writes goes into this file.
           Start volkit with <code>--session &lt;file&gt;</code>, or press <b>Load marks</b>, to
@@ -559,6 +602,11 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
           <code>atm 1m</code> / <code>slog25 3m</code> / <code>term rho10 decay</code> /
           <code>shift rho25</code> / <code>anchor</code> rows and <code>BANDS</code> sheet the reader reads back — so
           nothing reaches the workbook that is not already written down in the session file.
+          A <b>re-quoted RR or ST</b> is the one thing that does not go into a row of its own: a
+          quote is the sheet's own number, so it is written into the sheet's own cell and the
+          pair tab is then the database it is being used as. That cell may have held a formula,
+          and a number typed over one replaces it — which is why the backup matters here more
+          than anywhere else.
           It asks before it writes, and keeps the workbook it replaced beside it as
           <code>&lt;name&gt;.bak-&lt;stamp&gt;.xlsx</code>: openpyxl does not carry images or
           charts through, so that backup is the way back. A copy instead of the original is
@@ -580,8 +628,26 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
           <label style="margin:0;display:flex;align-items:center;gap:5px;width:auto;font-size:11px"
             title="the per-tenor overwrite, and the button that clears them">
             <input type="checkbox" id="matmowshow" style="width:auto"> overwrites
-            <span class="meta" id="matmowcount"></span></label></h2>
+            <span class="meta" id="matmowcount"></span></label>
+          <label style="margin:0;display:flex;align-items:center;gap:5px;width:auto;font-size:11px"
+            title="the four quotes each tenor is fitted from, as the pair's sheet holds them">
+            <input type="checkbox" id="mquoteshow" checked style="width:auto"> quotes</label>
+          <label style="margin:0;display:flex;align-items:center;gap:5px;width:auto;font-size:11px"
+            title="how each tenor's 10-delta wings follow its 25-delta ones, off the workbook's WING_RATIOS tab">
+            <input type="checkbox" id="mratioshow" style="width:auto"> ratios
+            <span class="meta" id="mrationote"></span></label>
+          <span class="meta" id="mquotenote" style="margin-left:9px"
+            title="a quote typed here replaces the pair sheet's for this session and refits that tenor; it is saved with the session and written into the sheet's own cell when the session is put back into the workbook"></span></h2>
         <div class="scroll"><table class="mark" id="matm"></table></div>
+        <div class="hide" id="mratiorow" style="margin-top:11px">
+          <div class="scroll"><table class="mark" id="mratio"></table></div>
+          <div class="hint" style="margin-top:6px">Each tenor's <b>10-delta</b> wings as a
+            multiple of its 25-delta ones — <code>ST 10d = ST 25d &times; st</code>. Where a
+            multiple is set the wing is <i>derived</i> and its box above is read-only. Empty
+            a box here and that wing is quoted in its own right instead; the greyed number is
+            what the workbook's <code>WING_RATIOS</code> tab holds.</div>
+          <div class="row" style="margin-top:8px"><button class="danger" id="mclearratio">Clear ratio changes</button></div>
+        </div>
         <div class="row hide" id="matmowrow" style="margin-top:9px"><button class="danger" id="mclearatm">Clear ATM overwrites</button></div>
       </section>
 
@@ -855,7 +921,8 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
     <div class="f"><label>Interp</label><select id="anmethod" style="width:94px"></select></div>
     <div class="f"><label>Roll target</label><select id="antarget" style="width:170px"></select></div>
     <div class="f"><label>Horizon (days)</label><input id="anhorizon" value="30" style="width:96px"></div>
-    <div class="f"><label>Lookback (days)</label><input id="anlookback" value="match" style="width:104px"></div>
+    <div class="f"><label>Lookback (days)</label><input id="anlookback" value="match" style="width:104px"
+      title="The window realized volatility is measured over, and so what the relative-value grid's 'level' signal compares against. 'match' gives each tenor its own length — a 1M mark against one month of realized. Type a number instead and every tenor is compared against that one window, so 1M and 2M read off the same realized volatility."></div>
     <div class="f"><label>Annualise realized</label><select id="anann" style="width:104px"></select></div>
     <div class="f"><label>Realized on</label><select id="anbasis" style="width:96px">
       <option value="auto">forward</option><option value="spot">spot</option></select></div>
@@ -881,7 +948,8 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
     <section class="card"><h2>Relative value <small id="anrvhead"></small></h2>
       <div class="rvbar">
         <div class="f"><label>History window (days)</label>
-          <input id="rvhist" value="250" style="width:104px"></div>
+          <input id="rvhist" value="250" style="width:104px"
+            title="How far back 'recent history' reaches for the history signal and for the scale each z is read against. This is NOT the realized lookback: that is 'Lookback (days)' in the bar above, and it is the one that decides what 'level' compares against."></div>
         <label style="margin:0;display:flex;align-items:center;gap:6px;width:auto;
                       color:var(--muted);font-size:11px">
           <input type="checkbox" id="rvtri" checked style="width:auto"> cross triangle</label>
@@ -932,8 +1000,12 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
     <i>usually moves</i>, since half a point is a great deal on a one-year at-the-money and
     nothing on a one-week wing. That is <i>reported</i> and enters the score nowhere; it is
     measured over the <b>history window</b>, which is deliberately not the realized lookback:
-    the lookback is matched to each tenor, and a month of a smooth one-month series is far too
-    short to say how much anything moves. The &rho; and &nu; behind <b>shape</b> come off that
+    the lookback is matched to each tenor by default, and a month of a smooth one-month series is
+    far too short to say how much anything moves. The lookback is <b>Lookback (days)</b> in the
+    bar at the top, and it is the one <b>level</b> is measured over: leave it at <code>match</code>
+    and each tenor is compared against its own length of realized volatility; type a number and
+    every tenor is compared against that one window, so a 1M and a 2M mark read off the same
+    realized number. The header of this card says which of the two you are running. The &rho; and &nu; behind <b>shape</b> come off that
     same window and for
     the same reason — on the lookback they were blank at every short tenor, and at every tenor at
     once on a lookback under about a month, which left <b>shape</b> reading as a signal that never
@@ -1516,7 +1588,7 @@ function defaultLeg(from){
     method:methodFor(pair,(STATE.methods||['SVI'])[0]),type:'C',strike:'ATM',barrier:'',
     settle:'',settlesrc:'calc',
     spot:'',swap:'',forward:'',pip:'',spotsrc:'feed',fwdsrc:'feed',strikeask:'',
-    notional:'1',side:'buy',ramp:'0',overhedge:'none',buffer:'0'};
+    notional:'100',side:'buy',ramp:'0',overhedge:'none',buffer:'0'};
 }
 function pipFor(leg){
   const p=parseFloat(leg.pip);
@@ -1576,27 +1648,42 @@ const dash=v=>(v===0||v==null||!isFinite(v))?'—':null;
    the market is `market_source`, which is not a level but the server saying
    which half of one it had to fill in. */
 const OUT=[
- ['days','Days',v=>num(v,1)],
+ /* Days to expiry is read as a whole number: a desk says a 1M is 31 days,
+    never 30.9, and the fraction of a day the clock carries is not something
+    anybody quotes off. */
+ ['days','Days',v=>num(v,0)],
  /* The settlement date is an input box now -- it is the date the desk
     confirms against and the one thing about a leg's dates the calendar
-    cannot always answer -- so it is not repeated here.  The one thing left
-    of the market is `market_source`, which is not a level but the screen
-    saying which half of one is still the feed's. */
- ['market_source','Market',v=>esc(v)],
+    cannot always answer -- so it is not repeated here. */
  ['vol','Vol %',v=>vnum(v),'big'],['atm_vol','ATM vol %',v=>vnum(v)],
  ['barrier_used','Barrier after buffer',v=>dash(v)??num(v,5),'',TOUCH],
- ['premium_dom','Price (term / unit)',v=>num(v,6)],
+ /* The premium in the pair's own pips, which is how a vanilla is actually
+    quoted.  `premium_dom` is term currency per one unit of base and a pip is
+    the last decimal of the pair -- 1/10000 on most, 1/100 on a yen pair --
+    so the pips are that price through the same divisor the swap box is read
+    with, `pipFor`, and not a second opinion about the pair's convention.
+    Exotics are left off the row: their price is per unit of *payout* rather
+    than per unit of base, and a percentage is how that is quoted, which the
+    next row already is. */
+ ['premium_dom','Price (pips)',(v,r,L)=>num(v*pipFor(L),2),'',VANILLA],
  ['premium_pct_base','Price % (of base / payout)',v=>num(v,4)],
- ['fair_value','Fair value (no buffer)',v=>num(v,6)],
  ['overhedge_cost','Overhedge cost',v=>dash(v)??num(v,6),'sign',['digital','one_touch','no_touch']],
  ['delta_pct','Delta %',v=>num(v,2)],
  ['smile_delta_pct','Smile delta %',v=>num(v,2),'',VANILLA],
+ /* What the delta hedge has to be moved by, in millions of base, for a one
+    per cent move in spot -- the gamma a desk says it is long or short, and
+    on the smile rather than at a frozen volatility, so it is the sibling of
+    the row above it and not of the Black gamma. */
+ ['smile_cash_gamma','Smile cash gamma (m base / 1%)',v=>num(v,4),'sign',VANILLA],
  ['vega_dom','Vega per vol pt',v=>num(v,6)],
  ['premium_amount','Premium amount',v=>num(v,4),'big sign'],
  ['vega_amount','Vega amount / vol pt',v=>num(v,4),'sign'],
  ['delta_amount','Delta hedge (m base)',v=>num(v,4),'sign'],
  ['pricing_method','Method',v=>esc(v),'',['digital','one_touch','no_touch']],
  ['mc_error','MC std error',v=>dash(v)??num(v,6),'',TOUCH],
+ /* `market_source` is not a level but the screen saying which half of one is
+    still the feed's, so it sits under the numbers rather than among them. */
+ ['market_source','Market',v=>esc(v)],
 ];
 const prodOf=L=>String((L&&L.product)||'vanilla').trim().toLowerCase();
 const applies=(only,L)=>!only||only.indexOf(prodOf(L))>=0;
@@ -1688,7 +1775,7 @@ function renderGrid(){
       if(!applies(only,L)){h+=`<td class="na" title="${esc(prodOf(L))} does not use this">·</td>`;return}
       const v=r[k]; let c='o '+(cls||'');
       if((cls||'').includes('sign')&&typeof v==='number')c+=v>0?' pos':(v<0?' neg':'');
-      h+=`<td class="${c}">${fmt(v,r)}</td>`;});
+      h+=`<td class="${c}">${fmt(v,r,L)}</td>`;});
     h+='<td class="spacer"></td></tr>';});
   h+='</tbody>';
   g.innerHTML=h;
@@ -2096,11 +2183,16 @@ function mq(){return{pair:$('#mpair').value,cut:$('#mcut').value,method:$('#mmet
    carries the count, and a shut overwrite column puts a dot on the tenor it
    belongs to. */
 function saveMarking(){try{localStorage.setItem('volkit.marking',JSON.stringify(
-  {atm_overwrites:$('#matmowshow').checked,smile:$('#msmileshow').checked}))}catch(e){}}
+  {atm_overwrites:$('#matmowshow').checked,quotes:$('#mquoteshow').checked,
+   ratios:$('#mratioshow').checked,smile:$('#msmileshow').checked}))}catch(e){}}
 function loadMarking(){
   let v=null; try{v=JSON.parse(localStorage.getItem('volkit.marking')||'null')}catch(e){}
   v=v&&typeof v==='object'?v:{};
   $('#matmowshow').checked=!!v.atm_overwrites; $('#msmileshow').checked=!!v.smile;
+  // Shown unless it was switched off: the quotes are what the tenor is fitted
+  // from, and a stored file with no opinion about them is not an opinion.
+  $('#mquoteshow').checked=v.quotes!==false;
+  $('#mratioshow').checked=!!v.ratios;
   markingVisible();
 }
 function markingVisible(){
@@ -2119,20 +2211,65 @@ const TERMC=['initial','final','decay'];
 /* The curve column is gone: what is read off this table is the marked cut
    volatility, and the fitted curve underneath it said nothing about the mark
    in the row beside it. */
+/* The four quotes a tenor is fitted from, in the order the server sends
+   them (surface.QUOTE_FIELDS): each wing's risk reversal beside its own
+   market strangle.  These are the sheet's own numbers rather than marks laid
+   over a fit, so a box shows what the fit is *using* and the sheet's number
+   sits underneath it as the placeholder -- clear the box and the sheet has it
+   back.  Editing one refits that tenor's smile on the server, which is why
+   every quote box goes through the same applyMark and redraw as the rest. */
+/* What the last refit had to say.  Held rather than alerted: a wing that
+   will not calibrate is a fact about the row that was just typed into, and it
+   belongs beside that table until the next edit answers differently. */
+let QPROB=[];
+function quoteFields(){return (MARKS&&MARKS.quote_fields)||['rr_25','st_25','rr_10','st_10']}
+function quoteLabel(f){return (MARKS&&MARKS.quote_labels&&MARKS.quote_labels[f])||f}
 function paintMarks(){
   if(!MARKS)return;
   const ow=$('#matmowshow').checked;
   const nown=MARKS.atm.filter(r=>r.overwrite!=null).length;
+  const nq=MARKS.atm.filter(r=>r.quotes_marked).length;
   $('#matmowcount').textContent=(!ow&&nown)?`· ${nown} marked`:'';
-  // Two columns want to sit beside each other; three want the whole card.
-  $('#matm').className='mark'+(ow?'':' tight');
+  const qn=$('#mquotenote');
+  qn.textContent=QPROB.length?QPROB.join(' · ')
+    :(nq?`${nq} tenor${nq===1?'':'s'} re-quoted`:'');
+  qn.className=QPROB.length?'msg bad':'meta';
+  const qcols=$('#mquoteshow').checked, QF=qcols?quoteFields():[];
+  // Two columns want to sit beside each other; anything more wants the card.
+  $('#matm').className='mark'+((ow||qcols)?'':' tight');
   $('#matm').innerHTML=`<thead><tr><th>Tenor</th><th>${esc(MARKS.cut)} cut %</th>`+
-    (ow?'<th>Overwrite %</th>':'')+`</tr></thead><tbody>`+
-    MARKS.atm.map(r=>`<tr${isKeyTenor(r.tenor)?' class="key"':''}><td>${esc(r.tenor)}`+
-      ((!ow&&r.overwrite!=null)?' <span class="owdot" title="overwritten">&bull;</span>':'')+
+    (ow?'<th>Overwrite %</th>':'')+
+    QF.map(f=>`<th title="the quote this tenor is fitted from, in vol points">${esc(quoteLabel(f))}</th>`).join('')+
+    `</tr></thead><tbody>`+
+    MARKS.atm.map(r=>{
+      const q=r.quotes||{}, sheet=r.quotes_sheet||{};
+      /* Three different things a row can be, and it says which: nothing
+         quoted at all, quoted but not fitted (a tenor part-typed, which the
+         server refuses to fit), and re-quoted away from the sheet. */
+      const any=QF.some(f=>q[f]!=null);
+      const tag=(!any)?'':(r.fitted?(r.quotes_marked?
+          ' <span class="owdot" title="re-quoted away from the sheet">&bull;</span>':'')
+        :' <span class="pill bad" title="a tenor is quoted by all four of its numbers or by none, so this one is not fitted">part</span>');
+      return `<tr${isKeyTenor(r.tenor)?' class="key"':''}><td>${esc(r.tenor)}`+
+      ((!ow&&r.overwrite!=null)?' <span class="owdot" title="overwritten">&bull;</span>':'')+tag+
       `</td><td>${vnum(r.cut)}</td>`+
       (ow?`<td><input data-m="atm" data-tenor="${esc(r.tenor)}" value="${r.overwrite==null?'':(r.overwrite*100).toFixed(4)}"
-        placeholder="${vnum(r.curve)}"></td>`:'')+'</tr>').join('')+'</tbody>';
+        placeholder="${vnum(r.curve)}"></td>`:'')+
+      QF.map(f=>{
+        /* A wing a ratio derives is not typed here. Showing an editable box
+           that the ratio then recomputes is a number that changes back the
+           moment you leave the field, so the box is read-only and carries the
+           multiple that made it; the ratio table below is where it is
+           changed, and clearing the ratio there gives this box back. */
+        const d=(r.derived||{})[f];
+        if(d!=null)return '<td class="derived" title="derived: '+esc(f.slice(0,2).toUpperCase())+
+          ' 25d &times; '+num(d,4)+' — clear the ratio below to quote it here">'+
+          (q[f]==null?'—':num(q[f],4))+'<span class="x">&times;'+num(d,3)+'</span></td>';
+        return `<td><input data-m="quote" data-field="${esc(f)}" data-tenor="${esc(r.tenor)}"
+        value="${q[f]==null?'':q[f].toFixed(4)}"
+        placeholder="${sheet[f]==null?'—':sheet[f].toFixed(4)}"></td>`;}).join('')+
+      '</tr>';}).join('')+'</tbody>';
+  paintRatios();
   const P=SMILEP;
   const sow=MARKS.smile.reduce((a,r)=>a+P.filter(p=>r[p+'_ow']!=null).length,0), sn=[];
   /* Put the curves in the same order as the grid beneath them: the server
@@ -2164,12 +2301,40 @@ function paintMarks(){
         value="${r[p+'_ow']==null?'':r[p+'_ow'].toFixed(4)}" placeholder="${r[p].toFixed(4)}"></td>`).join('')+'</tr>').join('')
      :`<tr><td colspan="5" class="meta">no smile quotes for this pair</td></tr>`)+'</tbody>';
 }
+/* The wing multipliers, under the quotes they derive.  Its own table rather
+   than two more columns on the one above: a multiple is not a volatility, and
+   a row of vol points with two bare numbers in the middle of it reads as a
+   quote somebody typed in the wrong unit. */
+function paintRatios(){
+  const host=$('#mratio'), on=$('#mratioshow').checked;
+  $('#mratiorow').classList.toggle('hide',!on);
+  const rows=(MARKS&&MARKS.ratios)||[], W=(MARKS&&MARKS.wings)||{st:'st_10',rr:'rr_10'};
+  const names=Object.keys(W);
+  const marked=rows.filter(r=>r.marked).length;
+  $('#mrationote').textContent=on?'':(marked?`${marked} changed`:'');
+  if(!on){host.innerHTML='';return}
+  host.innerHTML=`<thead><tr><th>Tenor</th>`+
+    names.map(n=>`<th title="${esc(n.toUpperCase())} 10d = ${esc(n.toUpperCase())} 25d times this">`+
+      esc(n.toUpperCase())+' 10d / 25d</th>').join('')+`</tr></thead><tbody>`+
+    (rows.length?rows.map(r=>`<tr><td>${esc(r.tenor)}`+
+      (r.marked?' <span class="owdot" title="changed">&bull;</span>':'')+'</td>'+
+      names.map(n=>`<td><input data-m="ratio" data-wing="${esc(n)}" data-tenor="${esc(r.tenor)}"
+        value="${r[n]==null?'':r[n].toFixed(4)}"
+        placeholder="${r[n+'_sheet']==null?'quoted':r[n+'_sheet'].toFixed(4)}"></td>`).join('')+
+      '</tr>').join('')
+     :`<tr><td colspan="${names.length+1}" class="meta">no tenors on this pair</td></tr>`)+
+    '</tbody>';
+}
 async function loadMarks(){
   const o=mq(); MARKS=await api('/api/marks?'+qs({pair:o.pair,cut:o.cut}));
   $('#manchor').checked=!!MARKS.anchor;
   paintMarks();
 }
 $('#matmowshow').onchange=()=>{markingVisible();saveMarking();paintMarks()};
+$('#mquoteshow').onchange=()=>{saveMarking();paintMarks()};
+$('#mratioshow').onchange=()=>{saveMarking();paintMarks()};
+$('#mclearratio').onclick=async()=>{await post('/api/overwrite',{pair:mq().pair,kind:'clear_ratio'});
+  await loadMarks();await redraw();schedulePrice()};
 $('#msmileshow').onchange=()=>{markingVisible();saveMarking();paintMarks()};
 /* A term structure is marked as a whole row: three coefficients are one
    curve, and a server that took them one at a time would spend two of the
@@ -2191,6 +2356,23 @@ async function applyMark(el){
     if(el.dataset.m==='atm'){
       if(v==='')await post('/api/overwrite',{pair:o.pair,kind:'clear_atm',tenor:el.dataset.tenor});
       else await post('/api/overwrite',{pair:o.pair,kind:'atm',tenor:el.dataset.tenor,value:parseFloat(v)});
+    }else if(el.dataset.m==='quote'){
+      /* A quote is an input to the fit, so the server refits the tenor and
+         answers with whatever the fit had to say.  Reported rather than
+         swallowed: a strangle that will not calibrate is exactly the box
+         that has just been typed into. */
+      const r=(v==='')
+        ?await post('/api/overwrite',{pair:o.pair,kind:'clear_quote',tenor:el.dataset.tenor,field:el.dataset.field})
+        :await post('/api/overwrite',{pair:o.pair,kind:'quote',tenor:el.dataset.tenor,
+                                      field:el.dataset.field,value:parseFloat(v)});
+      QPROB=(r&&r.problems)||[];
+    }else if(el.dataset.m==='ratio'){
+      /* Blank is not "no opinion": it is this wing taken off its ratio and
+         quoted in its own right, which is a decision the session keeps. The
+         way back to the tab's own multiple is the Clear button. */
+      const r=await post('/api/overwrite',{pair:o.pair,kind:'ratio',tenor:el.dataset.tenor,
+        wing:el.dataset.wing,value:v===''?null:parseFloat(v)});
+      QPROB=(r&&r.problems)||[];
     }else if(el.dataset.m==='term'){
       const body=termBody(el.dataset.param);
       if(body===null)await post('/api/overwrite',{pair:o.pair,kind:'clear_smile_term',param:el.dataset.param});
@@ -3456,7 +3638,15 @@ function rvTint(score){
 
 function renderRelValue(d){
   const host=$('#anrv');
-  $('#anrvhead').textContent=d?(d.pair+' · '+d.history_days+'-day history'+
+  /* Both windows in the header, because the card only carries a box for one
+     of them.  The realized lookback is the Analysis bar's 'Lookback (days)'
+     and it is what `level` is measured over; the History window beside this
+     grid is the scale the z's are read against.  Two different numbers on one
+     card with only one of them visible is how a matched lookback gets read as
+     a fixed one. */
+  $('#anrvhead').textContent=d?(d.pair+' · realized '+
+    (d.lookback_days?d.lookback_days+'-day window (every tenor)':'matched to each tenor')+
+    ' · '+d.history_days+'-day history'+
     (d.is_cross?' · cross of '+d.legs.join(' and '):'')+
     (d.has_feed?'':' · no forward feed')):'';
   if(!d){host.innerHTML='';return}
@@ -3763,7 +3953,8 @@ async function loadHistory(pathId,statusId){
 $('#anload').onclick=()=>loadHistory('#anhist','#anstatus');
 
 /* ============================= MANAGED BAND =============================
-   Pegged pairs only.  The band itself is policy and comes from bands.csv;
+   Pegged pairs only.  The band itself is policy and comes from the workbook's
+   PEG_BANDS tab;
    what is marked here is how much notice to take of it -- and none of it can
    be inferred from the quotes, because a wider body and a higher hazard both
    raise the at-the-money.  The card is not shown for a pair with no band. */
@@ -4111,6 +4302,89 @@ $('#cmplist').oninput=e=>{
    one file beside the workbook, written and read through the same functions
    `volkit session` uses. */
 function sessPath(){return $('#sesspath').value.trim()}
+/* ===================== THE WORKBOOK ITSELF =====================
+   The pair list and the configuration tabs.  Deliberately not part of the
+   session: a band, a holiday, a kACE pillar and a wing ratio are what the
+   tool is configured with rather than what a morning marked, so they are
+   written into the workbook and the book is read again on top of them.  Every
+   write here asks first, because a reload is what it costs. */
+let CFG=null;
+function cfgShow(msg,bad){
+  const el=$('#cfgmsg');el.className='msg'+(bad?' bad':' ok');el.textContent=msg;
+}
+function cfgVisible(){$('#cfgbody').classList.toggle('hide',!$('#cfgshow').checked)}
+async function loadConfig(){
+  if(!$('#cfgshow').checked)return;
+  try{CFG=await api('/api/config')}catch(e){cfgShow(e.message,true);return}
+  const note=[];
+  if(CFG.losses&&CFG.losses.length)note.push('writing drops '+CFG.losses.join(', '));
+  if(CFG.locked)note.push('open in Excel');
+  $('#cfgnote').textContent=note.join(' · ');
+  const pairs=(STATE.pairs||[]);
+  $('#cfgpairs').innerHTML='<thead><tr><th>Pair</th><th></th></tr></thead><tbody>'+
+    pairs.map(p=>'<tr><td>'+esc(p)+'</td><td style="text-align:right">'+
+      '<button class="ghost cfgdrop" data-pair="'+esc(p)+'" style="width:auto;padding:3px 9px;font-size:11px">remove</button>'+
+      '</td></tr>').join('')+'</tbody>';
+  $('#cfgpairs').querySelectorAll('.cfgdrop').forEach(b=>{
+    b.onclick=()=>cfgConfirm('Take <b>'+esc(b.dataset.pair)+'</b> out of the workbook\'s pair list? '+
+      'Its column and its sheet stay where they are.','Remove',
+      ()=>post('/api/config/pair',{action:'remove',pair:b.dataset.pair}));});
+  $('#cfgtabs').innerHTML=(CFG.tabs||[]).map((t,i)=>
+    '<div style="margin-top:12px"><label>'+esc(t.sheet)+
+    '<span class="meta" style="margin-left:7px;font-weight:400">'+esc(t.what)+'</span></label>'+
+    (t.error?'<div class="msg bad">'+esc(t.error)+'</div>'
+      :'<div class="scroll"><table class="mark" data-tab="'+i+'"><thead><tr>'+
+        t.columns.map(c=>'<th>'+esc(c)+'</th>').join('')+'</tr></thead><tbody>'+
+        t.rows.concat([{}]).map((r,ri)=>'<tr>'+t.columns.map(c=>
+          '<td><input data-tab="'+i+'" data-row="'+ri+'" data-col="'+esc(c)+'" value="'+
+          esc(r[c]==null?'':String(r[c]))+'"></td>').join('')+'</tr>').join('')+
+        '</tbody></table></div>'+
+        '<div class="row" style="margin-top:6px"><button class="ghost cfgsave" data-tab="'+i+
+        '" style="width:auto;padding:4px 11px;font-size:11px">Write '+esc(t.sheet)+'</button>'+
+        (t.present===false?'<span class="meta">this workbook has no such tab yet</span>':'')+
+        '</div>')+'</div>').join('');
+  $('#cfgtabs').querySelectorAll('.cfgsave').forEach(b=>{
+    b.onclick=()=>{
+      const t=CFG.tabs[+b.dataset.tab], rows=[];
+      $('#cfgtabs').querySelectorAll('input[data-tab="'+b.dataset.tab+'"]').forEach(el=>{
+        const i=+el.dataset.row; rows[i]=rows[i]||{};
+        const v=el.value.trim();
+        /* Typed as text and sent as a number where it reads as one: the tab
+           holds numbers, and "7.75" quoted is a band edge nothing compares. */
+        rows[i][el.dataset.col]=v===''?null:(/^-?\d*\.?\d+$/.test(v)?parseFloat(v):v);});
+      cfgConfirm('Write <b>'+esc(t.sheet)+'</b> into the workbook and read it again?','Write',
+        ()=>post('/api/config/save',{sheet:t.sheet,rows:rows.filter(Boolean)}));};});
+}
+function cfgConfirm(html,label,run){
+  const c=$('#cfgconfirm');c.classList.remove('hide');
+  c.innerHTML='<span>'+html+'</span><div class="grow"></div>'+
+    '<button id="cfggo" style="width:auto;padding:5px 12px;font-size:12px">'+esc(label)+'</button>'+
+    '<button id="cfgno" style="width:auto;padding:5px 12px;font-size:12px;background:transparent;color:var(--muted);border:1px solid var(--line)">Cancel</button>';
+  $('#cfgno').onclick=()=>c.classList.add('hide');
+  $('#cfggo').onclick=async()=>{
+    const go=$('#cfggo');go.disabled=true;go.textContent='writing…';
+    try{
+      const r=await run();
+      c.classList.add('hide');
+      const said=((r.wrote&&r.wrote.notes)||['written']).join(' · ');
+      /* The book underneath every screen is a new one now: boot() re-reads
+         the state and every screen with it, and the tables here are rebuilt
+         from the workbook rather than from what was typed into them. */
+      await boot(); await loadConfig();
+      cfgShow(said,false);
+    }catch(e){c.classList.add('hide');cfgShow(e.message,true)}
+  };
+}
+$('#cfgshow').onchange=()=>{cfgVisible();loadConfig()};
+$('#cfgaddpair').onclick=()=>{
+  const pair=($('#cfgnewpair').value||'').trim().toUpperCase(), atm=$('#cfgnewatm').value.trim();
+  if(pair.length!==6||!/^[A-Z]{6}$/.test(pair)){cfgShow('a pair is six letters, like USDSGD',true);return}
+  if(atm===''){cfgShow('a new pair needs the level its curve starts flat at — this tool does not invent one',true);return}
+  cfgConfirm('Add <b>'+esc(pair)+'</b> to the workbook, flat at '+esc(atm)+
+    ', with an empty quote sheet?','Add',
+    ()=>post('/api/config/pair',{action:'add',pair:pair,atm:parseFloat(atm)}));
+};
+
 function sessShow(r,msg,bad){
   const el=$('#sessmsg');
   el.className='msg'+(bad?' bad':' ok');
@@ -4153,11 +4427,11 @@ $('#sessload').onclick=sessLoad;
    book of record that is not written down beside it. The route writes the
    loaded workbook in place and keeps what it replaced; one inline
    confirmation, the house idiom, no browser dialog. */
-async function sessExport(){
+async function sessExport(force){
   const c=$('#sessconfirm');c.classList.remove('hide');
-  c.innerHTML=`<span>Write the saved marks into <b>${esc(STATE.source||'the workbook')}</b>?
-      A copy of it as it is now is kept beside it.</span>
-    <div class="grow"></div><button id="sessgo" style="width:auto;padding:5px 12px;font-size:12px">Write</button>
+  c.innerHTML=`<span>${force?'The workbook has changed since these marks were made. Write anyway, <b>losing whatever changed it</b>?'
+      :'Write the saved marks into <b>'+esc(STATE.source||'the workbook')+'</b>? A copy of it as it is now is kept beside it.'}</span>
+    <div class="grow"></div><button id="sessgo" style="width:auto;padding:5px 12px;font-size:12px">${force?'Write anyway':'Write'}</button>
     <button id="sessno" style="width:auto;padding:5px 12px;font-size:12px;background:transparent;color:var(--muted);border:1px solid var(--line)">Cancel</button>`;
   $('#sessno').onclick=()=>c.classList.add('hide');
   $('#sessgo').onclick=async()=>{
@@ -4166,17 +4440,24 @@ async function sessExport(){
     $('#sessmsg').innerHTML='<span class="spin"></span> writing the marks, then the workbook…';
     try{
       const saved=await post('/api/session/save',{path:sessPath()});
-      const r=await post('/api/session/export',{path:saved.written});
+      const r=await post('/api/session/export',{path:saved.written,force:force?1:0});
       c.classList.add('hide');
       const bits=['written into '+r.written];
       if(r.backup)bits.push('what it replaced is at '+r.backup);
       (r.notes||[]).forEach(n=>bits.push(n));
       (r.problems||[]).forEach(n=>bits.push('! '+n));
       sessShow(saved,bits.join(' · '),!!(r.problems&&r.problems.length));
-    }catch(e){c.classList.add('hide');sessShow(null,e.message,true)}
+    }catch(e){
+      c.classList.add('hide');
+      /* The workbook moved under us. Refused rather than written, and the
+         second press is a different question with its own confirmation --
+         never the same button quietly doing something else. */
+      if(/has changed since/.test(e.message||'')){sessShow(null,e.message,true);sessExport(true);}
+      else sessShow(null,e.message,true);
+    }
   };
 }
-$('#sessexport').onclick=sessExport;
+$('#sessexport').onclick=()=>sessExport(false);
 
 /* ============================== MONITOR ==============================
    Small panels, one per pair, each showing what has moved between two points
@@ -5406,6 +5687,7 @@ async function boot(){
     // one screen.  `fillSel` keeps whatever is already chosen, so this is
     // the value on a cold load and changes nothing on a reload; a build
     // whose workbook has no CNH pair falls back to the first pair as before.
+    cfgVisible();
     fillSel('#mpair',STATE.pairs||[],markingPair());
     fillSel('#mcut',cutList(),'TK');
     setMethodSel('#mmethod',$('#mpair').value);

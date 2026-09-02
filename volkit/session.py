@@ -50,7 +50,9 @@ from .banded import BandTreatment
 from .cross import is_cross
 from .cross import CrossAtmCurve
 from .paths import WRITE_ENCODING, app_dir, read_text
-from .surface import PARAM_NAMES, TERM_COEFFS
+from .surface import (PARAM_NAMES, QUOTE_FIELDS, QUOTE_LABELS, RATIO_WINGS,
+                      TERM_COEFFS, WING_RATIOS_SHEET, check_ratio,
+                      load_wing_ratios)
 from .events import event_entries
 from .timeutil import UTC, as_utc, parse_datetime
 
@@ -63,7 +65,8 @@ SESSION_FILENAME = "vol_session.json"
 #: What every block of a pair may carry.  Listed once so the reader, the
 #: writer and the tests all agree on the vocabulary.
 PAIR_BLOCKS = ("curve", "events", "atm_overwrites", "smile_overwrites",
-               "smile_term", "param_shifts", "anchor_tenors", "band")
+               "smile_term", "param_shifts", "anchor_tenors", "band",
+               "quote_overwrites", "wing_ratios")
 
 #: The suffix a workbook copy gets when a session is exported without a
 #: named destination: ``vol_marks.xlsx`` -> ``vol_marks_marked.xlsx``.
@@ -75,6 +78,385 @@ EXPORT_SUFFIX = "_marked"
 #: or pivots through a round trip, and an export cannot be undone from the
 #: session file alone, so the file it replaced is kept beside it.
 BACKUP_INFIX = ".bak-"
+
+#: How many of those backups to keep.  It used to be all of them, which was
+#: right while an export was a thing a desk did occasionally and the workbook
+#: was the book of record.  As the *store*, a save is a save: a full copy of
+#: the workbook per write, kept forever, fills a folder with files nobody
+#: reads and buries the one somebody wants.  The most recent are the ones an
+#: undo reaches for, so those are what is kept.
+BACKUP_KEEP = 20
+
+
+#: What a pair's PARAMS column starts at when the screen creates it: the
+#: shape of a curve, not a mark.  A new pair has to have *something* in these
+#: cells -- the reader refuses a column that is missing them -- and inventing
+#: a level would be a mark nobody made, so it starts at the one number the
+#: person adding the pair is asked for and the rest is the model's own
+#: neutral shape: flat, no short-dated add-on, no rate effects.
+NEW_PAIR_CURVE = {"initial": None, "long term": None, "MR": 5.0, "addon": 0.0,
+                  "short decay": 50.0, "ratevol": 0.0, "rate corr": 0.0}
+
+
+def add_pair(workbook, pair: str, *, atm: float, quotes: dict | None = None,
+             expect: str = "", force: bool = False) -> dict:
+    """Put a new pair into the workbook: CONFIG, PARAMS and its quote sheet.
+
+    The three places a pair exists, written together, because a pair that is
+    in one of them and not the others is exactly the half-built state the
+    reader spends its error messages on -- ``CONFIG lists 'X' but the workbook
+    has no 'X' sheet``.
+
+    ``atm`` is the level its curve starts flat at -- volatility points for a
+    dollar pair, a **correlation** in [-1, 1] for a cross, which is what those
+    same PARAMS cells mean there.  It is the one number that cannot be
+    defaulted, because a volatility this tool made up is a mark nobody made.  ``quotes`` is ``{TENOR: {rr_25, st_25, ...}}`` in
+    points for the tenors being quoted; a tenor with no entry gets no row, and
+    a pair with no rows at all is created and reported as not yet quoted --
+    which is a real state now that pairs are made here rather than in Excel.
+
+    A **cross** is not marked on a backbone: its PARAMS column is the
+    correlation between its dollar legs, and the same three cells mean
+    initial / final / decay there.  It is written the same way and the reader
+    tells them apart by the name, as it always has.
+    """
+    import io
+    import openpyxl
+    from .cross import dollar_legs, is_cross
+    from .marketdata import CONFIG_PAIR_COLUMNS, PARAM_ROWS, SMILE_COLUMNS, _norm
+
+    name = str(pair).strip().upper()
+    if len(name) != 6 or not name.isalpha():
+        raise SessionError(f"{pair!r} is not a six-letter currency pair")
+    level = float(atm)
+    cross = is_cross(name)
+    # A cross's first three PARAMS cells are its correlation term structure,
+    # not a volatility backbone, and the reader does not rescale them.  The
+    # two are different numbers in different units and are checked as such.
+    if cross and not -1.0 < level < 1.0:
+        raise SessionError(f"{name} is a cross, so its curve is the correlation between "
+                           f"{' and '.join(dollar_legs(name))}; {atm!r} is not a correlation")
+    if not cross and not 0 < level < 200:
+        raise SessionError(f"{name}: a starting at-the-money of {atm!r} points is not a "
+                           f"volatility; it is the level the curve starts flat at")
+    src = Path(workbook)
+    if not src.exists():
+        raise SessionError(f"workbook not found: {src}")
+    now = workbook_stamp(src)
+    if expect and now and expect != now and not force:
+        raise SessionError(f"{src.name} has changed since it was read; reload the workbook "
+                           f"and add the pair to what it says now")
+    with src.open("rb") as fh:
+        blob = fh.read()
+    wb = openpyxl.load_workbook(io.BytesIO(blob))
+    cached = _formula_cache(wb, openpyxl.load_workbook(io.BytesIO(blob), data_only=True))
+    notes: list[str] = []
+
+    # -- CONFIG ------------------------------------------------------------
+    if "CONFIG" not in wb.sheetnames:
+        raise SessionError(f"{src.name} has no CONFIG sheet")
+    cfg = wb["CONFIG"]
+    cols = {}
+    for c in range(1, cfg.max_column + 1):
+        v = cfg.cell(row=1, column=c).value
+        if v is not None and str(v).strip():
+            cols[_norm(v)] = c
+    pair_col = next((cols[k] for k in CONFIG_PAIR_COLUMNS if k in cols), None)
+    if pair_col is None:
+        raise SessionError("CONFIG has no PAIRS column listing the pairs to build")
+    listed = []
+    last = 1
+    for r in range(2, cfg.max_row + 1):
+        v = cfg.cell(row=r, column=pair_col).value
+        text = "" if v is None else str(v).strip().upper()
+        if text:
+            listed.append(text)
+            last = r
+    if name in listed:
+        raise SessionError(f"CONFIG already lists {name}")
+    cfg.cell(row=last + 1, column=pair_col, value=name)
+    notes.append(f"CONFIG: {name} added ({'a cross' if cross else 'a dollar pair'})")
+
+    # -- PARAMS ------------------------------------------------------------
+    ws = wb["PARAMS"]
+    header = {}
+    for c in range(2, ws.max_column + 1):
+        v = ws.cell(row=1, column=c).value
+        if v is not None and str(v).strip():
+            header[str(v).strip().upper()] = c
+    # A pair taken out of CONFIG keeps its column and its sheet, so adding one
+    # back finds what it had.  Reused rather than refused, and reused whole:
+    # what is there is somebody's curve, not a leftover to be reset.
+    reused = name in header
+    col = header[name] if reused else ws.max_column + 1
+    if not reused:
+        ws.cell(row=1, column=col, value=name)
+    label_row = {}
+    nrow = 1
+    for r in range(2, ws.max_row + 1):
+        label = ws.cell(row=r, column=1).value
+        if label is None or not str(label).strip():
+            continue
+        nrow = r
+        key = PARAM_ROWS.get(_norm(label))
+        if key:
+            label_row.setdefault(key, r)
+    if reused:
+        notes.append(f"PARAMS: {name} already had a column and it was left as it is")
+    else:
+        for label, value in NEW_PAIR_CURVE.items():
+            key = PARAM_ROWS[_norm(label)]
+            r = label_row.get(key)
+            if r is None:
+                nrow += 1
+                ws.cell(row=nrow, column=1, value=label)
+                label_row[key] = r = nrow
+            ws.cell(row=r, column=col, value=(level if value is None else value))
+        notes.append(f"PARAMS: a column for {name}, flat at {level:g}"
+                     + (" correlation" if cross else " volatility point(s)"))
+
+    # -- the quote sheet ---------------------------------------------------
+    existing = next((sn for sn in wb.sheetnames if sn.strip().upper() == name), None)
+    order = [c for c in SMILE_COLUMNS if c != "expiry"]
+    if existing is not None:
+        if quotes:
+            raise SessionError(
+                f"the workbook already has a {existing!r} sheet; the pair was added back "
+                f"onto it, so mark its quotes on the screen rather than here")
+        sheet = wb[existing]
+        r = sheet.max_row + 1
+        notes.append(f"{name}: its {existing!r} sheet was already there and was kept")
+    else:
+        sheet = wb.create_sheet(name)
+        sheet.cell(row=1, column=1, value="expiry")
+        for i, label in enumerate(order, start=2):
+            sheet.cell(row=1, column=i, value=label.upper())
+        r = 2
+    for tenor, vals in (quotes or {}).items():
+        row = {f: vals.get(f) for f in QUOTE_FIELDS}
+        if any(v is None for v in row.values()):
+            raise SessionError(
+                f"{name} {tenor}: a quoted tenor is all four of its numbers or none; "
+                f"{', '.join(QUOTE_LABELS[f] for f in QUOTE_FIELDS if row[f] is None)} "
+                f"{'is' if sum(v is None for v in row.values()) == 1 else 'are'} blank")
+        sheet.cell(row=r, column=1, value=str(tenor).upper())
+        for i, label in enumerate(order, start=2):
+            sheet.cell(row=r, column=i, value=float(row[SMILE_COLUMNS[label]]))
+        r += 1
+    quoted = len(quotes or {})
+    if existing is None:
+        notes.append(f"{name}: a quote sheet with {quoted} tenor(s)" if quoted else
+                     f"{name}: a quote sheet with no tenors yet, so it has no smile until "
+                     f"one is quoted on the marking screen")
+
+    bak = _backup_path(src)
+    with open(bak, "wb") as fh:
+        fh.write(blob)
+    notes.append(f"the workbook as it was is kept at {bak.name}")
+    pruned = prune_backups(src)
+    if pruned:
+        notes.append(f"{len(pruned)} older backup(s) removed, {BACKUP_KEEP} kept")
+    _save_workbook(wb, src, cached)
+    return {"written": str(src), "backup": str(bak), "pair": name, "quoted": quoted,
+            "notes": notes, "stamp": workbook_stamp(src)}
+
+
+def remove_pair(workbook, pair: str, *, expect: str = "", force: bool = False) -> dict:
+    """Take a pair out of CONFIG, and say what is left behind.
+
+    Only the CONFIG row: the PARAMS column and the quote sheet stay where they
+    are.  A pair is dropped from a run for a morning as often as forever, and
+    deleting a sheet of somebody's quotes to answer "stop building this" is a
+    great deal more than was asked for.  The workbook then holds a column and a
+    sheet nothing reads, which is said here so it is a choice and not a
+    surprise; both are still there to be deleted in Excel, or the pair added
+    back with what it had.
+    """
+    import io
+    import openpyxl
+    from .marketdata import CONFIG_PAIR_COLUMNS, _norm
+
+    name = str(pair).strip().upper()
+    src = Path(workbook)
+    if not src.exists():
+        raise SessionError(f"workbook not found: {src}")
+    now = workbook_stamp(src)
+    if expect and now and expect != now and not force:
+        raise SessionError(f"{src.name} has changed since it was read; reload the workbook "
+                           f"and make the change on what it says now")
+    with src.open("rb") as fh:
+        blob = fh.read()
+    wb = openpyxl.load_workbook(io.BytesIO(blob))
+    cached = _formula_cache(wb, openpyxl.load_workbook(io.BytesIO(blob), data_only=True))
+    if "CONFIG" not in wb.sheetnames:
+        raise SessionError(f"{src.name} has no CONFIG sheet")
+    cfg = wb["CONFIG"]
+    cols = {}
+    for c in range(1, cfg.max_column + 1):
+        v = cfg.cell(row=1, column=c).value
+        if v is not None and str(v).strip():
+            cols[_norm(v)] = c
+    targets = [cols[k] for k in list(CONFIG_PAIR_COLUMNS) + ["cor"] if k in cols]
+    hit = 0
+    for col in targets:
+        for r in range(2, cfg.max_row + 1):
+            v = cfg.cell(row=r, column=col).value
+            if v is not None and str(v).strip().upper() == name:
+                cfg.cell(row=r, column=col).value = None
+                hit += 1
+    if not hit:
+        raise SessionError(f"CONFIG does not list {name}")
+    notes = [f"CONFIG: {name} removed"]
+    kept = [w for w in ("its PARAMS column",
+                        f"its {name} sheet" if any(sn.strip().upper() == name
+                                                   for sn in wb.sheetnames) else "")
+            if w]
+    if kept:
+        notes.append(f"{name}: {' and '.join(kept)} left in place, so nothing reads "
+                     f"{'them' if len(kept) > 1 else 'it'} now; adding the pair back finds "
+                     f"what it had")
+    bak = _backup_path(src)
+    with open(bak, "wb") as fh:
+        fh.write(blob)
+    notes.append(f"the workbook as it was is kept at {bak.name}")
+    pruned = prune_backups(src)
+    if pruned:
+        notes.append(f"{len(pruned)} older backup(s) removed, {BACKUP_KEEP} kept")
+    _save_workbook(wb, src, cached)
+    return {"written": str(src), "backup": str(bak), "pair": name, "notes": notes,
+            "stamp": workbook_stamp(src)}
+
+
+def write_config_tabs(workbook, tabs: dict, *, expect: str = "",
+                      force: bool = False) -> dict:
+    """Write configuration tabs into the workbook, whole.
+
+    The second thing in this package that writes a workbook, and deliberately
+    not part of the session export: a peg band, a kACE pillar, a holiday and a
+    wing ratio are not *marks*.  They are what the tool is configured with, a
+    session does not carry them, and a desk that changes one means it to apply
+    to every session from now on -- so they go straight in, with the same
+    backup, the same staleness check and the same pruning the export has.
+
+    ``tabs`` is ``{SHEET: [row dicts]}``, each sheet one of
+    ``configsheets.EDITABLE``.  A tab is replaced by what is given for it and
+    the ones not named are untouched.
+    """
+    import io
+    import openpyxl
+    from . import configsheets
+
+    src = Path(workbook)
+    if not src.exists():
+        raise SessionError(f"workbook not found: {src}")
+    unknown = [k for k in tabs if k not in configsheets.EDITABLE]
+    if unknown:
+        raise SessionError(
+            f"{', '.join(unknown)} is not a configuration tab this writes "
+            f"({', '.join(configsheets.EDITABLE)}); the rest of the workbook is edited "
+            f"through the marking screens")
+    now = workbook_stamp(src)
+    if expect and now and expect != now and not force:
+        raise SessionError(
+            f"{src.name} has changed since it was read -- another volkit, or somebody "
+            f"saving it from Excel. Reload the workbook and make the change on what it "
+            f"says now")
+    with src.open("rb") as fh:
+        blob = fh.read()
+    wb = openpyxl.load_workbook(io.BytesIO(blob))
+    cached = _formula_cache(wb, openpyxl.load_workbook(io.BytesIO(blob), data_only=True))
+    notes = [configsheets.write_rows(wb, sheet, configsheets.EDITABLE[sheet][0], rows)
+             for sheet, rows in sorted(tabs.items())]
+    bak = _backup_path(src)
+    with open(bak, "wb") as fh:
+        fh.write(blob)
+    notes.append(f"the workbook as it was is kept at {bak.name}")
+    pruned = prune_backups(src)
+    if pruned:
+        notes.append(f"{len(pruned)} older backup(s) removed, {BACKUP_KEEP} kept")
+    _save_workbook(wb, src, cached)
+    locked = excel_lock(src)
+    if locked is not None:
+        notes.append(f"{locked.name} is beside the workbook, so Excel probably has it open; "
+                     f"anything it saves afterwards is written over this")
+    return {"written": str(src), "backup": str(bak), "tabs": sorted(tabs),
+            "notes": notes, "pruned": pruned, "stamp": workbook_stamp(src)}
+
+
+def round_trip_losses(path) -> list[str]:
+    """What a write would drop from this workbook, said before the first one.
+
+    openpyxl carries cell values, formulas and their cached results; it does
+    not carry images, charts, pivot tables or conditional-formatting rules
+    that came from parts it does not model.  While the workbook was a book of
+    record nobody wrote to, that cost nothing.  As the store the screens write
+    on every save, a chart somebody built is gone at the first save and the
+    ``.bak`` is the only place it still exists -- which is a thing to be told
+    once, not to discover.
+    """
+    import zipfile
+    out: list[str] = []
+    try:
+        with zipfile.ZipFile(Path(path)) as z:
+            names = z.namelist()
+    except (OSError, zipfile.BadZipFile) as exc:
+        return [f"cannot look inside {Path(path).name}: {exc}"]
+    for what, prefix in (("image", "xl/media/"), ("chart", "xl/charts/chart"),
+                         ("pivot table", "xl/pivotTables/pivotTable"),
+                         ("drawing", "xl/drawings/drawing")):
+        n = sum(1 for name in names if name.startswith(prefix))
+        if n:
+            out.append(f"{n} {what}{'' if n == 1 else 's'}")
+    return out
+
+
+def workbook_stamp(path) -> str:
+    """What identifies a workbook file, cheaply: size and modification time.
+
+    Recorded when a book is loaded and checked before it is written over.  Not
+    a hash -- the point is to notice that the file is not the one this session
+    read, and a rewritten workbook always changes both of these; hashing tens
+    of megabytes on every save to catch a rewrite that happened to preserve
+    them is paying a great deal for very little.
+    """
+    p = Path(path)
+    try:
+        st = p.stat()
+    except OSError:
+        return ""
+    return f"{st.st_size}:{st.st_mtime_ns}"
+
+
+def excel_lock(path) -> Path | None:
+    """Excel's own lock file beside a workbook it has open, if there is one.
+
+    Excel writes ``~$vol_marks.xlsx`` next to the file while it is open.  It is
+    a hint and not a guarantee -- a crash leaves one behind, and a file opened
+    read-only may not make one -- so what is done with it is to *say so*, not
+    to refuse.  On Windows an open workbook is one the replace below cannot
+    make, and "permission denied" is a much worse way to find that out.
+    """
+    p = Path(path)
+    lock = p.with_name("~$" + p.name)
+    return lock if lock.exists() else None
+
+
+def prune_backups(src, keep: int = BACKUP_KEEP) -> list[str]:
+    """Delete all but the newest ``keep`` backups of one workbook.
+
+    Returns what it removed.  Newest by name, which is newest by time: the
+    stamp is written so that it sorts.
+    """
+    p = Path(src)
+    found = sorted(p.parent.glob(f"{p.stem}{BACKUP_INFIX}*{p.suffix}"))
+    gone: list[str] = []
+    for old in found[:max(0, len(found) - max(0, int(keep)))]:
+        try:
+            old.unlink()
+            gone.append(old.name)
+        except OSError:
+            continue
+    return gone
 
 #: How the workbook spells each curve parameter's PARAMS row, for a row the
 #: sheet does not have yet.  The reader accepts these (``marketdata.PARAM_ROWS``).
@@ -176,6 +558,22 @@ def capture_pair(book, pair: str) -> dict:
         "atm_overwrites": {k: v * 100.0 for k, v in sorted(atm.tenor_overwrites.items())},
         "smile_overwrites": {name: dict(sorted(ow.items()))
                              for name, ow in sorted(surface.param_overwrites.items()) if ow},
+        # The quotes typed over the sheet's, in points like every other
+        # volatility here.  Only the boxes somebody filled: what the sheet
+        # already holds is the sheet's, and a session that copied it out would
+        # freeze one morning's quotes into every workbook it was put back onto.
+        "quote_overwrites": {tenor: {f: v * 100.0 for f, v in sorted(edits.items())}
+                             for tenor, edits in sorted(surface.quote_overwrites.items())
+                             if edits},
+        # The wing multipliers the screen changed.  Raw numbers, not points:
+        # a ratio is a multiple, not a volatility.  ``None`` is kept and means
+        # a wing taken off its ratio and quoted in its own right -- the
+        # difference between that and "no opinion" is the whole point of the
+        # tab, so it survives the file.
+        "wing_ratios": {tenor: {w: (None if v is None else float(v))
+                                for w, v in sorted(edits.items())}
+                        for tenor, edits in sorted(surface.ratio_overwrites.items())
+                        if edits},
         # A marked term structure replaces the fitted one for that parameter,
         # so what is written is the three coefficients themselves, raw.  Only
         # the parameters somebody marked appear; the rest are the fit's and
@@ -219,6 +617,11 @@ def capture(book, pairs=None, *, note: str = "") -> dict:
         "saved": datetime.now().astimezone().replace(microsecond=0).isoformat(),
         "valuation": book.clock.now.isoformat(),
         "workbook": str(getattr(book.data, "source", "") or ""),
+        # What that workbook was when these marks were made.  Checked before
+        # a write over it, so a file that somebody else has saved since is
+        # refused rather than quietly overwritten.  Advisory on the way back
+        # *in* -- a marker re-opening yesterday's marks is the normal case.
+        "workbook_stamp": workbook_stamp(getattr(book.data, "source", "") or ""),
         "note": str(note or ""),
         "units": UNITS_NOTE,
         "pairs": {p: capture_pair(book, p) for p in wanted},
@@ -376,6 +779,52 @@ def apply_block(surface, block: dict) -> list[str]:
                 except (TypeError, ValueError):
                     problems.append(f"smile overwrite {name} {tenor}: {value!r} is not a number")
 
+    requote = False
+    if "wing_ratios" in block:
+        requote = requote or bool(surface.ratio_overwrites)
+        surface.clear_ratio_overwrite()
+        for tenor, edits in (block.get("wing_ratios") or {}).items():
+            if not isinstance(edits, dict):
+                problems.append(f"wing ratio {tenor}: expected the wings as an object, "
+                                f"got {edits!r}")
+                continue
+            for wing, value in edits.items():
+                if wing not in RATIO_WINGS:
+                    problems.append(f"wing ratio {tenor}: {wing!r} is not a wing "
+                                    f"({', '.join(RATIO_WINGS)})")
+                    continue
+                try:
+                    surface.overwrite_ratio(str(tenor), wing,
+                                            None if value is None else float(value))
+                except (TypeError, ValueError) as exc:
+                    problems.append(f"wing ratio {wing} {tenor}: {exc}")
+        requote = requote or bool(surface.ratio_overwrites)
+
+    if "quote_overwrites" in block:
+        # Whether the quotes moved at all, which decides whether the smile has
+        # to be refitted below.  A block that carries no quote edits and lands
+        # on a surface that had none is not a re-quote, and refitting it would
+        # rebuild every smile against whatever the curve has just been marked
+        # to -- a different surface from the one that was saved, arriving
+        # through a code path nobody asked to run.
+        requote = bool(surface.quote_overwrites)
+        surface.clear_quote_overwrite()
+        for tenor, edits in (block.get("quote_overwrites") or {}).items():
+            if not isinstance(edits, dict):
+                problems.append(f"quote {tenor}: expected the quotes as an object, "
+                                f"got {edits!r}")
+                continue
+            for name, value in edits.items():
+                if name not in QUOTE_FIELDS:
+                    problems.append(f"quote {tenor}: {name!r} is not one of the four quotes "
+                                    f"({', '.join(QUOTE_FIELDS)})")
+                    continue
+                try:
+                    surface.overwrite_quote(str(tenor), name, float(value) / 100.0)
+                except (TypeError, ValueError) as exc:
+                    problems.append(f"quote {QUOTE_LABELS[name]} {tenor}: {exc}")
+        requote = requote or bool(surface.quote_overwrites)
+
     if "smile_term" in block:
         surface.clear_param_terms()
         for name, coeffs in (block.get("smile_term") or {}).items():
@@ -422,6 +871,18 @@ def apply_block(surface, block: dict) -> list[str]:
         except (TypeError, ValueError) as exc:
             problems.append(f"band treatment: {exc}")
 
+    # A typed quote is an input to the fit and not a mark applied on top of
+    # one, so a block that moved one has to refit the smile before anything
+    # reads it.  Only that case: on the way up from the workbook this runs
+    # before the book calibrates anything, and fitting an empty surface here
+    # would leave it with no parameter term structure at all -- and a refit
+    # on a block that touched no quote would rebuild the smiles against a
+    # curve the saved surface never fitted against, which is a different
+    # surface from the one somebody marked.
+    if requote and surface.fits:
+        surface.calibrate()
+        problems.extend(surface.warnings)
+        surface.warnings.clear()
     surface.invalidate()
     return problems
 
@@ -554,7 +1015,8 @@ def restore(book, path: str | Path, pairs=None) -> dict:
 # export: a session file into a workbook
 # --------------------------------------------------------------------------
 def export_workbook(doc: dict, workbook: str | Path, out: str | Path | None = None,
-                    pairs=None, *, in_place: bool = False) -> dict:
+                    pairs=None, *, in_place: bool = False, expect: str = "",
+                    force: bool = False) -> dict:
     """Write a session's marks into the cells a workbook keeps them in.
 
     The workbook is the book of record and nothing else in this package
@@ -595,8 +1057,15 @@ def export_workbook(doc: dict, workbook: str | Path, out: str | Path | None = No
 
     Formulas and the other sheets are kept as they are; images and charts,
     if any, are not (openpyxl does not carry them), which is why an in-place
-    write keeps a backup and why the CLI's default is still a copy.  Returns
-    ``{"written", "backup", "pairs", "problems", "notes", "in_place"}``.
+    write keeps a backup and why the CLI's default is still a copy.
+
+    ``expect`` is the workbook's :func:`workbook_stamp` as it was when the
+    marks being written were made.  An in-place write whose file no longer
+    matches it is **refused**: something else has written the workbook since,
+    and a store that lets the second writer win silently loses the first one's
+    morning.  ``force`` writes anyway, for a person who has looked and decided.
+    Returns ``{"written", "backup", "pairs", "problems", "notes", "in_place",
+    "stamp", "stale", "pruned", "locked"}``.
     """
     import openpyxl
     from datetime import timedelta
@@ -620,6 +1089,19 @@ def export_workbook(doc: dict, workbook: str | Path, out: str | Path | None = No
     if dst.suffix.lower() != ".xlsx":
         raise SessionError(f"{dst.name}: a workbook is written as .xlsx")
 
+    # -- is this still the file the marks were made against? ---------------
+    # Only for a write over the original: a copy takes nothing away from
+    # anybody, and refusing one would be a check with no failure to prevent.
+    writing_over = dst.exists() and dst.resolve() == src.resolve()
+    now = workbook_stamp(src)
+    stale = bool(writing_over and expect and now and expect != now)
+    if stale and not force:
+        raise SessionError(
+            f"{src.name} has changed since these marks were made -- another volkit, or "
+            f"somebody saving it from Excel. Writing now would drop whatever they did. "
+            f"Reload the workbook and put the marks back on it, or write a copy instead")
+    locked = str(excel_lock(dst) or "") if writing_over else ""
+
     # Read whole and closed before parsing, like every workbook here
     # (``marketdata.open_workbook``): an .xlsx held open is one Excel cannot
     # save.
@@ -632,7 +1114,8 @@ def export_workbook(doc: dict, workbook: str | Path, out: str | Path | None = No
     # copy saved by openpyxl alone has smile sheets full of ``=C2*3`` that
     # read as no quote at all until Excel has opened and saved it.  The
     # cached values are read here and put back into the saved file.
-    cached = _formula_cache(wb, openpyxl.load_workbook(io.BytesIO(blob), data_only=True))
+    values = openpyxl.load_workbook(io.BytesIO(blob), data_only=True)
+    cached = _formula_cache(wb, values)
     if "PARAMS" not in wb.sheetnames:
         raise SessionError(f"{src.name} has no PARAMS sheet")
     ws = wb["PARAMS"]
@@ -641,6 +1124,16 @@ def export_workbook(doc: dict, workbook: str | Path, out: str | Path | None = No
     problems: list[str] = []
     notes: list[str] = []
     written: list[str] = []
+    #: The multipliers as they end up, by pair, for the tab written at the end.
+    written_ratios: dict[str, dict[str, dict[str, float | None]]] = {}
+    # The wing multipliers as the workbook holds them, so a quote written into
+    # a sheet can be written with the wing it derives beside it.  Read from the
+    # source and not from the file being built: the tab is rewritten below.
+    try:
+        sheet_ratios = load_wing_ratios(src)
+    except (OSError, ValueError) as exc:
+        sheet_ratios = {}
+        problems.append(f"{WING_RATIOS_SHEET}: {exc}; wings were written as they stand")
 
     # -- the sheet as it stands -------------------------------------------
     header = {}
@@ -699,8 +1192,14 @@ def export_workbook(doc: dict, workbook: str | Path, out: str | Path | None = No
         return nrow[0]
 
     def clear(rows, col: int) -> None:
+        # ``ws.cell(row, column, value=None)`` does **not** blank a cell:
+        # openpyxl assigns only when ``value is not None``, so the call is a
+        # no-op and every clear here was one until 2026-09-02.  An overwrite
+        # taken off on the screen therefore stayed in the workbook and came
+        # back on the next load -- a mark nobody could see undoing a decision
+        # somebody had made.  Assigned through the cell, which does blank it.
         for r in rows:
-            ws.cell(row=r, column=col, value=None)
+            ws.cell(row=r, column=col).value = None
 
     def number(what: str, v):
         try:
@@ -800,10 +1299,72 @@ def export_workbook(doc: dict, workbook: str | Path, out: str | Path | None = No
                     n += 1
             wrote.append(f"{n} wing shift(s)")
         if "anchor_tenors" in block:
-            ws.cell(row=overlay_row(("anchor",)), column=col,
-                    value=1 if block["anchor_tenors"] else None)
+            # Same trap as ``clear`` above: switching the anchor off has to
+            # blank the cell, and passing None to ``cell()`` does not.
+            ws.cell(row=overlay_row(("anchor",)), column=col).value = (
+                1 if block["anchor_tenors"] else None)
             if block["anchor_tenors"]:
                 wrote.append("anchored")
+
+        # the wing multipliers, and the quotes they derive ------------------
+        # One step, because they are one statement about the sheet: the tab
+        # says which wings are a multiple of the 25-delta, and the sheet is
+        # then written as numbers throughout so nothing recalculates.
+        live_ratios: dict[str, dict[str, float | None]] = {}
+        for tenor, ratio in (sheet_ratios.get(name) or {}).items():
+            live_ratios[str(tenor).upper()] = {w: ratio.get(w) for w in RATIO_WINGS}
+        if "wing_ratios" in block:
+            for tenor, edits in (block.get("wing_ratios") or {}).items():
+                if not isinstance(edits, dict):
+                    problems.append(f"{name}: wing ratio {tenor}: expected the wings as an "
+                                    f"object, got {edits!r}")
+                    continue
+                row = live_ratios.setdefault(str(tenor).upper(),
+                                             {w: None for w in RATIO_WINGS})
+                for wing, v in edits.items():
+                    if wing not in RATIO_WINGS:
+                        problems.append(f"{name}: wing ratio {tenor}: {wing!r} is not a wing "
+                                        f"({', '.join(RATIO_WINGS)})")
+                        continue
+                    if v is None:
+                        row[wing] = None
+                        continue
+                    fv = number(f"{name} wing ratio {wing} {tenor}", v)
+                    if fv is None:
+                        continue
+                    try:
+                        row[wing] = check_ratio(wing, f"{name} {tenor}", fv)
+                    except ValueError as exc:
+                        problems.append(f"{name}: {exc}")
+
+        # quotes, into the pair's own sheet --------------------------------
+        if "quote_overwrites" in block:
+            clean: dict[str, dict[str, float]] = {}
+            for tenor, fields in (block.get("quote_overwrites") or {}).items():
+                if not isinstance(fields, dict):
+                    problems.append(f"{name}: quote {tenor}: expected the quotes as an "
+                                    f"object, got {fields!r}")
+                    continue
+                vals: dict[str, float] = {}
+                for f, v in fields.items():
+                    if f not in QUOTE_FIELDS:
+                        problems.append(f"{name}: quote {tenor}: {f!r} is not one of the four "
+                                        f"quotes ({', '.join(QUOTE_FIELDS)})")
+                        continue
+                    fv = number(f"{name} quote {QUOTE_LABELS[f]} {tenor}", v)
+                    if fv is not None:
+                        vals[f] = fv
+                if vals:
+                    clean[str(tenor)] = vals
+            if clean or any(any(v is not None for v in r.values())
+                            for r in live_ratios.values()):
+                n, probs, ns = _write_quote_cells(wb, values, name, clean, live_ratios)
+                problems.extend(probs)
+                notes.extend(ns)
+                if n:
+                    wrote.append(f"{n} quote(s)")
+        if live_ratios:
+            written_ratios[name] = live_ratios
 
         # band ------------------------------------------------------------
         if isinstance(block.get("band"), dict):
@@ -829,7 +1390,12 @@ def export_workbook(doc: dict, workbook: str | Path, out: str | Path | None = No
     if written and (rows or "event_table" in doc):
         notes.append(_write_events_sheet(wb, rows, sorted(header), tz_shift))
 
+    # -- WING_RATIOS -------------------------------------------------------
+    if written and written_ratios:
+        notes.append(_write_wing_ratios_sheet(wb, written_ratios))
+
     backup = ""
+    pruned: list[str] = []
     if not written:
         problems.append("nothing was written")
     else:
@@ -842,15 +1408,23 @@ def export_workbook(doc: dict, workbook: str | Path, out: str | Path | None = No
                 fh.write(blob)
             backup = str(bak)
             notes.append(f"the workbook as it was is kept at {bak.name}")
+            pruned = prune_backups(src)
+            if pruned:
+                notes.append(f"{len(pruned)} older backup(s) removed, {BACKUP_KEEP} kept")
         _save_workbook(wb, dst, cached)
         n = sum(len(v) for v in cached.values())
         if n:
             notes.append(f"{n} formula cell(s) kept, with the values Excel last computed "
                          "for them; a formula reading a cell written here shows its old "
                          "value until Excel recalculates")
+    if locked:
+        notes.append(f"{Path(locked).name} is beside the workbook, so Excel probably has it "
+                     f"open. What is written here is what the tool holds; anything Excel "
+                     f"saves afterwards is written over it")
     return {"written": str(dst) if written else "", "backup": backup,
             "pairs": written, "problems": problems, "notes": notes,
-            "in_place": bool(in_place)}
+            "in_place": bool(in_place), "stamp": workbook_stamp(dst) if written else "",
+            "stale": stale, "pruned": pruned, "locked": locked}
 
 
 def _backup_path(src: Path) -> Path:
@@ -956,6 +1530,308 @@ def _write_band_row(wb, sheet: str, pair: str, request: dict) -> None:
         ws.cell(row=row, column=header[key], value=value)
 
 
+#: ``=C2*3``, ``=1.85*D2``, ``=D2*1.75`` -- a cell reference and a constant,
+#: in either order, which is every shape the shipped workbook's wing columns
+#: use.  Anything else is reported rather than guessed at: a wing this cannot
+#: read is a relationship somebody has to look at before it is thrown away.
+_WING_FORMULA = re.compile(
+    r"^\s*=?\s*(?:\$?([A-Z]{1,3})\$?(\d+)\s*\*\s*([0-9]*\.?[0-9]+)"
+    r"|([0-9]*\.?[0-9]+)\s*\*\s*\$?([A-Z]{1,3})\$?(\d+))\s*$")
+
+
+def migrate_wing_ratios(workbook, out=None, *, in_place: bool = False) -> dict:
+    """Lift the pair sheets' wing formulas onto the ``WING_RATIOS`` tab.
+
+    Run once, on a workbook that is becoming a database.  Until it is run, a
+    pair sheet is a small spreadsheet model: ``ST 10D`` is ``=ST 25D * 3.25``
+    and ``RR 10D`` is ``=RR 25D * 1.85``, a different multiple per pair and per
+    tenor, and the tool cannot see any of it.  Writing a quote into such a
+    sheet leaves the wing beside it holding a number computed from the cell
+    that has just been replaced.
+
+    So: read every multiplier, write them onto a tab the tool reads, and
+    flatten the sheets to numbers.  Nothing is guessed -- a wing whose formula
+    is not a constant times the 25-delta cell of its own row is reported and
+    left exactly as it is, and the file is written only if every sheet was
+    understood or the caller asked for it anyway.
+
+    Returns ``{"written", "backup", "pairs", "ratios", "problems", "notes"}``.
+    """
+    import io
+    import openpyxl
+    from .marketdata import SMILE_COLUMNS
+
+    src = Path(workbook)
+    if not src.exists():
+        raise SessionError(f"workbook not found: {src}")
+    dst = Path(out) if out else (
+        src if in_place else src.with_name(src.stem + EXPORT_SUFFIX + src.suffix))
+    if dst.resolve() == src.resolve() and not in_place:
+        raise SessionError(f"{src.name} is the workbook itself; writing into it needs "
+                           "in_place (--in-place), or name another file")
+    with src.open("rb") as fh:
+        blob = fh.read()
+    wb = openpyxl.load_workbook(io.BytesIO(blob))
+    values = openpyxl.load_workbook(io.BytesIO(blob), data_only=True)
+    cached = _formula_cache(wb, values)
+
+    problems: list[str] = []
+    notes: list[str] = []
+    by_pair: dict[str, dict[str, dict[str, float | None]]] = {}
+    pairs: list[str] = []
+    for sheet in list(wb.sheetnames):
+        found, _ = _quote_sheet(wb, sheet)
+        if found is None:
+            continue
+        name, ws, col_of, expiry_col, row_of = found
+        rows: dict[str, dict[str, float | None]] = {}
+        readable = True
+        for tenor, r in row_of.items():
+            row: dict[str, float | None] = {}
+            for wing, target in RATIO_WINGS.items():
+                cell = ws.cell(row=r, column=col_of[target])
+                text = cell.value
+                if isinstance(text, str) and text.startswith("="):
+                    pass
+                elif _is_formula(text):
+                    text = "=" + str(getattr(text, "text", "")).lstrip("=")
+                else:
+                    row[wing] = None          # typed in its own right
+                    continue
+                m = _WING_FORMULA.match(str(text))
+                base_col = col_of[target.replace("_10", "_25")]
+                if m:
+                    col, rownum, factor = (m.group(1), m.group(2), m.group(3)) if m.group(1) \
+                        else (m.group(5), m.group(6), m.group(4))
+                    from openpyxl.utils import get_column_letter
+                    if col == get_column_letter(base_col) and int(rownum) == r:
+                        row[wing] = float(factor)
+                        continue
+                readable = False
+                problems.append(
+                    f"{name} {tenor}: {QUOTE_LABELS[target]} is {str(text)!r}, which is not a "
+                    f"constant times the {QUOTE_LABELS[target.replace('_10', '_25')]} of its "
+                    f"own row; it was left as it is and no ratio was written for it")
+                row[wing] = None
+            rows[tenor] = row
+        if rows:
+            by_pair[name.upper()] = rows
+            pairs.append(name)
+            if readable:
+                n, probs, ns = _write_quote_cells(wb, values, name, {}, rows)
+                problems.extend(probs)
+                notes.extend(ns)
+            else:
+                notes.append(f"{name}: left as it is, because a wing on it could not be read")
+
+    if not by_pair:
+        raise SessionError(f"{src.name} has no pair sheets with the four quote columns "
+                           f"({', '.join(SMILE_COLUMNS)})")
+    notes.append(_write_wing_ratios_sheet(wb, by_pair))
+    backup = ""
+    if dst.exists() and dst.resolve() == src.resolve():
+        bak = _backup_path(src)
+        with open(bak, "wb") as fh:
+            fh.write(blob)
+        backup = str(bak)
+        notes.append(f"the workbook as it was is kept at {bak.name}")
+    _save_workbook(wb, dst, cached)
+    found = sum(1 for rows in by_pair.values() for row in rows.values()
+                if any(v is not None for v in row.values()))
+    return {"written": str(dst), "backup": backup, "pairs": sorted(pairs),
+            "ratios": found, "problems": problems, "notes": notes}
+
+
+def _write_wing_ratios_sheet(wb, by_pair: dict) -> str:
+    """Write the ``WING_RATIOS`` tab: pair, tenor, st, rr.
+
+    Whole for the pairs written and merged with whatever is already there for
+    the rest, because a multiplier belongs to the pair whose wings it shapes
+    and a table half rewritten would leave another pair's rows describing a
+    sheet that has since been flattened.  A wing with no multiple is written
+    blank, which is how the tab says "quoted in its own right" -- not as a 1,
+    which would be a multiple that happens to be one.
+    """
+    from .marketdata import _norm
+    head = ("pair", "tenor", "st", "rr")
+    keep: dict[tuple, dict] = {}
+    if WING_RATIOS_SHEET in wb.sheetnames:
+        old = wb[WING_RATIOS_SHEET]
+        cols = {}
+        header_row = 0
+        for r in range(1, old.max_row + 1):
+            names = {_norm(old.cell(row=r, column=c).value or ""): c
+                     for c in range(1, old.max_column + 1)}
+            if "pair" in names and "tenor" in names:
+                cols, header_row = names, r
+                break
+        for r in range(header_row + 1, old.max_row + 1 if header_row else 1):
+            pair = str(old.cell(row=r, column=cols["pair"]).value or "").strip().upper()
+            tenor = str(old.cell(row=r, column=cols["tenor"]).value or "").strip().upper()
+            if not pair or not tenor or pair.startswith("#"):
+                continue
+            row = {}
+            for wing in RATIO_WINGS:
+                c = cols.get(wing)
+                v = old.cell(row=r, column=c).value if c else None
+                row[wing] = float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) \
+                    else None
+            keep[(pair, tenor)] = row
+        del wb[WING_RATIOS_SHEET]
+    for pair, rows in by_pair.items():
+        for tenor in [k for (p, k) in list(keep) if p == pair.upper()]:
+            keep.pop((pair.upper(), tenor), None)
+        for tenor, row in rows.items():
+            keep[(pair.upper(), str(tenor).upper())] = row
+
+    ws = wb.create_sheet(WING_RATIOS_SHEET)
+    ws.cell(row=1, column=1, value="# how each tenor's 10-delta wings follow its 25-delta "
+                                   "ones: ST 10d = ST 25d x st, RR 10d = RR 25d x rr. "
+                                   "A blank is no multiple -- that wing is quoted itself.")
+    for i, name in enumerate(head, start=1):
+        ws.cell(row=2, column=i, value=name)
+    r = 3
+    for (pair, tenor), row in sorted(keep.items()):
+        ws.cell(row=r, column=1, value=pair)
+        ws.cell(row=r, column=2, value=tenor)
+        for i, wing in enumerate(RATIO_WINGS, start=3):
+            if row.get(wing) is not None:
+                ws.cell(row=r, column=i, value=float(row[wing]))
+        r += 1
+    n = sum(1 for row in keep.values() if any(v is not None for v in row.values()))
+    return (f"{WING_RATIOS_SHEET}: {len(keep)} row(s), {n} carrying a multiplier")
+
+
+def _quote_sheet(wb, pair: str):
+    """The pair's own quote sheet, its header columns and its tenor rows.
+
+    ``(sheet_name, worksheet, {field: column}, expiry_column, {TENOR: row})``,
+    or a reason it could not be found.
+    """
+    from .marketdata import SMILE_COLUMNS, _norm
+    sheet = next((sn for sn in wb.sheetnames if sn.strip().upper() == pair.upper()), None)
+    if sheet is None:
+        return None, (f"{pair}: the workbook has no {pair!r} sheet, so its quotes were not "
+                      f"written; add the sheet or take the pair out of CONFIG")
+    ws = wb[sheet]
+    header: dict[str, int] = {}
+    for c in range(1, ws.max_column + 1):
+        v = ws.cell(row=1, column=c).value
+        if v is not None and str(v).strip():
+            header.setdefault(_norm(v), c)
+    missing = [k for k in SMILE_COLUMNS if k not in header]
+    if missing:
+        return None, (f"{pair}: sheet {sheet!r} has no {', '.join(missing)} column(s), so "
+                      f"its quotes were not written")
+    col_of = {f: header[label] for label, f in SMILE_COLUMNS.items() if f != "tenor"}
+    expiry_col = header["expiry"]
+    row_of: dict[str, int] = {}
+    for r in range(2, ws.max_row + 1):
+        v = ws.cell(row=r, column=expiry_col).value
+        key = "" if v is None else str(v).strip().upper()
+        if key:
+            row_of.setdefault(key, r)
+    return (sheet, ws, col_of, expiry_col, row_of), ""
+
+
+def _write_quote_cells(wb, values, pair: str, edits: dict,
+                       ratios: dict | None = None) -> tuple[int, list[str], list[str]]:
+    """Write the pair's quotes into its own sheet, as numbers, all of them.
+
+    The one place a session writes a *quote* rather than a mark.  Everything
+    else this module exports goes into a row the workbook keeps for it
+    (``atm 1m``, ``shift rho25``) and leaves the sheet's own numbers alone;
+    these are the sheet's own numbers, so an edited quote replaces the cell it
+    came from and the workbook is then the database it is being used as.
+
+    **The whole sheet is flattened, not only the cells that changed.**  A pair
+    sheet's 10-delta columns were formulas over its 25-delta ones, and writing
+    one cell of such a sheet leaves the wing beside it holding a value computed
+    from the number that has just been replaced: the file is then internally
+    inconsistent, and the next person to open it in Excel gets a wing that
+    recalculates itself into something nobody marked.  There is no half of this
+    that is safe, so every quote on a sheet this touches is written as the
+    number the tool is using, and the relationships that produced them live on
+    the ``WING_RATIOS`` tab where the tool can read them.
+
+    ``ratios`` is ``{TENOR: {"st": float | None, "rr": ...}}`` in force for this
+    pair.  A wing with a ratio is written as the 25-delta times it.
+
+    A tenor the sheet does not quote is appended, and only with all four of its
+    quotes (a ratio counts as supplying one): the reader refuses a half-quoted
+    row and finding that out on the way back in is worse than being told here.
+    """
+    problems: list[str] = []
+    notes: list[str] = []
+    found, why = _quote_sheet(wb, pair)
+    if found is None:
+        return 0, [why], notes
+    sheet, ws, col_of, expiry_col, row_of = found
+    vs = values[sheet] if sheet in values.sheetnames else None
+    ratios = ratios or {}
+
+    def cached(row: int, f: str):
+        """What the sheet holds for one quote today: the number Excel last
+        computed for it, or the number typed there."""
+        if vs is None:
+            return None
+        v = vs.cell(row=row, column=col_of[f]).value
+        return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+    n = 0
+    over_formula = False
+    tenors = list(row_of) + [str(t).strip().upper() for t in edits if
+                             str(t).strip().upper() not in row_of]
+    for key in tenors:
+        fields = {}
+        for raw, vals in edits.items():
+            if str(raw).strip().upper() == key:
+                fields = vals
+        ratio = {}
+        for raw, vals in ratios.items():
+            if str(raw).strip().upper() == key:
+                ratio = vals or {}
+        row = row_of.get(key)
+        # What every one of the four is worth, before anything is written:
+        # the sheet's own number, the typed one over it, and the derived one
+        # over that.  Read first and written after, because a derived wing
+        # reads the 25-delta cell it is taken from.
+        want: dict[str, float | None] = {}
+        for f in QUOTE_FIELDS:
+            want[f] = fields.get(f, cached(row, f) if row is not None else None)
+        for wing, target in (("st", "st_10"), ("rr", "rr_10")):
+            factor = ratio.get(wing)
+            base = want[target.replace("_10", "_25")]
+            if factor is not None and base is not None:
+                want[target] = float(base) * float(factor)
+        if row is None:
+            absent = [QUOTE_LABELS[f] for f in QUOTE_FIELDS if want[f] is None]
+            if absent:
+                problems.append(
+                    f"{pair} {key}: sheet {sheet!r} does not quote this tenor and "
+                    f"{', '.join(absent)} {'is' if len(absent) == 1 else 'are'} blank, so no "
+                    f"row was added; a quoted tenor is all four of its numbers or none")
+                continue
+            row = ws.max_row + 1
+            ws.cell(row=row, column=expiry_col, value=key)
+            row_of[key] = row
+            notes.append(f"{pair}: {key} added to sheet {sheet!r} as a newly quoted tenor")
+        for f in QUOTE_FIELDS:
+            if want[f] is None:
+                continue
+            cell = ws.cell(row=row, column=col_of[f])
+            if _is_formula(cell.value):
+                over_formula = True
+            cell.value = float(want[f])
+            n += 1
+    if over_formula:
+        notes.append(f"{pair}: sheet {sheet!r} held formulas in its quote columns and is now "
+                     f"numbers throughout. A quote written beside a formula that reads it "
+                     f"would leave the two disagreeing, so the sheet is flattened whole; the "
+                     f"relationship between the wings lives on {WING_RATIOS_SHEET} now")
+    return n, problems, notes
+
+
 def _is_formula(v) -> bool:
     """A cell openpyxl will write back as a formula.
 
@@ -996,8 +1872,18 @@ def _formula_cache(wb, values) -> dict[int, dict[str, float]]:
 # attributes: an array formula is ``<f t="array" ref="B2">C2*3</f>`` and a
 # shared one can be ``<f t="shared" si="0"/>`` with no text at all.  Matching
 # only a bare ``<f>`` skipped both, so the substitution silently did nothing.
+# The empty value element openpyxl leaves behind is written as ``<v></v>``.
+# This matched only the self-closing ``<v/>`` until 2026-09-02, so nothing
+# substituted and every array-formula quote in the shipped workbook came back
+# blank from an export -- the copy reloaded with one "blank quote" problem per
+# cell, which is the whole failure this cache exists to prevent, arriving
+# through a spelling.  Both forms are accepted now: which one openpyxl emits is
+# openpyxl's business and not something to depend on -- it writes ``<v></v>``
+# here, with and without lxml, on 3.1.5.  Two tests already covered this and
+# both were red on the working copy, which is the shape of a dependency that
+# moved under a check nobody re-ran.
 _EMPTY_V = re.compile(
-    r'<c r="([A-Z]+[0-9]+)"([^>]*)>(<f[^>]*/>|<f[^>]*>[^<]*</f>)<v\s*/></c>')
+    r'<c r="([A-Z]+[0-9]+)"([^>]*)>(<f[^>]*/>|<f[^>]*>[^<]*</f>)(?:<v\s*/>|<v></v>)</c>')
 
 
 def _restore_formula_cache(xlsx: bytes, cached: dict[int, dict[str, float]]) -> bytes:

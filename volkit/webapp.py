@@ -22,7 +22,7 @@ import threading
 import traceback
 import webbrowser
 from dataclasses import asdict
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -49,7 +49,7 @@ from .marketmaker import quote_panel_from_request as mm_quote_panel_from_request
 from .marketmaker import rules_from_request
 from .quotes import FLY_CONVENTIONS
 from .quotes import VOL_UNITS as QUOTE_VOL_UNITS
-from .surface import PARAM_NAMES
+from .surface import PARAM_NAMES, QUOTE_FIELDS, QUOTE_LABELS, RATIO_WINGS
 from .analytics import TARGETS, carry_table, fair_value_table, realized_table, triangle_table
 from .relvalue import HISTORY_DAYS, SHARED, SIGNALS, WEIGHTS
 from .relvalue import panel_from_request as relvalue_panel_from_request
@@ -119,6 +119,11 @@ class BookService:
                               else self.AUTO_DEFAULT_INTERVAL)
         self.auto_enabled = bool(auto_reload and auto_reload > 0)
         self.workbook_mtime: float | None = None
+        # What the workbook was when this book was read, so a write over it
+        # can tell that it is still the same file.  Not the mtime above: that
+        # is the watcher's, is only set when a watcher runs, and says nothing
+        # about size.
+        self.workbook_stamp: str = ""
         self.history_mtime: float | None = None
         self.auto_events: list[dict] = []
         # Bumped once per reload the watcher performs.  The page polls it
@@ -226,10 +231,10 @@ class BookService:
         # The network, replaceable: tests post into a function.
         self.kace_opener = None
         try:
-            self.kace_spreads = kace_mod.SpreadTable.load(kace_spreads_path)
+            self.kace_spreads = kace_mod.SpreadTable.load(kace_spreads_path or self.path)
         except kace_mod.KaceError as exc:
             self.kace_spreads = kace_mod.SpreadTable(
-                path=str(kace_spreads_path or kace_mod.SpreadTable.default_path()))
+                path=f"{Path(kace_spreads_path or self.path).name}!{kace_mod.SPREADS_SHEET}")
             self.kace_error = str(exc)
         self.reload()
         if session_path:
@@ -260,6 +265,7 @@ class BookService:
             except Exception as exc:  # noqa: BLE001 - reported to the browser
                 self.load_error = f"{type(exc).__name__}: {exc}"
             self.workbook_mtime = stamp
+            self.workbook_stamp = session.workbook_stamp(self.path)
             # Whatever this session had marked is gone with the old book, so
             # there is nothing left to protect from the next reload.
             self.dirty = False
@@ -927,20 +933,55 @@ class BookService:
             return price_strip(self.book, legs)
 
     def marks(self, q: dict) -> dict:
-        """The marking grid: ATM tenors and per-tenor smile parameters."""
+        """The marking grid: ATM tenors, their quotes, and smile parameters."""
         with self._lock:
             surface = self.book[q["pair"]]
             cut = q.get("cut", "TK")
+            # The four quotes belong to the tenor row they are marked on, so
+            # they are attached to it here rather than sent as a second table
+            # the screen would have to line up itself.  Keyed by the tenor as
+            # the quote sheet spells it, matched however the row does.
+            quotes = {r["tenor"].upper(): r for r in surface.quote_rows()}
+            ratios = {r["tenor"].upper(): r for r in surface.ratio_rows()}
+            # Every tenor the book prices at, plus any the quotes reach that
+            # it does not: a tenor typed into the sheet (or into this screen)
+            # and then not shown is a mark nobody can see.
+            names = list(self.book.data.tenor_points)
+            seen = {t.upper() for t in names}
+            names += [r["tenor"] for t, r in sorted(quotes.items()) if t not in seen]
             atm_rows = []
-            for tenor in self.book.data.tenor_points:
+            for tenor in names:
                 t = surface.tenor_years(tenor)
-                atm_rows.append({
+                row = {
                     "tenor": tenor,
                     "curve": surface.atm.curve_vol(t) * 100,
                     "marked": surface.atm.term_vol(t) * 100,
                     "cut": surface.atm.cut_vol(self.clock.datetime_from_years(t), cut) * 100,
                     "overwrite": surface.atm.tenor_overwrites.get(tenor.lower()),
-                })
+                }
+                qr = quotes.get(tenor.upper())
+                row["quotes"] = ({f: (None if qr[f] is None else qr[f] * 100)
+                                  for f in QUOTE_FIELDS} if qr else
+                                 {f: None for f in QUOTE_FIELDS})
+                row["quotes_sheet"] = ({f: (None if qr[f + "_sheet"] is None
+                                            else qr[f + "_sheet"] * 100)
+                                        for f in QUOTE_FIELDS} if qr else
+                                       {f: None for f in QUOTE_FIELDS})
+                # Marked = different from the sheet, and fitted = this tenor
+                # actually has a smile behind it.  A tenor being quoted and a
+                # tenor being fitted are two different facts and the screen
+                # shows both: a half-typed new tenor is quoted by nobody and
+                # fitted by nothing, and has to say so on its own row.
+                # Which wings this tenor derives rather than quotes, and by what
+                # multiple.  The screen shows a derived box read-only with the
+                # multiplier on it: a box that can be typed into and then
+                # silently recomputed is the worst of the two.
+                row["derived"] = {f: (None if qr is None else qr.get(f + "_derived"))
+                                  for f in QUOTE_FIELDS}
+                row["quotes_marked"] = bool(qr and qr["marked"])
+                row["quoted"] = bool(qr and qr["quoted"])
+                row["fitted"] = bool(qr and qr["fitted"])
+                atm_rows.append(row)
             smile_rows = []
             for fit in surface.fits:
                 row = {"tenor": fit.tenor, "t": fit.t, "atm": fit.atm_vol * 100, "ok": fit.ok}
@@ -952,6 +993,10 @@ class BookService:
             return {"atm": atm_rows, "smile": smile_rows,
                     "term": surface.term_rows(),
                     "anchor": surface.anchor_tenors,
+                    "quote_fields": list(QUOTE_FIELDS), "quote_labels": dict(QUOTE_LABELS),
+                    "wings": dict(RATIO_WINGS),
+                    "ratios": [ratios[t.upper()] for t in
+                               [r["tenor"] for r in atm_rows] if t.upper() in ratios],
                     "pair": q["pair"], "cut": cut}
 
     # -- curve parameters and events --------------------------------------
@@ -1144,6 +1189,7 @@ class BookService:
         with self._lock:
             surface = self.book[q["pair"]]
             kind = q.get("kind", "atm")
+            refit = False
             if kind == "atm":
                 surface.atm.overwrite_tenor(q["tenor"], float(q["value"]) / 100.0)
             elif kind == "smile":
@@ -1165,17 +1211,163 @@ class BookService:
                     raise ValueError("; ".join(problems))
             elif kind == "clear_smile_term":
                 surface.clear_param_terms(q.get("param") or None)
+            elif kind == "quote":
+                # A quote is an input to the fit, not a mark on top of one, so
+                # this is the one overwrite that has to refit the smile before
+                # anything reads it.  Done here rather than lazily: the screen
+                # posts a box and then asks for the marks, and a surface that
+                # refitted somewhere in between would answer with whichever
+                # fit happened to be there.
+                surface.overwrite_quote(q["tenor"], q["field"],
+                                        float(q["value"]) / 100.0)
+                refit = True
+            elif kind == "clear_quote":
+                surface.clear_quote_overwrite(q.get("tenor") or None,
+                                              q.get("field") or None)
+                refit = True
+            elif kind == "ratio":
+                # A wing's multiplier. Blank takes the wing off the ratio and
+                # gives the quote box beside it back; that is a decision, so
+                # it is stored rather than forgotten.
+                raw = q.get("value")
+                surface.overwrite_ratio(
+                    q["tenor"], q["wing"],
+                    None if raw in (None, "") else float(raw))
+                refit = True
+            elif kind == "clear_ratio":
+                surface.clear_ratio_overwrite(q.get("tenor") or None, q.get("wing") or None)
+                refit = True
             elif kind == "clear_smile":
                 surface.clear_param_overwrites()
             elif kind == "anchor":
                 surface.anchor_tenors = bool(q["value"])
             else:
                 raise ValueError(f"unknown overwrite kind {kind!r}")
+            problems: list[str] = []
+            if refit:
+                surface.calibrate()
+                problems = list(surface.warnings)
+                surface.warnings.clear()
+                problems.extend(f"{fit.tenor}: {fit.message}"
+                                for fit in surface.fits if not fit.ok)
             surface.invalidate()
             self.dirty = True
-            return {"ok": True}
+            return {"ok": True, "problems": problems}
 
     # -- the session file -------------------------------------------------
+    # -- the workbook's configuration tabs --------------------------------
+    def config_tabs(self, q: dict | None = None) -> dict:
+        """Every configuration tab the screens can edit, as it stands.
+
+        The tabs, not the objects read off them: a band on this screen is the
+        row a desk typed, not the ``Band`` the book made of it, so what comes
+        back is what will go back and a round trip through the screen changes
+        nothing it was not asked to change.
+        """
+        from . import configsheets
+        with self._lock:
+            path = self.path
+            out = []
+            for sheet, (columns, required) in configsheets.EDITABLE.items():
+                entry = {"sheet": sheet, "columns": list(columns),
+                         "what": configsheets.SHEETS.get(sheet, ""), "rows": [], "error": ""}
+                try:
+                    rows = configsheets.read_rows(path, sheet, required=required)
+                except (OSError, ValueError) as exc:
+                    entry["error"] = str(exc)
+                    rows = None
+                else:
+                    # Absent and empty are different answers and the screen
+                    # says which: a tab that was never given to this workbook,
+                    # and one a desk has deliberately emptied.
+                    entry["present"] = rows is not None
+                if rows:
+                    entry["rows"] = [{c: r.raw(c) if not isinstance(r.raw(c), (date, datetime))
+                                      else r.text(c) for c in columns} for r in rows]
+                out.append(entry)
+            return {"workbook": path, "tabs": out,
+                    "stamp": self.workbook_stamp,
+                    "losses": session.round_trip_losses(path),
+                    "locked": str(session.excel_lock(path) or "")}
+
+    def config_save(self, payload: dict) -> dict:
+        """Write one configuration tab and re-read the book on top of it.
+
+        A band, a holiday or a wing ratio changes how the workbook *loads*, so
+        there is no version of this that leaves the loaded book alone: it is
+        written and then read back, and what the screens show afterwards is
+        what the file now says.  Marks made in this session do not survive
+        that, which is what a reload is -- so it refuses while there are any,
+        rather than throwing them away to save a configuration change.
+        """
+        with self._lock:
+            sheet = str(payload.get("sheet") or "").strip().upper()
+            rows = payload.get("rows")
+            if not isinstance(rows, list):
+                raise ValueError("rows must be a list of objects, one per row of the tab")
+            if self.dirty and not payload.get("force"):
+                raise ValueError(
+                    "this session has marks the workbook does not hold, and writing a "
+                    "configuration tab re-reads the workbook, which would drop them. Save "
+                    "them into the workbook first, or press again to write anyway")
+            out = session.write_config_tabs(
+                self.path, {sheet: rows},
+                expect=self.workbook_stamp, force=bool(payload.get("force")))
+            self.reload()
+            # The write's own report is kept apart from the book's state: both
+            # carry ``notes``, and a screen that read the book's notes as the
+            # write's would tell a person their configuration change said
+            # something about crosses.
+            return {"ok": True, "wrote": out, **self.state()}
+
+    def config_pair(self, payload: dict) -> dict:
+        """Add a pair to the workbook, or take one out, and re-read it.
+
+        The pair list is not a mark: it decides what the book *is*, so like
+        the configuration tabs it goes into the workbook and the book is read
+        again on top of it.  Same refusal while this session has marks the
+        workbook does not hold -- a reload would drop them, and losing a
+        morning to add a pair is not a trade anybody would make knowingly.
+        """
+        with self._lock:
+            pair = str(payload.get("pair") or "").strip().upper()
+            action = str(payload.get("action") or "add").strip().lower()
+            if self.dirty and not payload.get("force"):
+                raise ValueError(
+                    "this session has marks the workbook does not hold, and changing the "
+                    "pair list re-reads the workbook, which would drop them. Save them into "
+                    "the workbook first, or press again to change it anyway")
+            if action == "remove":
+                out = session.remove_pair(self.path, pair, expect=self.workbook_stamp,
+                                          force=bool(payload.get("force")))
+            elif action == "add":
+                quotes = payload.get("quotes") or {}
+                clean: dict[str, dict[str, float]] = {}
+                for tenor, vals in quotes.items():
+                    if not isinstance(vals, dict):
+                        raise ValueError(f"{tenor}: expected the four quotes as an object")
+                    row = {}
+                    for f, v in vals.items():
+                        if f not in QUOTE_FIELDS:
+                            raise ValueError(f"{tenor}: {f!r} is not one of the four quotes")
+                        if v in (None, ""):
+                            continue
+                        # Points, like the boxes they were typed in and like
+                        # the sheet they land on.  ``add_pair`` writes the
+                        # workbook's own cells and the workbook quotes points;
+                        # dividing here would put a 0.24 strangle in as 0.0024.
+                        row[f] = float(v)
+                    if row:
+                        clean[str(tenor).upper()] = row
+                out = session.add_pair(
+                    self.path, pair, atm=float(payload.get("atm") or 0.0),
+                    quotes=clean, expect=self.workbook_stamp,
+                    force=bool(payload.get("force")))
+            else:
+                raise ValueError(f"unknown action {action!r}; expected 'add' or 'remove'")
+            self.reload()
+            return {"ok": True, "wrote": out, **self.state()}
+
     def session_state(self, q: dict | None = None) -> dict:
         """Where the session file is, and whether there is one there.
 
@@ -1251,7 +1443,17 @@ class BookService:
                 raise ValueError("the loaded book did not come from a workbook file")
             out = (payload.get("out") or "").strip() or None
             doc = session.load(path)
-            result = session.export_workbook(doc, src, out, pairs, in_place=out is None)
+            result = session.export_workbook(
+                doc, src, out, pairs, in_place=out is None,
+                expect=self.workbook_stamp, force=bool(payload.get("force")))
+            if result["written"] and out is None:
+                # The file on disk is now what this book says, so the next
+                # write is measured from here and the screen stops saying the
+                # marks are only in memory.  Left as it was, the very write
+                # that made them agree would be refused as a change.
+                self.workbook_stamp = result["stamp"]
+                self.workbook_mtime = self._mtime(self.path)
+                self.dirty = False
             return {"ok": not result["problems"], "path": str(path), "workbook": src,
                     **result}
 
@@ -2065,6 +2267,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self.service.vol_query(q))
             elif url.path == "/api/smile":
                 self._json(self.service.smile(q))
+            elif url.path == "/api/config":
+                self._json(self.service.config_tabs(q))
             elif url.path == "/api/marks":
                 self._json(self.service.marks(q))
             elif url.path == "/api/curve":
@@ -2196,6 +2400,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self.service.session_load(payload))
             elif url.path == "/api/session/export":
                 self._json(self.service.session_export(payload))
+            elif url.path == "/api/config/save":
+                self._json(self.service.config_save(payload))
+            elif url.path == "/api/config/pair":
+                self._json(self.service.config_pair(payload))
             elif url.path == "/api/monitor/curves":
                 self._json(self.service.compare_curves(payload))
             elif url.path == "/api/monitor":

@@ -57,7 +57,7 @@ These were the user's explicit choices. Do not quietly reverse them.
 | **Implement fixes, don't just flag them** | When something is wrong, fix it and note what moves. Leave it switchable only when there is a real reason to reconcile against old marks. |
 | **Web UI, not Tkinter** | Stdlib `http.server` only. No Flask/FastAPI. The desk machine may have nothing installed. |
 | **Excel stays primary** | `vol_marks.xlsx` must keep working as-is. Abstract behind a data source; do not migrate to YAML. |
-| **Nothing writes to the workbook** | Every mark a screen makes lives on the loaded book. What a session wants to keep goes into `session.py`'s own file *beside* the workbook, never into it -- see §13. The one exception is the **export** in §13, asked for by name: it writes the saved *file*, never the live book, and keeps the workbook it replaced beside it. |
+| **Nothing writes to the workbook** | Every mark a screen makes lives on the loaded book. What a session wants to keep goes into `session.py`'s own file *beside* the workbook, never into it -- see §13. The one exception is the **export** in §13, asked for by name: it writes the saved *file*, never the live book, and keeps the workbook it replaced beside it. Within that export, an edited **quote** (`quote_overwrites`) is the only thing written into a sheet's own cell rather than into a session row the reader reads back -- a quote is the sheet's number, and the desk uses the workbook as the database behind the GUI; a pair sheet that is written is written whole, as numbers, because a quote beside a formula that reads it leaves the file disagreeing with itself. Configuration is the second exception and is deliberately *not* a session: `session.write_config_tabs`, `add_pair` and `remove_pair` write the workbook and the book is read again on top of them. Every write over the original checks `workbook_stamp` first and refuses a file that moved. |
 | **Nothing fails silently** | The legacy `except: pass` returning `0.0000` is the anti-pattern this project exists to remove. Errors surface with the real message. |
 
 ## 3. Architecture
@@ -67,7 +67,7 @@ timeutil   one day-count (365.2425), one injected Clock, tenor parsing
            including the short-date codes (O/N, T/N, S/N, S/W)
 numerics   bracketed solves, damped fixed points, panel integration
 calendars  holiday calendars, the FX date construction (spot, settlement,
-           expiry back from it), CSV overrides
+           expiry back from it), and the workbook's HOLIDAYS overrides
 timeweight intraday / weekend / holiday weighting
 black      Black-76, its greeks, FX delta conventions, strike-from-delta
 sabr       Hagan 2002 + calibration (closed-form alpha, global sweep)
@@ -83,6 +83,9 @@ surface    ATM + smile, greeks, delta strikes, RR / fly
 exotics    digitals, one-touch / no-touch, overhedge buffers
 pricing    multi-leg strips, strike/expiry specs, per-leg error isolation, and
            the one-number reading of them the marking screen asks for
+configsheets the workbook's settings tabs -- PEG_BANDS, KACE_SPREADS,
+           HOLIDAYS -- read one way, with '#' comment rows and a header found
+           rather than assumed. A new setting is a tab here, not a new file
 marketdata validated Excel reader; CONFIG is two columns and a cross
            names its own dollar legs; EVENTS is a row per release, a column
            per currency and per pair
@@ -156,7 +159,7 @@ working in its area — not before.
 | Read this | When |
 |---|---|
 | `claude/invariants.md` (§4) | The reasoning behind every invariant listed below — the bug each one was written after. Read before changing anything the list names. |
-| `claude/managed-currencies.md` (§6) | **Before touching `banded.py`**, or anything about pegged pairs, band treatments, hazard rates or `files/bands.csv`. |
+| `claude/managed-currencies.md` (§6) | **Before touching `banded.py`**, or anything about pegged pairs, band treatments, hazard rates or the workbook's `PEG_BANDS` tab. |
 | `claude/known-limitations.md` (§7) | Before "fixing" something that looks wrong — it may be a flagged, deliberate limitation. |
 | `claude/screen-listed.md` (§8) | `listed.py`, exchange-traded options, the paste parser, positions and aggregated greeks. |
 | `claude/screen-analysis.md` (§9) | `analytics.py`, `moments.py`, `history.py`, `relvalue.py` — carry and roll, fair value, realized, the cross triangle, the relative-value grid. |
@@ -170,6 +173,7 @@ working in its area — not before.
 | `claude/agent-marking.md` (§18) | `remarks.py`, `marking.py`, `consult.py`, `rules.py` — the marking agent and its rules of thumb. |
 | `claude/agent-ask.md` (§19) | `ask.py` — the read-only question agent. |
 | `claude/kace-feed.md` (§20) | `kace.py` — the RATE_FEED message, posting, the spread table. |
+| `claude/config-tabs.md` | **Before adding a setting**, or anything about `PEG_BANDS`, `KACE_SPREADS`, `HOLIDAYS` or `configsheets.py`. |
 
 Design notes that are not standing context: `claude/kace-export-design.md`,
 `claude/marking-agent-design.md`.
@@ -356,7 +360,7 @@ and what is reported instead** — read it before "fixing" one.
 - The relative-value carry signal stretches a first-order break-even into the
   wings; the shape signal inherits SABR's lack of mean reversion.
 - The managed-float reading is a heuristic on measured numbers and is **not**
-  the authority — `files/bands.csv` is (§6).
+  the authority — the workbook's `PEG_BANDS` tab is (§6).
 - The carry weight is not tapered by the regime, on purpose.
 
 ## 10. Working on this

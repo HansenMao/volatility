@@ -45,7 +45,6 @@ to compensate, which shifts the whole peg-intact smile.
 
 from __future__ import annotations
 
-import csv
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -55,7 +54,7 @@ import numpy as np
 from scipy.optimize import least_squares
 from scipy.special import betainc, gammaln, ndtr
 
-from . import black, paths
+from . import black
 from .black import DeltaConvention
 from .numerics import ConvergenceError, solve_scalar
 
@@ -88,19 +87,40 @@ class Band:
         return bool(np.all((np.asarray(s) >= self.lower) & (np.asarray(s) <= self.upper)))
 
 
-def load_bands(path: str | Path) -> dict[str, Band]:
-    """Read ``pair,lower,upper[,note]`` rows.  Bands are policy, so they are data."""
+#: The workbook tab the bands are maintained on.  Not ``BANDS``: that tab is
+#: the marking *treatment* for a pegged pair -- hazard, jump sizes, blend, and
+#: an optional override of the edges -- and the range it overrides is this one.
+#: Two different things, kept two tabs, so a treatment cannot be mistaken for
+#: the policy it is applied to.
+PEG_BANDS_SHEET = "PEG_BANDS"
+
+
+def load_bands(path: str | Path | None = None) -> dict[str, Band]:
+    """Read the workbook's ``PEG_BANDS`` tab.  Bands are policy, so they are data.
+
+    ``path`` is the marks workbook -- the bands live in the same file as the
+    marks they apply to, which is what stops a desk copying one without the
+    other.  The tab is asked for by name, so a workbook that has not got it is
+    an error here; the caller that can carry on without bands (``Book``) is
+    the one that decides to.
+    """
+    from . import configsheets
+
+    book = Path(path) if path else configsheets.default_workbook()
+    rows = configsheets.read_rows(book, PEG_BANDS_SHEET,
+                                  required=("pair", "lower", "upper"))
+    if rows is None:
+        raise ValueError(configsheets.missing(PEG_BANDS_SHEET, book))
     out: dict[str, Band] = {}
-    for line in paths.read_text(path).splitlines():
-        line = line.split("#", 1)[0].strip()
-        if not line:
+    for row in rows:
+        pair = row.text("pair").upper()
+        if not pair:
             continue
-        parts = [p.strip() for p in line.split(",")]
-        if len(parts) < 3:
-            raise ValueError(f"bad band row {line!r}: expected 'pair,lower,upper[,note]'")
-        pair = parts[0].upper()
-        out[pair] = Band(pair, float(parts[1]), float(parts[2]),
-                         parts[3] if len(parts) > 3 else "")
+        lower, upper = row.real("lower"), row.real("upper")
+        if lower is None or upper is None:
+            raise ValueError(f"{PEG_BANDS_SHEET} row {row.number}: {pair} needs a "
+                             f"lower and an upper edge; got {lower!r} and {upper!r}")
+        out[pair] = Band(pair, lower, upper, row.text("note"))
     return out
 
 
@@ -1017,7 +1037,7 @@ BAND_MODES = ("warn", "off", "mixture")
 class BandTreatment:
     """The adjustable part of the barrier: everything a marker may move.
 
-    The band itself is policy and lives in ``bands.csv``.  What is *marked* is
+    The band itself is policy and lives on the ``PEG_BANDS`` tab.  What is *marked* is
     how much the peg is worth paying attention to, and none of it can be
     inferred from the quotes: a wider Beta body and a higher hazard both raise
     the at-the-money, so a joint fit is degenerate (§6).  Every number here is
@@ -1202,7 +1222,7 @@ def band_panel(surface, tenors=None, *, cut: str = "NY") -> dict:
     }
     if band is None:
         out["message"] = (f"{surface.pair} has no managed band. Bands are policy and live in "
-                          f"bands.csv; only put a pair there if the range is genuinely defended")
+                          f"the PEG_BANDS tab; only list a pair there if the range is genuinely defended")
         return out
     effective = treatment.effective_band(band)
     out["band"] = {
@@ -1257,7 +1277,7 @@ def fit_band_treatment(surface, tenors=None, *, free: Sequence[str] = DEFAULT_FR
     }
     if band is None:
         out["message"] = (f"{surface.pair} has no managed band. Bands are policy and live in "
-                          f"bands.csv; only put a pair there if the range is genuinely defended")
+                          f"the PEG_BANDS tab; only list a pair there if the range is genuinely defended")
         return out
     effective = treatment.effective_band(band)
     method = surface.method if surface.method in LOGNORMAL_INTERPOLATORS else LOGNORMAL_INTERPOLATORS[0]

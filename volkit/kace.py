@@ -32,7 +32,7 @@ Three things the sheet did are done differently here, on purpose:
   expiry is 365 to 367 days out depending on the weekday; when it fell past
   the last row the pillar's lookup was ``#N/A``, and the literal text ``#N/A``
   went into the XML.
-* **The spread table names the pillars.** ``kace_spreads.csv`` beside the
+* **The spread table names the pillars.** The ``KACE_SPREADS`` tab of the
   workbook holds ``pair,tenor,spread`` rows, and the tenors listed for a pair
   are exactly the pillars posted.  A tenor listed with no mark behind it, or
   a pair with no rows, is refused by name rather than defaulted.
@@ -75,7 +75,6 @@ without a kACE to talk to.
 
 from __future__ import annotations
 
-import csv
 import hashlib
 import json
 import os
@@ -91,11 +90,11 @@ from xml.sax.saxutils import escape
 
 from . import paths
 from .atm import cut_datetime
-from .paths import app_dir, find_data_file
+from .paths import app_dir
 from .timeutil import DAYS_IN_YEAR, UTC, tenor_to_years
 
-#: The spread table, beside the workbook.
-SPREADS_FILENAME = "kace_spreads.csv"
+#: The workbook tab the spread table is maintained on.
+SPREADS_SHEET = "KACE_SPREADS"
 #: Where the credentials may come from when they are not on the command line.
 ENV_USER = "VOLKIT_KACE_USER"
 ENV_PASSWORD = "VOLKIT_KACE_PASSWORD"
@@ -160,50 +159,63 @@ class SpreadTable:
 
     @classmethod
     def default_path(cls) -> Path:
-        """Beside the exe, or ``files/`` in a source tree; the first that exists."""
-        found = find_data_file(SPREADS_FILENAME, f"files/{SPREADS_FILENAME}")
-        return found if found is not None else app_dir() / SPREADS_FILENAME
+        """The workbook whose ``KACE_SPREADS`` tab holds the table."""
+        from . import configsheets
+
+        return configsheets.default_workbook()
 
     @classmethod
     def load(cls, path: str | Path | None = None) -> "SpreadTable":
-        """Read the table.  A file that is there and wrong is refused whole."""
+        """Read the ``KACE_SPREADS`` tab.  A tab that is wrong is refused whole.
+
+        ``path`` is the marks workbook: the pillars a pair is posted at are
+        maintained beside the marks that are posted at them, and one file
+        travels to a new machine intact where two did not.
+        """
+        from . import configsheets
+
         p = Path(path) if path else cls.default_path()
-        if not p.exists():
-            raise KaceError(f"no kACE spread table at {p}: a 'pair,tenor,spread' CSV naming "
-                            f"the pillars to post and the ATM bid/offer width at each")
-        table = cls(path=str(p))
+        table = cls(path=f"{p.name}!{SPREADS_SHEET}")
+        try:
+            rows = configsheets.read_rows(p, SPREADS_SHEET,
+                                          required=("pair", "tenor", "spread"))
+        except configsheets.ConfigSheetError as exc:
+            raise KaceError(str(exc)) from None
+        if rows is None:
+            raise KaceError(
+                f"{p} has no {SPREADS_SHEET!r} tab: a 'pair, tenor, spread' table naming "
+                f"the pillars to post and the ATM bid/offer width at each")
         bad: list[str] = []
-        with paths.open_text(p, newline="") as fh:
-            for n, raw in enumerate(csv.reader(fh), start=1):
-                cells = [c.strip() for c in raw]
-                if not cells or not any(cells) or cells[0].startswith("#"):
-                    continue
-                if cells[0].lower() == "pair" and len(cells) > 1 and cells[1].lower() == "tenor":
-                    continue
-                if len(cells) < 3:
-                    bad.append(f"line {n}: expected 'pair,tenor,spread', got {','.join(cells)!r}")
-                    continue
-                pair, tenor = cells[0].upper(), canonical_tenor(cells[1])
+        for row in rows:
+            where = f"row {row.number}"
+            pair, tenor = row.text("pair").upper(), canonical_tenor(row.text("tenor"))
+            if not pair or not tenor:
+                bad.append(f"{where}: expected a pair, a tenor and a spread")
+                continue
+            try:
+                spread = row.real("spread")
+            except configsheets.ConfigSheetError:
+                bad.append(f"{where}: the spread for {pair} {tenor} is not a number")
+                continue
+            if spread is None:
+                bad.append(f"{where}: {pair} {tenor} has no spread")
+                continue
+            if spread < 0:
+                bad.append(f"{where}: spread {spread:g} for {pair} {tenor} is negative")
+                continue
+            if tenor != OVERNIGHT:
                 try:
-                    spread = float(cells[2])
-                except ValueError:
-                    bad.append(f"line {n}: spread {cells[2]!r} for {pair} {tenor} is not a number")
+                    tenor_to_years(tenor)
+                except ValueError as exc:
+                    bad.append(f"{where}: {exc}")
                     continue
-                if spread < 0:
-                    bad.append(f"line {n}: spread {spread:g} for {pair} {tenor} is negative")
-                    continue
-                if tenor != OVERNIGHT:
-                    try:
-                        tenor_to_years(tenor)
-                    except ValueError as exc:
-                        bad.append(f"line {n}: {exc}")
-                        continue
-                if tenor in table.rows.setdefault(pair, {}):
-                    bad.append(f"line {n}: {pair} {tenor} is listed twice")
-                    continue
-                table.rows[pair][tenor] = spread
+            if tenor in table.rows.setdefault(pair, {}):
+                bad.append(f"{where}: {pair} {tenor} is listed twice")
+                continue
+            table.rows[pair][tenor] = spread
         if bad:
-            raise KaceError(f"{p} could not be read:\n  " + "\n  ".join(bad))
+            raise KaceError(f"{p.name}!{SPREADS_SHEET} could not be read:\n  "
+                            + "\n  ".join(bad))
         return table
 
     def for_pair(self, pair: str) -> dict[str, float]:

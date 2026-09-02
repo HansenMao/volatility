@@ -213,8 +213,29 @@ def cmd_check(args) -> int:
     ccys = data.events.currencies()
     print(f"  events  : {len(data.events.rows)} on the EVENTS sheet"
           + (f", weighted on {', '.join(ccys)}" if ccys else ""))
+    from . import session as session_mod
+    from .surface import WING_RATIOS_SHEET
+    ratios = 0
+    try:
+        ratios = sum(len(v) for v in session_mod.load_wing_ratios(args.workbook).values())
+    except (OSError, ValueError) as exc:
+        print(f"  wings   : {WING_RATIOS_SHEET} cannot be read ({exc})")
+    else:
+        print(f"  wings   : {ratios} tenor(s) on {WING_RATIOS_SHEET}" if ratios else
+              f"  wings   : no {WING_RATIOS_SHEET} tab; the 10-delta columns are quoted or "
+              f"are formulas the tool cannot see. 'volkit migrate-wings' reads them onto a "
+              f"tab it can")
     for note in data.notes:
         print(f"    . {note}")
+    # What a write over this workbook would take out of it, said before the
+    # first one rather than found in the backup after it.
+    lost = session_mod.round_trip_losses(args.workbook)
+    if lost:
+        print(f"    . writing this workbook drops {', '.join(lost)}: openpyxl does not carry "
+              f"them. The .bak an in-place write leaves is where they would still be")
+    lock = session_mod.excel_lock(args.workbook)
+    if lock is not None:
+        print(f"    . {lock.name} is beside it, so Excel probably has it open")
     if data.problems:
         print(f"\n  {len(data.problems)} problem(s):")
         for p in data.problems:
@@ -270,7 +291,7 @@ def cmd_kace(args) -> int:
         print(f"clearRate for {pair} in scenario {scenario}, horDate "
               f"{book.clock.now.date():%d %b %Y}", file=sys.stderr)
     else:
-        table = kace.SpreadTable.load(args.kace_spreads)
+        table = kace.SpreadTable.load(args.kace_spreads or args.workbook)
         feed = kace.build(book, args.pair, table, cut=args.cut, source=args.source,
                           method=args.method)
         s = feed.summary()
@@ -1459,6 +1480,33 @@ def cmd_events(args) -> int:
     return 0
 
 
+def cmd_migrate_wings(args) -> int:
+    """Lift the pair sheets' wing formulas onto the WING_RATIOS tab.
+
+    Run once, when the workbook stops being a spreadsheet somebody opens and
+    becomes the database behind the screens.  Until it is run, ``ST 10D`` and
+    ``RR 10D`` are formulas over the 25-delta columns and the tool cannot see
+    the multiple; writing a quote into such a sheet leaves the wing beside it
+    computed from the cell that has just been replaced.
+    """
+    from . import session as session_mod
+
+    out = args.out or None
+    res = session_mod.migrate_wing_ratios(args.workbook, out, in_place=args.in_place)
+    print(f"{res['ratios']} multiplier(s) read from {len(res['pairs'])} pair sheet(s)")
+    for note in res["notes"]:
+        print(f"  . {note}")
+    for bad in res["problems"]:
+        print(f"  ! {bad}", file=sys.stderr)
+    print(f"  written to {res['written']}")
+    if res["backup"]:
+        print(f"  the workbook as it was is at {res['backup']}")
+    if res["problems"]:
+        print("  a wing that could not be read is still a formula; look at it before the "
+              "sheet is written again", file=sys.stderr)
+    return 1 if res["problems"] else 0
+
+
 def cmd_session(args) -> int:
     """Save the marks on a book to a file, put a saved file back, or read one.
 
@@ -1490,6 +1538,10 @@ def cmd_session(args) -> int:
             if block.get("smile_term"):
                 bits.append(f"{len(block['smile_term'])} marked term structure(s) "
                             f"({', '.join(sorted(block['smile_term']))})")
+            if block.get("quote_overwrites"):
+                q = block["quote_overwrites"]
+                bits.append(f"{sum(len(v) for v in q.values())} re-quoted number(s) across "
+                            f"{len(q)} tenor(s) ({', '.join(sorted(q))})")
             if block.get("param_shifts"):
                 bits.append(f"{len(block['param_shifts'])} wing shift(s)")
             if block.get("events"):
@@ -1510,9 +1562,14 @@ def cmd_session(args) -> int:
         # an export, off a session *file*, into a copy unless --in-place --
         # which keeps the workbook it replaced beside it.
         doc = session_mod.load(path)
-        out = session_mod.export_workbook(
-            doc, args.workbook, args.to_workbook or None,
-            [args.pair] if args.pair else None, in_place=args.in_place)
+        try:
+            out = session_mod.export_workbook(
+                doc, args.workbook, args.to_workbook or None,
+                [args.pair] if args.pair else None, in_place=args.in_place,
+                expect=str(doc.get("workbook_stamp") or ""), force=args.force)
+        except session_mod.SessionError as exc:
+            print(f"! {exc}", file=sys.stderr)
+            return 1
         if out["written"]:
             print(f"{path}: written into {out['written']}"
                   + (" (in place)" if out["in_place"] else f" -- {args.workbook} is unchanged"))
@@ -1559,7 +1616,7 @@ def cmd_serve(args) -> int:
           dtcc_direct=bool(getattr(args, "no_proxy", False)),
           journal_path=getattr(args, "journal", None),
           rules_path=getattr(args, "rules", None),
-          kace_spreads_path=getattr(args, "kace_spreads", None),
+          kace_spreads_path=getattr(args, "kace_spreads", None) or args.workbook,
           kace_user=getattr(args, "kace_user", None),
           kace_password=getattr(args, "kace_password", None),
           kace_scenario=getattr(args, "kace_scenario", None) or kace.DEFAULT_SCENARIO,
@@ -2288,9 +2345,8 @@ def build_parser() -> argparse.ArgumentParser:
     # read when the option is not given.
     kace_opts = argparse.ArgumentParser(add_help=False)
     kace_opts.add_argument("--kace-spreads",
-                           help=f"the 'pair,tenor,spread' table naming the pillars and the "
-                                f"ATM widths (default: {kace.SPREADS_FILENAME} beside the "
-                                f"workbook)")
+                           help=f"a workbook whose {kace.SPREADS_SHEET} tab names the pillars "
+                                f"and the ATM widths (default: the marks workbook's own tab)")
     kace_opts.add_argument("--kace-user", help=f"the feed username in the message header "
                                                f"(default: {kace.ENV_USER} in the environment)")
     kace_opts.add_argument("--kace-password", help=f"the feed password in the message header "
@@ -2374,9 +2430,22 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--in-place", action="store_true",
                    help="with --to-workbook: write the workbook itself, keeping "
                         "what it replaced as <name>.bak-<stamp>.xlsx beside it")
+    s.add_argument("--force", action="store_true",
+                   help="with --to-workbook --in-place: write even though the workbook has "
+                        "changed since these marks were made. Whatever changed it is lost")
     s.add_argument("--pair", help="one pair only (default: every pair in the book)")
     s.add_argument("--note", default="", help="a line recorded in the file")
     s.set_defaults(func=cmd_session)
+
+    s = add_command("migrate-wings", parents=[common],
+                    help="read the pair sheets' 10-delta wing formulas onto a WING_RATIOS "
+                         "tab and flatten the sheets to numbers (run once)")
+    s.add_argument("out", nargs="?", help="write to this file instead of a copy beside the "
+                                          "workbook")
+    s.add_argument("--in-place", action="store_true",
+                   help="write the workbook itself, keeping what it replaced as "
+                        "<name>.bak-<stamp>.xlsx beside it")
+    s.set_defaults(func=cmd_migrate_wings)
 
     s = add_command("serve", parents=[common, kace_opts], help="run the local web interface")
     s.add_argument("--host", default="127.0.0.1")

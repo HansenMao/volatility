@@ -486,6 +486,8 @@ class LegResult:
     premium_pct_base: float = 0.0   # % of base notional
     delta_pct: float = 0.0          # in the pair's quoted convention
     smile_delta_pct: float = 0.0
+    # millions of base the hedge moves by per 1% move in spot, on the smile
+    smile_cash_gamma: float = 0.0
     vega_dom: float = 0.0           # domestic per 1 unit of base, per vol point
     gamma: float = 0.0
     premium_amount: float = 0.0     # domestic, for the stated notional
@@ -687,6 +689,7 @@ def _price_leg(book, leg: OptionLeg) -> LegResult:
             pricing_method=res.method, mc_error=res.std_error,
             premium_dom=price, premium_pct_base=price * 100.0,
             delta_pct=delta * spot * 100.0, smile_delta_pct=float("nan"),
+            smile_cash_gamma=float("nan"),
             vega_dom=vega, gamma=0.0,
             premium_amount=notional * price, vega_amount=notional * vega,
             delta_amount=notional * delta * spot,
@@ -732,6 +735,7 @@ def _price_leg(book, leg: OptionLeg) -> LegResult:
                             if res.ramp else "smile derivative (ramp 0)"),
             premium_dom=price, premium_pct_base=price * 100.0,
             delta_pct=delta * spot * 100.0, smile_delta_pct=float("nan"),
+            smile_cash_gamma=float("nan"),
             vega_dom=vega, gamma=0.0,
             premium_amount=notional * price, vega_amount=notional * vega,
             delta_amount=notional * delta * spot,
@@ -743,14 +747,30 @@ def _price_leg(book, leg: OptionLeg) -> LegResult:
     vega = float(black.vega(forward, strike, vol, t)) / 100.0
     gamma = float(black.gamma(forward, strike, vol, t))
     try:
-        smile_delta = surface.smile_delta(spot, strike, expiry_dt, is_call, leg.method, leg.cut)
+        # The forward, not spot: it is what the price above was taken off and
+        # what the smile's own strike ratio is against.  Spot went in here
+        # once, and on a pair with any forward points that is the delta of a
+        # different option -- a 3M EURUSD ATM read 44.6.
+        smile_delta = surface.smile_delta(forward, strike, expiry_dt, is_call,
+                                          leg.method, leg.cut)
     except (ValueError, ConvergenceError):
         smile_delta = float("nan")
+    # The gamma the desk quotes: how far the delta hedge moves for a one per
+    # cent move in spot, along the smile rather than at a frozen vol, so it is
+    # the derivative of the delta on the row above and not of a Black one.
+    # Signed with the leg, like the other amounts, so a sold option shows the
+    # short gamma it is.
+    try:
+        smile_gamma = surface.smile_gamma(forward, strike, expiry_dt, is_call,
+                                          leg.method, leg.cut)
+    except (ValueError, ConvergenceError):
+        smile_gamma = float("nan")
     return LegResult(
         **common, strike=strike, strike_ratio=ratio, strike_spec=spec.text,
         is_call=is_call, vol=vol * 100.0, fair_value=premium_dom,
         premium_dom=premium_dom, premium_pct_base=premium_dom / spot * 100.0,
         delta_pct=delta * 100.0, smile_delta_pct=smile_delta * 100.0,
+        smile_cash_gamma=notional * smile_gamma,
         vega_dom=vega, gamma=gamma,
         premium_amount=notional * premium_dom, vega_amount=notional * vega,
         delta_amount=notional * delta,

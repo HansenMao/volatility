@@ -50,12 +50,12 @@ what `TestKaceFeed` pins string for string.
   processing time and the first kilobyte of the reply. A dry run records
   nothing. The tab shows the last ten and the confirm step is inline, not a
   browser dialog; the clear is styled as the destructive one.
-- **The spread table names the pillars.** `kace_spreads.csv` beside the
-  workbook (`files/` in the source tree), `pair,tenor,spread` in vol points;
+- **The spread table names the pillars.** The workbook's `KACE_SPREADS` tab,
+  `pair, tenor, spread` in vol points;
   the tenors listed for a pair *are* its pillars. A tenor with no mark behind
-  it is refused by name; a pair with no rows cannot be posted; a file that is
+  it is refused by name; a pair with no rows cannot be posted; a tab that is
   there and wrong is refused whole and shown on the tab, like the rules file.
-  `--kace-spreads` moves it. The shipped rows are the USDCNH sheet's column L.
+  `--kace-spreads` points at a different workbook. The shipped rows are the USDCNH sheet's column L.
 - **The daily rule is the sheet's, spelled out.** A day takes the spread of
   the last pillar expiring on or before it; a day before the O/N expiry takes
   O/N's (`spread_for`). That was an approximate `VLOOKUP` with an `ISERROR`

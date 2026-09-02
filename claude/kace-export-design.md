@@ -68,6 +68,11 @@ Decisions inside it:
 
 - **Horizon follows the pillars, not the config.** The daily series is run to the last pillar's expiry plus a margin, so the 1Y node can never fall off the end. If a pillar's expiry is somehow not in the series the generator refuses by name rather than emit `#N/A`.
 - **`horDate` is the book's valuation date**, not the wall clock. Anything else re-creates the `TODAY()` bug.
+> Superseded on the file, not on the reasoning: the spread table is the
+> workbook's `KACE_SPREADS` tab now, with the holiday and band settings
+> that moved with it (`volkit/configsheets.py`). Everything below about
+> *what* the table holds and why still stands.
+
 - **The spread table gets a file**, `files/kace_spreads.csv` with `pair,tenor,spread` rows, loaded like `holiday_overrides.csv`, and a missing pair is an error not a default. The sheet's column L becomes its first nine rows. (It could instead share the market-maker's learned width ladder, but that is a quote width, not the width the desk wants to show a pricing platform, and tying them would move a posted mark when somebody re-learns quoting widths.)
 - **The daily lookup rule is kept as the sheet has it** — last pillar on or before the day, first pillar before any expiry — and stated in the module docstring, since it is the one piece of the sheet that was a rule in disguise.
 - **RR/FLY default to the quoted marks**, which is what the sheet posts (it copies them from Murex; volkit's marks sheet is the desk's copy of the same numbers). `--source fitted` posts what the surface actually returns at the pillar, which is the rrfly table's other column.

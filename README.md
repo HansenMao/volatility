@@ -396,8 +396,10 @@ with marked jump sizes and post-break volatilities. Out-of-band probability is
 therefore an **output**, and a real one — the peg breaking is a risk to be
 marked, not one to be assumed away.
 
-Bands are policy, so they are data: `files/bands.csv`, one `pair,lower,upper`
-row each, loaded automatically and attached to the surface. A **Managed band**
+Bands are policy, so they are data: the workbook's `PEG_BANDS` tab, one
+`pair, lower, upper, note` row each, loaded automatically and attached to the
+surface. Not to be confused with the `BANDS` tab, which is the marking
+*treatment* below and not the range it is applied to. A **Managed band**
 card appears on the marking screen for a pair that has one, and nothing at all
 for a pair that does not. What is marked on it:
 
@@ -420,7 +422,7 @@ convenience and not a model; it says so.
 to place and `VolSurface.band_for_slice` refuses by name, so `BAND` is left
 out of the interpolation list for a pair that has none — and out of it
 entirely for a book with no pegged pair at all, which is every book that does
-not carry one of the pairs in `bands.csv`. A leg or a panel saved against a
+not carry one of the pairs on `PEG_BANDS`. A leg or a panel saved against a
 pegged pair and then pointed at a free floater has its method put back to a
 legal one rather than left holding a choice the screen no longer shows. The
 server's refusal stays exactly where it was; this only stops the screen
@@ -578,7 +580,7 @@ ten volatility points scores 0.53, right beside USDCNH's 0.50. The second
 condition is a low realized volatility in absolute terms — the suppressed
 diffusion itself rather than a consequence of it. It is a heuristic on
 measured numbers and not an authority: a hard defended band is a policy fact
-and is marked in `bands.csv`.
+and is marked on the `PEG_BANDS` tab.
 
 No historical sheet means no scale, and then there is no score — the
 volatility-point columns are still reported, because they are still true.
@@ -1063,8 +1065,8 @@ tab is the check, **Copy XML** / **↓ feed XML** the message, **↓ clear XML**
 the `clearRate` message; the **scenario** box on the tab is the kACE
 scenario it all posts into (`--kace-scenario` on the command line).
 
-`kace_spreads.csv` (`pair,tenor,spread`) names the pillars posted for each
-pair and the ATM width at each — the tenors listed *are* the pillars, and a
+The workbook's `KACE_SPREADS` tab (`pair, tenor, spread`) names the pillars
+posted for each pair and the ATM width at each — the tenors listed *are* the pillars, and a
 tenor with no mark behind it is refused by name. The header's credentials
 come from `--kace-user` / `--kace-password` (so `kace-user =` in
 `volkit.cfg`) or `VOLKIT_KACE_USER` / `VOLKIT_KACE_PASSWORD`; without a
@@ -1151,7 +1153,25 @@ columns, the pair's adjustment into its own -- and the marks the workbook had
 no cell for go into rows the tool reads back: `atm 1m` (an ATM overwrite, in
 points), `slog25 3m` (a smile parameter overwrite), `term rho10 decay` (one
 coefficient of a marked parameter term structure), `shift rho25` (a wing
-shift), `anchor`, and a `BANDS` sheet for the band treatment. What it writes
+shift), `anchor`, and a `BANDS` sheet for the band treatment.
+
+A **re-quoted RR or ST** is the one mark that does not get a row of its own.
+A quote is the pair sheet's own number, so an edited one is written into the
+pair sheet's own cell, and a tenor the sheet does not quote yet is appended as
+a new row -- with all four of its numbers or not at all, because the reader
+refuses a half-quoted row.
+
+A pair sheet that is written is written **whole, as numbers**. Those sheets
+carried formulas over their own columns (`ST 10D = ST 25D * 3.25`), and a quote
+written beside a formula that reads it leaves the file saying one thing to
+volkit and another to Excel; the multiples live on the `WING_RATIOS` tab
+instead, where the tool can see them. `volkit migrate-wings --in-place` moves an
+existing workbook over, once.
+
+A write over the original is **refused** if the file has changed since the
+marks were made -- another volkit, or somebody saving it from Excel -- rather
+than overwriting whatever they did; `--force` is the way past it. The backups
+are pruned to the twenty most recent. What it writes
 loads as the session it came from; formulas and their last values are kept,
 images and charts are not -- which is why an in-place write keeps the backup
 and why the plain `--to-workbook` still writes a copy. A pair is replaced,
@@ -1539,7 +1559,12 @@ the same clock always gives the same numbers.
   rebuilt on every refresh, which is why `paste` is refused there.
 * **A new data source** — produce a `MarketData` object; nothing below
   `marketdata` knows about Excel.
-* **A new holiday** — add a row to `files/holiday_overrides.csv`.
+* **A new holiday** — add a row to the workbook's `HOLIDAYS` tab.
+* **A new setting of any kind** — a tab of the workbook, named in
+  `configsheets.SHEETS` and read with `configsheets.read_rows`. Settings do
+  not travel as loose files beside the workbook any more, because a desk
+  that copies the workbook and not the file beside it gets a tool that
+  silently does less.
 * **A new economic event** — add a row to the workbook's `EVENTS` sheet: the
   release time in Hong Kong time, then a weight in each currency's column and
   an adjustment in each pair's.

@@ -248,7 +248,7 @@ LOGNORMAL_SIGNALS: tuple[str, ...] = ("level", "shape", "history")
 #:
 #: This is a heuristic on measured quantities and it is not the authority on
 #: anything.  A hard, defended band is a **policy fact** and is marked in
-#: ``files/bands.csv`` (§6); this only raises a hand on a pair whose numbers
+#: the workbook's ``PEG_BANDS`` tab (§6); this only raises a hand on a pair whose numbers
 #: have the shape.  A high-carry, high-volatility pair -- USDTRY at 35 and 25
 #: -- is deliberately outside it: its diffusion is not suppressed, it is
 #: merely expensive.
@@ -892,7 +892,7 @@ def relative_value(book, pair: str, hist=None, *, horizon_days: float = 30.0,
             f"The level, shape and history signals all read a volatility as the width of a "
             f"lognormal distribution and are {share * 100:.0f}% of the declared weight here. "
             f"This is a heuristic on the numbers; a hard defended band is a policy fact and "
-            f"is marked in bands.csv")
+            f"is marked on the PEG_BANDS tab")
 
     return RelativeValue(
         pair=pair, is_cross=is_cross, legs=tuple(info.legs), has_feed=has_feed,

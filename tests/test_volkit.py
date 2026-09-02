@@ -991,8 +991,28 @@ class TestMarketData(unittest.TestCase):
         self.assertIn("USDJPY", data.marks)
         self.assertNotIn("EURUSD", data.marks)
 
-    def test_a_sheet_with_no_readable_row_is_reported(self):
-        """The same failure by the other route: the tab is there and empty."""
+    def test_a_sheet_whose_rows_cannot_be_read_is_reported(self):
+        """The same failure by the other route: the rows are there and unreadable."""
+        path = self._workbook({"PAIRS": ["USDJPY"], "TENORS": ["1m", "3m"]}, ["USDJPY"])
+        import openpyxl
+        wb = openpyxl.load_workbook(path)
+        ws = wb["USDJPY"]
+        for r in range(2, ws.max_row + 1):
+            for c in range(2, 6):
+                ws.cell(row=r, column=c).value = None
+        wb.save(path)
+        data = ExcelSource(path).load()
+        self.assertTrue(any("no readable quotes" in p for p in data.problems), data.problems)
+
+    def test_a_sheet_with_its_columns_and_no_rows_is_a_pair_not_yet_quoted(self):
+        """Which is a real state now that a pair is created from the screens.
+
+        It used to be a problem, because the only way to get here was deleting
+        rows by hand.  A pair added on the Workbook card arrives exactly like
+        this, and a check that goes red on a pair somebody has just made is a
+        check people stop reading.  Still *said* -- a pair with no smile is
+        worth knowing about -- just not called a fault in the workbook.
+        """
         path = self._workbook({"PAIRS": ["USDJPY"], "TENORS": ["1m", "3m"]}, ["USDJPY"])
         import openpyxl
         wb = openpyxl.load_workbook(path)
@@ -1000,7 +1020,8 @@ class TestMarketData(unittest.TestCase):
         ws.delete_rows(2, ws.max_row)
         wb.save(path)
         data = ExcelSource(path).load()
-        self.assertTrue(any("no readable quotes" in p for p in data.problems), data.problems)
+        self.assertEqual(data.problems, [])
+        self.assertTrue(any("no quotes yet" in n for n in data.notes), data.notes)
 
     def test_a_pair_asked_for_with_no_quotes_says_so(self):
         """``calibrate_smiles`` used to skip it silently, so the book came
@@ -1322,7 +1343,7 @@ class TestPricing(unittest.TestCase):
         book = Book.from_excel(WORKBOOK, ASOF).load_all(["USDHKD"])
         book.feed = MarketFeed.load(FEED)
         if "USDHKD" not in book.banded_pairs():
-            self.skipTest("no USDHKD band in bands.csv")
+            self.skipTest("no USDHKD band on the PEG_BANDS tab")
         band = book["USDHKD"].band
         q = quick_vol(book, "USDHKD", "1M", str(band.upper * 1.02), forward=band.upper)
         self.assertTrue(any("outside the managed band" in w for w in q["warnings"]), q["warnings"])
@@ -2555,10 +2576,112 @@ class TestBandedSmile(unittest.TestCase):
             with self.assertRaises(ValueError):
                 JumpSpec(**kw)
 
-    def test_bands_file_loads_and_rejects_degenerate_rows(self):
-        bands = load_bands(Path(__file__).resolve().parents[1] / "files" / "bands.csv")
+    def test_the_peg_bands_tab_loads_and_rejects_degenerate_rows(self):
+        bands = load_bands(Path(__file__).resolve().parents[1] / "files" / "vol_marks.xlsx")
         self.assertIn("USDHKD", bands)
         self.assertEqual(bands["USDHKD"].lower, 7.75)
+
+    def test_a_workbook_with_no_peg_bands_tab_says_so_by_name(self):
+        """The tab is asked for by name, so its absence is named, not shrugged at."""
+        legacy = Path(__file__).resolve().parents[1] / "files" / "vol_marks_legacy_format.xlsx"
+        with self.assertRaises(ValueError) as ctx:
+            load_bands(legacy)
+        self.assertIn("PEG_BANDS", str(ctx.exception))
+
+
+class TestConfigurationTabs(unittest.TestCase):
+    """The settings that used to be a CSV each, now tabs of the workbook.
+
+    Three things are pinned: the reader's own conventions (a header found
+    below prose, a '#' row skipped wherever it sits, an absent tab answered
+    with None rather than an empty table), that the shipped workbook actually
+    carries all three tabs, and that the holidays it lists reach the book
+    without reaching every *other* book in the process.
+    """
+
+    def _workbook(self, rows, sheet="PEG_BANDS"):
+        import tempfile
+        import openpyxl
+        d = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d, True)
+        wb = openpyxl.Workbook()
+        wb.active.title = sheet
+        for row in rows:
+            wb.active.append(row)
+        path = d / "marks.xlsx"
+        wb.save(path)
+        return path
+
+    def test_an_absent_tab_is_none_and_an_empty_one_is_an_empty_list(self):
+        from volkit import configsheets
+        path = self._workbook([["pair", "lower", "upper"]])
+        self.assertIsNone(configsheets.read_rows(path, "HOLIDAYS",
+                                                 required=("country", "date")))
+        self.assertEqual(configsheets.read_rows(path, "PEG_BANDS",
+                                                required=("pair", "lower", "upper")), [])
+
+    def test_the_header_is_found_below_prose_and_comments_are_skipped(self):
+        from volkit import configsheets
+        path = self._workbook([
+            ["# what this tab is for"],
+            ["# and a second line of it"],
+            ["Pair", "Lower", "Upper", "Note"],
+            ["USDHKD", 7.75, 7.85, "the peg"],
+            ["# deliberately not listed: USDCNY"],
+            ["USDXXX", 1.0, 2.0, None],
+        ])
+        rows = configsheets.read_rows(path, "PEG_BANDS",
+                                      required=("pair", "lower", "upper"))
+        self.assertEqual([r.text("pair") for r in rows], ["USDHKD", "USDXXX"])
+        # The row number is the one Excel shows, so an error can be looked up.
+        self.assertEqual([r.number for r in rows], [4, 6])
+        self.assertEqual(rows[0].real("lower"), 7.75)
+        self.assertEqual(rows[0].text("note"), "the peg")
+        self.assertEqual(rows[1].text("note"), "")
+
+    def test_a_tab_with_no_header_at_all_is_refused_by_name(self):
+        from volkit import configsheets
+        path = self._workbook([["# nothing but prose"], ["# and more of it"]])
+        with self.assertRaises(configsheets.ConfigSheetError) as ctx:
+            configsheets.read_rows(path, "PEG_BANDS", required=("pair", "lower", "upper"))
+        self.assertIn("PEG_BANDS", str(ctx.exception))
+
+    def test_the_shipped_workbook_carries_every_configuration_tab(self):
+        """Every tab the tool needs -- which is not quite every tab it reads.
+
+        ``WING_RATIOS`` is the exception on purpose: a workbook that has not
+        been through ``volkit migrate-wings`` quotes all four wings itself,
+        which is what every workbook did before the tab existed, and a
+        configuration a workbook is allowed not to have must not be asserted
+        into existence by a test.  The rest are not optional -- a missing
+        ``PEG_BANDS`` is a managed pair with no band and a screen that says
+        nothing about it.
+        """
+        from volkit import configsheets
+        optional = {"WING_RATIOS"}
+        needed = [s for s in configsheets.SHEETS if s not in optional]
+        self.assertEqual([s for s in configsheets.present(WORKBOOK) if s not in optional],
+                         needed)
+
+    def test_the_holidays_tab_reaches_the_book_and_no_further(self):
+        """A lunar holiday belongs to the workbook that lists it.
+
+        The overrides were loadable but never loaded before this: a Chinese
+        New Year in the file moved no expiry.  They are the book's calendars
+        now -- and a *copy*, because a book that added dates to the shared set
+        would change the expiry of every book loaded after it.
+        """
+        from volkit.calendars import DEFAULT_CALENDARS
+        book = Book.from_excel(WORKBOOK, ASOF)
+        cny = date(2026, 2, 17)
+        self.assertTrue(book.calendars.is_holiday("CNH", cny))
+        self.assertIsNot(book.calendars, DEFAULT_CALENDARS)
+        self.assertEqual(DEFAULT_CALENDARS.overrides, {})
+
+    def test_a_workbook_with_no_holidays_tab_keeps_the_shared_calendars(self):
+        from volkit.calendars import DEFAULT_CALENDARS
+        legacy = WORKBOOK.parent / "vol_marks_legacy_format.xlsx"
+        self.assertIs(Book.from_excel(legacy, ASOF).calendars, DEFAULT_CALENDARS)
 
 
 class TestBreakRegimeFit(unittest.TestCase):
@@ -2974,7 +3097,7 @@ class TestBandInterpolation(unittest.TestCase):
         book = Book.from_excel(WORKBOOK, ASOF).load_all(["EURUSD"])
         with self.assertRaises(ValueError) as ctx:
             book["EURUSD"].vol(1.0, self.EXPIRY, "BAND", "NY")
-        self.assertIn("bands.csv", str(ctx.exception))
+        self.assertIn("PEG_BANDS", str(ctx.exception))
 
     def test_the_panel_reports_breach_probability_and_keeps_a_failed_row(self):
         from volkit.banded import band_panel
@@ -5844,7 +5967,7 @@ class TestWebAssets(unittest.TestCase):
         page = _source("volkit", "web", "index.html")
         js = page.split("<script>")[1]
         paint = js.split("function paintMarks(){")[1].split("\nasync function loadMarks")[0]
-        self.assertIn("$('#matm').className='mark'+(ow?'':' tight')", paint)
+        self.assertIn("$('#matm').className='mark'+((ow||qcols)?'':' tight')", paint)
         self.assertIn("table.mark.tight{width:auto", page)
         self.assertIn("isKeyTenor(r.tenor)?' class=\"key\"':''", paint)
         self.assertIn("table.mark tr.key td", page)
@@ -6596,6 +6719,367 @@ class TestSessionFile(unittest.TestCase):
             self.assertAlmostEqual(service.book["USDJPY"].atm.tenor_overwrites["1m"], 0.0925)
 
 
+class TestQuoteMarking(unittest.TestCase):
+    """Typing a quote over the one the pair's sheet holds.
+
+    The sheet is where quotes come from, not where they have to come from:
+    the marking screen edits the four numbers a tenor is fitted from, the
+    session carries them, and writing the session back puts them in the
+    sheet's own cell.  What is pinned here is the layering -- ``marks`` stays
+    the workbook's, the edit sits beside it, and the fit uses the two
+    together -- because an edit written into ``marks`` would be silently lost
+    the next time the book handed the surface its quotes.
+    """
+
+    def surface(self):
+        return Book.from_excel(WORKBOOK, ASOF).load_all(["USDJPY"])["USDJPY"]
+
+    def test_a_typed_quote_is_fitted_and_the_sheets_number_is_kept(self):
+        s = self.surface()
+        was = {m.tenor.upper(): m.rr_25 for m in s.marks}["3M"]
+        before = [f.rho25 for f in s.fits]
+        s.overwrite_quote("3M", "rr_25", -0.009)
+        s.calibrate()
+        self.assertNotEqual(before, [f.rho25 for f in s.fits])
+        # The sheet's own quote is untouched, so clearing the box gives it back
+        # without a reload -- and the screen can show it as the placeholder.
+        self.assertEqual({m.tenor.upper(): m.rr_25 for m in s.marks}["3M"], was)
+        row = {r["tenor"]: r for r in s.quote_rows()}["3M"]
+        self.assertAlmostEqual(row["rr_25"], -0.009)
+        self.assertAlmostEqual(row["rr_25_sheet"], was)
+        self.assertTrue(row["marked"])
+        s.clear_quote_overwrite("3M", "rr_25")
+        s.calibrate()
+        self.assertEqual(before, [f.rho25 for f in s.fits])
+        self.assertFalse({r["tenor"]: r for r in s.quote_rows()}["3M"]["marked"])
+
+    def test_a_quote_typed_back_onto_the_sheets_own_number_is_not_a_mark(self):
+        """A dot that says "changed" on a row nobody changed is noise, and
+        the screen reads ``marked`` rather than "is there an entry"."""
+        s = self.surface()
+        was = {m.tenor.upper(): m.rr_25 for m in s.marks}["3M"]
+        s.overwrite_quote("3M", "rr_25", was)
+        self.assertFalse({r["tenor"]: r for r in s.quote_rows()}["3M"]["marked"])
+
+    def test_a_tenor_the_sheet_does_not_quote_needs_all_four(self):
+        s = self.surface()
+        fitted = {f.tenor.upper() for f in s.fits}
+        self.assertNotIn("4M", fitted)
+        s.overwrite_quote("4M", "rr_25", -0.005)
+        s.warnings.clear()
+        s.calibrate()
+        self.assertNotIn("4M", {f.tenor.upper() for f in s.fits})
+        self.assertTrue(any("all four" in w for w in s.warnings), s.warnings)
+        # The row still exists on the screen that is creating it, saying what
+        # it is: quoted by nobody, fitted by nothing.
+        row = {r["tenor"]: r for r in s.quote_rows()}["4M"]
+        self.assertFalse(row["quoted"])
+        self.assertFalse(row["fitted"])
+        for name, v in (("st_25", 0.002), ("rr_10", -0.009), ("st_10", 0.0065)):
+            s.overwrite_quote("4M", name, v)
+        s.calibrate()
+        self.assertIn("4M", {f.tenor.upper() for f in s.fits})
+        self.assertTrue({r["tenor"]: r for r in s.quote_rows()}["4M"]["fitted"])
+
+    def test_a_strangle_is_refused_where_the_reader_would_refuse_it(self):
+        """The same two checks the workbook reader makes on the cell this
+        replaces, so a bad number is caught in the box it was typed in and
+        not as a convergence failure three calls later."""
+        s = self.surface()
+        with self.assertRaises(ValueError) as cm:
+            s.overwrite_quote("1M", "st_25", -0.01)
+        self.assertIn("positive", str(cm.exception))
+        with self.assertRaises(ValueError):
+            s.overwrite_quote("1M", "fly_25", 0.01)
+
+    def test_the_screen_shows_the_quotes_on_the_tenor_row(self):
+        from volkit.webapp import BookService
+        from volkit.surface import QUOTE_FIELDS
+        service = BookService(str(WORKBOOK), ASOF)
+        rows = {r["tenor"].upper(): r for r in service.marks({"pair": "USDJPY"})["atm"]}
+        self.assertEqual(sorted(rows["3M"]["quotes"]), sorted(QUOTE_FIELDS))
+        self.assertTrue(rows["3M"]["quoted"])
+        # In points, like every volatility the screen shows.
+        self.assertAlmostEqual(rows["3M"]["quotes"]["rr_25"],
+                               rows["3M"]["quotes_sheet"]["rr_25"])
+        self.assertGreater(abs(rows["3M"]["quotes"]["rr_25"]), 0.05)
+        out = service.overwrite({"pair": "USDJPY", "kind": "quote", "tenor": "3M",
+                                 "field": "rr_25", "value": -0.9})
+        self.assertEqual(out["problems"], [])
+        again = {r["tenor"].upper(): r
+                 for r in service.marks({"pair": "USDJPY"})["atm"]}["3M"]
+        self.assertAlmostEqual(again["quotes"]["rr_25"], -0.9)
+        self.assertTrue(again["quotes_marked"])
+        # A tenor the workbook does not quote appears once it is typed into,
+        # even though the book prices no such point.
+        service.overwrite({"pair": "USDJPY", "kind": "quote", "tenor": "4M",
+                           "field": "rr_25", "value": -0.5})
+        self.assertIn("4M", {r["tenor"].upper()
+                             for r in service.marks({"pair": "USDJPY"})["atm"]})
+
+    def test_a_session_carries_the_quotes_in_points_and_refits_on_the_way_back(self):
+        from volkit import session
+        book = Book.from_excel(WORKBOOK, ASOF).load_all(["USDJPY"])
+        s = book["USDJPY"]
+        s.overwrite_quote("3M", "rr_25", -0.009)
+        s.calibrate()
+        block = session.capture(book, ["USDJPY"])["pairs"]["USDJPY"]
+        self.assertAlmostEqual(block["quote_overwrites"]["3M"]["rr_25"], -0.9)
+        fresh = Book.from_excel(WORKBOOK, ASOF).load_all(["USDJPY"])
+        out = session.apply_document(fresh, session.capture(book, ["USDJPY"]))
+        self.assertEqual(out["problems"], [])
+        # Restored *and refitted*: a quote is an input to the fit, so a
+        # surface that took one back without refitting would hold the typed
+        # number and the old smile at the same time.
+        self.assertEqual([f.rho25 for f in s.fits], [f.rho25 for f in fresh["USDJPY"].fits])
+
+
+class TestWingRatios(unittest.TestCase):
+    """The 10-delta wings as a multiple of the 25-delta ones.
+
+    They were formulas in the pair sheets -- ``ST 10D = ST 25D * 3.25`` -- so
+    the tool could not see them and a quote written beside one left the wing
+    holding a number computed from the cell that had just been replaced.  The
+    multiples are data now.  What is pinned is that the derivation is the last
+    word on a wing it governs, that typing that wing takes it off the ratio
+    rather than fighting it, and that the migration off the formulas does not
+    move a single mark.
+    """
+
+    def workbook(self, migrate=True) -> Path:
+        import shutil
+        import tempfile
+        from volkit import session
+        d = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d, True)
+        wb = d / "vol_marks.xlsx"
+        shutil.copy(WORKBOOK, wb)
+        if migrate:
+            session.migrate_wing_ratios(wb, in_place=True)
+        return wb
+
+    def test_the_migration_reads_every_multiple_and_moves_no_mark(self):
+        from volkit import session
+        from volkit.surface import load_wing_ratios
+        wb = self.workbook(migrate=False)
+        out = session.migrate_wing_ratios(wb, in_place=True)
+        self.assertEqual(out["problems"], [])
+        self.assertGreater(out["ratios"], 100)
+        ratios = load_wing_ratios(wb)
+        # Per pair *and* per tenor: one number for the pair would have been a
+        # different workbook from the one the desk has.
+        self.assertAlmostEqual(ratios["USDJPY"]["3M"].rr, 1.85)
+        self.assertAlmostEqual(ratios["USDJPY"]["1Y"].rr, 1.875)
+        self.assertAlmostEqual(ratios["USDHKD"]["3M"].st, 3.4)
+
+        pairs = ["USDJPY", "EURUSD", "USDHKD", "EURJPY"]
+        was = Book.from_excel(WORKBOOK, ASOF).load_all(pairs)
+        now = Book.from_excel(wb, ASOF).load_all(pairs)
+        self.assertEqual(now.data.problems, [])
+        for pair in pairs:
+            for t in (0.02, 0.25, 1.0, 2.0):
+                expiry = ASOF.datetime_from_years(t)
+                for k in (0.9, 1.0, 1.1):
+                    self.assertAlmostEqual(float(was[pair].vol(k, expiry)),
+                                           float(now[pair].vol(k, expiry)), places=8,
+                                           msg=(pair, t, k))
+
+    def test_a_quoted_25_delta_moves_the_wing_it_derives(self):
+        """The whole point. Before the ratios were data, writing the 25-delta
+        left the 10-delta at a value taken from the number just replaced."""
+        s = Book.from_excel(self.workbook(), ASOF).load_all(["USDJPY"])["USDJPY"]
+        before = {m.tenor.upper(): m for m in s.quoted_marks()}["3M"]
+        self.assertAlmostEqual(before.rr_10 / before.rr_25, 1.85)
+        s.overwrite_quote("3M", "rr_25", -0.009)
+        after = {m.tenor.upper(): m for m in s.quoted_marks()}["3M"]
+        self.assertAlmostEqual(after.rr_25, -0.009)
+        self.assertAlmostEqual(after.rr_10, -0.009 * 1.85)
+
+    def test_typing_the_wing_takes_it_off_the_ratio_and_clearing_puts_it_back(self):
+        """Otherwise the ratio, applied last, wins over the box just typed in
+        and the number goes back to what it was on the way out of the field."""
+        s = Book.from_excel(self.workbook(), ASOF).load_all(["USDJPY"])["USDJPY"]
+        s.overwrite_quote("3M", "rr_10", -0.02)
+        self.assertIsNone(s.effective_ratio("3M").rr)
+        self.assertAlmostEqual({m.tenor.upper(): m for m in s.quoted_marks()}["3M"].rr_10,
+                               -0.02)
+        # ...and the strangle beside it is untouched: one wing, one decision.
+        self.assertAlmostEqual(s.effective_ratio("3M").st, 3.0)
+        s.clear_quote_overwrite("3M", "rr_10")
+        self.assertAlmostEqual(s.effective_ratio("3M").rr, 1.85)
+
+    def test_a_ratio_and_the_quotes_it_derives_survive_the_session(self):
+        from volkit import session
+        wb = self.workbook()
+        book = Book.from_excel(wb, ASOF).load_all(["USDJPY"])
+        s = book["USDJPY"]
+        s.overwrite_ratio("3M", "st", 4.0)
+        s.overwrite_quote("6M", "rr_10", -0.02)      # takes 6M off its rr ratio
+        s.calibrate()
+        block = session.capture(book, ["USDJPY"])["pairs"]["USDJPY"]
+        self.assertAlmostEqual(block["wing_ratios"]["3M"]["st"], 4.0)
+        # A wing taken off its ratio is written as a null and *kept*: "no
+        # multiple here" and "no opinion" are different answers.
+        self.assertIsNone(block["wing_ratios"]["6M"]["rr"])
+        fresh = Book.from_excel(wb, ASOF).load_all(["USDJPY"])
+        out = session.apply_document(fresh, session.capture(book, ["USDJPY"]))
+        self.assertEqual(out["problems"], [])
+        self.assertAlmostEqual(fresh["USDJPY"].effective_ratio("3M").st, 4.0)
+        self.assertIsNone(fresh["USDJPY"].effective_ratio("6M").rr)
+        self.assertEqual([f.rho25 for f in s.fits], [f.rho25 for f in fresh["USDJPY"].fits])
+
+    def test_writing_a_quote_leaves_the_sheet_all_numbers_and_consistent(self):
+        """A sheet half formula and half number is a workbook that changes
+        itself the next time Excel opens it."""
+        from volkit import session
+        wb = self.workbook(migrate=False)
+        book = Book.from_excel(wb, ASOF).load_all(["USDJPY"])
+        book["USDJPY"].overwrite_quote("3M", "rr_25", -0.009)
+        book["USDJPY"].calibrate()
+        session.export_workbook(session.capture(book, ["USDJPY"]), wb, in_place=True)
+        marks = {m.tenor.upper(): m
+                 for m in Book.from_excel(wb, ASOF).load_all(["USDJPY"])["USDJPY"].marks}
+        self.assertAlmostEqual(marks["3M"].rr_25, -0.009)
+        import openpyxl
+        ws = openpyxl.load_workbook(wb)["USDJPY"]
+        self.assertFalse([c.coordinate for row in ws.iter_rows() for c in row
+                          if session._is_formula(c.value)])
+
+    def test_a_new_tenor_needs_only_the_25_delta_where_a_ratio_derives_the_wing(self):
+        s = Book.from_excel(self.workbook(), ASOF).load_all(["USDJPY"])["USDJPY"]
+        s.overwrite_ratio("4M", "st", 3.0)
+        s.overwrite_ratio("4M", "rr", 1.85)
+        s.overwrite_quote("4M", "st_25", 0.0025)
+        s.overwrite_quote("4M", "rr_25", -0.006)
+        s.warnings.clear()
+        s.calibrate()
+        self.assertIn("4M", {f.tenor.upper() for f in s.fits})
+        self.assertEqual(s.warnings, [])
+
+
+class TestWorkbookAsDatabase(unittest.TestCase):
+    """The workbook written by the screens rather than opened by a person.
+
+    A store has obligations a book of record does not: a write must not lose
+    somebody else's, a clear must actually clear, and the copies it keeps must
+    not grow without end.
+    """
+
+    def workbook(self) -> Path:
+        import shutil
+        import tempfile
+        d = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d, True)
+        wb = d / "vol_marks.xlsx"
+        shutil.copy(WORKBOOK, wb)
+        return wb
+
+    def marked(self, wb):
+        from volkit import session
+        book = Book.from_excel(wb, ASOF).load_all(["USDJPY"])
+        book["USDJPY"].atm.overwrite_tenor("1m", 0.0925)
+        return session.capture(book, ["USDJPY"])
+
+    def test_a_write_over_a_workbook_that_moved_is_refused(self):
+        """Two volkits, or somebody saving from Excel. Last writer wins is how
+        a store loses a morning."""
+        from volkit import session
+        wb = self.workbook()
+        stamp = session.workbook_stamp(wb)
+        doc = self.marked(wb)
+        session.export_workbook(doc, wb, in_place=True, expect=stamp)
+        with self.assertRaises(session.SessionError) as cm:
+            session.export_workbook(doc, wb, in_place=True, expect=stamp)
+        self.assertIn("changed since", str(cm.exception))
+        # A copy takes nothing from anybody and is never refused.
+        out = session.export_workbook(doc, wb, wb.with_name("copy.xlsx"), expect=stamp)
+        self.assertEqual(out["problems"], [])
+        # And a person who has looked can say so.
+        forced = session.export_workbook(doc, wb, in_place=True, expect=stamp, force=True)
+        self.assertTrue(forced["stale"])
+
+    def test_a_cleared_overwrite_is_cleared_in_the_workbook(self):
+        """``ws.cell(row, column, value=None)`` does not blank a cell --
+        openpyxl assigns only when the value is not None -- so every clear on
+        this path was a no-op and an overwrite taken off on the screen came
+        back on the next load."""
+        from volkit import session
+        wb = self.workbook()
+        book = Book.from_excel(wb, ASOF).load_all(["USDJPY"])
+        book["USDJPY"].atm.overwrite_tenor("1m", 0.0925)
+        book["USDJPY"].anchor_tenors = True
+        session.export_workbook(session.capture(book, ["USDJPY"]), wb, in_place=True)
+        back = Book.from_excel(wb, ASOF).load_all(["USDJPY"])
+        self.assertEqual(back["USDJPY"].atm.tenor_overwrites, {"1m": 0.0925})
+        self.assertTrue(back["USDJPY"].anchor_tenors)
+
+        back["USDJPY"].atm.clear_overwrite("1m")
+        back["USDJPY"].anchor_tenors = False
+        session.export_workbook(session.capture(back, ["USDJPY"]), wb, in_place=True,
+                                force=True)
+        after = Book.from_excel(wb, ASOF).load_all(["USDJPY"])
+        self.assertEqual(after["USDJPY"].atm.tenor_overwrites, {})
+        self.assertFalse(after["USDJPY"].anchor_tenors)
+
+    def test_the_backups_are_pruned_to_the_most_recent(self):
+        from volkit import session
+        wb = self.workbook()
+        doc = self.marked(wb)
+        for _ in range(4):
+            session.export_workbook(doc, wb, in_place=True, force=True)
+        kept = sorted(wb.parent.glob(f"{wb.stem}{session.BACKUP_INFIX}*{wb.suffix}"))
+        self.assertEqual(len(kept), 4)
+        self.assertEqual(session.prune_backups(wb, keep=2) and len(
+            list(wb.parent.glob(f"{wb.stem}{session.BACKUP_INFIX}*{wb.suffix}"))), 2)
+
+    def test_a_configuration_tab_is_written_and_read_back(self):
+        from volkit import session
+        wb = self.workbook()
+        rows = [{"pair": "USDHKD", "lower": 7.75, "upper": 7.85, "note": "HKMA"},
+                {"pair": "USDTRY", "lower": 30.0, "upper": 45.0, "note": "made up"}]
+        session.write_config_tabs(wb, {"PEG_BANDS": rows})
+        book = Book.from_excel(wb, ASOF)
+        self.assertEqual(sorted(book.bands), ["USDHKD", "USDTRY"])
+        # A tab this does not write is refused by name rather than written
+        # somewhere it would not be read.
+        with self.assertRaises(session.SessionError):
+            session.write_config_tabs(wb, {"PARAMS": []})
+
+    def test_a_pair_is_added_and_removed_through_the_workbook(self):
+        from volkit import session
+        wb = self.workbook()
+        out = session.add_pair(wb, "USDSGD", atm=6.5, quotes={
+            "3M": {"rr_25": -0.40, "st_25": 0.24, "rr_10": -0.74, "st_10": 0.72}})
+        self.assertEqual(out["quoted"], 1)
+        book = Book.from_excel(wb, ASOF).load_all(["USDSGD"])
+        self.assertEqual(book.data.problems, [])
+        self.assertIn("USDSGD", book.pairs)
+        self.assertEqual([f.tenor for f in book["USDSGD"].fits], ["3M"])
+
+        # A cross is its correlation, not a volatility, and says so.
+        with self.assertRaises(session.SessionError) as cm:
+            session.add_pair(wb, "SGDJPY", atm=6.5)
+        self.assertIn("correlation", str(cm.exception))
+
+        # Removing takes it out of CONFIG and leaves its work where it is, so
+        # adding it back finds what it had.
+        session.remove_pair(wb, "USDSGD")
+        self.assertNotIn("USDSGD", Book.from_excel(wb, ASOF).data.pairs)
+        session.add_pair(wb, "USDSGD", atm=6.5)
+        again = Book.from_excel(wb, ASOF).load_all(["USDSGD"])
+        self.assertEqual([m.tenor for m in again["USDSGD"].marks], ["3M"])
+
+    def test_a_pair_with_its_columns_and_no_quotes_is_said_not_refused(self):
+        """A pair created on the screen and not yet marked is a real state
+        now; a check that goes red on it is a check people stop reading."""
+        from volkit import session
+        wb = self.workbook()
+        session.add_pair(wb, "USDSGD", atm=6.5)
+        data = Book.from_excel(wb, ASOF).data
+        self.assertEqual(data.problems, [])
+        self.assertTrue(any("no quotes yet" in n for n in data.notes), data.notes)
+
+
 class TestSessionIntoWorkbook(unittest.TestCase):
     """A session file written into a workbook's own cells.
 
@@ -6738,6 +7222,74 @@ class TestSessionIntoWorkbook(unittest.TestCase):
         self.assertTrue(session._is_formula(kept), kept)
         self.assertAlmostEqual(
             openpyxl.load_workbook(out, data_only=True)["USDJPY"]["B2"].value, 0.6525)
+
+    def test_a_re_quoted_tenor_goes_into_the_sheets_own_cell(self):
+        """The one mark that is not written to a row of its own.
+
+        A quote is the sheet's own number, so it replaces the sheet's own
+        cell and the pair tab is then the database it is being used as.  The
+        copy has to load with the typed quote in it and with every quote
+        nobody touched exactly as it was -- including the array formulas the
+        shipped workbook's smile sheets are made of, which is the failure
+        mode this write is one cell away from at all times.
+        """
+        import shutil
+        import tempfile
+        from volkit import session
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            wb = tmp / "vol_marks.xlsx"
+            shutil.copy(WORKBOOK, wb)
+            book = Book.from_excel(WORKBOOK, ASOF).load_all(["USDJPY"])
+            s = book["USDJPY"]
+            untouched = {m.tenor.upper(): (m.st_10, m.rr_10) for m in s.marks}
+            s.overwrite_quote("3M", "rr_25", -0.009)
+            for name, v in (("rr_25", -0.005), ("st_25", 0.002),
+                            ("rr_10", -0.009), ("st_10", 0.0065)):
+                s.overwrite_quote("4M", name, v)
+            s.calibrate()
+            doc = session.capture(book, ["USDJPY"])
+            out = session.export_workbook(doc, wb)
+            self.assertEqual(out["problems"], [])
+            self.assertTrue(any("newly quoted tenor" in n for n in out["notes"]), out["notes"])
+
+            copy = Book.from_excel(out["written"], ASOF).load_all(["USDJPY"])
+            self.assertEqual(copy.data.problems, [], copy.data.problems)
+            marks = {m.tenor.upper(): m for m in copy["USDJPY"].marks}
+            self.assertAlmostEqual(marks["3M"].rr_25, -0.009)
+            self.assertAlmostEqual(marks["4M"].st_10, 0.0065)
+            # Everything nobody typed into is the number it was, formulas
+            # included -- 1W's strangle is an array formula on this workbook.
+            for tenor, (st10, rr10) in untouched.items():
+                self.assertAlmostEqual(marks[tenor].st_10, st10, msg=tenor)
+                self.assertAlmostEqual(marks[tenor].rr_10, rr10, msg=tenor)
+            # And the copy is the session: the workbook's quotes now say what
+            # the session's overwrites said, so the two fit the same smile.
+            for t in (0.08, 0.25, 1.0):
+                expiry = ASOF.datetime_from_years(t)
+                for k in (0.97, 1.0, 1.03):
+                    self.assertAlmostEqual(float(s.vol(k, expiry)),
+                                           float(copy["USDJPY"].vol(k, expiry)),
+                                           places=9, msg=(t, k))
+
+    def test_a_half_typed_new_tenor_is_refused_rather_than_half_written(self):
+        """A row the reader would call a blank quote is not written at all,
+        and the export says so where it happened."""
+        import shutil
+        import tempfile
+        from volkit import session
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            wb = tmp / "vol_marks.xlsx"
+            shutil.copy(WORKBOOK, wb)
+            book = Book.from_excel(WORKBOOK, ASOF).load_all(["USDJPY"])
+            book["USDJPY"].overwrite_quote("4M", "rr_25", -0.005)
+            doc = session.capture(book, ["USDJPY"])
+            out = session.export_workbook(doc, wb)
+            self.assertTrue(any("all four" in p for p in out["problems"]), out["problems"])
+            copy = Book.from_excel(out["written"], ASOF).load_all(["USDJPY"])
+            self.assertEqual(copy.data.problems, [], copy.data.problems)
+            self.assertNotIn("4M", {m.tenor.upper() for m in copy["USDJPY"].marks})
 
     def test_the_events_sheet_is_written_whole_and_a_weight_reaches_every_pair(self):
         """USD 0.4 on the NFP row belongs to every pair with a dollar in it,
@@ -9148,6 +9700,33 @@ class TestColumnQuotes(unittest.TestCase):
         self.assertEqual(q.describe(), "3M 1.09")
         self.assertNotIn("put", q.describe())
 
+    def test_a_strike_with_the_side_glued_on_is_a_strike(self):
+        """'7.77c' is the 7.77 call, and it beats a delta on the same line.
+
+        It used to match nothing -- not a number, not a word -- and was
+        reported as ignored, which left a line that had named its strike to be
+        quoted off whatever delta was beside it, or off the at-the-money.
+        """
+        q = self.parse("3M, 7.77c, 8.10/8.30").quotes[0]
+        self.assertEqual((q.instrument, q.strike), ("outright", 7.77))
+        self.assertFalse(any("ignored" in n for n in q.notes), q.notes)
+
+        # The strike names the option exactly and the delta only through the
+        # marks, so the strike wins and the line says the delta was dropped.
+        both = self.parse("1M 25d 7.77p 8.10/8.30").quotes[0]
+        self.assertEqual(both.strike, 7.77)
+        self.assertIsNone(both.delta)
+        self.assertTrue(any("delta is dropped" in n for n in both.notes), both.notes)
+
+        # On a premium the side is the whole difference between two prices,
+        # so there it survives.
+        prem = self.parse("6M 1.1000c 0.0123 prem").quotes[0]
+        self.assertEqual((prem.strike, prem.is_call), (1.10, True))
+
+        # The delta spellings above it are untouched.
+        self.assertEqual(self.parse("1M 25dc 8.1/8.3").quotes[0].delta, 0.25)
+        self.assertEqual(self.parse("1M 100k 8.2/8.3").quotes[0].size, 0.1)
+
     def test_a_bare_delta_takes_the_call_wing_and_says_so(self):
         """A delta names two strikes, one on each wing, so it has to pick.
 
@@ -10283,7 +10862,8 @@ class TestKaceFeed(unittest.TestCase):
     the spread table naming the pillars) and the desk's conventions.
     """
 
-    SPREADS = Path(__file__).resolve().parents[1] / "files" / "kace_spreads.csv"
+    # The pillars and widths are a tab of the workbook now, not a file beside it.
+    SPREADS = Path(__file__).resolve().parents[1] / "files" / "vol_marks.xlsx"
 
     # The sheet's nine pillars (USDCNHData!K3:S11), as of a 2026-01-22 valuation.
     SHEET_PILLARS = [
@@ -10429,24 +11009,60 @@ class TestKaceFeed(unittest.TestCase):
             table.for_pair("EURUSD")
         self.assertIn("EURUSD", str(ctx.exception))
 
-    def test_a_bad_table_is_refused_by_line(self):
+    def test_a_bad_table_is_refused_by_row(self):
+        """The table is a tab now, so a bad cell is reported by the row Excel
+        shows -- which is the number somebody goes and looks at."""
         import tempfile
-        from volkit import kace, paths
+        import openpyxl
+        from volkit import kace
+
+        def workbook(path, rows):
+            wb = openpyxl.Workbook()
+            wb.active.title = kace.SPREADS_SHEET
+            for row in rows:
+                wb.active.append(row)
+            wb.save(path)
+            return path
+
         with tempfile.TemporaryDirectory() as tmp:
-            p = Path(tmp) / "s.csv"
-            paths.write_text(p, "pair,tenor,spread\nUSDCNH,on,1\nUSDCNH,1W,wide\n"
-                                "USDCNH,1W,0.8\nUSDCNH,1W\nUSDCNH,7Q,0.1\n")
+            p = workbook(Path(tmp) / "marks.xlsx", [
+                ["pair", "tenor", "spread"],
+                ["USDCNH", "on", 1],
+                ["USDCNH", "1W", "wide"],
+                ["USDCNH", "1W", 0.8],
+                ["USDCNH", "1W", None],
+                ["USDCNH", "7Q", 0.1],
+            ])
             with self.assertRaises(kace.KaceError) as ctx:
                 kace.SpreadTable.load(p)
             msg = str(ctx.exception)
-            self.assertIn("line 3", msg)          # not a number
-            self.assertIn("line 5", msg)          # too short
-            self.assertIn("line 6", msg)          # not a tenor
-            paths.write_text(p, "# comment\nUSDCNH, on , 1\nusdcnh,1w,0.8\n")
-            self.assertEqual(kace.SpreadTable.load(p).for_pair("USDCNH"), {"O/N": 1.0, "1W": 0.8})
+            self.assertIn(kace.SPREADS_SHEET, msg)
+            self.assertIn("row 3", msg)           # not a number
+            self.assertIn("row 5", msg)           # no spread
+            self.assertIn("row 6", msg)           # not a tenor
+
+            # Notes above the header, a '#' row anywhere, and a heading or a
+            # cell in whatever case somebody typed it.
+            good = workbook(Path(tmp) / "good.xlsx", [
+                ["# the desk's pillars"],
+                ["Pair", "Tenor", "Spread"],
+                ["USDCNH", " on ", 1],
+                ["# and the rest"],
+                ["usdcnh", "1w", 0.8],
+            ])
+            self.assertEqual(kace.SpreadTable.load(good).for_pair("USDCNH"),
+                             {"O/N": 1.0, "1W": 0.8})
+
+            # A workbook without the tab, and no workbook at all, are both
+            # said by name rather than answered with an empty table.
+            bare = Path(tmp) / "bare.xlsx"
+            openpyxl.Workbook().save(bare)
             with self.assertRaises(kace.KaceError) as ctx:
-                kace.SpreadTable.load(Path(tmp) / "missing.csv")
-            self.assertIn("missing.csv", str(ctx.exception))
+                kace.SpreadTable.load(bare)
+            self.assertIn(kace.SPREADS_SHEET, str(ctx.exception))
+            with self.assertRaises(kace.KaceError) as ctx:
+                kace.SpreadTable.load(Path(tmp) / "missing.xlsx")
+            self.assertIn("missing.xlsx", str(ctx.exception))
 
     # -- off the book ---------------------------------------------------------
     @classmethod

@@ -24,9 +24,13 @@ out of a chat window or a spreadsheet usually arrives:
 
 ``expiry, strike, bid/offer``, optionally with a timestamp in front of it.  The
 middle column is a **strike specification** in the same vocabulary the pricing
-screen takes: ``ATM``, an absolute strike, or a delta (``25d``, ``25dp``,
-``-25d``).  The two shapes are read by one parser rather than two, because a
-run that mixes them -- and they do -- must not depend on which line came first.
+screen takes: ``ATM``, an absolute strike (``7.75``, and ``7.75c`` or
+``7.75p`` with the side glued on), or a delta (``25d``, ``25dp``, ``-25d``).
+The two shapes are read by one parser rather than two, because a run that
+mixes them -- and they do -- must not depend on which line came first.  A
+strike and a delta on one line is a strike quote: the strike names the option
+exactly and the delta only names it through the marks, so the delta is
+dropped and the line says so.
 
 Five things are easy to get wrong and are therefore handled explicitly.
 
@@ -427,6 +431,12 @@ _DELTA = re.compile(r"^(\d+(?:\.\d+)?)\s*(?:d|delta|dl)$")
 _SIZE = re.compile(r"^(\d+(?:\.\d+)?)\s*(mm|mio|mln|m|k|bn|b)$")
 _NUMBER = re.compile(r"^[-+]?(?:\d+(?:\.\d+)?|\.\d+)$")
 _STRIKE_WORD = re.compile(r"^(?:k|strike|struck)[=:]?$")
+#: A strike with its side glued on: ``7.77c``, ``1.1000p``, ``7.77call``.  A
+#: run writes the effective strike this way as readily as with a space, and
+#: without this it is neither a number nor a word and lands in "ignored" --
+#: leaving a line that named its strike to be quoted off a delta instead.
+#: The delta branches above run first, so ``25d`` and ``25dc`` are untouched.
+_STRIKE_SIDE = re.compile(r"^(\d+(?:\.\d+)?|\.\d+)(c|calls?|p|puts?)$")
 #: A date in one token that is not ISO: 30sep26, 30-Sep-2026, 2026/09/30,
 #: 09/30/2026.  Gated by shape so that ``parse_datetime`` is only asked about
 #: something that could be a date, and a number is never one.
@@ -773,6 +783,23 @@ def _consume_tokens(tokens: list[list], columns: int, state: _Line) -> None:
             continue
         if word in ("notional", "not", "ccy"):
             state.size_basis = "notional"
+            i += 1
+            continue
+
+        # '7.77c' -- the strike and the side in one token.  It is a strike
+        # like any other, so by _settle_side it beats a delta on the same
+        # line: the strike names the option exactly, the delta only through
+        # the marks.
+        mk = _STRIKE_SIDE.match(word)
+        if mk:
+            value = float(mk.group(1))
+            if state.strike is not None and state.strike != value:
+                raise ValueError(f"the line names a strike twice "
+                                 f"({state.strike:g} and {value:g})")
+            state.strike = value
+            if state.instrument in (None, "outright"):
+                state.instrument = "outright"
+                state.is_call = mk.group(2)[0] == "c"
             i += 1
             continue
 

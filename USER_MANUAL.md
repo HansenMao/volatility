@@ -29,8 +29,7 @@ because a UTF-8 file reads the same on every machine. If you save it the way
 Notepad saves by default (*ANSI*), the tool still reads it, using this
 machine's own code page, and prints a `note:` line saying so; re-save it as
 UTF-8 and the note goes away. Notepad's *Unicode* (UTF-16) is read too. The
-same goes for `bands.csv`, `holiday_overrides.csv` and every other text file
-here.
+same goes for `market_feed.csv`, `volkit.cfg` and every other text file here.
 
 Whatever it read is printed at the top of the console, so you can always see
 which settings are in force. If you start the tool from a command prompt with
@@ -54,13 +53,26 @@ source):
 | `vol_marks.xlsx` | the workbook: parameters, quotes, events | yes |
 | `market_feed.csv` | spot and forward points, by tenor or by date | no |
 | `vol_history.xlsx` | past spot / forwards / quotes, for the Analysis tab | no |
-| `bands.csv` | managed/pegged trading bands | no |
 | `volkit.cfg` | startup settings, read when the exe is double-clicked | no |
-| `holiday_overrides.csv` | extra holiday dates | no |
-| `kace_spreads.csv` | the kACE feed: which tenors are posted, and the ATM width at each | only for the kACE feed |
 | `mm_knowledge.json` | the market maker's knowledge bank — widths, floors, notes | created when you first save one |
 
 If the tool cannot find the workbook, pass it: `volkit.exe -w C:\path\to\vol_marks.xlsx`
+
+**The settings live in the workbook.** What used to be a CSV each beside the
+exe is now a tab of `vol_marks.xlsx`, so one file carries the marks and the
+settings that go with them:
+
+| Tab | What it is |
+|---|---|
+| `PEG_BANDS` | managed/pegged trading bands: `pair, lower, upper, note` |
+| `KACE_SPREADS` | the kACE feed: which tenors are posted, and the ATM width at each |
+| `HOLIDAYS` | holiday dates no rule derives: `country, date, remove` |
+
+Each is an ordinary table with a header row. A row whose first cell starts
+with `#` is a note and is skipped, wherever it sits — the tabs ship with the
+reasoning that used to be at the top of each file, and you can add your own.
+Anything above the header row is free text. Future settings arrive the same
+way: another tab, no new file.
 
 **None of these files is held open.** Each one is copied into memory and
 closed before it is read, so a workbook loaded here can still be edited and
@@ -193,7 +205,15 @@ box you can fill in that is then ignored is the same silent nothing as a
 price that quietly comes back zero. A row that another column needs stays put
 and shows a dot in the columns that do not, so two legs never look like the
 same instrument. The result rows follow the same rule: **MC std error**
-belongs to a simulated barrier, **Smile delta %** to a vanilla.
+belongs to a simulated barrier, **Smile delta %** and **Smile cash gamma** to a
+vanilla, and so does **Price (pips)** — pips are a price per unit of base, and a
+touch is priced as a fraction of its payout, which the percentage row carries.
+
+**Price (pips)** is the premium in the pair's own pips, which is how a vanilla is
+quoted; **Smile cash gamma** is the millions of base the delta hedge moves by for a
+one per cent move in spot, differenced along the smile rather than at a frozen
+volatility, so it is the gamma the desk actually carries. A new leg starts at a
+100 million notional.
 
 Every column is the **same fixed width** whatever is in it, so a long premium
 in one leg cannot widen the leg beside it and shift the whole grid under your
@@ -287,8 +307,8 @@ move the screen.
   reversion, short add-on and decay, rate vol and correlation. For a **cross**
   this marks the *correlation* term structure instead and shows which legs it
   is built from. A rejected value leaves the curve untouched and says why.
-* **Managed band** — only for a pegged pair, and only if it is listed in
-  `bands.csv`. See below.
+* **Managed band** — only for a pegged pair, and only if it is listed on the
+  workbook's `PEG_BANDS` tab. See below.
 * **Saved marks** — everything this session has marked, written to a file
   beside the workbook. See *Saving a session* below.
 
@@ -306,6 +326,48 @@ move the screen.
   that wants the room. A tenor that *is* overwritten carries a **·** beside
   its name while the column is shut, and the heading counts them — a mark you
   cannot see would be worse than a column you did not want.
+* **The quotes, on the same rows** — `RR 25d`, `ST 25d`, `RR 10d`, `ST 10d`:
+  the four numbers each tenor's smile is fitted from, as the pair's own sheet
+  holds them, in volatility points. They are **editable**. Type into one and
+  that tenor's smile is refitted on the spot; clear the box and the sheet's
+  number comes back, which is what the greyed number underneath is. The sheet
+  itself is never touched while you mark — the edit lives in the session, like
+  every other mark — and the row carries a **·** when a quote has been moved
+  away from the sheet's. Untick **quotes** in the heading to put the columns
+  away.
+
+  A tenor the sheet does **not** quote can be created here: type into its
+  blank row and it becomes quoted. It is fitted only once all four of its
+  numbers are filled in, and until then the row says `part` and the note above
+  the table says which of the four are still blank — a tenor is quoted by all
+  four of its numbers or by none, which is the same rule the workbook reader
+  applies. A strangle must be positive, refused in the box rather than as a
+  calibration failure later.
+
+  These edits are saved with the session, and **Write to workbook** puts them
+  into the pair sheet's own cells (a new tenor becomes a new row). That is the
+  one mark written into a sheet's own number rather than into a row the reader
+  reads back, and it is what makes the workbook a database the GUI is the only
+  way into. A sheet that is written is written **whole, as numbers** — see
+  *Wing ratios* next.
+* **Wing ratios** — tick **ratios** in the heading for a second table under the
+  quotes: each tenor's 10-delta wings as a multiple of its 25-delta ones,
+  `ST 10d = ST 25d × st`. Where a multiple is set the wing is *derived*, its box
+  above is read-only and shows what the multiple made, and marking the
+  25-delta moves it. Empty a box here and that wing is quoted in its own right
+  instead; typing into a 10-delta box above does the same thing, because a box
+  a ratio would recompute is a number that changes back when you leave the
+  field. The multiples live on the workbook's `WING_RATIOS` tab.
+
+  They used to be Excel formulas in the pair sheets, which is why this exists:
+  `ST 10D` was `=ST 25D * 3.25` and `RR 10D` was `=RR 25D * 1.85`, a different
+  multiple per pair *and* per tenor, and the tool could not see any of it.
+  Writing a quote into such a sheet left the wing beside it holding a number
+  computed from the cell that had just been replaced — the file was internally
+  inconsistent and the wing moved on its own the next time Excel opened it. Run
+  **`volkit migrate-wings --in-place`** once to read the multiples onto the tab
+  and flatten the sheets to numbers; `volkit check` says whether a workbook has
+  been through it.
 * **Charts** — smile (with the risk-neutral density), term structure, daily
   vols, and the **kACE feed** (below). The expiry box beside the tabs drives
   the smile chart.
@@ -426,8 +488,8 @@ on the band in a U-shape (it spends its life near the edges, because that is
 where the central bank steps in); or the peg breaks, one way or the other, and
 lands somewhere else entirely.
 
-The band itself comes from `bands.csv` and is not marked on the screen — it is
-policy, and if it changes the file changes. What you mark is how much notice to
+The band itself comes from the workbook's `PEG_BANDS` tab and is not marked on
+the screen — it is policy, and if it changes the tab changes. What you mark is how much notice to
 take of it:
 
 | Setting | What it does |
@@ -658,7 +720,7 @@ Set the **pair**, **cut** and **interpolation** at the top, then:
 |---|---|
 | Roll target | which point on the smile is rolled: the ATM, a 25 or 10 delta wing, or a risk reversal or butterfly |
 | Horizon (days) | how far forward to roll. A tenor shorter than the horizon cannot be rolled and says so — drop to 7 days to see the front |
-| Lookback (days) | the realized window. `match` uses each tenor's own length, which is the only like-for-like comparison there is |
+| Lookback (days) | the realized window, and so what the relative-value grid's **level** signal compares against. `match` uses each tenor's own length, which is the only like-for-like comparison there is: a 1M mark against one month of realized. Type a **number** instead and every tenor is measured over that one window, so a 1M and a 2M row read off the same realized volatility and their **level** figures differ only by their marks. The relative-value card's header says which of the two is running |
 | Annualise realized | `weighted` divides by the same volatility time the model uses. `calendar` and `count` are the naive alternatives, shown in the table anyway |
 | Realized on | `forward` (the default) measures what the option's own underlying did, swap-point moves included, wherever the sheet quotes them. `spot` measures spot alone |
 | Triangle noise floor | on by default; untick it for a faster cross triangle |
@@ -763,7 +825,7 @@ than for diffusion, and the level, shape and history signals all read a
 volatility as the width of an ordinary lognormal. It takes both conditions on
 purpose — a big rate differential alone describes USDJPY perfectly well, and
 USDJPY is not managed. It is a reading of the numbers, not a ruling: a hard
-defended band is policy and lives in `bands.csv`.
+defended band is policy and lives on the `PEG_BANDS` tab.
 
 Read the **faded** cells with care — they were scored on less than half the
 declared weight, which the detail panel spells out. A cell with no history at
@@ -1143,9 +1205,13 @@ header pasted along with the run is recognised as one and passed over.
 | Strike column | What it means |
 |---|---|
 | `ATM` | the at-the-money |
-| `1.0900` | the volatility at that strike. No `call` or `put` needed — the volatility at a strike is one number either way — but it needs a **forward feed**, because the surface works in strike over forward. A cross the feed does not quote counts as covered when it quotes **both legs**: EURUSD and USDJPY in the file are an EURJPY forward, and the sheet says once which triangle it used |
+| `1.0900`, `1.0900c`, `1.0900p` | the volatility at that strike. No `call` or `put` needed — the volatility at a strike is one number either way — but it needs a **forward feed**, because the surface works in strike over forward. A cross the feed does not quote counts as covered when it quotes **both legs**: EURUSD and USDJPY in the file are an EURJPY forward, and the sheet says once which triangle it used |
 | `25d` | the 25 delta **call**. A bare delta names two strikes, one on each wing, so it takes the call and the row says so |
 | `25dp`, `-25d` | the 25 delta put |
+
+A strike and a delta on one row is a **strike** quote: the strike names the
+option exactly and the delta only names it through the marks, so the delta is
+dropped and the row says so.
 
 One rule to know: **a comma is a column boundary, and a price never straddles
 one**. That is what tells `3M, 7.75, 8.30` (a choice price at the 7.75 strike)
@@ -1323,8 +1389,8 @@ column, including anything the market-maker tab shifted).
 
 Three things to know:
 
-* **`kace_spreads.csv` decides what is posted.** One row per pair and tenor:
-  `USDCNH,1W,0.8` means the 1W pillar is posted with a 0.8 vol-point ATM
+* **The `KACE_SPREADS` tab decides what is posted.** One row per pair and
+  tenor: `USDCNH | 1W | 0.8` means the 1W pillar is posted with a 0.8 vol-point ATM
   width. The tenors listed for a pair are exactly its pillars, so a pair with
   no rows cannot be posted, and a tenor listed with no marks behind it in the
   workbook is refused by name. A day between two pillars takes the earlier
@@ -1418,14 +1484,57 @@ rows and a `BANDS` sheet the tool reads back. It asks before it writes, and it
 always writes the *saved file*, so what lands in the workbook is exactly what
 you can open and read in the JSON beside it.
 
+Quotes are the exception, and the point of the exercise: an `RR` or `ST` you
+re-typed on the ATM term structure table goes into the **pair sheet's own
+cell**, and a tenor you created goes in as a new row. Nothing else writes over
+a number the workbook already had. A tenor typed with fewer than all four of
+its quotes is refused rather than half-written, and the message names it.
+
+A pair sheet that is written is written **whole, as numbers**. It is not a
+choice: those sheets held formulas over their own columns, and a quote written
+beside a formula that reads it leaves the two disagreeing — the file says one
+thing to volkit and another to Excel. Flattening is the only version of this
+that is safe, and the relationships that produced the wings live on the
+`WING_RATIOS` tab instead.
+
+**If somebody else has written the workbook** since your marks were made —
+another volkit, or a colleague saving it from Excel — the write is **refused**,
+not merged and not silently applied over the top. Reload the workbook, put your
+marks back on it, and write again; the button asks a second time if you want to
+overwrite anyway, and says what that costs. `volkit session ... --to-workbook
+--in-place` does the same and takes `--force`.
+
 The workbook it replaces is kept beside it, stamped with the time --
-`vol_marks.bak-20260901-142530.xlsx`. Keep it: the tool rewrites the file
+`vol_marks.bak-20260901-142530.xlsx`, the twenty most recent kept and older
+ones pruned as they are made. Keep them: the tool rewrites the file
 through a spreadsheet library that carries formulas and their last values but
 **not images or charts**, so if the workbook has a chart in it, that backup is
 the way back. To look at the result before adopting it instead, run
 `volkit session marks.json --to-workbook` from a shell -- that writes a copy
 (`_marked` added to the name) and leaves the workbook alone. The message lists
 every pair written and anything it could not write.
+
+### The workbook as a database
+
+If the workbook is the store the screens read and write and nobody opens it by
+hand, three more things are done here rather than in Excel. They are on the
+**Workbook** card of the marking screen, folded away until you tick it, because
+none of them is a mark: each is written into the workbook and the book is then
+**read again on top of it**, so save your marks first — a reload drops anything
+the workbook does not hold, and the card refuses while there is anything to
+drop.
+
+* **The pairs it builds.** Add one and it gets a `CONFIG` row, a `PARAMS`
+  column at the level you give (a **correlation** for a cross, since that is
+  what those cells mean there) and an empty quote sheet to mark on. Remove one
+  and it comes out of `CONFIG` only: its column and its sheet stay where they
+  are, so adding it back finds what it had.
+* **The configuration tabs** — `PEG_BANDS`, `KACE_SPREADS`, `HOLIDAYS` and
+  `WING_RATIOS` — edited as tables and written whole. The prose and `#` comment
+  lines above each header are kept.
+* **What a write would cost.** `volkit check` reports images, charts and pivot
+  tables a write would drop (the library carries formulas and their values, not
+  those), and whether Excel currently has the file open.
 
 ---
 
@@ -1602,15 +1711,19 @@ than dropped, so a series that has gone missing is visible.
 `files/history_sample.xlsx` is a synthetic example of the layout — regenerate it
 with `python3 files/make_history_sample.py`. It is never loaded for you.
 
-**`bands.csv`** — `pair,lower,upper,note` for defended pegs. Only put a pair
-here if the range is genuinely defended.
+**`PEG_BANDS`** (a tab of the workbook) — `pair, lower, upper, note` for
+defended pegs. Only list a pair here if the range is genuinely defended. This
+is the range itself; the `BANDS` tab is the marking treatment applied to it.
 
-**`holiday_overrides.csv`** — `country,date[,remove]`. Lunar-calendar holidays
-(Chinese New Year and similar) must be listed here; they cannot be derived.
+**`HOLIDAYS`** (a tab of the workbook) — `country, date, remove`.
+Lunar-calendar holidays (Chinese New Year and similar) must be listed here;
+they cannot be derived. `remove = yes` takes away a date the built-in rules
+would otherwise make a holiday.
 
-**`kace_spreads.csv`** — `pair,tenor,spread`: the pillars the kACE feed posts
-for a pair and the ATM bid/offer width at each, in volatility points. The
-tenors listed are the pillars. See *Sending the marks to kACE* above.
+**`KACE_SPREADS`** (a tab of the workbook) — `pair, tenor, spread`: the
+pillars the kACE feed posts for a pair and the ATM bid/offer width at each, in
+volatility points. The tenors listed are the pillars. See *Sending the marks
+to kACE* above.
 
 **`kace_posts.jsonl`** — every message posted to kACE, one JSON line each,
 written by the tool: when, pair, scenario, feed or clear, node count, a hash
@@ -2267,7 +2380,7 @@ the fact list, and the first line says which it was.
 | *the band is the absolute range … and this smile is being read in moneyness* | the BAND model needs an outright forward to place the band. Load a feed (`--feed market_feed.csv`) |
 | *the band … is N% of the forward wide, so even a Beta on its edges reaches only …* | at that maturity the quoted ATM needs the peg to break. Raise the hazard or the jump sizes, or re-check the quote |
 | *a hazard of …/yr … already implies an at-the-money of at least …* | the opposite: the marked break risk alone is worth more than the quote. Lower the hazard or the jumps |
-| *has no managed band* | the BAND method only applies to pairs in `bands.csv` |
+| *has no managed band* | the BAND method only applies to pairs on the workbook's `PEG_BANDS` tab |
 | *is hidden in this build* | the screen is there but off. Start with `--enable-tab NAME`, or add `enable-tab = NAME` to `volkit.cfg` |
 | *is not UTF-8; it was read as …* | the file was saved in this machine's own encoding, not UTF-8. It **was** read — nothing is lost — but re-save it as UTF-8 (Notepad: *Save as*, Encoding: UTF-8) so it reads the same on another machine |
 | *is not UTF-8; save it as UTF-8* | the file is in an encoding this machine cannot read either. Open it in Notepad and *Save as* with Encoding UTF-8 |

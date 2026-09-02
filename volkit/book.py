@@ -26,7 +26,7 @@ from .cross import CorrelationCurve, CrossAtmCurve, infer_leg_signs
 from .events import EventBook, EventSchedule
 from .feed import MarketFeed
 from .marketdata import ExcelSource, MarketData, MarketDataError
-from .surface import VolSurface
+from .surface import VolSurface, WingRatio, load_wing_ratios
 from .timeutil import DAYS_IN_YEAR, Clock, parse_datetime
 from .timeweight import TimeWeighting
 
@@ -56,36 +56,86 @@ class Book:
     # Managed / pegged trading bands, by pair.  A banded pair needs a
     # bounded-support smile: a lognormal one prices strikes outside the band.
     bands: dict[str, Band] = field(default_factory=dict)
+    # The ``WING_RATIOS`` tab, by pair: how each tenor's 10-delta wings follow
+    # its 25-delta ones.  Read once for the book so a surface built later
+    # cannot get a different answer from one built now.
+    wing_ratios: dict[str, dict[str, WingRatio]] = field(default_factory=dict)
 
     @classmethod
     def from_excel(cls, path: str | Path, clock: Clock | None = None, *,
                    legacy_cross_sign: bool = False, bands: str | Path | None = None,
-                   **kw) -> "Book":
+                   calendars: CalendarSet | None = None, **kw) -> "Book":
         book = cls(data=ExcelSource(path, **kw).load(), clock=clock or Clock.utcnow(),
                    legacy_cross_sign=legacy_cross_sign)
         book.events = book.data.events.copy()
-        book.bands = book._default_bands(bands)
+        book.bands = book._default_bands(bands or path)
+        book.wing_ratios = book._default_wing_ratios(path)
+        book.calendars = calendars if calendars is not None else book._default_calendars(path)
         return book
 
     def _default_bands(self, path: str | Path | None) -> dict[str, Band]:
-        """The managed bands to hand the surfaces, from ``bands.csv``.
+        """The managed bands to hand the surfaces, from the ``PEG_BANDS`` tab.
 
         Loaded here rather than left to the caller because a peg is a property
         of the pair, not of the screen looking at it: a build where the
         pricing tab knew about the band and the analysis tab did not would be
-        the same silent half-answer as a swallowed error.  A file that cannot
-        be read is a warning, not a failed book -- the rest of the marks are
-        unaffected by it.
+        the same silent half-answer as a swallowed error.  A tab that is not
+        there, or cannot be read, is a warning and no bands -- the rest of the
+        marks are unaffected by it, and a warning is how a desk finds out that
+        the BAND method has nothing to work with.
         """
-        from .paths import find_data_file
-        found = Path(path) if path else find_data_file("bands.csv", "files/bands.csv")
+        found = Path(path) if path else None
         if found is None:
             return {}
         try:
             return {k: v for k, v in load_bands(found).items() if v.upper > v.lower > 0}
         except (OSError, ValueError) as exc:
-            self.warnings.append(f"managed bands: {found} could not be read ({exc})")
+            self.warnings.append(f"managed bands: {exc}")
             return {}
+
+    def _default_wing_ratios(self, path: str | Path | None) -> dict[str, dict]:
+        """The ``WING_RATIOS`` tab, or nothing if the workbook has not got it.
+
+        Not having it is the ordinary case for a workbook that predates the
+        tab: every wing is then quoted in its own right, which is what every
+        workbook did before. A tab that cannot be *read* is a different thing
+        and is a warning, because a desk that wrote one meant it to apply.
+        """
+        if path is None:
+            return {}
+        try:
+            return load_wing_ratios(path)
+        except (OSError, ValueError) as exc:
+            self.warnings.append(f"wing ratios: {exc}")
+            return {}
+
+    def _default_calendars(self, path: str | Path | None) -> CalendarSet:
+        """The shared calendars plus whatever the ``HOLIDAYS`` tab adds.
+
+        A copy, never the shared default: a lunar holiday belongs to the
+        workbook that lists it, and a book that quietly added dates to the
+        process-wide calendar would change the expiry of every other book
+        loaded after it.  A workbook with no such tab gets the shared set
+        itself, unchanged, so nothing pays for a tab it has not got.
+        """
+        if path is None:
+            return self.calendars
+        cal = CalendarSet(
+            use_package=DEFAULT_CALENDARS.use_package,
+            overrides={k: set(v) for k, v in DEFAULT_CALENDARS.overrides.items()},
+            removals={k: set(v) for k, v in DEFAULT_CALENDARS.removals.items()},
+        )
+        try:
+            added = cal.load_overrides_sheet(path)
+        except (OSError, ValueError) as exc:
+            self.warnings.append(f"holidays: {exc}")
+            return DEFAULT_CALENDARS
+        if added is None:
+            return DEFAULT_CALENDARS
+        if added:
+            self.data.notes.append(
+                f"HOLIDAYS: {added} date(s) read from the workbook")
+        return cal
 
     def market_level(self, pair: str, t: float) -> dict:
         """Spot and the outright forward at ``t`` years, from the feed.
@@ -383,6 +433,7 @@ class Book:
         surface = VolSurface(
             pair=name, atm=atm,
             conv=DeltaConvention(spec.resolved_premium_adjusted()),
+            wing_ratios=dict(self.wing_ratios.get(name, {})),
         )
         self._attach_band(name, surface)
         # The marks a session wrote into the workbook (the ``atm 1m`` /
@@ -404,7 +455,10 @@ class Book:
             if pairs and name not in pairs:
                 continue
             marks = self.data.marks.get(name)
-            if not marks:
+            # A pair whose only quotes were typed on the marking screen still
+            # has a smile to fit: the sheet is where quotes usually come from,
+            # not where they have to come from.
+            if not marks and not surface.quote_overwrites:
                 # A pair asked for by name and left uncalibrated is the one
                 # case worth saying out loud: every later call on it raises
                 # "no smile term structure", which reads like a caller that
@@ -418,7 +472,7 @@ class Book:
                         f"fitted; every smile on this pair will refuse"
                     )
                 continue
-            surface.calibrate(marks)
+            surface.calibrate(marks or [])
             self.warnings.extend(surface.warnings)
             surface.warnings.clear()
             for fit in surface.fits:
@@ -469,9 +523,14 @@ class Book:
         return problems
 
     # -- access -----------------------------------------------------------
-    def load_bands(self, path: str | Path) -> "Book":
-        """Attach managed-band definitions and hand them to their surfaces."""
-        self.bands = {k: v for k, v in load_bands(path).items() if v.upper > v.lower > 0}
+    def load_bands(self, path: str | Path | None = None) -> "Book":
+        """Attach managed-band definitions and hand them to their surfaces.
+
+        ``path`` is a workbook whose ``PEG_BANDS`` tab holds them; the book's
+        own workbook when nothing else is named.
+        """
+        source = path or self.data.source or None
+        self.bands = {k: v for k, v in load_bands(source).items() if v.upper > v.lower > 0}
         for name, surface in self.surfaces.items():
             self._attach_band(name, surface)
         return self

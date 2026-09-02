@@ -718,9 +718,21 @@ class ExcelSource:
                 marks.append(SmileMark(tenor=str(tenor).strip(), **values))
             if marks:
                 data.marks[name] = marks
+            elif len(df.index) == 0:
+                # A sheet with the right columns and no rows at all is a pair
+                # that has been created and not yet quoted -- which is a real
+                # state now that a pair is added from the screens rather than
+                # by hand in Excel.  Said, because a pair with no smile is
+                # worth knowing about, but not a problem: there is nothing
+                # wrong with the workbook, and a check that goes red on a pair
+                # somebody has just made is a check people stop reading.
+                data.notes.append(
+                    f"sheet {name!r} has its columns and no quotes yet, so {name} has no "
+                    f"smile until one is marked on it"
+                )
             else:
-                # A sheet with the right columns and not one readable row is
-                # the same failure arriving by a different route.
+                # Rows that are there and cannot be read is the same failure
+                # as a missing column, arriving by a different route.
                 data.problems.append(
                     f"sheet {name!r} has no readable quotes, so {name} has no smile"
                 )

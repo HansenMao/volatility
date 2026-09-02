@@ -40,7 +40,7 @@ for the reasoning behind it. Read this file when working in the area above.
   warns, the ρ/ν card says the same thing, and neither corrects for it.
 - **The managed-float reading is a heuristic on measured numbers, and it is
   not the authority on anything.** A hard, defended band is a *policy fact*
-  and is marked in `files/bands.csv` (§6); `relvalue.suppressed_diffusion`
+  and is marked on the workbook's `PEG_BANDS` tab (§6); `relvalue.suppressed_diffusion`
   only raises a hand on a pair whose carry and realized volatility have the
   shape. It deliberately takes **two** conditions, because the obvious
   one-condition version is wrong: read as `|c| / sigma` alone, USDJPY on a

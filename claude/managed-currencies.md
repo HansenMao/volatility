@@ -68,9 +68,11 @@ per pair and living on the surface beside `param_shifts`:
 - **A blend strictly between 0 and 1 is a weighted average of two implied
   volatilities.** It is a marking convenience, is arbitrage free in neither
   model's sense, and warns.
-- Bands load automatically (`Book.from_excel` → `files/bands.csv`), so a
-  pegged pair is flagged on every screen rather than on whichever one
-  remembered to call `load_bands`.
+- Bands load automatically (`Book.from_excel` → the workbook's `PEG_BANDS`
+  tab, read through `configsheets.read_rows`), so a pegged pair is flagged on
+  every screen rather than on whichever one remembered to call `load_bands`.
+  `PEG_BANDS` is the *range*; the `BANDS` tab is the marking treatment applied
+  to it, including an optional override of the edges. Two tabs on purpose.
 - **`BAND` is only offered where it can work.** The page filters the
   interpolation list by `STATE.bands.pairs`: a named pair answers for itself,
   a screen spanning several (the monitor's tiles, a listed panel taking its
