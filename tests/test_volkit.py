@@ -6029,6 +6029,102 @@ class TestWebAssets(unittest.TestCase):
         self.assertIn("curve", paint)
         self.assertIn("marked", paint)
 
+    def test_the_bump_is_a_disclosure_that_hides_no_mark(self):
+        """Shut by default like the other two, and it may be: what a bump
+        writes are per-tenor ATM overwrites, which the card's own heading
+        counts whether this row is open or not.  It is the one control on the
+        screen that is allowed to be shut without carrying its own count."""
+        page = _source("volkit", "web", "index.html")
+        js = page.split("<script>")[1]
+        i = page.index('id="mbumpshow"')
+        tag = page[page.rindex("<input", 0, i):page.index(">", i)]
+        self.assertNotIn("checked", tag)
+        self.assertIn('<div class="hide" id="mbumprow"', page)
+        self.assertIn("$('#mbumprow').classList.toggle('hide',!$('#mbumpshow').checked)", js)
+        # The count that makes shutting it safe is the overwrite count.
+        paint = js.split("function paintMarks(){")[1].split("\nasync function loadMarks")[0]
+        self.assertIn("matmowcount", paint)
+
+    def test_the_bump_reads_and_writes_through_one_route_and_never_replays(self):
+        """`Show` and `Apply` are the same call with a flag.  An apply that
+        replayed the table on screen would put the levels a preview was taken
+        at back onto a curve that had been marked since."""
+        html = _source("volkit", "web", "index.html")
+        js = html.split("<script>")[1].split("</script>")[0]
+        body = js.split("async function bumpRun(apply){")[1].split("\n}")[0]
+        self.assertIn("post('/api/atm/bump'", body.replace(" ", ""))
+        self.assertIn("apply:!!apply", body.replace(" ", ""))
+        self.assertIn("anchor:$('#mbumpanchor').value", body.replace(" ", ""))
+        self.assertIn("move:$('#mbumpmove').value.trim()", body.replace(" ", ""))
+        self.assertIn("$('#mbumpgo').onclick=()=>bumpRun(false)", js.replace(" ", ""))
+        self.assertIn("$('#mbumpapply').onclick=()=>bumpRun(true)", js.replace(" ", ""))
+        # Applied, the screen re-reads the marks rather than assuming them.
+        self.assertIn("await loadMarks()", body)
+        # And the anchor is one of the tenors the table above it shows.
+        paint = js.split("function paintMarks(){")[1].split("\nasync function loadMarks")[0]
+        self.assertIn("fillSel('#mbumpanchor',MARKS.atm.map(r=>r.tenor),"
+                      "keyTenorIn(MARKS.atm.map(r=>r.tenor)))", paint)
+
+    def test_the_key_tenor_is_matched_however_the_workbook_spells_it(self):
+        """`fillSel` matches by string.  A default of '1M' offered to a
+        workbook whose tenors are '1m' matches nothing and falls through to
+        whatever happens to be first, which for this desk is the 1W -- an
+        anchor nobody chose, on the control that moves the whole curve."""
+        html = _source("volkit", "web", "index.html")
+        js = html.split("<script>")[1].split("</script>")[0]
+        self.assertIn("function keyTenorIn(list){return (list||[]).filter(isKeyTenor)[0]||''}",
+                      js)
+        for call in ("keyTenorIn(MARKS.atm.map(r=>r.tenor))", "keyTenorIn(tenors)"):
+            self.assertIn(call, js)
+
+    def test_the_bump_shows_volatilities_to_the_one_number_of_decimals(self):
+        html = _source("volkit", "web", "index.html")
+        js = html.split("<script>")[1].split("</script>")[0]
+        body = js.split("async function bumpRun(apply){")[1].split("\n}")[0]
+        for call in ("vnum(x.before)", "vsgn(x.move)", "vnum(x.after)"):
+            self.assertIn(call, body)
+
+    def test_the_workbook_card_repaints_from_what_was_typed_into_it(self):
+        """A suggestion adds a column and rows, so the table has to be
+        redrawn -- and a redraw that had not harvested the boxes first would
+        throw away every other edit on the tab.  `cfgHarvest` is that harvest,
+        and it is called before each of the three things that redraw."""
+        html = _source("volkit", "web", "index.html")
+        js = html.split("<script>")[1].split("</script>")[0]
+        for fn in ("function cfgHarvest(i){", "function cfgPaintTabs(){",
+                   "function cfgTabHtml(t,i){"):
+            self.assertIn(fn, js)
+        # The save posts what CFG holds after the harvest, not the raw boxes.
+        save = js.split("$('#cfgtabs').querySelectorAll('.cfgsave')")[1].split("});")[0]
+        self.assertIn("cfgHarvest(i)", save)
+        self.assertIn("rows:t.rows", save.replace(" ", ""))
+        # Adding a column and accepting a suggestion both harvest first.
+        add = js.split("$('#cfgtabs').querySelectorAll('.cfgaddcol')")[1].split("cfgPaintTabs();")[0]
+        self.assertIn("cfgHarvest(i)", add)
+        use = js.split("use.onclick=()=>{")[1].split("cfgPaintTabs();")[0]
+        self.assertIn("cfgHarvest(i)", use)
+
+    def test_a_measured_weighting_is_suggested_and_never_written(self):
+        """What the market did is evidence about the shape, not the shape.
+        The button fills the boxes; the tab is written by the Write button
+        beside it, by a person who has looked at them."""
+        html = _source("volkit", "web", "index.html")
+        js = html.split("<script>")[1].split("</script>")[0]
+        use = js.split("use.onclick=()=>{")[1].split("\n  };")[0]
+        self.assertNotIn("post(", use)
+        self.assertIn("row[into]", use)
+        self.assertIn("press Write", use)
+        # Beta is the suggestion, because beta is what the tab holds.
+        self.assertIn("x.beta", use)
+        self.assertNotIn("sd_ratio", use)
+        # Into the measured pair's column or into the tab's default, which is
+        # the one a desk seeds first and has no other way to fill from the
+        # market.
+        self.assertIn("out.querySelector('.cfgvinto').value", use)
+        self.assertIn('class="cfgvinto"', js)
+        self.assertIn("<option value=\"default\">the default column</option>",
+                      js.replace("'", '"'))
+
     def test_a_marked_term_structure_is_posted_as_a_whole_row(self):
         """Three coefficients are one curve.
 
@@ -6955,6 +7051,443 @@ class TestWingRatios(unittest.TestCase):
         s.calibrate()
         self.assertIn("4M", {f.tenor.upper() for f in s.fits})
         self.assertEqual(s.warnings, [])
+
+
+class TestVegaWeights(unittest.TestCase):
+    """The shape a move of one tenor is shared out by.
+
+    The tab existed on the desk's workbook long before anything read it -- one
+    unheaded column of numbers under ``USDCNH`` -- and a marker typed the
+    result of it into the overwrite column tenor by tenor.  What is pinned
+    here is the three things that makes it a mark rather than arithmetic: that
+    a pair reads its own column and falls back to the default *cell by cell*,
+    that the anchor moves exactly what was asked whatever its own weight is,
+    and that a tenor the tab cannot weight keeps its place and says so instead
+    of quietly not moving.
+    """
+
+    def _sheet(self, rows, sheet="Vega Weights"):
+        import tempfile
+        import openpyxl
+        d = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d, True)
+        wb = openpyxl.Workbook()
+        wb.active.title = sheet
+        for row in rows:
+            wb.active.append(row)
+        path = d / "marks.xlsx"
+        wb.save(path)
+        return path
+
+    def _weights(self):
+        from volkit.vegaweights import load_vega_weights
+        return load_vega_weights(self._sheet([
+            ["# how far each tenor moves when the anchor moves one point"],
+            ["tenor", "default", "USDJPY", "note"],
+            ["1W", 1.60, 2.10, "front end"],
+            ["1M", 1.00, 1.00, None],
+            ["3M", 0.65, None, "USDJPY takes the default here"],
+            ["1Y", 0.40, 0.55, None],
+        ]))
+
+    # -- the tab ----------------------------------------------------------
+    def test_a_pair_column_wins_and_a_blank_cell_in_it_falls_back(self):
+        """Per cell, not per column.
+
+        A desk with a view on the front end of USDJPY and none on its back end
+        should not have to retype the back end to say so, and a column that
+        fell back as a whole would make an opinion about 1W an opinion about
+        every tenor on the tab.
+        """
+        w = self._weights()
+        self.assertEqual(w.pairs, ("USDJPY",))
+        self.assertEqual(w.weight_for("USDJPY", "1W"), (2.10, "USDJPY"))
+        self.assertEqual(w.weight_for("USDJPY", "3M"), (0.65, "default"))
+        self.assertEqual(w.weight_for("EURUSD", "1W"), (1.60, "default"))
+        # A tenor the tab has no row for is an absence, not a one.
+        self.assertEqual(w.weight_for("USDJPY", "2Y"), (None, ""))
+        self.assertEqual(w.for_pair("USDJPY"),
+                         {"1W": 2.10, "1M": 1.00, "3M": 0.65, "1Y": 0.55})
+
+    def test_a_column_that_is_not_a_pair_is_refused_by_name(self):
+        """The columns are tenor, default, note and pairs.
+
+        A heading nobody meant -- a stray ``USD``, a pasted date -- read as a
+        pair column is a weight that silently applies to nothing, which is the
+        shape of every bug this project was written to remove.
+        """
+        from volkit import configsheets
+        from volkit.vegaweights import load_vega_weights
+        path = self._sheet([["tenor", "default", "USD"], ["1M", 1.0, 1.0]])
+        with self.assertRaises(configsheets.ConfigSheetError) as ctx:
+            load_vega_weights(path)
+        self.assertIn("'usd'", str(ctx.exception))
+
+    def test_a_tenor_written_twice_is_refused(self):
+        from volkit import configsheets
+        from volkit.vegaweights import load_vega_weights
+        path = self._sheet([["tenor", "default"], ["1M", 1.0], ["1m", 0.8]])
+        with self.assertRaises(configsheets.ConfigSheetError) as ctx:
+            load_vega_weights(path)
+        self.assertIn("twice", str(ctx.exception))
+
+    def test_a_negative_weight_is_allowed_and_a_word_is_not(self):
+        """A measured beta can come out negative when the back end has been
+        trading against the front.  Refusing it on the tab would make the
+        realized table on the same screen suggest a number the tab cannot
+        hold, so it is a mark like any other."""
+        from volkit import configsheets
+        from volkit.vegaweights import load_vega_weights
+        w = load_vega_weights(self._sheet([["tenor", "default"], ["1M", 1.0], ["1Y", -0.2]]))
+        self.assertEqual(w.weight_for("EURUSD", "1Y"), (-0.2, "default"))
+        with self.assertRaises(configsheets.ConfigSheetError):
+            load_vega_weights(self._sheet([["tenor", "default"], ["1M", "steep"]]))
+
+    def test_an_absent_tab_is_absent_rather_than_empty(self):
+        from volkit.vegaweights import load_vega_weights
+        w = load_vega_weights(self._sheet([["pair", "lower", "upper"]], sheet="PEG_BANDS"))
+        self.assertFalse(w.present)
+        self.assertEqual(w.tenors, ())
+
+    def test_the_tab_is_found_however_the_workbook_capitalises_it(self):
+        """``Vega Weights`` is what the desk called it.  A workbook where
+        somebody has since typed ``VEGA_WEIGHTS`` is the same tab."""
+        from volkit.vegaweights import load_vega_weights
+        for name in ("Vega Weights", "VEGA_WEIGHTS", "vega weights"):
+            w = load_vega_weights(self._sheet([["tenor", "default"], ["1M", 1.0]],
+                                              sheet=name))
+            self.assertTrue(w.present, name)
+
+    # -- the bump ---------------------------------------------------------
+    def test_the_anchor_moves_what_was_asked_and_the_scale_cancels(self):
+        """Only ratios matter.  A tab anchored at 1.00 and the same shape
+        multiplied by 100 are one view, and a bump that divided by the wrong
+        one of them would move the whole curve by a factor of a hundred."""
+        from volkit.vegaweights import bump_levels, load_vega_weights
+        levels = {"1W": 0.09, "1M": 0.08, "3M": 0.075, "1Y": 0.07}
+        rows = bump_levels(self._weights(), "USDJPY", "1M", 0.01, levels)
+        by = {r.tenor: r for r in rows}
+        self.assertAlmostEqual(by["1M"].move, 0.01, places=15)
+        self.assertAlmostEqual(by["1W"].move, 0.021, places=15)
+        self.assertAlmostEqual(by["1Y"].move, 0.0055, places=15)
+        scaled = load_vega_weights(self._sheet([
+            ["tenor", "default", "USDJPY"],
+            ["1W", 160.0, 210.0], ["1M", 100.0, 100.0],
+            ["3M", 65.0, None], ["1Y", 40.0, 55.0]]))
+        for a, b in zip(rows, bump_levels(scaled, "USDJPY", "1M", 0.01, levels)):
+            self.assertAlmostEqual(a.after, b.after, places=15)
+
+    def test_a_tenor_the_tab_cannot_weight_keeps_its_place_and_says_why(self):
+        from volkit.vegaweights import bump_levels
+        rows = bump_levels(self._weights(), "EURUSD", "1M", 0.01,
+                           {"1M": 0.08, "2Y": 0.07})
+        self.assertEqual([r.tenor for r in rows], ["1M", "2Y"])
+        self.assertIsNone(rows[1].after)
+        self.assertIn("no weight", rows[1].reason)
+
+    def test_a_bump_through_zero_is_reported_rather_than_marked(self):
+        from volkit.vegaweights import bump_levels
+        rows = bump_levels(self._weights(), "EURUSD", "1M", -0.20,
+                           {"1M": 0.08, "1Y": 0.07})
+        self.assertTrue(all(r.after is None for r in rows))
+        self.assertIn("vol points", rows[0].reason)
+
+    def test_an_anchor_off_the_curve_or_off_the_tab_is_refused_whole(self):
+        """Before a single row is computed: half a bump is not a curve."""
+        from volkit.vegaweights import bump_levels, VegaWeights
+        levels = {"1M": 0.08, "2Y": 0.07}
+        with self.assertRaises(ValueError):
+            bump_levels(self._weights(), "EURUSD", "6M", 0.01, levels)
+        with self.assertRaises(ValueError) as ctx:
+            bump_levels(self._weights(), "EURUSD", "2Y", 0.01, levels)
+        self.assertIn("no weight", str(ctx.exception))
+        with self.assertRaises(ValueError) as ctx:
+            bump_levels(VegaWeights(), "EURUSD", "1M", 0.01, levels)
+        self.assertIn("Vega Weights", str(ctx.exception))
+
+    def test_an_anchor_that_does_not_move_cannot_measure_a_move(self):
+        from volkit.vegaweights import bump_levels, load_vega_weights
+        w = load_vega_weights(self._sheet([["tenor", "default"], ["1M", 0.0], ["1Y", 0.4]]))
+        with self.assertRaises(ValueError) as ctx:
+            bump_levels(w, "EURUSD", "1M", 0.01, {"1M": 0.08, "1Y": 0.07})
+        self.assertIn("does not move", str(ctx.exception))
+
+    # -- the book and the shipped workbook --------------------------------
+    def test_the_shipped_workbook_weights_its_managed_pair(self):
+        book = Book.from_excel(WORKBOOK, ASOF)
+        self.assertEqual([w for w in book.warnings if "vega" in w.lower()], [])
+        self.assertEqual(book.vega_weights.weight_for("USDCNH", "1Y"), (1.0, "USDCNH"))
+        self.assertEqual(book.vega_weights.weight_for("USDCNH", "1W")[0], 2.6)
+
+    def test_a_workbook_whose_tab_has_no_header_says_so_and_prices_anyway(self):
+        """The old layout: one unheaded column of numbers.  It is a warning
+        and no weights -- a tab that is *there* and cannot be read is a
+        different thing from one that was never written, and a desk that wrote
+        one meant it to apply."""
+        legacy = WORKBOOK.parent / "vol_marks_legacy_format.xlsx"
+        book = Book.from_excel(legacy, ASOF).load_all(["EURUSD"])
+        said = [w for w in book.warnings if "vega weights" in w.lower()]
+        self.assertTrue(said and "tenor, default" in said[0], said)
+        self.assertFalse(book.vega_weights.present)
+        self.assertGreater(book["EURUSD"].atm.term_vol(0.25), 0)
+
+
+class TestVegaWeightsThroughTheScreens(unittest.TestCase):
+    """The route, the workbook card's open columns, and what a bump leaves.
+
+    The bump makes nothing new: what it writes are the per-tenor ATM
+    overwrites a marker could have typed one row at a time, so the session
+    carries them, the overwrite count reports them and the clear button undoes
+    them.  That is the property worth pinning -- a bump that stored a bump
+    would be a mark the rest of the tool could not see.
+    """
+
+    def _service(self):
+        import shutil
+        import tempfile
+        from volkit.webapp import BookService
+        d = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d, True)
+        wb = d / "vol_marks.xlsx"
+        shutil.copy(WORKBOOK, wb)
+        return BookService(str(wb), ASOF), wb
+
+    def test_a_bump_is_shown_before_it_is_written(self):
+        svc, _ = self._service()
+        shown = svc.atm_bump({"pair": "USDCNH", "anchor": "1M", "move": 1.0})
+        self.assertEqual(shown["applied"], 0)
+        self.assertEqual(svc.book["USDCNH"].atm.tenor_overwrites, {})
+        row = {r["tenor"].upper(): r for r in shown["rows"]}
+        self.assertAlmostEqual(row["1M"]["move"], 1.0, places=9)
+        # 2.6 / 1.85 at the front, off the workbook's own USDCNH column.
+        self.assertAlmostEqual(row["1W"]["move"], 2.6 / 1.85, places=9)
+        self.assertEqual(row["1W"]["source"], "USDCNH")
+        self.assertEqual(shown["column"], "USDCNH")
+
+    def test_applying_leaves_ordinary_overwrites_and_nothing_else(self):
+        svc, _ = self._service()
+        out = svc.atm_bump({"pair": "USDCNH", "anchor": "1M", "move": 1.0, "apply": True})
+        atm = svc.book["USDCNH"].atm
+        self.assertEqual(out["applied"], len(atm.tenor_overwrites))
+        marks = svc.marks({"pair": "USDCNH", "cut": "TK"})
+        by = {r["tenor"].upper(): r for r in marks["atm"]}
+        for r in out["rows"]:
+            if r["after"] is None:          # 3W: the tab has no row for it
+                self.assertIsNone(by[r["tenor"].upper()]["overwrite"])
+            else:
+                self.assertAlmostEqual(by[r["tenor"].upper()]["overwrite"] * 100,
+                                       r["after"], places=9)
+        # Cleared by the button that clears any other overwrite.
+        svc.overwrite({"pair": "USDCNH", "kind": "clear_atm"})
+        self.assertEqual(atm.tenor_overwrites, {})
+
+    def test_every_level_is_read_before_any_of_them_is_written(self):
+        """An overwrite changes what ``term_vol`` interpolates either side of
+        it, so a bump applied row by row would move each tenor off a curve the
+        previous row had already moved.  Showing and applying must agree."""
+        svc, _ = self._service()
+        shown = svc.atm_bump({"pair": "USDCNH", "anchor": "1M", "move": 0.75})
+        done = svc.atm_bump({"pair": "USDCNH", "anchor": "1M", "move": 0.75, "apply": True})
+        for a, b in zip(shown["rows"], done["rows"]):
+            self.assertEqual(a["tenor"], b["tenor"])
+            if a["after"] is None:
+                self.assertIsNone(b["after"])
+            else:
+                self.assertAlmostEqual(a["after"], b["after"], places=12)
+
+    def test_a_bump_survives_a_session_round_trip(self):
+        from volkit import session
+        svc, wb = self._service()
+        svc.atm_bump({"pair": "USDCNH", "anchor": "1M", "move": 1.0, "apply": True})
+        was = dict(svc.book["USDCNH"].atm.tenor_overwrites)
+        path = wb.parent / "vol_session.json"
+        session.write(session.capture(svc.book, ["USDCNH"]), path)
+        fresh = Book.from_excel(wb, ASOF).load_all(["USDCNH"])
+        session.apply_document(fresh, session.load(path), ["USDCNH"])
+        back = fresh["USDCNH"].atm.tenor_overwrites
+        self.assertEqual(sorted(back), sorted(was))
+        # To the precision the file is written at, which is far finer than a
+        # mark is made to; the point is that the bump left nothing the session
+        # does not carry.
+        for tenor, vol in was.items():
+            self.assertAlmostEqual(back[tenor], vol, places=12)
+
+    def test_a_move_that_was_not_typed_is_refused_rather_than_read_as_zero(self):
+        svc, _ = self._service()
+        for bad in ({}, {"move": ""}, {"move": "up a bit"}):
+            with self.assertRaises(ValueError):
+                svc.atm_bump({"pair": "USDCNH", "anchor": "1M", **bad})
+
+    def test_the_weights_a_pair_reads_are_answerable_before_anything_is_bumped(self):
+        """A tenor with no weight does not move, and finding that out from the
+        result table is finding it out one press late."""
+        svc, _ = self._service()
+        out = svc.vega_weights({"pair": "USDCNH"})
+        self.assertTrue(out["present"])
+        self.assertEqual(out["column"], "USDCNH")
+        blank = [r["tenor"] for r in out["rows"] if r["weight"] is None]
+        self.assertEqual([t.upper() for t in blank], ["3W"])
+        # A pair with no column of its own reads the default -- which this
+        # workbook leaves empty, so it is weighted by nothing and says so.
+        other = svc.vega_weights({"pair": "EURUSD"})
+        self.assertEqual(other["column"], "default")
+        self.assertTrue(all(r["weight"] is None for r in other["rows"]))
+
+    def test_the_realized_route_says_what_is_missing_rather_than_returning_nothing(self):
+        svc, _ = self._service()
+        with self.assertRaises(ValueError) as ctx:
+            svc.vega_realized({"pair": "USDCNH", "anchor": "1M", "lookback": 180})
+        self.assertIn("no historical workbook", str(ctx.exception))
+        svc.load_history({"path": str(HISTORY)})
+        with self.assertRaises(ValueError) as ctx:
+            svc.vega_realized({"pair": "USDCNH", "anchor": "1M", "lookback": 180})
+        self.assertIn("no sheet for USDCNH", str(ctx.exception))
+        with self.assertRaises(ValueError):
+            svc.vega_realized({"pair": "USDCNH", "anchor": "1M", "lookback": "a while"})
+
+    def test_the_workbook_card_offers_the_columns_the_tab_actually_has(self):
+        """The pair columns are the desk's, not this build's.  A card that
+        showed only the fixed ones would offer to write every one of them
+        away on the next save."""
+        svc, _ = self._service()
+        tab = {t["sheet"]: t for t in svc.config_tabs()["tabs"]}["Vega Weights"]
+        self.assertTrue(tab["open"])
+        self.assertEqual(tab["measure"], "vega")
+        self.assertEqual(tab["columns"], ["tenor", "default", "USDCNH", "note"])
+        self.assertEqual(tab["rows"][0]["tenor"], "1W")
+        self.assertEqual(tab["rows"][0]["USDCNH"], 2.6)
+
+    def test_a_pair_column_added_on_the_card_reaches_the_tab_and_comes_back(self):
+        svc, _ = self._service()
+        tab = {t["sheet"]: t for t in svc.config_tabs()["tabs"]}["Vega Weights"]
+        rows = [dict(r) for r in tab["rows"]]
+        for r in rows:
+            r["EURUSD"] = 0.5
+        svc.config_save({"sheet": "Vega Weights", "rows": rows})
+        again = {t["sheet"]: t for t in svc.config_tabs()["tabs"]}["Vega Weights"]
+        self.assertEqual(again["columns"], ["tenor", "default", "USDCNH", "EURUSD", "note"])
+        self.assertEqual(svc.book.vega_weights.weight_for("EURUSD", "1M"), (0.5, "EURUSD"))
+        # And the column that was already there is still there.
+        self.assertEqual(svc.book.vega_weights.weight_for("USDCNH", "1W"), (2.6, "USDCNH"))
+
+    def test_writing_a_tab_leaves_it_where_it_was_in_the_workbook(self):
+        """The tab is replaced, not edited.  Recreated at the end of the
+        workbook it is a tab that jumps on somebody every time a setting is
+        saved, and the desk opens this file in Excel."""
+        import openpyxl
+        svc, wb = self._service()
+        book = openpyxl.load_workbook(wb, read_only=True)
+        order = list(book.sheetnames)
+        book.close()
+        tab = {t["sheet"]: t for t in svc.config_tabs()["tabs"]}["Vega Weights"]
+        svc.config_save({"sheet": "Vega Weights", "rows": tab["rows"]})
+        book = openpyxl.load_workbook(wb, read_only=True)
+        self.assertEqual(book.sheetnames, order)
+        book.close()
+
+    def test_a_column_that_is_not_a_pair_is_refused_before_it_is_written(self):
+        """The screen validates the box; this is the same rule on the route
+        behind it.  Written through, a mistyped heading is accepted here,
+        refused by the tab's reader on the next load, and the tab is
+        unreadable until somebody opens Excel and fixes it by hand."""
+        svc, _ = self._service()
+        tab = {t["sheet"]: t for t in svc.config_tabs()["tabs"]}["Vega Weights"]
+        rows = [dict(r) for r in tab["rows"]]
+        rows[0]["USD"] = 0.5
+        with self.assertRaises(ValueError) as ctx:
+            svc.config_save({"sheet": "Vega Weights", "rows": rows})
+        self.assertIn("six letters", str(ctx.exception))
+        # And nothing was written: the tab still reads.
+        self.assertEqual(svc.book.vega_weights.weight_for("USDCNH", "1W"), (2.6, "USDCNH"))
+
+    def test_the_tabs_prose_survives_being_written_from_the_screen(self):
+        """The '#' lines above the header are the reasoning a desk wrote down.
+        The reader treats them as comments precisely so a save can keep
+        them."""
+        import openpyxl
+        svc, wb = self._service()
+        tab = {t["sheet"]: t for t in svc.config_tabs()["tabs"]}["Vega Weights"]
+        svc.config_save({"sheet": "Vega Weights", "rows": tab["rows"]})
+        book = openpyxl.load_workbook(wb, read_only=True)
+        first = [r[0] for r in book["Vega Weights"].iter_rows(values_only=True)][:3]
+        book.close()
+        self.assertTrue(all(str(c).startswith("#") for c in first), first)
+
+
+class TestRealizedVegaWeights(unittest.TestCase):
+    """The same shape, measured off the historical book.
+
+    A suggestion and nothing more: it fills the workbook card's boxes and is
+    written by a person.  What is pinned is the identity the two extra columns
+    exist for -- ``beta == corr * sd_ratio`` -- and that the anchor's own beta
+    is exactly one, because a table that showed anything else for it has a bug
+    in it rather than a market in it.
+    """
+
+    def _hist(self, series, dates=None):
+        from volkit.history import PairHistory
+        import numpy as np
+        n = len(next(iter(series.values())))
+        days = dates or [date(2024, 1, 1) + timedelta(days=i) for i in range(n)]
+        return PairHistory(pair="EURUSD", dates=days,
+                           spot=np.full(n, 1.08),
+                           atm={k: np.asarray(v, dtype=float) for k, v in series.items()})
+
+    def test_beta_is_the_correlation_times_the_ratio_and_the_anchor_is_one(self):
+        from volkit.vegaweights import realized_weights
+        import numpy as np
+        rng = np.random.default_rng(7)
+        base = 0.08 + np.cumsum(rng.normal(0, 0.0004, 90))
+        half = 0.08 + 0.5 * (base - 0.08) + np.cumsum(rng.normal(0, 0.0001, 90))
+        out = realized_weights(self._hist({"1M": base, "3M": half}), "1M", 400)
+        by = {r.tenor: r for r in out.rows}
+        self.assertAlmostEqual(by["1M"].beta, 1.0, places=12)
+        self.assertAlmostEqual(by["1M"].sd_ratio, 1.0, places=12)
+        self.assertAlmostEqual(by["3M"].beta, by["3M"].corr * by["3M"].sd_ratio, places=12)
+        self.assertAlmostEqual(by["3M"].beta, 0.5, delta=0.15)
+
+    def test_a_tenor_that_moved_alone_has_a_big_ratio_and_a_small_beta(self):
+        """Which is the whole reason both columns are shown.  A weighting
+        taken off the standard-deviation ratio would mark a move that nothing
+        said was coming."""
+        from volkit.vegaweights import realized_weights
+        import numpy as np
+        rng = np.random.default_rng(11)
+        base = 0.08 + np.cumsum(rng.normal(0, 0.0004, 120))
+        alone = 0.09 + np.cumsum(rng.normal(0, 0.0004, 120))
+        out = realized_weights(self._hist({"1M": base, "1Y": alone}), "1M", 400)
+        row = {r.tenor: r for r in out.rows}["1Y"]
+        self.assertLess(abs(row.beta), 0.4)
+        self.assertGreater(row.sd_ratio, 0.6)
+        self.assertTrue(any("less than half the time" in w for w in out.warnings))
+
+    def test_a_tenor_the_sheet_does_not_quote_keeps_its_place(self):
+        from volkit.vegaweights import realized_weights
+        import numpy as np
+        base = 0.08 + np.arange(60) * 1e-5
+        out = realized_weights(self._hist({"1M": base}), "1M", 400,
+                               tenors=["1M", "6M"])
+        self.assertEqual([r.tenor for r in out.rows], ["1M", "6M"])
+        self.assertIsNone(out.rows[1].beta)
+        self.assertIn("quotes no at-the-money", out.rows[1].reason)
+
+    def test_too_few_paired_observations_is_a_reason_not_a_number(self):
+        from volkit.vegaweights import realized_weights
+        import numpy as np
+        base = 0.08 + np.arange(10) * 1e-4
+        out = realized_weights(self._hist({"1M": base}), "1M", 400)
+        self.assertIsNone(out.rows[0].beta)
+        self.assertIn("at least 20", out.rows[0].reason)
+
+    def test_the_shipped_history_measures_against_the_shipped_workbook(self):
+        from volkit.history import load_history
+        from volkit.vegaweights import realized_weights
+        hist = load_history(HISTORY)
+        out = realized_weights(hist["EURUSD"], "1M", 250)
+        self.assertEqual(out.anchor, "1M")
+        got = out.suggested()
+        self.assertAlmostEqual(got["1M"], 1.0, places=12)
+        self.assertTrue(out.first and out.last and out.first < out.last)
 
 
 class TestWorkbookAsDatabase(unittest.TestCase):

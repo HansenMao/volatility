@@ -1523,6 +1523,7 @@ the same clock always gives the same numbers.
 | `smile` | arbitrage-constrained SVI, vanna-volga, cached slices |
 | `events` | dated volatility bumps and height calibration, and the one table they live in (the workbook's EVENTS sheet) |
 | `atm` | the ATM term structure |
+| `vegaweights` | how far each tenor moves when one of them is moved: the workbook's `Vega Weights` tab, the bump that shares a move out by it, and the same shape measured off the historical book |
 | `cross` | cross pairs from two legs and a correlation, and which two dollar pairs a cross name means |
 | `surface` | ATM + smile, greeks, delta strikes, RR / fly |
 | `marketdata` | validated Excel reader: CONFIG is two columns, a cross names its own dollar legs, EVENTS is a row per release |
@@ -1560,6 +1561,9 @@ the same clock always gives the same numbers.
 * **A new data source** — produce a `MarketData` object; nothing below
   `marketdata` knows about Excel.
 * **A new holiday** — add a row to the workbook's `HOLIDAYS` tab.
+* **A pair with its own term-structure shape** — a column headed with that
+  pair on the workbook's `Vega Weights` tab, added on the marking screen's
+  Workbook card. Blank cells in it fall back to `default`, cell by cell.
 * **A new setting of any kind** — a tab of the workbook, named in
   `configsheets.SHEETS` and read with `configsheets.read_rows`. Settings do
   not travel as loose files beside the workbook any more, because a desk

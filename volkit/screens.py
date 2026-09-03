@@ -104,8 +104,9 @@ SCREENS: tuple[Screen, ...] = (
         routes=("/api/marks", "/api/overwrite", "/api/smile", "/api/term",
                 "/api/daily", "/api/curve", "/api/events", "/api/events/workbook", "/api/events/weights",
                 "/api/rrfly", "/api/export/daily", "/api/band", "/api/band/fit", "/api/vol",
-                "/api/kace", "/api/export/kace", "/api/kace/post"),
-        commands=("tenors", "daily", "events", "validate", "band", "kace"),
+                "/api/kace", "/api/export/kace", "/api/kace/post",
+                "/api/vega", "/api/vega/realized", "/api/atm/bump"),
+        commands=("tenors", "daily", "events", "validate", "band", "kace", "vega"),
     ),
     Screen(
         name="monitor", label="Monitor", panel="p-monitor",

@@ -56,6 +56,8 @@ SHEETS: dict[str, str] = {
     "HOLIDAYS": "holiday dates no rule derives: country, date, remove",
     "WING_RATIOS": "how each tenor's 10-delta wings follow its 25-delta ones: "
                    "pair, tenor, st, rr",
+    "Vega Weights": "how far each tenor moves when the anchor moves one vol point: "
+                    "tenor, default, and a column per pair that needs its own",
 }
 
 #: The columns each tab is edited with, and which of them decide where its
@@ -70,7 +72,20 @@ EDITABLE: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "KACE_SPREADS": (("pair", "tenor", "spread"), ("pair", "tenor")),
     "HOLIDAYS": (("country", "date", "remove"), ("country", "date")),
     "WING_RATIOS": (("pair", "tenor", "st", "rr"), ("pair", "tenor")),
+    "Vega Weights": (("tenor", "default", "note"), ("tenor", "default")),
 }
+
+#: Tabs whose columns are not the whole list.  ``Vega Weights`` carries a
+#: column per pair that has its own curve shape, and which pairs those are is
+#: the desk's business rather than this module's -- so the fixed columns above
+#: are the ones the tab must have and the ones a screen starts it with, and
+#: whatever else is on the sheet (or in what a screen sends back) is carried
+#: through.  Everywhere else a tab's columns are exactly what ``EDITABLE``
+#: says: a writer that guessed would reorder a desk's own columns on a save.
+OPEN_COLUMNS: frozenset[str] = frozenset({"Vega Weights"})
+
+#: Columns an open tab keeps at the right-hand end however many it grows.
+TRAILING: frozenset[str] = frozenset({"note"})
 
 
 class ConfigSheetError(ValueError):
@@ -101,14 +116,20 @@ class Row:
     sheet: str = ""
 
     def __contains__(self, key: str) -> bool:
-        return key in self.cells
+        return normalise(key) in self.cells
 
     def raw(self, key: str):
-        return self.cells.get(key)
+        """One cell, by a heading spelled however the caller has it.
+
+        Normalised on the way in because an open tab's columns are named by
+        the desk -- a screen asking for ``USDJPY`` and a sheet that stored it
+        as ``usdjpy`` are asking about one column.
+        """
+        return self.cells.get(normalise(key))
 
     def text(self, key: str) -> str:
         """The cell as trimmed text; ``""`` when it is blank or absent."""
-        v = self.cells.get(key)
+        v = self.raw(key)
         if v is None:
             return ""
         if isinstance(v, datetime):
@@ -123,7 +144,7 @@ class Row:
 
     def real(self, key: str) -> float | None:
         """The cell as a number, or ``None`` when blank; a bad cell is refused."""
-        v = self.cells.get(key)
+        v = self.raw(key)
         if v is None or (isinstance(v, str) and not v.strip()):
             return None
         try:
@@ -140,7 +161,7 @@ class Row:
         text, and a desk will produce both in the same column -- one typed,
         one pasted.  Both are dates and are read as such.
         """
-        v = self.cells.get(key)
+        v = self.raw(key)
         if v is None:
             return None
         if isinstance(v, datetime):
@@ -167,6 +188,59 @@ class Row:
 def normalise(heading) -> str:
     """A column heading as the readers spell it: lower case, underscores."""
     return str(heading).strip().lower().replace(" ", "_").replace("-", "_")
+
+
+def check_open_columns(sheet: str, columns) -> None:
+    """Refuse a column an open tab's own reader would refuse, before writing it.
+
+    An open tab's extra columns are **pairs** -- that is what "open" means
+    here.  Written without this, a mistyped heading is accepted, the tab's
+    reader refuses it on the next load, and the tab is unreadable until
+    somebody opens the workbook in Excel and fixes it by hand.  The screen
+    validates the box too; this is the same rule on the route behind it.
+    """
+    if sheet not in OPEN_COLUMNS:
+        return
+    fixed = {normalise(c) for c in EDITABLE[sheet][0]}
+    for column in columns:
+        name = normalise(column)
+        if name in fixed or (len(name) == 6 and name.isalpha()):
+            continue
+        raise ConfigSheetError(
+            f"{sheet} has no column {column!r}. Its columns are "
+            f"{', '.join(EDITABLE[sheet][0])}, and one per pair -- six letters, like "
+            f"USDJPY")
+
+
+def columns_for(sheet: str, rows=()) -> tuple[str, ...]:
+    """The columns one tab is written with, fixed ones first.
+
+    For an ordinary tab this is exactly what :data:`EDITABLE` declares.  For
+    an open one it is that list plus every other column the rows carry, in the
+    order they first appear -- which is how a pair column added on the screen
+    reaches the sheet, and how one already on the sheet survives a save that
+    did not mention it.
+    """
+    fixed = EDITABLE[sheet][0]
+    if sheet not in OPEN_COLUMNS:
+        return tuple(fixed)
+    # ``note`` is written last whatever else the tab grows, because a comment
+    # column wedged between the weights and the pairs is a column a desk
+    # scrolls past on every row.
+    head = [c for c in fixed if c not in TRAILING]
+    tail = [c for c in fixed if c in TRAILING]
+    seen = {c for c in fixed}
+    for row in rows or ():
+        for key in row:
+            name = normalise(key)
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            # A pair is a proper noun and is written as one: the reader
+            # matches headings case-insensitively, and a desk reading the tab
+            # in Excel should see USDJPY rather than usdjpy.
+            head.append(name.upper() if len(name) == 6 and name.isalpha() else name)
+    return tuple(head + tail)
 
 
 def open_workbook(path: str | Path):
@@ -204,8 +278,28 @@ def sheet_names(path: str | Path) -> list[str]:
 
 def present(path: str | Path) -> list[str]:
     """Which of the known configuration tabs this workbook actually has."""
-    names = set(sheet_names(path))
-    return [s for s in SHEETS if s in names]
+    names = sheet_names(path)
+    return [s for s in SHEETS if match_sheet(names, s) is not None]
+
+
+def match_sheet(names, sheet: str) -> str | None:
+    """The workbook's own spelling of a tab, or ``None`` if it has not got it.
+
+    Exactly first, then ignoring case, spaces and underscores.  The tabs are
+    named by desks in Excel and this one predates the tool that reads it --
+    ``Vega Weights`` is what the desk called it -- so a workbook where
+    somebody has since typed ``VEGA_WEIGHTS`` is the same tab and is read, and
+    a tab written back keeps the name the file already has rather than
+    acquiring a second one beside it.
+    """
+    want = normalise(sheet)
+    for name in names:
+        if name == sheet:
+            return name
+    for name in names:
+        if normalise(name) == want:
+            return name
+    return None
 
 
 def read_rows(path: str | Path, sheet: str, *,
@@ -223,9 +317,10 @@ def read_rows(path: str | Path, sheet: str, *,
     """
     wb = open_workbook(path)
     try:
-        if sheet not in wb.sheetnames:
+        found = match_sheet(wb.sheetnames, sheet)
+        if found is None:
             return None
-        grid = [list(r) for r in wb[sheet].iter_rows(values_only=True)]
+        grid = [list(r) for r in wb[found].iter_rows(values_only=True)]
     finally:
         wb.close()
 
@@ -264,7 +359,7 @@ def read_rows(path: str | Path, sheet: str, *,
     return out
 
 
-def write_rows(wb, sheet: str, columns, rows) -> str:
+def write_rows(wb, sheet: str, columns, rows, header=None) -> str:
     """Replace one configuration tab's data, keeping the prose above it.
 
     ``wb`` is an open openpyxl workbook -- the caller saves it, because a tab
@@ -280,10 +375,23 @@ def write_rows(wb, sheet: str, columns, rows) -> str:
 
     Returns a line for the report.
     """
+    # Which columns identify the old header row.  Not ``columns``: an open
+    # tab is written with whatever pair columns it has grown, and a header
+    # that does not yet carry one of them is still the header -- looked for by
+    # every column, a tab gaining its first pair column would find no header,
+    # keep the "#" lines from *below* the data as prose and write them above
+    # the new one.
     keep: list[str] = []
-    if sheet in wb.sheetnames:
+    at = len(wb.sheetnames)
+    found = match_sheet(wb.sheetnames, sheet)
+    if found is not None:
+        sheet = found                       # keep the name the workbook has
+        # ...and its place in the tab bar.  The tab is replaced rather than
+        # edited, and one recreated at the end of the workbook is a tab that
+        # jumped on somebody every time a setting was saved.
+        at = wb.sheetnames.index(sheet)
         old = wb[sheet]
-        want = {normalise(c) for c in columns}
+        want = {normalise(c) for c in (header or columns)}
         for r in range(1, old.max_row + 1):
             first = old.cell(row=r, column=1).value
             text = "" if first is None else str(first).strip()
@@ -294,7 +402,7 @@ def write_rows(wb, sheet: str, columns, rows) -> str:
             if text.startswith("#"):
                 keep.append(text)
         del wb[sheet]
-    ws = wb.create_sheet(sheet)
+    ws = wb.create_sheet(sheet, at)
     r = 1
     for line in keep:
         ws.cell(row=r, column=1, value=line)
@@ -303,11 +411,17 @@ def write_rows(wb, sheet: str, columns, rows) -> str:
         ws.cell(row=r, column=i, value=name)
     r += 1
     written = 0
+    keys = [normalise(c) for c in columns]
     for row in rows:
-        if not any(row.get(c) not in (None, "") for c in columns):
+        # Matched the way the reader matches: a heading written ``USDJPY``
+        # and a row that came back keyed ``usdjpy`` are one column, and
+        # looking it up by the spelling in the header would write the whole
+        # column blank.
+        cells = {normalise(k): v for k, v in row.items()}
+        if not any(cells.get(k) not in (None, "") for k in keys):
             continue
-        for i, name in enumerate(columns, start=1):
-            v = row.get(name)
+        for i, key in enumerate(keys, start=1):
+            v = cells.get(key)
             if v is not None and v != "":
                 ws.cell(row=r, column=i, value=v)
         r += 1

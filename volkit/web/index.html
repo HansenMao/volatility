@@ -636,6 +636,9 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
             title="how each tenor's 10-delta wings follow its 25-delta ones, off the workbook's WING_RATIOS tab">
             <input type="checkbox" id="mratioshow" style="width:auto"> ratios
             <span class="meta" id="mrationote"></span></label>
+          <label style="margin:0;display:flex;align-items:center;gap:5px;width:auto;font-size:11px"
+            title="move one tenor and let the workbook's vega weights carry the rest of the curve">
+            <input type="checkbox" id="mbumpshow" style="width:auto"> bump</label>
           <span class="meta" id="mquotenote" style="margin-left:9px"
             title="a quote typed here replaces the pair sheet's for this session and refits that tenor; it is saved with the session and written into the sheet's own cell when the session is put back into the workbook"></span></h2>
         <div class="scroll"><table class="mark" id="matm"></table></div>
@@ -649,6 +652,37 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
           <div class="row" style="margin-top:8px"><button class="danger" id="mclearratio">Clear ratio changes</button></div>
         </div>
         <div class="row hide" id="matmowrow" style="margin-top:9px"><button class="danger" id="mclearatm">Clear ATM overwrites</button></div>
+        <!-- The bump.  A desk does not mark a term structure one tenor at a
+             time: it has a view on one of them and the rest of the curve
+             follows in a fixed proportion.  Those proportions are the
+             workbook's Vega Weights tab, and what this produces is nothing
+             new -- ordinary per-tenor ATM overwrites, the same marks a person
+             could have typed into the column above, counted by the same
+             heading and cleared by the same button. -->
+        <div class="hide" id="mbumprow" style="margin-top:11px">
+          <div class="row" style="flex-wrap:wrap;gap:8px;align-items:flex-end">
+            <div style="width:auto"><label>Anchor</label>
+              <select id="mbumpanchor" style="width:auto;padding:4px 7px"></select></div>
+            <div style="width:auto"><label>Move, vol points</label>
+              <input id="mbumpmove" placeholder="+0.25" style="width:96px"></div>
+            <button class="ghost" id="mbumpgo"
+              style="width:auto;padding:5px 12px;font-size:12px">Show</button>
+            <button id="mbumpapply"
+              style="width:auto;padding:5px 12px;font-size:12px">Apply as overwrites</button>
+            <span class="grow"></span><span class="meta" id="mbumpcol"></span>
+          </div>
+          <div class="hint" style="margin-top:6px">Each tenor moves
+            <code>move &times; w(tenor) / w(anchor)</code>, so the anchor moves exactly what you
+            typed whatever its own weight is and only the <i>ratios</i> on the tab matter. The
+            weights come from the workbook&rsquo;s <code>Vega Weights</code> tab &mdash; this
+            pair&rsquo;s own column where it has one, the <code>default</code> column cell by
+            cell where it does not &mdash; and are edited on the <b>Workbook</b> card, which is
+            also where a realized weighting can be measured off the historical book. A tenor the
+            tab cannot weight keeps its place and says so; it is not moved.
+            <b>Show</b> reads, <b>Apply</b> writes: what it writes is per-tenor ATM overwrites,
+            counted in this card&rsquo;s heading and cleared by the button above.</div>
+          <div id="mbumpout" style="margin-top:8px"></div>
+        </div>
       </section>
 
       <section class="card">
@@ -2184,7 +2218,8 @@ function mq(){return{pair:$('#mpair').value,cut:$('#mcut').value,method:$('#mmet
    belongs to. */
 function saveMarking(){try{localStorage.setItem('volkit.marking',JSON.stringify(
   {atm_overwrites:$('#matmowshow').checked,quotes:$('#mquoteshow').checked,
-   ratios:$('#mratioshow').checked,smile:$('#msmileshow').checked}))}catch(e){}}
+   ratios:$('#mratioshow').checked,smile:$('#msmileshow').checked,
+   bump:$('#mbumpshow').checked}))}catch(e){}}
 function loadMarking(){
   let v=null; try{v=JSON.parse(localStorage.getItem('volkit.marking')||'null')}catch(e){}
   v=v&&typeof v==='object'?v:{};
@@ -2193,17 +2228,26 @@ function loadMarking(){
   // from, and a stored file with no opinion about them is not an opinion.
   $('#mquoteshow').checked=v.quotes!==false;
   $('#mratioshow').checked=!!v.ratios;
+  $('#mbumpshow').checked=!!v.bump;
   markingVisible();
 }
 function markingVisible(){
   $('#matmowrow').classList.toggle('hide',!$('#matmowshow').checked);
   $('#msmilebody').classList.toggle('hide',!$('#msmileshow').checked);
+  /* Nothing is hidden by shutting the bump: what it makes are per-tenor ATM
+     overwrites, which the overwrite count in this card's heading already
+     reports whether this row is open or not. */
+  $('#mbumprow').classList.toggle('hide',!$('#mbumpshow').checked);
 }
 /* The tenor the term structure is read against.  One name, matched however
    the workbook spells it (`1M`, `1m`, `1 M`), so a sheet that writes its
    tenors in lower case still gets the highlight. */
 const KEY_TENOR='1M';
 function isKeyTenor(t){return String(t||'').replace(/\s+/g,'').toUpperCase()===KEY_TENOR}
+/* ...and the entry of a list that *is* it, as that list spells it. A default
+   of '1M' offered to a workbook whose tenors are '1m' matches nothing and
+   silently anchors on whatever happens to be first. */
+function keyTenorIn(list){return (list||[]).filter(isKeyTenor)[0]||''}
 const SMILEP=['slog25','slog10','rho25','rho10'];
 /* The three coefficients of one parameter's term structure, in the order the
    model declares them (surface.TERM_COEFFS). */
@@ -2270,6 +2314,10 @@ function paintMarks(){
         placeholder="${sheet[f]==null?'—':sheet[f].toFixed(4)}"></td>`;}).join('')+
       '</tr>';}).join('')+'</tbody>';
   paintRatios();
+  /* The anchor is one of the tenors on the table above it, and keeps what was
+     chosen across a repaint -- fillSel does that -- so a pair change that
+     still has the tenor leaves the bump where it was set. */
+  fillSel('#mbumpanchor',MARKS.atm.map(r=>r.tenor),keyTenorIn(MARKS.atm.map(r=>r.tenor)));
   const P=SMILEP;
   const sow=MARKS.smile.reduce((a,r)=>a+P.filter(p=>r[p+'_ow']!=null).length,0), sn=[];
   /* Put the curves in the same order as the grid beneath them: the server
@@ -2333,6 +2381,51 @@ async function loadMarks(){
 $('#matmowshow').onchange=()=>{markingVisible();saveMarking();paintMarks()};
 $('#mquoteshow').onchange=()=>{saveMarking();paintMarks()};
 $('#mratioshow').onchange=()=>{saveMarking();paintMarks()};
+$('#mbumpshow').onchange=()=>{markingVisible();saveMarking();bumpWeights()};
+/* Which column this pair's weights come from, and what the tab cannot weight,
+   said *before* anything is bumped: a tenor with no weight does not move, and
+   finding that out from the result table is finding it out one press late. */
+async function bumpWeights(){
+  if(!$('#mbumpshow').checked)return;
+  let r;
+  try{r=await api('/api/vega?'+qs({pair:mq().pair}))}
+  catch(e){$('#mbumpcol').textContent='';return}
+  const blank=r.rows.filter(x=>x.weight==null).map(x=>x.tenor);
+  $('#mbumpcol').textContent=(r.present?('weights: '+r.column):'no '+r.sheet+' tab')+
+    (blank.length?(' · no weight at '+blank.join(', ')):'');
+}
+/* ---- the bump -----------------------------------------------------------
+   Two calls of one route.  `Show` reads it and `Apply` writes it, and the
+   apply recomputes rather than replaying the table on screen: between the two
+   the curve may have been marked somewhere else, and a bump that replayed a
+   stale preview would put the *old* levels back under the guise of moving
+   them.  What it writes is per-tenor ATM overwrites and nothing else. */
+async function bumpRun(apply){
+  const out=$('#mbumpout');
+  out.innerHTML='<span class="spin"></span> '+(apply?'applying':'reading')+'…';
+  let r;
+  try{
+    r=await post('/api/atm/bump',{pair:mq().pair,anchor:$('#mbumpanchor').value,
+                                  move:$('#mbumpmove').value.trim(),apply:!!apply});
+  }catch(e){out.innerHTML='<div class="msg bad">'+esc(e.message)+'</div>';return}
+  $('#mbumpcol').textContent=r.column?('weights: '+r.column):'';
+  const moved=r.rows.filter(x=>x.after!=null).length;
+  out.innerHTML=
+    '<div class="msg '+(apply?'ok':'')+'">'+(apply
+      ? r.applied+' tenor(s) overwritten from a '+vsgn(r.move)+' move of '+esc(r.anchor)
+      : moved+' of '+r.rows.length+' tenor(s) would move')+'</div>'+
+    '<div class="scroll" style="margin-top:6px"><table class="mark"><thead><tr><th>Tenor</th>'+
+    '<th>Weight</th><th>Now %</th><th>Move %</th><th>Bumped %</th></tr></thead><tbody>'+
+    r.rows.map(x=>'<tr><td>'+esc(x.tenor)+'</td>'+
+      (x.after==null
+        ?'<td colspan="4" class="meta">'+esc(x.reason)+'</td>'
+        :'<td>'+num(x.weight,4)+'<span class="meta"> '+esc(x.source)+'</span></td>'+
+         '<td>'+vnum(x.before)+'</td><td>'+vsgn(x.move)+'</td><td>'+vnum(x.after)+'</td>')+
+      '</tr>').join('')+'</tbody></table></div>';
+  if(apply){await loadMarks();await redraw();schedulePrice()}
+}
+$('#mbumpgo').onclick=()=>bumpRun(false);
+$('#mbumpapply').onclick=()=>bumpRun(true);
 $('#mclearratio').onclick=async()=>{await post('/api/overwrite',{pair:mq().pair,kind:'clear_ratio'});
   await loadMarks();await redraw();schedulePrice()};
 $('#msmileshow').onchange=()=>{markingVisible();saveMarking();paintMarks()};
@@ -4329,31 +4422,181 @@ async function loadConfig(){
     b.onclick=()=>cfgConfirm('Take <b>'+esc(b.dataset.pair)+'</b> out of the workbook\'s pair list? '+
       'Its column and its sheet stay where they are.','Remove',
       ()=>post('/api/config/pair',{action:'remove',pair:b.dataset.pair}));});
-  $('#cfgtabs').innerHTML=(CFG.tabs||[]).map((t,i)=>
-    '<div style="margin-top:12px"><label>'+esc(t.sheet)+
-    '<span class="meta" style="margin-left:7px;font-weight:400">'+esc(t.what)+'</span></label>'+
-    (t.error?'<div class="msg bad">'+esc(t.error)+'</div>'
-      :'<div class="scroll"><table class="mark" data-tab="'+i+'"><thead><tr>'+
-        t.columns.map(c=>'<th>'+esc(c)+'</th>').join('')+'</tr></thead><tbody>'+
-        t.rows.concat([{}]).map((r,ri)=>'<tr>'+t.columns.map(c=>
-          '<td><input data-tab="'+i+'" data-row="'+ri+'" data-col="'+esc(c)+'" value="'+
-          esc(r[c]==null?'':String(r[c]))+'"></td>').join('')+'</tr>').join('')+
-        '</tbody></table></div>'+
-        '<div class="row" style="margin-top:6px"><button class="ghost cfgsave" data-tab="'+i+
-        '" style="width:auto;padding:4px 11px;font-size:11px">Write '+esc(t.sheet)+'</button>'+
-        (t.present===false?'<span class="meta">this workbook has no such tab yet</span>':'')+
-        '</div>')+'</div>').join('');
+  cfgPaintTabs();
+}
+/* One tab's table, and the controls under it.  Painted from CFG rather than
+   from the DOM so that a suggestion can be written into CFG and the table
+   repainted from it -- and harvested back into CFG before that happens, so a
+   repaint never throws away what was typed into the other columns. */
+function cfgHarvest(i){
+  const t=CFG.tabs[i]; if(!t||t.error)return;
+  const rows=[];
+  $('#cfgtabs').querySelectorAll('input[data-tab="'+i+'"]').forEach(el=>{
+    const r=+el.dataset.row; rows[r]=rows[r]||{};
+    const v=el.value.trim();
+    /* Typed as text and sent as a number where it reads as one: the tab
+       holds numbers, and "7.75" quoted is a band edge nothing compares. */
+    rows[r][el.dataset.col]=v===''?null:(/^-?\d*\.?\d+$/.test(v)?parseFloat(v):v);});
+  t.rows=rows.filter(r=>r&&t.columns.some(c=>r[c]!=null&&r[c]!==''));
+}
+function cfgTabHtml(t,i){
+  const head='<div style="margin-top:12px"><label>'+esc(t.sheet)+
+    '<span class="meta" style="margin-left:7px;font-weight:400">'+esc(t.what)+'</span></label>';
+  if(t.error)return head+'<div class="msg bad">'+esc(t.error)+'</div></div>';
+  return head+'<div class="scroll"><table class="mark" data-tab="'+i+'"><thead><tr>'+
+    t.columns.map(c=>'<th>'+esc(c)+'</th>').join('')+'</tr></thead><tbody>'+
+    t.rows.concat([{}]).map((r,ri)=>'<tr>'+t.columns.map(c=>
+      '<td><input data-tab="'+i+'" data-row="'+ri+'" data-col="'+esc(c)+'" value="'+
+      esc(r[c]==null?'':String(r[c]))+'"></td>').join('')+'</tr>').join('')+
+    '</tbody></table></div>'+
+    '<div class="row" style="margin-top:6px;flex-wrap:wrap;gap:6px"><button class="ghost cfgsave" data-tab="'+i+
+    '" style="width:auto;padding:4px 11px;font-size:11px">Write '+esc(t.sheet)+'</button>'+
+    (t.present===false?'<span class="meta">this workbook has no such tab yet</span>':'')+
+    /* A tab whose columns are the desk's own gets a way to add one. Typed
+       rather than chosen from the pair list: a column may be added for a pair
+       before the workbook builds it, and the server refuses anything that is
+       not a pair. */
+    (t.open?'<span class="grow"></span><input class="cfgnewcol" data-tab="'+i+
+      '" placeholder="USDJPY" style="width:96px;text-transform:uppercase" '+
+      'title="give this pair its own column on the tab; blank cells in it fall back to default">'+
+      '<button class="ghost cfgaddcol" data-tab="'+i+
+      '" style="width:auto;padding:4px 11px;font-size:11px">Add column</button>':'')+
+    '</div>'+(t.measure==='vega'?cfgVegaHtml(i):'')+'</div>';
+}
+function cfgPaintTabs(){
+  $('#cfgtabs').innerHTML=(CFG.tabs||[]).map(cfgTabHtml).join('');
   $('#cfgtabs').querySelectorAll('.cfgsave').forEach(b=>{
     b.onclick=()=>{
-      const t=CFG.tabs[+b.dataset.tab], rows=[];
-      $('#cfgtabs').querySelectorAll('input[data-tab="'+b.dataset.tab+'"]').forEach(el=>{
-        const i=+el.dataset.row; rows[i]=rows[i]||{};
-        const v=el.value.trim();
-        /* Typed as text and sent as a number where it reads as one: the tab
-           holds numbers, and "7.75" quoted is a band edge nothing compares. */
-        rows[i][el.dataset.col]=v===''?null:(/^-?\d*\.?\d+$/.test(v)?parseFloat(v):v);});
+      const i=+b.dataset.tab, t=CFG.tabs[i];
+      cfgHarvest(i);
       cfgConfirm('Write <b>'+esc(t.sheet)+'</b> into the workbook and read it again?','Write',
-        ()=>post('/api/config/save',{sheet:t.sheet,rows:rows.filter(Boolean)}));};});
+        ()=>post('/api/config/save',{sheet:t.sheet,rows:t.rows}));};});
+  $('#cfgtabs').querySelectorAll('.cfgaddcol').forEach(b=>{
+    b.onclick=()=>{
+      const i=+b.dataset.tab, t=CFG.tabs[i];
+      const box=$('#cfgtabs').querySelector('.cfgnewcol[data-tab="'+i+'"]');
+      const name=(box.value||'').trim().toUpperCase();
+      if(!/^[A-Z]{6}$/.test(name)){cfgShow('a column is a pair, six letters, like USDJPY',true);return}
+      if(t.columns.indexOf(name)>=0){cfgShow(name+' already has a column on '+t.sheet,true);return}
+      cfgHarvest(i);
+      /* In front of any trailing note column, which is where the tab keeps
+         it -- the server writes the columns back in the order it is sent. */
+      const at=t.columns.indexOf('note');
+      t.columns.splice(at<0?t.columns.length:at,0,name);
+      box.value='';
+      cfgPaintTabs();
+      cfgShow(name+' has a column on '+t.sheet+' now; fill it in and press Write '+t.sheet,false);};});
+  cfgVegaBind();
+}
+/* ---- the realized weighting, suggested into the tab ---------------------
+   What the market did is evidence about the shape of a term structure, not
+   the shape: it goes into the boxes for somebody to look at and write, and
+   never onto the tab on its own.  Beta is the suggestion because it is the
+   number the tab holds -- how far this tenor moved when the anchor moved one
+   point.  The standard-deviation ratio sits beside it because the two
+   disagreeing is the thing worth seeing: a tenor that moved as much as the
+   anchor but not *with* it has a big ratio and a small beta. */
+let VEGAR=null;
+/* What the measurer was set to, kept out of the DOM: accepting a suggestion
+   adds a column and repaints the whole tab, and a control that lived only in
+   the markup would come back shut and reset every time. */
+let VEGAUI={open:false,pair:'',anchor:'',lookback:'180'};
+function cfgVegaHtml(i){
+  return '<details class="hint" style="margin-top:9px"'+(VEGAUI.open?' open':'')+
+    '><summary>Suggest a column from the '+
+    'historical book</summary>'+
+    '<div style="margin:8px 0 0">Each tenor&rsquo;s daily change in at-the-money volatility, '+
+    'regressed on the anchor&rsquo;s, over the lookback. <b>beta</b> is what this tab holds; '+
+    '<b>sd ratio</b> is how much the tenor moved at all and <b>corr</b> is how much of that '+
+    'was with the anchor, so a big ratio beside a small beta is a tenor that moves on its own. '+
+    'The anchor&rsquo;s own beta is 1 by construction.</div>'+
+    '<div class="row" style="margin-top:8px;flex-wrap:wrap;gap:6px">'+
+    '<select class="cfgvpair" data-tab="'+i+'" style="width:auto;padding:3px 6px"></select>'+
+    '<select class="cfgvanchor" data-tab="'+i+'" style="width:auto;padding:3px 6px"></select>'+
+    '<input class="cfgvlb" data-tab="'+i+'" value="180" style="width:74px" '+
+    'title="lookback window in days"><span class="meta">days</span>'+
+    '<button class="cfgvgo" data-tab="'+i+'" style="width:auto;padding:4px 11px;'+
+    'font-size:11px;background:transparent;color:var(--ink);border:1px solid var(--line);'+
+    'font-weight:500">Measure</button></div>'+
+    '<div class="cfgvout" data-tab="'+i+'" style="margin-top:8px"></div></details>';
+}
+function cfgVegaBind(){
+  const box=$('#cfgtabs').querySelector('.cfgvpair'); if(!box)return;
+  const i=+box.dataset.tab;
+  const tenors=STATE.tenors||[];
+  fillSel('.cfgvpair',STATE.pairs||[],VEGAUI.pair||markingPair());
+  fillSel('.cfgvanchor',tenors,VEGAUI.anchor||keyTenorIn(tenors));
+  $('#cfgtabs').querySelector('.cfgvlb').value=VEGAUI.lookback;
+  const keep=()=>{
+    VEGAUI.pair=$('#cfgtabs').querySelector('.cfgvpair').value;
+    VEGAUI.anchor=$('#cfgtabs').querySelector('.cfgvanchor').value;
+    VEGAUI.lookback=$('#cfgtabs').querySelector('.cfgvlb').value;
+  };
+  ['.cfgvpair','.cfgvanchor','.cfgvlb'].forEach(sel=>{
+    $('#cfgtabs').querySelector(sel).onchange=keep;});
+  box.closest('details').ontoggle=e=>{VEGAUI.open=e.target.open};
+  if(VEGAR)cfgVegaPaint(i);
+  $('#cfgtabs').querySelector('.cfgvgo').onclick=async()=>{
+    keep();
+    const out=$('#cfgtabs').querySelector('.cfgvout');
+    out.innerHTML='<span class="spin"></span> measuring…';
+    try{
+      VEGAR=await post('/api/vega/realized',{
+        pair:$('#cfgtabs').querySelector('.cfgvpair').value,
+        anchor:$('#cfgtabs').querySelector('.cfgvanchor').value,
+        lookback:$('#cfgtabs').querySelector('.cfgvlb').value});
+    }catch(e){VEGAR=null;out.innerHTML='<div class="msg bad">'+esc(e.message)+'</div>';return}
+    cfgVegaPaint(i);
+  };
+}
+function cfgVegaPaint(i){
+  const out=$('#cfgtabs').querySelector('.cfgvout'); if(!out)return;
+  const r=VEGAR;
+  if(!r){out.innerHTML='';return}
+  const span=r.first?(' · '+esc(r.first)+' to '+esc(r.last)):'';
+  out.innerHTML='<div class="meta">'+esc(r.pair)+' against '+esc(r.anchor)+' over '+
+    num(r.lookback,0)+' days'+span+'</div>'+
+    (r.warnings||[]).map(w=>'<div class="msg bad">'+esc(w)+'</div>').join('')+
+    '<div class="scroll" style="margin-top:6px"><table class="mark"><thead><tr><th>Tenor</th>'+
+    '<th>beta</th><th>sd ratio</th><th>corr</th><th>n</th></tr></thead><tbody>'+
+    r.rows.map(x=>'<tr><td>'+esc(x.tenor)+'</td>'+
+      (x.beta==null
+        ?'<td colspan="4" class="meta">'+esc(x.reason)+'</td>'
+        :'<td>'+num(x.beta,4)+'</td><td>'+num(x.sd_ratio,4)+'</td><td>'+num(x.corr,3)+
+         '</td><td>'+x.observations+'</td>')+'</tr>').join('')+'</tbody></table></div>'+
+    /* Which column it goes into. A pair that has been measured is the usual
+       answer, but the tab's `default` is what a desk seeds first and there is
+       no other way to fill it from what the market did. */
+    '<div class="row" style="margin-top:8px;align-items:center;gap:6px"><button class="cfgvuse" '+
+    'style="width:auto;padding:4px 11px;font-size:11px;background:transparent;'+
+    'color:var(--ink);border:1px solid var(--line);font-weight:500">Suggest into</button>'+
+    '<select class="cfgvinto" style="width:auto;padding:3px 6px">'+
+    '<option value="'+esc(r.pair)+'">the '+esc(r.pair)+' column</option>'+
+    '<option value="default">the default column</option></select>'+
+    '<span class="meta">fills the boxes above — nothing is written until you '+
+    'press Write</span></div>';
+  const use=out.querySelector('.cfgvuse'); if(!use)return;
+  use.onclick=()=>{
+    const t=CFG.tabs[i], into=out.querySelector('.cfgvinto').value;
+    cfgHarvest(i);
+    if(t.columns.indexOf(into)<0){
+      const at=t.columns.indexOf('note');
+      t.columns.splice(at<0?t.columns.length:at,0,into);
+    }
+    const by={}; t.rows.forEach(row=>{by[String(row.tenor||'').toUpperCase()]=row});
+    let n=0;
+    r.rows.forEach(x=>{
+      if(x.beta==null)return;
+      let row=by[x.tenor];
+      /* A tenor the tab has no row for gets one: the suggestion is about the
+         curve the book prices, and a measured weight with nowhere to go is a
+         suggestion nobody can accept. */
+      if(!row){row={tenor:x.tenor};t.rows.push(row);by[x.tenor]=row}
+      row[into]=Math.round(x.beta*1e4)/1e4; n++;});
+    cfgPaintTabs();
+    cfgVegaPaint(i);
+    cfgShow(n+' weight(s) suggested into the '+into+' column of '+t.sheet+
+      '; check them and press Write '+t.sheet,false);};
 }
 function cfgConfirm(html,label,run){
   const c=$('#cfgconfirm');c.classList.remove('hide');
@@ -5663,7 +5906,10 @@ $('#nav').onclick=e=>{const b=e.target.closest('button');if(!b)return;showPanel(
 $('#tabs').onclick=e=>{const b=e.target.closest('button');if(!b)return;
   [...$('#tabs').children].forEach(x=>x.classList.toggle('on',x===b));TAB=b.dataset.t;redraw();};
 $('#mpair').onchange=async()=>{setMethodSel('#mmethod',$('#mpair').value);
-  await loadCurve();await loadMarks();await loadBand();redraw()};
+  /* A bump table belongs to the pair it was read on: left up, it is another
+     pair's levels under this pair's heading. */
+  $('#mbumpout').innerHTML='';$('#mbumpcol').textContent='';
+  await loadCurve();await loadMarks();await loadBand();redraw();bumpWeights()};
 $('#mcut').onchange=async()=>{await loadMarks();await loadBand();redraw()};
 $('#mmethod').onchange=redraw;
 $('#chartexpiry').onchange=redraw;
@@ -5692,6 +5938,7 @@ async function boot(){
     fillSel('#mcut',cutList(),'TK');
     setMethodSel('#mmethod',$('#mpair').value);
     loadMarking();
+    bumpWeights();
   }
   if(has('analysis')){
     fillSel('#anpair',STATE.pairs||[]);

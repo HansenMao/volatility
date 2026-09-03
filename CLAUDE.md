@@ -78,14 +78,18 @@ events     dated vol bumps, weighted per currency and superposed per pair,
            joint height calibration, and the one table they all live in --
            the workbook's EVENTS sheet in memory
 atm        the ATM term structure
+vegaweights how far each tenor moves when one of them is moved: the workbook's
+           Vega Weights tab, the bump that shares a move out by it, and the
+           same shape measured off the historical book
 cross      cross pairs from two legs and a correlation
 surface    ATM + smile, greeks, delta strikes, RR / fly
 exotics    digitals, one-touch / no-touch, overhedge buffers
 pricing    multi-leg strips, strike/expiry specs, per-leg error isolation, and
            the one-number reading of them the marking screen asks for
 configsheets the workbook's settings tabs -- PEG_BANDS, KACE_SPREADS,
-           HOLIDAYS -- read one way, with '#' comment rows and a header found
-           rather than assumed. A new setting is a tab here, not a new file
+           HOLIDAYS, WING_RATIOS, Vega Weights -- read one way, with '#'
+           comment rows and a header found rather than assumed. A new setting
+           is a tab here, not a new file
 marketdata validated Excel reader; CONFIG is two columns and a cross
            names its own dollar legs; EVENTS is a row per release, a column
            per currency and per pair
@@ -173,6 +177,7 @@ working in its area — not before.
 | `claude/agent-marking.md` (§18) | `remarks.py`, `marking.py`, `consult.py`, `rules.py` — the marking agent and its rules of thumb. |
 | `claude/agent-ask.md` (§19) | `ask.py` — the read-only question agent. |
 | `claude/kace-feed.md` (§20) | `kace.py` — the RATE_FEED message, posting, the spread table. |
+| `claude/vega-weights.md` (§21) | `vegaweights.py`, the workbook's `Vega Weights` tab, the ATM card's **bump**, and the realized weighting suggested on the Workbook card. |
 | `claude/config-tabs.md` | **Before adding a setting**, or anything about `PEG_BANDS`, `KACE_SPREADS`, `HOLIDAYS` or `configsheets.py`. |
 
 Design notes that are not standing context: `claude/kace-export-design.md`,
@@ -237,6 +242,12 @@ to safely amend.
   `1wk` is `1W`; `06 Nov` is the first 6-Nov on or after the reference date,
   which is the injected clock and never the machine. Tenor-versus-date is
   `parse_tenor`, never the length of the string.
+- **A vega weight is a move ratio and the anchor's cancels.** Each tenor moves
+  `move x w(tenor) / w(anchor)`, so only ratios on the `Vega Weights` tab
+  matter and a pair falls back to `default` **cell by cell**. A bump reads
+  every level before it writes any of them, and what it writes are ordinary
+  per-tenor ATM overwrites -- nothing new is stored. A realized weighting is a
+  **suggestion into the tab's boxes**, never a write.
 - **`pricing.resolve_legs`, `pricing.resolve_strike` and `pricing.quick_vol`**
   are the one reading of a leg's market, a typed strike and the marking
   screen's vol query. A strike read two ways can be read two different ways.

@@ -365,7 +365,15 @@ def write_config_tabs(workbook, tabs: dict, *, expect: str = "",
         blob = fh.read()
     wb = openpyxl.load_workbook(io.BytesIO(blob))
     cached = _formula_cache(wb, openpyxl.load_workbook(io.BytesIO(blob), data_only=True))
-    notes = [configsheets.write_rows(wb, sheet, configsheets.EDITABLE[sheet][0], rows)
+    # ``columns_for`` rather than the fixed list: ``Vega Weights`` carries a
+    # column per pair with its own curve shape, and a writer that knew only
+    # the fixed columns would drop every one of them on the first save.
+    written = {sheet: configsheets.columns_for(sheet, rows)
+               for sheet, rows in sorted(tabs.items())}
+    for sheet, columns in written.items():
+        configsheets.check_open_columns(sheet, columns)
+    notes = [configsheets.write_rows(wb, sheet, written[sheet], rows,
+                                     header=configsheets.EDITABLE[sheet][1])
              for sheet, rows in sorted(tabs.items())]
     bak = _backup_path(src)
     with open(bak, "wb") as fh:

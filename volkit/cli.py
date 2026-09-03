@@ -225,6 +225,21 @@ def cmd_check(args) -> int:
               f"  wings   : no {WING_RATIOS_SHEET} tab; the 10-delta columns are quoted or "
               f"are formulas the tool cannot see. 'volkit migrate-wings' reads them onto a "
               f"tab it can")
+    from .vegaweights import VEGA_WEIGHTS_SHEET, load_vega_weights
+    try:
+        weights = load_vega_weights(args.workbook)
+    except (OSError, ValueError) as exc:
+        print(f"  weights : {VEGA_WEIGHTS_SHEET} cannot be read ({exc})")
+    else:
+        if not weights.present:
+            print(f"  weights : no {VEGA_WEIGHTS_SHEET} tab; the marking screen's bump has "
+                  f"no shape to share a move out by")
+        else:
+            own = f", own column: {', '.join(weights.pairs)}" if weights.pairs else ""
+            default = sum(1 for t in weights.tenors
+                          if "default" in weights.cells.get(t, {}))
+            print(f"  weights : {len(weights.tenors)} tenor(s) on {VEGA_WEIGHTS_SHEET}, "
+                  f"{default} with a default{own}")
     for note in data.notes:
         print(f"    . {note}")
     # What a write over this workbook would take out of it, said before the
@@ -256,6 +271,72 @@ def cmd_tenors(args) -> int:
         cut = surface.atm.cut_vol(book.clock.datetime_from_years(t), args.cut)
         print(f"  {tenor:<6}{surface.atm.term_vol(t) * 100:>10.4f}{cut * 100:>10.4f}"
               f"  {d.expiry:%Y-%m-%d}  {d.delivery:%Y-%m-%d}")
+    return 0
+
+
+def cmd_vega(args) -> int:
+    """The vega weights a pair reads, the bump they imply, and the measured shape.
+
+    The same three things the marking screen shows, off the same functions, so
+    a curve moved on the screen can be reproduced in a batch job -- and so a
+    desk can see what the ``Vega Weights`` tab says without opening Excel.
+    ``--apply`` is deliberately absent: this prints, and the marks are made on
+    the screen or through a session file.
+    """
+    from . import vegaweights
+
+    book = _book(args, [args.pair])
+    pair = args.pair.upper()
+    surface = book[pair]
+    weights = book.vega_weights
+    tenors = list(book.data.tenor_points)
+    column = weights.column_for(pair)
+    print(f"{pair}   {vegaweights.VEGA_WEIGHTS_SHEET}: "
+          + ("not on this workbook" if not weights.present
+             else f"reading the '{column}' column"))
+    levels = {t: surface.atm.term_vol(surface.tenor_years(t)) for t in tenors}
+    if args.move is None:
+        print(f"  {'tenor':<8}{'weight':>10}  {'from':<10}{'marked %':>10}")
+        for tenor in tenors:
+            value, source = weights.weight_for(pair, tenor)
+            shown = "—".rjust(10) if value is None else f"{value:>10.4f}"
+            print(f"  {tenor:<8}{shown}  {source or '—':<10}{levels[tenor] * 100:>10.4f}")
+    else:
+        rows = vegaweights.bump_levels(weights, pair, args.anchor, args.move / 100.0, levels)
+        print(f"  anchor {args.anchor.upper()} moved {args.move:+.4f} vol points")
+        print(f"  {'tenor':<8}{'weight':>10}{'before %':>11}{'move %':>10}{'after %':>11}")
+        for r in rows:
+            if r.after is None:
+                print(f"  {r.tenor:<8}{'—':>10}{r.before * 100:>11.4f}"
+                      f"{'—':>10}{'—':>11}   {r.reason}")
+            else:
+                print(f"  {r.tenor:<8}{r.weight:>10.4f}{r.before * 100:>11.4f}"
+                      f"{r.move * 100:>+10.4f}{r.after * 100:>11.4f}")
+    if args.realized:
+        from .history import load_history
+        if not args.history:
+            raise ValueError("--realized needs a historical workbook; pass --history")
+        history = load_history(args.history, book.pairs, vol_unit=args.vol_unit)
+        for problem in list(history.problems) + list(history.skipped_sheets):
+            print(f"  . {problem}", file=sys.stderr)
+        if pair not in history:
+            raise ValueError(f"{args.history} has no sheet for {pair}; it has "
+                             f"{', '.join(sorted(history.pairs))}")
+        out = vegaweights.realized_weights(history[pair], args.anchor, args.lookback,
+                                           tenors=tenors)
+        span = f"{out.first} to {out.last}" if out.first else "no dated window"
+        print(f"\n  realized against {out.anchor} over {out.lookback_days:g} days "
+              f"({span})")
+        print(f"  {'tenor':<8}{'beta':>10}{'sd ratio':>10}{'corr':>8}{'n':>6}")
+        for r in out.rows:
+            if r.beta is None:
+                print(f"  {r.tenor:<8}{'—':>10}{'—':>10}{'—':>8}{r.observations:>6}"
+                      f"   {r.reason}")
+            else:
+                print(f"  {r.tenor:<8}{r.beta:>10.4f}{r.sd_ratio:>10.4f}"
+                      f"{r.corr:>8.3f}{r.observations:>6}")
+        for w in out.warnings:
+            print(f"  ! {w}", file=sys.stderr)
     return 0
 
 
@@ -2749,6 +2830,23 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("pair")
     s.add_argument("--cut", default="TK")
     s.set_defaults(func=cmd_tenors)
+
+    s = add_command("vega", parents=[common],
+                    help="the Vega Weights tab as a pair reads it, the bump it implies, "
+                         "and the same shape measured off the historical book")
+    s.add_argument("pair")
+    s.add_argument("--anchor", default="1M",
+                   help="the tenor a move is measured from (default 1M)")
+    s.add_argument("--move", type=float,
+                   help="move the anchor this many vol points and print the bumped curve")
+    s.add_argument("--realized", action="store_true",
+                   help="also measure the shape off the historical book")
+    s.add_argument("--history", default=_default_history(),
+                   help="historical workbook (with --realized)")
+    s.add_argument("--lookback", type=float, default=180.0,
+                   help="realized lookback window in days (default 180)")
+    s.add_argument("--vol-unit", default="auto", choices=["auto", "percent", "decimal"])
+    s.set_defaults(func=cmd_vega)
 
     s = add_command("daily", parents=[common], help="export the daily volatility series")
     s.add_argument("pair")

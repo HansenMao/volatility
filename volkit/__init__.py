@@ -54,6 +54,7 @@ _EXPORTS = {
     "Clock": "timeutil",
     "tenor_to_years": "timeutil",
     "TimeWeighting": "timeweight",
+    "VegaWeights": "vegaweights",
 }
 
 __all__ = sorted(_EXPORTS)

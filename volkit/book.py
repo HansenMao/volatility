@@ -27,6 +27,7 @@ from .events import EventBook, EventSchedule
 from .feed import MarketFeed
 from .marketdata import ExcelSource, MarketData, MarketDataError
 from .surface import VolSurface, WingRatio, load_wing_ratios
+from .vegaweights import VegaWeights, load_vega_weights
 from .timeutil import DAYS_IN_YEAR, Clock, parse_datetime
 from .timeweight import TimeWeighting
 
@@ -60,6 +61,11 @@ class Book:
     # its 25-delta ones.  Read once for the book so a surface built later
     # cannot get a different answer from one built now.
     wing_ratios: dict[str, dict[str, WingRatio]] = field(default_factory=dict)
+    #: The ``Vega Weights`` tab: how far each tenor moves when the anchor
+    #: moves one vol point.  Not part of any surface -- nothing prices
+    #: differently for it -- but read with the book so the marking screen and
+    #: the command line share one answer about what a workbook says.
+    vega_weights: VegaWeights = field(default_factory=VegaWeights)
 
     @classmethod
     def from_excel(cls, path: str | Path, clock: Clock | None = None, *,
@@ -70,6 +76,7 @@ class Book:
         book.events = book.data.events.copy()
         book.bands = book._default_bands(bands or path)
         book.wing_ratios = book._default_wing_ratios(path)
+        book.vega_weights = book._default_vega_weights(path)
         book.calendars = calendars if calendars is not None else book._default_calendars(path)
         return book
 
@@ -108,6 +115,23 @@ class Book:
         except (OSError, ValueError) as exc:
             self.warnings.append(f"wing ratios: {exc}")
             return {}
+
+    def _default_vega_weights(self, path: str | Path | None) -> VegaWeights:
+        """The ``Vega Weights`` tab, or an absent one.
+
+        A workbook without it is the ordinary case and costs nothing: the
+        marking screen's bump says there is no shape to share a move out by
+        and every other number is unaffected.  A tab that is there and cannot
+        be read is a warning for the same reason the wing ratios are -- a desk
+        that wrote one meant it to apply.
+        """
+        if path is None:
+            return VegaWeights()
+        try:
+            return load_vega_weights(path)
+        except (OSError, ValueError) as exc:
+            self.warnings.append(f"vega weights: {exc}")
+            return VegaWeights()
 
     def _default_calendars(self, path: str | Path | None) -> CalendarSet:
         """The shared calendars plus whatever the ``HOLIDAYS`` tab adds.

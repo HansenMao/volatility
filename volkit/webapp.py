@@ -50,6 +50,7 @@ from .marketmaker import rules_from_request
 from .quotes import FLY_CONVENTIONS
 from .quotes import VOL_UNITS as QUOTE_VOL_UNITS
 from .surface import PARAM_NAMES, QUOTE_FIELDS, QUOTE_LABELS, RATIO_WINGS
+from . import vegaweights
 from .analytics import TARGETS, carry_table, fair_value_table, realized_table, triangle_table
 from .relvalue import HISTORY_DAYS, SHARED, SIGNALS, WEIGHTS
 from .relvalue import panel_from_request as relvalue_panel_from_request
@@ -943,12 +944,7 @@ class BookService:
             # the quote sheet spells it, matched however the row does.
             quotes = {r["tenor"].upper(): r for r in surface.quote_rows()}
             ratios = {r["tenor"].upper(): r for r in surface.ratio_rows()}
-            # Every tenor the book prices at, plus any the quotes reach that
-            # it does not: a tenor typed into the sheet (or into this screen)
-            # and then not shown is a mark nobody can see.
-            names = list(self.book.data.tenor_points)
-            seen = {t.upper() for t in names}
-            names += [r["tenor"] for t, r in sorted(quotes.items()) if t not in seen]
+            names = self._atm_tenors(surface)
             atm_rows = []
             for tenor in names:
                 t = surface.tenor_years(tenor)
@@ -1254,6 +1250,130 @@ class BookService:
             self.dirty = True
             return {"ok": True, "problems": problems}
 
+    # -- vega weights: the shape a move is shared out by ------------------
+    def _atm_tenors(self, surface) -> list[str]:
+        """Every tenor the ATM table shows, in the order it shows them.
+
+        The book's own tenor points, plus any the quotes reach that it does
+        not: a tenor typed into the sheet (or into this screen) and then not
+        shown is a mark nobody can see.  Shared with the bump so the two
+        tables cannot end up listing different curves.
+        """
+        names = list(self.book.data.tenor_points)
+        seen = {t.upper() for t in names}
+        names += [r["tenor"] for t, r in
+                  sorted({q["tenor"].upper(): q for q in surface.quote_rows()}.items())
+                  if t not in seen]
+        return names
+
+    def vega_weights(self, q: dict | None = None) -> dict:
+        """The ``Vega Weights`` tab as one pair reads it, tenor by tenor.
+
+        Which column each weight came from is part of the answer: a pair that
+        has its own column and a pair falling back to the default are two
+        different marks, and a screen that showed only the number could not
+        tell a desk which of the two it was looking at.
+        """
+        q = q or {}
+        with self._lock:
+            pair = str(q.get("pair") or "").strip().upper() or self.book.pairs[0]
+            surface = self.book[pair]
+            weights = self.book.vega_weights
+            rows = []
+            for tenor in self._atm_tenors(surface):
+                value, source = weights.weight_for(pair, tenor)
+                rows.append({"tenor": tenor, "weight": value, "source": source})
+            return {"pair": pair, "sheet": vegaweights.VEGA_WEIGHTS_SHEET,
+                    "present": weights.present, "column": weights.column_for(pair),
+                    "pairs": list(weights.pairs), "rows": rows}
+
+    def vega_realized(self, payload: dict) -> dict:
+        """The same shape, measured off the historical book over a lookback.
+
+        A suggestion and nothing more: it goes into the workbook card's boxes
+        for a person to look at and write, never onto the tab on its own.
+        What the market did last quarter is evidence about the shape, not the
+        shape -- the desk's view of the next event is not in it.
+        """
+        with self._lock:
+            pair = str(payload.get("pair") or "").strip().upper() or self.book.pairs[0]
+            if self.history is None:
+                raise ValueError(
+                    "no historical workbook is loaded, so there is nothing to measure a "
+                    "realized weighting on. Load one on the Analysis screen, or start "
+                    "volkit with --history")
+            if pair not in self.history:
+                raise ValueError(
+                    f"the historical workbook has no sheet for {pair}; it has "
+                    f"{', '.join(sorted(self.history.pairs))}")
+            anchor = str(payload.get("anchor") or "").strip()
+            raw = payload.get("lookback")
+            try:
+                lookback = float(raw)
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"a realized weighting needs a lookback window in days, got "
+                    f"{raw!r}") from None
+            if not math.isfinite(lookback) or lookback <= 0:
+                raise ValueError(
+                    f"a lookback window is a positive number of days, got {raw!r}")
+            surface = self.book[pair]
+            out = vegaweights.realized_weights(
+                self.history[pair], anchor, lookback,
+                tenors=self._atm_tenors(surface))
+            return {"pair": out.pair, "anchor": out.anchor,
+                    "lookback": out.lookback_days,
+                    "first": out.first.isoformat() if out.first else "",
+                    "last": out.last.isoformat() if out.last else "",
+                    "warnings": list(out.warnings),
+                    "rows": [{"tenor": r.tenor, "beta": r.beta, "sd_ratio": r.sd_ratio,
+                              "corr": r.corr, "observations": r.observations,
+                              "reason": r.reason} for r in out.rows]}
+
+    def atm_bump(self, payload: dict) -> dict:
+        """Move one tenor and let the weights carry the rest of the curve.
+
+        Two calls, the same one: ``apply`` false is the table a marker reads
+        before deciding, true writes it as ordinary per-tenor ATM overwrites.
+        Nothing new is stored -- the result of a bump is exactly the marks a
+        person could have typed one row at a time, so the session carries it,
+        the overwrite column shows it and clearing an overwrite undoes it.
+
+        Every level is read *before* any of them is written: an overwrite
+        changes what ``term_vol`` interpolates at the tenors either side of
+        it, so a bump applied row by row would move each tenor off a curve
+        the previous row had already moved.
+        """
+        with self._lock:
+            pair = str(payload.get("pair") or "").strip().upper() or self.book.pairs[0]
+            surface = self.book[pair]
+            if payload.get("move") in (None, ""):
+                raise ValueError("a bump needs a move of the anchor tenor, in vol points")
+            move = float(payload["move"]) / 100.0
+            if not math.isfinite(move):
+                raise ValueError(f"{payload['move']!r} is not a move in vol points")
+            anchor = str(payload.get("anchor") or "").strip()
+            levels = {t: surface.atm.term_vol(surface.tenor_years(t))
+                      for t in self._atm_tenors(surface)}
+            rows = vegaweights.bump_levels(self.book.vega_weights, pair, anchor,
+                                           move, levels)
+            applied = 0
+            if payload.get("apply"):
+                for row in rows:
+                    if row.after is not None:
+                        surface.atm.overwrite_tenor(row.tenor, row.after)
+                        applied += 1
+                surface.invalidate()
+                self.dirty = True
+            return {"pair": pair, "anchor": anchor.upper(), "move": move * 100.0,
+                    "applied": applied, "column": self.book.vega_weights.column_for(pair),
+                    "sheet": vegaweights.VEGA_WEIGHTS_SHEET,
+                    "rows": [{"tenor": r.tenor, "weight": r.weight, "source": r.source,
+                              "before": r.before * 100.0,
+                              "after": None if r.after is None else r.after * 100.0,
+                              "move": None if r.move is None else r.move * 100.0,
+                              "reason": r.reason} for r in rows]}
+
     # -- the session file -------------------------------------------------
     # -- the workbook's configuration tabs --------------------------------
     def config_tabs(self, q: dict | None = None) -> dict:
@@ -1281,9 +1401,25 @@ class BookService:
                     # says which: a tab that was never given to this workbook,
                     # and one a desk has deliberately emptied.
                     entry["present"] = rows is not None
+                if rows is not None:
+                    # An open tab is edited with the columns it actually has,
+                    # not only the ones this build knows the names of: the
+                    # pair columns on Vega Weights are the desk's, and a
+                    # screen that showed the fixed three would offer to write
+                    # every one of them away.
+                    columns = configsheets.columns_for(
+                        sheet, [r.cells for r in rows])
+                    entry["columns"] = list(columns)
                 if rows:
                     entry["rows"] = [{c: r.raw(c) if not isinstance(r.raw(c), (date, datetime))
                                       else r.text(c) for c in columns} for r in rows]
+                entry["open"] = sheet in configsheets.OPEN_COLUMNS
+                # What the screen can measure for this tab, rather than the
+                # tab's name: the page keys off the capability so a second
+                # measurable tab is a line here and not a name in the
+                # JavaScript.
+                entry["measure"] = ("vega" if sheet == vegaweights.VEGA_WEIGHTS_SHEET
+                                    else "")
                 out.append(entry)
             return {"workbook": path, "tabs": out,
                     "stamp": self.workbook_stamp,
@@ -1300,8 +1436,14 @@ class BookService:
         that, which is what a reload is -- so it refuses while there are any,
         rather than throwing them away to save a configuration change.
         """
+        from . import configsheets
         with self._lock:
-            sheet = str(payload.get("sheet") or "").strip().upper()
+            # Matched against the tabs this writes rather than upper-cased
+            # into one: 'Vega Weights' is the name the desk's workbook has,
+            # and a screen that shouted it back would be asking to write a
+            # tab that does not exist.
+            asked = str(payload.get("sheet") or "").strip()
+            sheet = configsheets.match_sheet(configsheets.EDITABLE, asked) or asked.upper()
             rows = payload.get("rows")
             if not isinstance(rows, list):
                 raise ValueError("rows must be a list of objects, one per row of the tab")
@@ -2269,6 +2411,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self.service.smile(q))
             elif url.path == "/api/config":
                 self._json(self.service.config_tabs(q))
+            elif url.path == "/api/vega":
+                self._json(self.service.vega_weights(q))
             elif url.path == "/api/marks":
                 self._json(self.service.marks(q))
             elif url.path == "/api/curve":
@@ -2402,6 +2546,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self.service.session_export(payload))
             elif url.path == "/api/config/save":
                 self._json(self.service.config_save(payload))
+            elif url.path == "/api/vega/realized":
+                self._json(self.service.vega_realized(payload))
+            elif url.path == "/api/atm/bump":
+                self._json(self.service.atm_bump(payload))
             elif url.path == "/api/config/pair":
                 self._json(self.service.config_pair(payload))
             elif url.path == "/api/monitor/curves":

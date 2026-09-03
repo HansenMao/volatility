@@ -368,6 +368,32 @@ move the screen.
   **`volkit migrate-wings --in-place`** once to read the multiples onto the tab
   and flatten the sheets to numbers; `volkit check` says whether a workbook has
   been through it.
+* **Bump** — tick **bump** in the heading for the row that moves the whole
+  curve at once. Choose an **anchor** tenor, type a **move** in vol points, and
+  every tenor moves `move × w(tenor) / w(anchor)` where the weights come from
+  the workbook's `Vega Weights` tab — this pair's own column where it has one,
+  the `default` column cell by cell where it does not. Only the *ratios* on the
+  tab matter: the anchor always moves exactly what you typed, whatever its own
+  weight is, so a tab written 2.00 / 1.00 / 0.65 and one written 200 / 100 / 65
+  are the same view.
+
+  **Show** reads it and **Apply as overwrites** writes it, and what it writes
+  are ordinary per-tenor ATM overwrites — the same marks you could have typed
+  one row at a time. They are counted in this card's heading, cleared by *Clear
+  ATM overwrites*, and saved with the session like any other mark; nothing new
+  is stored, which is why this row can be shut without hiding anything. Apply
+  recomputes rather than replaying what is on screen, so a curve marked
+  somewhere else between the two is bumped from where it now is.
+
+  A tenor the tab has no weight for keeps its place in the table and says so;
+  it is **not** moved. A move that would take a tenor to zero or below is
+  reported the same way and the rest of the curve still moves. An anchor that
+  is not on the curve, or that the tab cannot weight, refuses the whole bump
+  before a single row is computed — half a bump is not a curve.
+
+  The weights are edited on the **Workbook** card below, which is also where a
+  weighting measured off the historical book can be suggested into them.
+  `volkit vega USDCNH --anchor 1M --move 0.25` prints the same table.
 * **Charts** — smile (with the risk-neutral density), term structure, daily
   vols, and the **kACE feed** (below). The expiry box beside the tabs drives
   the smile chart.
@@ -1529,9 +1555,31 @@ drop.
   what those cells mean there) and an empty quote sheet to mark on. Remove one
   and it comes out of `CONFIG` only: its column and its sheet stay where they
   are, so adding it back finds what it had.
-* **The configuration tabs** — `PEG_BANDS`, `KACE_SPREADS`, `HOLIDAYS` and
-  `WING_RATIOS` — edited as tables and written whole. The prose and `#` comment
-  lines above each header are kept.
+* **The configuration tabs** — `PEG_BANDS`, `KACE_SPREADS`, `HOLIDAYS`,
+  `WING_RATIOS` and `Vega Weights` — edited as tables and written whole. The
+  prose and `#` comment lines above each header are kept.
+* **Vega weights, and a column per pair.** `Vega Weights` is the shape the ATM
+  card's *bump* shares a move out by: a `tenor` column, a `default` column every
+  pair falls back to, and one column per pair that needs its own. The fallback
+  is **cell by cell** — a pair column with a blank 2Y takes the default at 2Y —
+  so a view about the front end of one pair does not commit you to its back
+  end. It is the one tab whose columns are yours rather than the tool's, so it
+  has an **Add column** box beside its Write button; type a pair and fill the
+  column in. A blank cell is not a weight of one: it is no view, and a tenor no
+  column can weight is reported by the bump rather than left still.
+* **A weighting measured off the historical book.** Under that table, *Suggest
+  a column from the historical book* takes a pair, an anchor tenor and a
+  lookback in days, and regresses each tenor's daily change in at-the-money
+  volatility on the anchor's. **beta** is what the tab holds; **sd ratio** is
+  how much that tenor moved at all and **corr** how much of it was with the
+  anchor, so a big ratio beside a small beta is a tenor that moves on its own
+  and a beta you would not want to mark. The anchor's own beta is 1 by
+  construction. *Suggest into* fills the boxes above — the measured pair's own
+  column or the tab's `default`, whichever you pick beside the button, adding
+  the column and any missing tenor row — and **writes nothing**: what the market
+  did last quarter is evidence about the shape, not the shape, and you press
+  *Write Vega Weights* when you have looked at it. Needs a historical workbook
+  loaded (`--history`, or the Analysis screen's box).
 * **What a write would cost.** `volkit check` reports images, charts and pivot
   tables a write would drop (the library carries formulas and their values, not
   those), and whether Excel currently has the file open.
@@ -1753,6 +1801,10 @@ volkit smile  USDJPY 2026-11-23           the smile at one expiry
 volkit vol    USDJPY 2026-11-23 --strike 152 --forward 149.9
 volkit vol    USDJPY 5m --strike 25dp --feed market_feed.csv -v
 volkit daily  USDJPY --horizon 1 --out USDJPY_daily_vol
+volkit vega   USDCNH                      the Vega Weights tab as this pair reads it
+volkit vega   USDCNH --anchor 1M --move 0.25   ... and the curve that move bumps it to
+volkit vega   EURUSD --realized --history vol_history.xlsx --lookback 180
+                                          the same shape measured off the historical book
 volkit kace   USDCNH --out usdcnh_kace.xml   the kACE RATE_FEED message, to paste into the poster
 volkit kace   USDCNH --clear --out clear.xml the clearRate message for the pair
 volkit kace   USDCNH --source fitted         wings off the fitted surface instead of the marks
