@@ -278,6 +278,78 @@ known volatility comes back as that volatility to 1e-11.
   dissemination is thousands of rows and "1,180 had a capped notional" is the
   useful shape of that.
 
+### The layout actually in circulation (checked against five 2026 files)
+
+The synonym table covered both *published* layouts and still could not read a
+real file, because what the file leaves **empty** matters as much as what it
+carries. Verified against 330,255 rows of CFTC FOREX dissemination:
+
+- **`Option Type` is empty in every row.** Read only from that column, no print
+  in the file has a side — and `implied_from_trade` refuses a trade with no
+  side, so the entire tape inverts to nothing. The side is in the **legs**:
+  `Call currency` against `Put currency`. A USD call against an HKD put is a
+  call on USDHKD, whatever the file calls the pair.
+- **The order the pair is written in is not a convention.** The same file
+  writes USDHKD as `HKD/USD` and AUDHKD as `AUD/HKD`; `Exchange rate basis`
+  reads "second per first" in nine rows out of ten and the other way in the
+  tenth. So nothing is read from the order: the **currencies** are matched
+  against the book either way round (`_orient`), the book's spelling wins, and
+  the row says so. Without this every USDHKD print was dropped as a pair the
+  book does not build, which is exactly what a desk saw as an empty archive.
+- **The legs say which way round the strike is written** (`_oriented`). The
+  quote-currency amount over the base-currency amount is the rate to whatever
+  rounding the amounts carry, and the published strike is whichever of it and
+  its reciprocal that ratio is near. The ratio is a *check*, never a
+  replacement: leg amounts are rounded, and a 7.75 strike against legs that
+  round to 7.80 is a 7.75 strike.
+- **The cap belongs to the leg the premium is divided by.** The file caps one
+  leg and not the other; reading the row's flag threw away trades whose base
+  leg was published in full.
+- **`Execution Timestamp` beats `Event timestamp`.** On an exercise or a
+  correction the event timestamp is the moment of *that*, and reading it as the
+  trade dates a print days late.
+- **Two thirds of a file is not options** — 27,146 option prints in 330,255
+  rows. Outrights, NDFs and swaps are no longer filed as at-the-money trades;
+  they are a `forward` observation carrying the rate and the date, which is
+  what `synthesis.TapeForwards` builds a curve out of. On a pair the historical
+  workbook has never held, that curve is the only forward there is, and it is
+  what made USDHKD invertible at all.
+
+`TapeForwards` interpolates in the **log of the rate against days** — a
+constant interest differential, which is what a forward curve is — and extends
+the last segment's carry no further than twice the longest date printed.
+Holding the rate flat instead would price a 2028 option off a two-week
+forward, and on a pegged pair the carry *is* the trade.
+
+## The tape as market colour (`flow.py`)
+
+The file publishes **what printed and never who bought**: no buyer, no seller,
+no aggressor flag, by design. So a direction cannot be read out of it and has
+to be inferred, and this module is the only place that inference lives.
+
+- **A print above our mark was paid, one below it was given**, and the mark it
+  was judged against is kept on the row so a wrong call can be argued with.
+  The mark is the surface *as it stands now* and not as it stood that morning —
+  the archive keeps no past curve — which is said on the read and is why the
+  default half-life is a working week.
+- **A print near the mark is not evidence.** Inside a tolerance it is
+  `unclear`, never pushed to the side it fell on. The tolerance is half the
+  archived width where the archive knows one and a fraction of the mark where
+  it does not, because every market has a mid somebody disagrees with.
+- **Size is vega, not notional** — a hundred million of a one-week option and
+  of a two-year one are not the same amount of buying. Reported in the base
+  currency per volatility point, which is the unit the quote panel's own axe is
+  typed in, so the two can be compared without conversion.
+- **It decides nothing.** The module produces a signed, age-weighted vega per
+  tenor bucket and stops. `marketmaker.skew_for` takes it as a fourth lean
+  beside the fair value, the axe and the bank, **off unless `flow_weight` is
+  set**, capped with the others, and on level instruments only: what the tape
+  paid for says nothing about where the skew belongs.
+- **Paid means mark up.** Customers paying means dealers are getting shorter
+  and the next caller is more likely another buyer, which is the opposite sign
+  to a long vega axe. A desk that would rather fade the crowd sets a negative
+  weight and the same arithmetic runs backwards.
+
 Files, all beside the workbook like the bank: `mm_archive.jsonl` (the
 observations), `mm_ingest.json` (what has been read). Tests are in
 `tests/test_agent.py` — the one test module outside `tests/test_volkit.py`,

@@ -487,7 +487,7 @@ def carry_table(book, pair: str, *, horizon_days: float = 30.0, target: str = "a
             smile_delta_ok = True
             for weight, delta, is_call in legs:
                 if delta == 0.0:
-                    k_ratio = float(black.dns_strike(1.0, atm_now, t, surface.conv))
+                    k_ratio = float(black.atm_strike(1.0, atm_now, t, surface.conv))
                     v_now = float(surface.vol(k_ratio, expiry, method, cut))
                 else:
                     k_ratio, v_now = surface.delta_strike(expiry, delta, is_call, method, cut)
@@ -693,7 +693,7 @@ def fair_value_table(book, pair: str, hist=None, *,
             continue
         expiry, expiry2 = book.clock.datetime_from_years(t), book.clock.datetime_from_years(t - h)
         implied = float(surface.atm_vol(expiry, cut))
-        k_ratio = float(black.dns_strike(1.0, implied, t, surface.conv))
+        k_ratio = float(black.atm_strike(1.0, implied, t, surface.conv))
         k_abs = k_ratio * row.forward
         v2 = float(surface.vol(k_abs / row.forward_rolled, expiry2, method, cut))
         vega_now = float(black.vega(row.forward, k_abs, implied, t))

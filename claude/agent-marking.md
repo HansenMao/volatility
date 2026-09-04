@@ -297,5 +297,30 @@ fewer free parameters, so its RMSE gets *worse* while matching what the desk
 actually does. The critique reports that numerically rather than hiding it,
 and adjudicating it is the person's job.
 
+## The two locks, and which order they are taken in
+
+The server holds one book behind `BookService._lock`, and the observation
+archive behind `_archive_lock` of its own -- reading a folder can take a
+minute, and under the book's lock that is a minute in which no screen answers
+(§17). The marking card needs both, and the order is binding:
+
+- **The archive is read first, on its own lock, and that lock is let go before
+  the book's is taken.** `Panel.archive_evidence` is the archive half --
+  `synthesis.synthesize` and nothing else -- and what it returns is handed to
+  `Panel.run` as `archive_evidence`, which then touches no archive at all.
+  `webapp.mm_mark` borrows the clock under the book's lock, lets it go, reads
+  the archive, and only then takes the book for the numeric work.
+- Held the other way round -- the book's lock outstanding while the archive's
+  is waited for, which is what `mm_mark` used to do -- **a folder scan or a
+  DTCC download froze the fit**. Those hold `_archive_lock` for minutes, with
+  a language model behind the scan; the card queued behind them still holding
+  the book, and the Fit button beside it, which asks the archive nothing, sat
+  spinning until they were done. A test pins it: the book's lock is provably
+  not held at the moment the archive's is taken.
+- The page cannot tell a queued run from a working one either, so it says:
+  the status line counts the seconds after three of them and names the
+  possibility after ten (`busy()` in `index.html`, used by the fit, the quote
+  and the card).
+
 Files, beside the workbook: `mm_remarks.jsonl` (the journal), and
 `mm_rules.toml` (the rules of thumb).

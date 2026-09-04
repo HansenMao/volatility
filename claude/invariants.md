@@ -347,8 +347,10 @@ for the reasoning behind it. Read this file when working in the area above.
   every leg `typed` on a screen nobody had typed into.
 - **The marking screen's vol query is the pricing screen's two boxes and one
   number.** `pricing.quick_vol` is that reading and `pricing.resolve_strike`
-  is the one place a typed strike lands on the marks -- `ATM` to the
-  delta-neutral straddle's own moneyness, `25d` to a solve on the interpolated
+  is the one place a typed strike lands on the marks -- `ATM` to the pair's
+  own at-the-money at that tenor (the delta-neutral straddle out to the
+  `atmf beyond` tenor, the forward beyond it; `ATMF` and `DNS` name one of
+  the two outright), `25d` to a solve on the interpolated
   smile, a number as written -- shared with `_price_leg`, which had its own
   copy of the same six lines. A strike read two ways is a strike that can be
   read two different ways, and `1M` understood differently on two tabs of one
@@ -384,7 +386,8 @@ for the reasoning behind it. Read this file when working in the area above.
   value, which is how the card shows both readings without breaking the rule
   above that nothing resolved is written into a box. The delta is
   `quick_vol`'s, not the page's: it is read under the pair's own
-  `DeltaConvention` (premium adjusted for a USD-base pair, so a
+  `DeltaConvention` (premium adjusted where the premium currency is the base
+  -- USD-base pairs *and* every cross -- so a
   premium-adjusted delta-neutral straddle is a shade under 50 delta and a
   browser that assumed 50 would name a strike nobody asked about), and it is
   read at `F = 1` because delta is a function of moneyness alone -- which is

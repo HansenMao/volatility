@@ -19,3 +19,6 @@ _to_delete/
 # the timestamped workbook backups the session export leaves beside the
 # workbook (see session.py) — desk output, not source
 files/vol_marks.bak-*.xlsx
+
+# screenshots and scratch output written while working with Claude; not source
+Claude outputs/

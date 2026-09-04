@@ -118,18 +118,38 @@ This is the largest of the date changes and it moves every tenor slightly.
 order and this now follows it:
 
 1. **Spot date** = trade date + the pair's spot lag (T+1 for USDCAD, T+2 for
-   the rest), counted on the *two currencies'* own calendars, and then rolled
-   forward to a day USD can settle on. US holidays do not stop the count for a
-   pair with no dollar in it — they only rule out the value date it lands on.
-   Counting them would push EURJPY spot out a day every Thanksgiving, which is
-   not what the market does. `CalendarSet.settlement_countries` is the seam.
+   the rest), counted *separately per currency on its own calendar* with the
+   later landing taken, and then rolled forward to a day every calendar and
+   USD can settle on. The dollar's count is one day shorter than the others'
+   (one clear US working day before spot, not two), so a US holiday on T+1
+   delays no pair, dollar or cross; a US holiday on T+2 delays every pair.
+   Until 2026-09-04 the count for a dollar pair ran on the pair's merged
+   calendar, which put EURUSD and USDJPY spot a day late after every Monday US
+   holiday (Friday before MLK: Wednesday instead of Tuesday), and a merged
+   two-currency count is a day late for a cross whenever the two holidays
+   alternate. `SETTLEMENT_CURRENCIES` and `CalendarSet.spot_date` are the seam.
 2. **Settlement (delivery) date** = spot + the tenor, adjusted **modified
    following** on the value-date calendars, with the **end-of-month rule**: off
    a spot date that is the last value date of its month, every month and year
    tenor settles on the last value date of *its* month. Without that rule a 1M
    dealt off a 28-Feb spot settles 28-Mar where the market settles 31-Mar.
-3. **Expiry** = the spot lag *back* from the settlement date, on the pair's own
-   calendars.
+3. **Expiry** = the *inverse spot* of the settlement date: the latest day,
+   open on the pair's own calendars, whose spot date is the settlement date.
+   Stepping the lag back on a calendar (the construction until 2026-09-04)
+   picks the earlier of two trade dates that share a spot date around a Monday
+   US holiday — Thursday instead of Friday for a delivery on the Tuesday after
+   MLK. When no expirable day settles exactly on the delivery (the walk back
+   lands on Thanksgiving), the expiry is the last that settles *by* it, the
+   delivery does not move, and `FxDates.rule` says so.
+
+The same change tightened the built-in calendars the spot date runs on: the
+USD calendar follows the Federal Reserve (Columbus Day and Veterans Day added;
+a Saturday holiday is *not* observed on the Friday, so 3 July 2026 and 24
+December 2027 are USD value dates), Japan gains the two equinoxes, 31 December,
+chained substitute holidays and the sandwiched "citizens' holiday" (Silver
+Week 21–23 September 2026), and CAD/NZD/AUD weekend holidays move forward as
+they do at home rather than back as US federal ones do. Lunar dates still come
+from the HOLIDAYS tab.
 
 **Day tenors go the other way, because that is what they mean.** `O/N` expires
 on the next business day and settles from that day's own spot; `8D` expires on
@@ -218,6 +238,65 @@ degenerate case and not the working one.
 the spot date and the rule that produced it on hover; the marking screen's vol
 query and `volkit vol --verbose` say it too, and `volkit tenors` prints the
 expiry and settlement date beside every pillar.
+
+### 1.7 The quoting conventions: premium currency and the at-the-money strike
+
+Two conventions the legacy tool got half right, revised 2026-09-04. Both move
+marks, the first on every cross.
+
+**Premium adjustment follows the premium currency, not the first three
+letters.** The legacy `delta_adjust` was `ccy[0:3] == 'USD'`, and this tool
+carried it. The market's rule is that the quoted delta is premium adjusted
+when the premium is paid in the *base* currency, because the premium is then
+itself a position in the underlying: EURUSD, GBPUSD, AUDUSD and NZDUSD pay in
+USD (the quote currency) and are unadjusted; USDJPY, USDCNH and USDCAD pay in
+USD (the base) and are adjusted; and every cross -- EURJPY, EURGBP, AUDJPY,
+GBPNZD, EURCNH, GBPCNH, AUDCNH, NZDCNH, CNHHKD -- pays in its base currency
+and is adjusted. The old rule read all nine crosses in the shipped workbook as
+unadjusted, so their 25- and 10-delta wing quotes were placed at unadjusted
+strikes and every cross smile was calibrated to the wrong points.
+`DeltaConvention.for_pair` now applies the market's rule (USD when it is in
+the pair, else the base currency, is the premium currency) and a
+`CONVENTIONS` tab (`pair, premium, atmf beyond`) overrides it per pair.
+
+**The at-the-money is the straddle out to 1Y and the forward beyond.** The
+tool put the ATM vol on the delta-neutral straddle at every tenor, and read
+`ATMF` typed in a strike box as a synonym for it. The market's convention on
+this desk is the delta-neutral straddle out to and including the 1Y pillar
+and the forward strike beyond it; the boundary is per pair on the
+`CONVENTIONS` tab (`atmf beyond`: a tenor, `never`, `always`) and is resolved
+on the pair's own calendar so that the boundary pillar itself, however many
+days the calendar gives it, stays on the straddle side. `black.atm_strike`
+replaces `black.dns_strike` at every smile anchor and calibration, so a
+long-dated ATM vol is read at the forward; `ATM` in a strike box is the
+convention at that tenor, `ATMF` the forward and `DNS` / `50d` the straddle
+outright; the smile table's ATM row reads its delta rather than assuming 50.
+The shipped workbook's pillars stop at 1Y, so nothing marked moves from this
+-- typed expiries beyond a year do.
+
+**Spot delta, from a `RATES` tab.** The market quotes spot delta out to a
+year on the majors and their crosses, and spot delta is forward delta times
+the base currency's discount factor to settlement -- a 25-delta quote on 1Y
+USDJPY is a 26-and-a-bit forward delta, so reading it as a forward delta put
+the strike about a quarter of a per cent too far from the money at 1Y (and
+nothing at 1M). A `RATES` tab (`currency, tenor, rate` in % p.a., simple, so
+the factor is `1/(1 + r t)`) now supplies the factor: `Book.rates` hands each
+surface a `discount_lookup`, `VolSurface.slice_conv(t)` puts the factor into
+the slice's convention (`DeltaConvention.at`), and `black.delta` /
+`strike_from_delta` scale by it -- so the wing quotes are calibrated at the
+strikes the market means, and every delta a screen shows is a spot delta out
+to the boundary and a forward delta beyond it, labelled either way. A base
+currency with no rate stays forward delta with a warning at load and a note
+on every row (*forward delta (no AUD rate on the RATES tab)*); `delta =
+forward` on the `CONVENTIONS` tab is a pair that never wants one. The same
+tab's quote-currency rate discounts the forward premium to the premium date;
+the pricing screen's premium rows and totals read either that or the forward
+value under a *premium: forward | spot* toggle on the Results bar (the result
+carries both: `premium_*` and `premium_pv_*` / `pv_amount`, the latter `None`
+without a rate, and a `pv_premium` total that is `None` if any leg on the
+pair lacks one); no rate is a dash, not a guess. The delta-neutral straddle
+strike is unchanged by any of this (it is delta neutral under either
+reading), as is every price.
 
 ---
 

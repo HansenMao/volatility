@@ -294,14 +294,14 @@ class SmileSlice:
         """Construct the 10d/25d/ATM/25d/10d anchor set, then fit."""
         if method not in INTERPOLATORS:
             raise ValueError(f"unknown interpolation method {method!r}; expected one of {INTERPOLATORS}")
-        conv = conv if isinstance(conv, DeltaConvention) else DeltaConvention(bool(conv))
+        conv = DeltaConvention.of(conv)
         deltas = (-0.10, -0.25, 0.50, 0.25, 0.10)
         strikes = np.empty(5)
         vols = np.empty(5)
         warn: list[str] = []
         strikes[0], vols[0] = sabr.smile_strike_and_vol(sabr_10, -0.10, t, False, conv)
         strikes[1], vols[1] = sabr.smile_strike_and_vol(sabr_25, -0.25, t, False, conv)
-        strikes[2], vols[2] = black.dns_strike(forward, atm_vol, t, conv), atm_vol
+        strikes[2], vols[2] = black.atm_strike(forward, atm_vol, t, conv), atm_vol
         strikes[3], vols[3] = sabr.smile_strike_and_vol(sabr_25, 0.25, t, True, conv)
         strikes[4], vols[4] = sabr.smile_strike_and_vol(sabr_10, 0.10, t, True, conv)
 

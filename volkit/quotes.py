@@ -86,7 +86,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, timedelta
 
 from .timeutil import TenorError, normalise_tenor, parse_datetime, parse_tenor
 
@@ -389,6 +389,15 @@ _WEIGHT = re.compile(r"^(?:(\d+(?:\.\d+)?)[x*]|[x*](\d+(?:\.\d+)?))$")
 _PREMIUM = ("prem", "premium", "premia", "live", "cash")
 _PIPS = ("pips", "pip")
 _PCT = ("pct", "percent")
+#: Basis points.  A basis point is a hundredth of a per cent, so ``5bp`` is
+#: 0.05% of the base notional -- the same unit the ``%`` lines are read in,
+#: scaled.  A run writes a small live premium this way as readily as in
+#: per cent, and reading 5bp as 5% is a hundredfold error in the price.
+_BPS = ("bp", "bps", "basispoint", "basispoints", "basispts", "basispt")
+#: The same, glued to its number, anywhere in a token: ``5bp``, ``12.5bps``,
+#: and the two-way ``5/6bp`` where only the far side carries the unit.  A
+#: digit has to come before it, so ``gbp`` is a currency and not a price.
+_BPS_NUM = re.compile(r"(\d+(?:\.\d+)?|\.\d+)\s*bps?\b", re.I)
 _CCY = frozenset((
     "usd", "eur", "jpy", "gbp", "chf", "aud", "nzd", "cad", "sek", "nok", "dkk", "cnh",
     "cny", "hkd", "sgd", "krw", "twd", "inr", "idr", "myr", "php", "thb", "vnd", "mxn",
@@ -443,6 +452,22 @@ _STRIKE_SIDE = re.compile(r"^(\d+(?:\.\d+)?|\.\d+)(c|calls?|p|puts?)$")
 #: The year-less shapes are here too -- ``06Nov``, ``Nov06`` -- and are
 #: resolved forward from the caller's date; with no date behind them they
 #: come back as "not an expiry" rather than as a guess.
+#: A weekday name is an **intra-week expiry**: the next one of that day from
+#: today.  A run that wants a date this week writes "Fri" rather than "6D",
+#: and counting the days by hand is how a quote lands a day off the option.
+#: Only spellings of three letters or more: a two-letter abbreviation is a
+#: word a sentence has in it, and "we" is already dropped as one.  The day the
+#: run was written is *not* the expiry, so "Mon" on a Monday is the Monday
+#: after it -- an option quoted this morning to expire this morning is not
+#: what a broker means, and the row says which date it landed on either way.
+_WEEKDAYS = {
+    "mon": 0, "monday": 0, "tue": 1, "tues": 1, "tuesday": 1,
+    "wed": 2, "weds": 2, "wednesday": 2, "thu": 3, "thur": 3, "thurs": 3,
+    "thursday": 3, "fri": 4, "friday": 4, "sat": 5, "saturday": 5,
+    "sun": 6, "sunday": 6,
+}
+_DAY_NAMES = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday",
+              "Saturday", "Sunday")
 _DATEISH = re.compile(
     r"^(?:\d{1,2}[-./]?[a-z]{3,9}[-./]?\d{2,4}|\d{4}[-./]\d{1,2}[-./]\d{1,2}"
     r"|\d{1,2}/\d{1,2}/\d{4}|[a-z]{3,9}[-./ ]?\d{1,2}[-./,]?\d{4}"
@@ -517,13 +542,16 @@ def _as_expiry(token: str, today=None):
     punctuation that :func:`_squash` would remove, and are dates all the same.
 
     ``today`` is the date a year-less token (``06Nov``) is resolved forward
-    from.  Without one the token is not an expiry rather than a guess, which
-    is what a run read with no clock behind it should say.
+    from, and the day a weekday name (``fri``) is counted forward from.
+    Without one neither is an expiry rather than a guess, which is what a run
+    read with no clock behind it should say.
     """
     tok = token.strip().strip("[]()").rstrip(",;:")
     word = _squash(tok)
     if tok.upper() in _SHORT_DATES:
         return tok.upper()
+    if word in _WEEKDAYS:
+        return None if today is None else _next_weekday(_WEEKDAYS[word], today)
     if _DATE.match(word):
         return parse_datetime(word)
     if _TENOR.match(word):
@@ -538,6 +566,18 @@ def _as_expiry(token: str, today=None):
         except (ValueError, TenorError):
             return None
     return None
+
+
+def _next_weekday(want: int, today: date):
+    """The next ``want``-day strictly after ``today``, as a dated expiry.
+
+    Strictly after: a run saying "Mon" on a Monday means the Monday coming,
+    not the morning it is being read on -- an expiry today is no expiry, and
+    it would be refused by the panel as not in the future rather than read as
+    the week the desk meant.  One to seven days, always.
+    """
+    ahead = (want - today.weekday()) % 7 or 7
+    return parse_datetime((today + timedelta(days=ahead)).isoformat())
 
 
 def _pair_of(token: str) -> str | None:
@@ -568,6 +608,10 @@ class _Line:
     over: str | None = None              # the currency (or 'call'/'put') said to be over
     explicit_spread: bool = False
     literal_order: bool = False          # 'A-B' rather than 'A/B'
+    #: The expiries that came from a weekday name rather than from a tenor or
+    #: a written date.  A day name is the weakest way to say when: anything
+    #: else on the line beats it (:func:`_settle_expiries`).
+    weekday_expiries: list = field(default_factory=list)
     #: The legs of a structure, each consumed on its own, when the line was
     #: split on ``vs``.  Empty for a plain line.
     legs: list = field(default_factory=list)
@@ -576,6 +620,13 @@ class _Line:
     quote_kind: str = "vol"
     pips_seen: bool = False
     pct_seen: bool = False
+    bps_seen: bool = False
+    #: Numbers that carried their own unit (``5bp``).  A number that says what
+    #: unit it is in is a price, never a strike.
+    unit_values: list = field(default_factory=list)
+    #: The line said ``live``: an option dealt without its delta hedge, which
+    #: is a low-delta option, and whose side the moneyness can therefore name.
+    live_seen: bool = False
     premium_ccy: str | None = None       # the currency word after a premium
     pair: str | None = None
     #: ``(value, column)`` for every number left after the words were taken
@@ -681,6 +732,16 @@ def _consume_tokens(tokens: list[list], columns: int, state: _Line) -> None:
         if "%" in raw_tok:
             state.pct_seen = True
             tok = raw_tok.replace("%", "")
+        # '5bp' is a number that said it is basis points, which only a premium
+        # is quoted in: the unit comes off here and the number goes on.  Which
+        # numbers wore it is remembered, because a number that names its own
+        # unit is the price, and that is what tells a strike from it on a line
+        # holding one of each.
+        if _BPS_NUM.search(tok):
+            state.quote_kind = "premium"
+            state.bps_seen = True
+            state.unit_values.extend(float(m.group(1)) for m in _BPS_NUM.finditer(tok))
+            tok = _BPS_NUM.sub(lambda m: m.group(1), tok)
         word = _squash(tok)
         nxt = _squash(tokens[i + 1][0]) if i + 1 < len(tokens) else ""
         prev_raw = tokens[i - 1][0].replace("%", "") if i else ""
@@ -760,9 +821,33 @@ def _consume_tokens(tokens: list[list], columns: int, state: _Line) -> None:
             i += 2
             continue
 
+        # 'mon 09:15 1M ATM ...' -- a day name in front of a time is the day
+        # the run was written and not an expiry.  Read as one it would beat
+        # the tenor beside it (a date beats a tenor) and move the quote a
+        # month, which is the one way a weekday could do real damage.
+        if word in _WEEKDAYS and i + 1 < len(tokens) and \
+                _as_timestamp(tokens[i + 1][0]) is not None:
+            state.notes.append(f"'{word}' sits in front of a time and was read as the day the "
+                               f"run was written, not as an expiry")
+            i += 1
+            continue
+
         exp = _as_expiry(tok, state.today)
         if exp is not None:
             state.expiries.append(exp)
+            if word in _WEEKDAYS:
+                # An intra-week expiry, dated here so nothing downstream has
+                # to know what day it is: what the line gets is the date.
+                state.weekday_expiries.append(exp)
+                state.notes.append(
+                    f"'{word}' read as the next {_DAY_NAMES[_WEEKDAYS[word]]} from today, "
+                    f"{_expiry_label(exp)}")
+            i += 1
+            continue
+        if word in _WEEKDAYS:
+            # The word is a weekday and there is no clock to count from.
+            state.notes.append(f"'{word}' names a weekday, and this run was read with no date "
+                               f"behind it, so there is nothing to count forward from")
             i += 1
             continue
 
@@ -815,6 +900,7 @@ def _consume_tokens(tokens: list[list], columns: int, state: _Line) -> None:
         if word in _PREMIUM:
             state.quote_kind = "premium"
             if word == "live":
+                state.live_seen = True
                 state.notes.append("'live' read as an option dealt without its delta hedge, "
                                    "so the price is a premium")
             i += 1
@@ -822,6 +908,16 @@ def _consume_tokens(tokens: list[list], columns: int, state: _Line) -> None:
         if word in _PIPS:
             state.quote_kind = "premium"
             state.pips_seen = True
+            i += 1
+            continue
+        if word in _BPS:
+            state.quote_kind = "premium"
+            state.bps_seen = True
+            # 'bp' as a word of its own still says which number it belongs to:
+            # the one before it, which is therefore the price and not a strike.
+            prev_num = _squash(_SEP.split(prev_raw)[-1].strip() or "x")
+            if _NUMBER.match(prev_num):
+                state.unit_values.append(float(prev_num))
             i += 1
             continue
         if word in _PCT:
@@ -952,6 +1048,10 @@ def _merge_legs(state: _Line) -> None:
             state.quote_kind = "premium"
         state.pips_seen = state.pips_seen or leg.pips_seen
         state.pct_seen = state.pct_seen or leg.pct_seen
+        state.weekday_expiries.extend(leg.weekday_expiries)
+        state.bps_seen = state.bps_seen or leg.bps_seen
+        state.live_seen = state.live_seen or leg.live_seen
+        state.unit_values.extend(leg.unit_values)
         state.premium_ccy = leg.premium_ccy or state.premium_ccy
         state.notes.extend(leg.notes)
         leg.notes = []
@@ -993,9 +1093,25 @@ def _settle_expiries(state: _Line, notes: list[str], *, spread_ok: bool = True) 
     land a day off the one written down.  The date is kept and the line says
     the tenor was passed over.  Two tenors on a line that is not a spread stay
     a refusal, because nothing on the line says which one is meant.
+
+    A **weekday name is the weakest** of the three and loses to either of the
+    others: "Fri 1M ATM" is the 1M, and the Friday was the day somebody wrote
+    the line.  A day name only dates a line that says when in no other way.
     """
     if spread_ok and state.explicit_spread and len(state.expiries) == 2:
         return
+    if len(state.expiries) > 1 and state.weekday_expiries:
+        others = [e for e in state.expiries
+                  if not any(e is w for w in state.weekday_expiries)]
+        if others:
+            dropped = [e for e in state.expiries if any(e is w for w in state.weekday_expiries)]
+            notes.append(
+                f"a weekday ({', '.join(_expiry_label(d) for d in dropped)}) and "
+                f"{'another expiry' if len(others) == 1 else 'other expiries'} "
+                f"({', '.join(_expiry_label(o) for o in others)}) are on the line; the "
+                f"weekday is read as the day it was written and dropped")
+            state.expiries = others
+            state.weekday_expiries = []
     if len(state.expiries) <= 1:
         return
     dates = [e for e in state.expiries if not isinstance(e, str)]
@@ -1031,8 +1147,20 @@ def _settle_side(state: _Line, notes: list[str]) -> None:
             raise ValueError("a premium is dealt on a strike, so the line needs one; a delta "
                              "only names a strike through the marks")
         if state.is_call is None:
+            # A live option is dealt without its delta hedge, which is what
+            # makes it a low-delta option: it is out of the money, so which
+            # side of the forward the strike sits determines the side.  The
+            # forward is not here -- the parse has no feed behind it -- so the
+            # side is left open and resolved where the forward is known, and
+            # the line says so rather than being refused.
+            if state.live_seen:
+                notes.append("no side on a live line; read from the moneyness against the "
+                             "forward (a live option is a low-delta option, so a strike above "
+                             "the forward is the call and one below it the put)")
+                return
             raise ValueError("a premium needs the side: a call and a put at one strike are "
-                             "two different prices. Write 'call' or 'put'")
+                             "two different prices. Write 'call' or 'put', or 'live' to have "
+                             "the side read from the moneyness")
         return
     if state.strike is not None:
         if state.is_call is not None:
@@ -1061,6 +1189,13 @@ def _premium_unit(state: _Line, pair: str | None, notes: list[str]) -> tuple[str
     """
     if state.quote_kind != "premium":
         return None, 1.0
+    if state.bps_seen:
+        # A basis point is a hundredth of a per cent of the base notional, so
+        # 5bp is 0.05% and is carried as the per cent it is.  Said outright:
+        # the number on the screen is not the number on the line.
+        notes.append("a premium in basis points is a hundredth of a per cent of the base "
+                     "notional: 5bp is 0.05%")
+        return "pct", 0.01
     if state.pips_seen:
         return "pips", 1.0
     ccy = state.premium_ccy
@@ -1117,6 +1252,16 @@ def _price_numbers(state: _Line, notes: list[str], *, assumed: bool = False) -> 
         state.strike = numbers.pop(0)
         state.instrument = "outright"
         notes.append(f"leading number read as the strike ({state.strike:g})")
+    elif state.columns == 1 and len(numbers) == 2 and state.strike is None and \
+            state.unit_values and numbers[-1] in state.unit_values and \
+            numbers[0] not in state.unit_values and \
+            (assumed or state.instrument in (None, "outright")):
+        # '1.20 5bp' is a strike and a choice price: the price named its own
+        # unit, so the number beside it that did not is the strike.
+        state.strike = numbers.pop(0)
+        state.instrument = "outright"
+        notes.append(f"leading number read as the strike ({state.strike:g}); the number after "
+                     f"it carried the unit, so it is the price")
     if len(numbers) > 2:
         raise ValueError(f"{len(numbers)} numbers left after the tenor and the instrument "
                          f"({', '.join(f'{n:g}' for n in numbers)}); the line is ambiguous")

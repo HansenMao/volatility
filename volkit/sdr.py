@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import csv
 import io
+import math
 import re
 import zipfile
 from dataclasses import dataclass, field
@@ -71,8 +72,7 @@ _FIELDS: dict[str, tuple[str, ...]] = {
     "original_id": ("originaldisseminationid", "originaldisseminationidentifier",
                     "origdisseminationid", "priordisseminationid"),
     "action": ("action", "actiontype", "eventtype", "actiontypeeventtype"),
-    "executed": ("executiontimestamp", "eventtimestamp", "executiontime",
-                 "originalexecutiontimestamp"),
+    "executed": ("eventtimestamp", "executiontime", "originalexecutiontimestamp"),
     "expiry": ("optionexpirationdate", "expirationdate", "expirydate", "enddate",
                "optionexpiry", "maturitydate"),
     "effective": ("effectivedate", "startdate"),
@@ -97,6 +97,33 @@ _FIELDS: dict[str, tuple[str, ...]] = {
             "roundednotionalamountcap"),
     "platform": ("platformidentifier", "executionvenue", "venue"),
     "cleared": ("cleared", "clearedindicator"),
+    # --- the CDE layout in circulation, which publishes an FX option as its
+    # two legs rather than as a side and a strike.  ``Option Type`` is empty
+    # in every row of a 2026 file; these are what carry the same facts.
+    "call_amount": ("callamount",),
+    "call_ccy": ("callcurrency",),
+    "put_amount": ("putamount",),
+    "put_ccy": ("putcurrency",),
+    #: The rate the trade was struck at, and the two currencies it is written
+    #: in.  On an option row it repeats the strike; on a forward or an NDF it
+    #: is the traded outright, which is the only forward on the tape.
+    "rate": ("exchangerate",),
+    "rate_basis": ("exchangeratebasis",),
+    #: The product, in words: ``NA/O Van Put HKD USD``, ``NA/Fwd NDF HKD USD``.
+    #: The one field that says what the row *is* when everything else is blank.
+    "fisn": ("upifisn",),
+    "upi": ("uniqueproductidentifier", "upi"),
+    "upi_underlier": ("upiunderliername",),
+    #: TRAD, EXER, NOVA, ETRM ... an exercise is not a trade, and the action
+    #: column alone does not separate them.
+    "event_type": ("eventtype",),
+    #: When the trade was *done*.  Kept apart from the event timestamp, which
+    #: on an exercise or a correction is the moment of that event and not of
+    #: the trade -- reading one as the other dates a print days late.
+    "execution": ("executiontimestamp",),
+    "premium_per_unit": ("optionpremiumperunit", "premiumperunit"),
+    "product_name": ("productname",),
+    "maturity": ("maturitydateoftheunderlier",),
 }
 _BY_SYNONYM = {syn: name for name, syns in _FIELDS.items() for syn in syns}
 
@@ -111,6 +138,9 @@ _IGNORED = frozenset((
     "packagetransactionprice", "packagetransactionspread", "mandatorilyclearableindicator",
     "embeddedoption", "postpricedindicator", "priceunitofmeasure", "quantityunitofmeasure",
     "amendmentindicator", "reportingjurisdiction", "counterparty1", "counterparty2",
+    "postpricedswapindicator", "custombasketindicator", "indexfactor", "pricenotation",
+    "strikepricenotation", "pricecurrency", "settlementlocation", "deliverytype",
+    "underlieridsourceleg1", "firstexercisedate", "optionlockoutperiod",
 ))
 
 # Both legs must stand alone.  Without the boundary look-arounds this finds
@@ -222,8 +252,13 @@ def _read_handle(fh, out: SdrRead, *, want, known, source: str, origin: str,
     out.columns = dict(col)
 
     missing = [k for k in ("executed", "underlier", "strike") if k not in col]
-    if "underlier" not in col and "product" in col:
-        missing.remove("underlier")     # a UPI/taxonomy string carries the pair
+    if "underlier" not in col and (col.keys() & {"product", "product_name", "strike_pair",
+                                                "rate_basis", "upi_underlier", "fisn"}):
+        missing.remove("underlier")     # a UPI, a FISN or a rate basis carries the pair
+    if "executed" not in col and "execution" in col:
+        missing.remove("executed")      # the execution timestamp is the better one anyway
+    if "strike" not in col and "call_amount" in col:
+        missing.remove("strike")        # an option's legs carry its strike
     if missing:
         raise SdrError(
             f"{label} is missing the column(s) this reader needs: {', '.join(missing)}. "
@@ -295,18 +330,30 @@ def _row(raw: dict, col: dict, *, want, known, source: str, origin: str,
     get = lambda key: str(raw.get(col.get(key, ""), "") or "").strip()
 
     action = get("action").upper()
-    pair, pair_note = _pair_of(get("underlier"), get("underlier_2"), get("product"),
-                               get("strike_pair"), get("ccy_1"), get("ccy_2"))
+    # The underlier and the product name are empty in the layout in
+    # circulation, so the pair is found wherever it *is* written -- and the
+    # order it is written in is not a convention: the same file writes USDHKD
+    # as "HKD/USD" and AUDHKD as "AUD/HKD".  Only the book decides which way
+    # round a pair is quoted.
+    pair, pair_note = _pair_of(get("underlier"), get("underlier_2"), get("product_name"),
+                               get("strike_pair"), get("rate_basis"), get("upi_underlier"),
+                               get("fisn"), get("ccy_1"), get("ccy_2"))
     if not pair:
         return None, f"no currency pair in {get('underlier') or get('product') or 'this row'!r}"
+    pair, orient_note = _orient(pair, known or want)
     if want and pair not in want:
         return None, f"{pair} is not one of the pairs asked for"
     if known and pair not in known:
         return None, f"{pair} is not a pair this book builds"
+    base, quote = pair[:3], pair[3:6]
 
-    executed = parse_time(get("executed"))
+    # The trade's own time, not the event's.  On an exercise or a correction
+    # the event timestamp is the moment of *that*, and reading it as the trade
+    # dates a print days after it was done.
+    executed = parse_time(get("execution")) or parse_time(get("executed"))
     if executed is None:
-        return None, f"execution timestamp {get('executed')!r} cannot be read"
+        return None, (f"execution timestamp {get('execution') or get('executed')!r} "
+                      f"cannot be read")
 
     option_type = get("option_type").upper().replace(" ", "")
     is_call: bool | None = None
@@ -317,11 +364,39 @@ def _row(raw: dict, col: dict, *, want, known, source: str, origin: str,
     elif option_type:
         return None, f"option type {get('option_type')!r} is neither a call nor a put"
 
+    # The legs are the authority: ``Option Type`` is blank in every row of the
+    # layout in circulation, and the legs give the side, the strike in the
+    # book's convention, and the base notional in one go.
+    leg_call, leg_ratio, leg_notional, leg_capped, leg_note = _side_and_strike(
+        raw, col, base, quote)
+    if leg_call is not None:
+        is_call = leg_call
+    elif is_call is None:
+        is_call = _fisn_side(get("fisn"), base, quote)
+        if is_call is not None:
+            leg_note = (f"neither the option type nor the legs gave a side; read as a "
+                        f"{'call' if is_call else 'put'} from the product name "
+                        f"{get('fisn')!r}")
+
     strike, strike_note = _number(get("strike"))
+    if strike is None and leg_ratio:
+        strike, flip_note = leg_ratio, "no strike was published; the legs give it"
+    else:
+        strike, flip_note = _oriented(strike, leg_ratio, "strike")
+        if strike is not None and not leg_ratio and orient_note:
+            flip_note = ("the legs give no amounts, so the strike is the published one and "
+                         "which way round it is written could not be checked")
     premium, _ = _number(get("premium"))
     notional, capped = _notional(get("notional_1"), get("cap"))
+    if leg_notional:
+        # The base leg, whichever column it landed in.  ``Notional amount-Leg
+        # 1`` is whichever leg the reporter put first, and a premium per unit
+        # of the *quote* currency is not a premium per unit of the base.
+        notional, notional_ccy_leg, capped = leg_notional, base, leg_capped
+    else:
+        notional_ccy_leg = get("ccy_1").upper()
 
-    notes = [n for n in (pair_note, strike_note) if n]
+    notes = [n for n in (pair_note, orient_note, leg_note, flip_note, strike_note) if n]
     if capped:
         notes.append(
             "the published notional is the dissemination cap, so the size is a lower bound "
@@ -346,18 +421,162 @@ def _row(raw: dict, col: dict, *, want, known, source: str, origin: str,
                      f"read as a new trade, not as a correction")
         original = ""
 
-    expiry = _date(get("expiry"))
+    expiry = _date(get("expiry")) or _date(get("maturity"))
+    at = executed.astimezone(timezone.utc).isoformat(timespec="seconds")
+    event = get("event_type").upper()
+    common = dict(pair=pair, at=at, tenor=expiry or "", expiry_date=expiry,
+                  action=action or "NEWT", event=event,
+                  external_id=get("dissemination_id"), supersedes_external=original,
+                  source=source, origin=origin, via="sdr", line=line, raw=_brief(raw))
+
+    # An option or a forward?  Two thirds of every file is outrights, NDFs and
+    # swaps, and filing those as at-the-money *trades* fills the archive with
+    # rows that are not options at all.  They are not noise, though: the rate
+    # on one is the traded forward of its own date, and on a pair the
+    # historical workbook does not cover it is the only forward there is.
+    option = (strike is not None or leg_call is not None
+              or any(x in (get("fisn") or "").upper() for x in _FISN_OPTION))
+    if not option:
+        rate, _ = _number(get("rate"))
+        # The two notional legs orient the rate the same way the option's two
+        # legs orient its strike, and for the same reason: the label cannot.
+        amounts = {get("ccy_1").upper(): _number(get("notional_1"))[0],
+                   get("ccy_2").upper(): _number(get("notional_2"))[0]}
+        fwd_ratio = None
+        if amounts.get(base) and amounts.get(quote):
+            fwd_ratio = amounts[quote] / amounts[base]
+        if rate is None and fwd_ratio:
+            rate, rate_note = fwd_ratio, "no rate was published; the two legs give it"
+        else:
+            rate, rate_note = _oriented(rate, fwd_ratio, "rate")
+            if rate is not None and not fwd_ratio and orient_note:
+                return None, ("a forward whose legs do not say which way round its rate is "
+                              "written, on a pair the book quotes the other way")
+        if rate is None or not expiry:
+            return None, ("neither an option nor a dated forward: no strike, no option legs "
+                          "and no rate with a date on it")
+        if rate_note:
+            notes.append(rate_note)
+        return Observation(kind="forward", instrument="atm", rate=rate,
+                           notional=amounts.get(base) or notional, notional_ccy=base,
+                           notional_capped=capped, notes=tuple(notes), **common), ""
+
     return Observation(
-        kind="trade", pair=pair, at=executed.astimezone(timezone.utc).isoformat(timespec="seconds"),
-        instrument="outright" if strike is not None else "atm",
-        tenor=expiry or "", strike=strike, is_call=is_call,
+        kind="trade", instrument="outright" if strike is not None else "atm",
+        strike=strike, is_call=is_call,
         premium=premium, premium_ccy=get("premium_ccy").upper(),
-        notional=notional, notional_ccy=get("ccy_1").upper(),
-        notional_capped=capped, expiry_date=expiry,
-        action=action or "NEWT", external_id=get("dissemination_id"),
-        supersedes_external=original,
-        source=source, origin=origin, via="sdr", line=line,
-        raw=_brief(raw), notes=tuple(notes)), ""
+        notional=notional, notional_ccy=notional_ccy_leg,
+        notional_capped=capped, notes=tuple(notes), **common), ""
+
+
+def _orient(pair: str, known) -> tuple[str, str]:
+    """The book's own spelling of a pair the file may have written either way.
+
+    The file writes USDHKD as ``HKD/USD`` -- and AUDHKD as ``AUD/HKD`` -- so
+    the order in the file is not a convention anything may be read from.  The
+    currencies are, and the book is the authority on which way round the pair
+    is quoted: matched either way, the book's spelling wins and the row says
+    so.  Without a book there is nothing to orient against and the file's own
+    order stands, which is the one case a strike may come out inverted.
+    """
+    if not pair or not known:
+        return pair, ""
+    if pair in known:
+        return pair, ""
+    flipped = pair[3:6] + pair[:3]
+    if flipped in known:
+        return flipped, (f"the file wrote the pair as {pair[:3]}/{pair[3:6]}; the book quotes "
+                         f"{flipped}, and the side and the strike are read in that convention")
+    return pair, ""
+
+
+def _side_and_strike(raw, col, base: str, quote: str) -> tuple:
+    """The side, the strike and the base notional, from the option's two legs.
+
+    An FX option is a call on one currency and a put on the other, and that is
+    how this file publishes it: ``Call currency USD`` with ``Put currency HKD``
+    is a USD call, which on USDHKD is a call.  Two facts come out of the pair
+    of legs and neither needs a naming convention:
+
+    * **the side** -- the call currency is the base, or it is not;
+    * **the strike** -- the quote-currency amount over the base-currency
+      amount, which is the strike in the book's own convention whatever order
+      the file wrote the pair in.
+
+    This matters because ``Option Type`` is **empty in every row** of the
+    layout in circulation: read only from that column, no print in the file
+    has a side, and a trade with no side cannot be inverted to a volatility.
+
+    Returns ``(is_call, ratio, base_notional, capped, note)``, any of which may be
+    ``None`` when the legs do not carry it.  The ratio is a *check* on the
+    published strike and not a replacement for it: leg amounts are rounded,
+    and a strike of 7.75 published against legs that round to 7.80 is a 7.75
+    strike.  What the ratio is for is deciding **which way round** the
+    published number is written, which nothing else in the row can settle.
+    """
+    get = lambda key: str(raw.get(col.get(key, ""), "") or "").strip()
+    call_ccy, put_ccy = get("call_ccy").upper(), get("put_ccy").upper()
+    if not (call_ccy and put_ccy) or {call_ccy, put_ccy} != {base, quote}:
+        return None, None, None, False, ""
+    is_call = call_ccy == base
+    call_amt, call_capped = _notional(get("call_amount"), "")
+    put_amt, put_capped = _notional(get("put_amount"), "")
+    base_amt = call_amt if is_call else put_amt
+    quote_amt = put_amt if is_call else call_amt
+    # The cap is a property of the *amount used*, not of the row.  The file
+    # caps one leg and not the other often enough that reading the row's flag
+    # instead threw away trades whose base leg was published in full -- and
+    # the base leg is the only one a premium per unit is divided by.
+    base_capped = call_capped if is_call else put_capped
+    side = "call" if is_call else "put"
+    note = f"read as a {side} from the legs ({call_ccy} call against {put_ccy} put)"
+    if base_capped:
+        note += f"; the {base} leg is the dissemination cap and not the size"
+    if base_amt and quote_amt:
+        return is_call, quote_amt / base_amt, base_amt, base_capped, note
+    return is_call, None, base_amt or None, base_capped, note
+
+
+def _oriented(value: float | None, ratio: float | None, what: str) -> tuple[float | None, str]:
+    """A published rate, in the direction the two legs say it is written.
+
+    The file's own labels do not settle it: the same file writes USDHKD as
+    ``HKD/USD`` and AUDHKD as ``AUD/HKD``, and ``Exchange rate basis`` reads
+    "second per first" in nine rows out of ten and the other way in the tenth.
+    The **amounts** settle it, always: one leg over the other is the rate, to
+    whatever rounding the amounts carry, and the published number is whichever
+    of it and its reciprocal that ratio is near.
+    """
+    if value is None or not value or not ratio or ratio <= 0:
+        return value, ""
+    near = abs(math.log(value / ratio))
+    flipped = abs(math.log((1.0 / value) / ratio))
+    if near <= flipped:
+        return value, ""
+    return 1.0 / value, (f"the {what} {value:g} was published in the other direction; the legs "
+                         f"put it at {ratio:g}, so it is read as {1.0 / value:g}")
+
+
+#: What the FISN calls a product: ``NA/O Van Put HKD USD``, ``NA/Fwd NDF HKD
+#: USD``.  It is the only field that says what the row *is* when ``Product
+#: name`` and ``Underlier ID`` are blank, which in a 2026 file they always are.
+_FISN_OPTION = ("/O ", " VAN ", " NDO ", " OPT ")
+_FISN_FORWARD = ("/FWD", " NDF ", " FWD ")
+
+
+def _fisn_side(fisn: str, base: str, quote: str) -> bool | None:
+    """The side out of ``NA/O Van Put HKD USD``: a put on the first currency
+    named after it.  Used only when the legs did not say, and never against
+    the order the pair is written in -- the currency it names is looked up."""
+    text = str(fisn or "").upper()
+    m = re.search(r"(CALL|PUT)\s+([A-Z]{3})", text)
+    if not m:
+        return None
+    on, ccy = m.group(1), m.group(2)
+    if ccy not in (base, quote):
+        return None
+    # A put on the quote currency is a call on the base, and the other way.
+    return (on == "CALL") if ccy == base else (on == "PUT")
 
 
 def _pair_of(*candidates) -> tuple[str, str]:

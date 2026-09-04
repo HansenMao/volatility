@@ -46,6 +46,8 @@ screen with no author.
 from __future__ import annotations
 
 import math
+
+import numpy as np
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
@@ -641,6 +643,101 @@ class TradeVol:
 MAX_STALE_DAYS = 7.0
 
 
+class TapeForwards:
+    """The forward curve the dissemination file itself printed.
+
+    Every outright and NDF in the same file carries the rate it was struck at
+    and the date it settles, which is a forward curve for that day -- and on a
+    pair the historical workbook does not cover it is the **only** forward
+    there is.  A premium cannot become a volatility without one, so a desk
+    that marks a pair the sheet has never held could invert nothing at all.
+
+    Three rules, and each exists because the alternative is a silent error:
+
+    * **A forward is used only from near the trade's own date.**  The same
+      bound the historical sheet gets: Friday's print is a fine forward for a
+      Monday trade, a print from three weeks ago is not.
+    * **Interpolation is in the log of the rate against days**, which is a
+      constant interest differential -- what a forward curve actually is.
+    * **Extrapolation is bounded.**  Beyond the last print the last segment's
+      carry is extended, and only as far as twice the longest date printed.
+      Holding the rate flat instead would price a 2028 option off a two-week
+      forward, and on a pegged pair the carry *is* the trade.
+    """
+
+    #: How far past the longest printed date the last segment's carry may be
+    #: extended, as a multiple of that date.
+    MAX_EXTRAPOLATE = 2.0
+
+    def __init__(self, rows=(), *, max_stale_days: float = 7.0):
+        self.max_stale_days = float(max_stale_days)
+        self.by_day: dict = {}
+        for obs in rows:
+            when, expiry = obs.when, days_of(obs.expiry_date or obs.tenor, asof=obs.when)
+            if when is None or expiry is None or expiry <= 0 or not obs.rate:
+                continue
+            self.by_day.setdefault(when.date(), []).append((expiry, float(obs.rate)))
+        for day, points in self.by_day.items():
+            points.sort()
+
+    def __len__(self) -> int:
+        return sum(len(v) for v in self.by_day.values())
+
+    def _points(self, want) -> tuple[list, str]:
+        """The nearest day's prints at or before ``want``, inside the bound."""
+        days = sorted(d for d in self.by_day if d <= want)
+        if not days:
+            return [], ""
+        used = days[-1]
+        stale = (want - used).days
+        if stale > self.max_stale_days:
+            return [], (f"the newest forward printed on or before {want.isoformat()} is from "
+                        f"{used.isoformat()}, {stale} days earlier")
+        return self.by_day[used], ("" if stale == 0 else
+                                   f" printed on {used.isoformat()}, {stale} day(s) before")
+
+    def at(self, when: datetime, days: float) -> tuple[float | None, str]:
+        """The forward for a trade of ``days`` on the date of ``when``."""
+        points, why = self._points(when.date())
+        if not points:
+            return None, (why or "the tape printed no forward on or before that date")
+        xs = [d for d, _ in points]
+        ys = [math.log(r) for _, r in points]
+        where = f"{len(points)} forward print(s) on the tape{why}"
+        if len(points) == 1:
+            if abs(days - xs[0]) > max(1.0, 0.25 * xs[0]):
+                return None, (f"the tape printed one forward that day, at {xs[0]:.0f} days, "
+                              f"and this trade is {days:.0f} days")
+            return math.exp(ys[0]), f"one forward print at {xs[0]:.0f} days ({where})"
+        if xs[0] <= days <= xs[-1]:
+            hi = next((i for i, x in enumerate(xs) if x >= days), len(xs) - 1)
+            lo = max(0, hi - 1)
+            return math.exp(float(np.interp(days, xs, ys))), (
+                f"interpolated between the {xs[lo]:.0f} and {xs[hi]:.0f} day prints ({where})")
+        if days > xs[-1]:
+            if days > self.MAX_EXTRAPOLATE * xs[-1]:
+                return None, (f"the tape printed nothing beyond {xs[-1]:.0f} days and this "
+                              f"trade is {days:.0f}; extending the carry that far would be a "
+                              f"forward nobody quoted")
+            slope = (ys[-1] - ys[-2]) / max(1e-9, xs[-1] - xs[-2])
+            return math.exp(ys[-1] + slope * (days - xs[-1])), (
+                f"the carry between the {xs[-2]:.0f} and {xs[-1]:.0f} day prints, extended to "
+                f"{days:.0f} days ({where})")
+        slope = (ys[1] - ys[0]) / max(1e-9, xs[1] - xs[0])
+        return math.exp(ys[0] - slope * (xs[0] - days)), (
+            f"the carry between the {xs[0]:.0f} and {xs[1]:.0f} day prints, extended back to "
+            f"{days:.0f} days ({where})")
+
+
+def tape_forwards(archive: Archive, pair: str, *, asof: datetime,
+                  lookback_days: float = 90.0, max_stale_days: float = MAX_STALE_DAYS):
+    """Every forward print the archive holds for one pair, as a curve per day."""
+    since = asof - timedelta(days=lookback_days + max_stale_days)
+    rows = [o for o in archive.query(pair=pair, kinds="forward", since=since, until=asof)
+            if o.action.upper() not in ("CANC", "EROR")]
+    return TapeForwards(rows, max_stale_days=max_stale_days)
+
+
 def _forward_for_trade(hist_pair, when: datetime, days: float,
                        max_stale_days: float = MAX_STALE_DAYS) -> tuple[float | None, str]:
     """The forward at the trade's own date, out of the historical workbook.
@@ -781,7 +878,7 @@ def implied_from_trade(obs: Observation, *, pair: str, forward: float,
 
 def invert_trades(archive: Archive, pair: str, *, asof: datetime, hist_pair=None,
                   lookback_days: float = 90.0, discount_rate: float | None = None,
-                  max_stale_days: float = MAX_STALE_DAYS,
+                  max_stale_days: float = MAX_STALE_DAYS, tape=None,
                   limit: int = 500) -> tuple[list[TradeVol], list[str]]:
     """Every printed trade this build can turn into a volatility, and why the rest could not.
 
@@ -805,7 +902,18 @@ def invert_trades(archive: Archive, pair: str, *, asof: datetime, hist_pair=None
             refused["the expiry could not be read"] = refused.get("the expiry could not be read", 0) + 1
             continue
         years = days / DAYS_IN_YEAR
+        # The desk's own sheet first -- it is the record the marks were made
+        # against -- and the tape behind it, which is the only forward there
+        # is on a pair the sheet has never held.  Whichever answered is named
+        # on the row: two forwards for one date are two different numbers.
         forward, source = _forward_for_trade(hist_pair, when, days, max_stale_days)
+        if forward is None and tape is not None and len(tape):
+            sheet_said = source
+            forward, source = tape.at(when, days)
+            if forward is not None:
+                source = f"the tape: {source}"
+            else:
+                source = f"{sheet_said}, and from the tape: {source}"
         if forward is None:
             refused[source] = refused.get(source, 0) + 1
             continue

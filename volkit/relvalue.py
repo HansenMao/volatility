@@ -650,7 +650,7 @@ def _measured_smile_shape(realized_vol: float, rho: float, nu: float, t: float,
     smile should look like -- and it is read at the *marked* strike, because a
     comparison at two different strikes is not a comparison.
     """
-    k_atm = float(black.dns_strike(1.0, realized_vol, t, conv))
+    k_atm = float(black.atm_strike(1.0, realized_vol, t, conv))
     alpha = sabr.alpha_from_atm(realized_vol, k_atm, rho, nu, t, 1.0, 1.0)
     p = sabr.SabrParams(alpha, rho, nu, t, 1.0, 1.0)
     return float(sabr.lognormal_vol(strike_ratio, p)) - realized_vol
@@ -916,7 +916,7 @@ def _cell(surface, hist, tri_row, tri_note, carry, col: GridColumn, tenor: str, 
     # -- where on the smile this cell is -------------------------------------
     try:
         if col.name == "atm":
-            k = float(black.dns_strike(1.0, atm, t, surface.conv))
+            k = float(black.atm_strike(1.0, atm, t, surface.conv))
             implied = atm
         else:
             k, implied = surface.delta_strike(expiry, col.delta, col.is_call, method, cut)

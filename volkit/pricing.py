@@ -22,8 +22,14 @@ from .timeutil import UTC, parse_datetime, parse_tenor
 
 # "25d", "25dc", "25 delta put", "-10d", "atm", "dns", or a plain number.
 _DELTA_RE = re.compile(r"^\s*(-?)\s*(\d+(?:\.\d+)?)\s*d(?:elta)?\s*([cp])?\s*$", re.IGNORECASE)
-# "50d" is the delta-neutral straddle by another name; "0d" is not a strike.
-_ATM_WORDS = {"atm", "atmf", "dns", "50d"}
+# Three ways of asking for the money.  ``ATM`` is the pair's own convention
+# at that tenor -- the delta-neutral straddle out to the boundary, the
+# forward beyond it -- and the other two name one of those outright: a desk
+# that types ``ATMF`` on a 3M wants the forward strike, not the straddle the
+# convention would give it, and ``DNS`` (or ``50d``) on a 2Y wants the
+# straddle.  ``0d`` is not a strike.
+_ATM_WORDS = {"atm": "convention", "atmf": "forward", "fwd": "forward", "forward": "forward",
+              "dns": "straddle", "50d": "straddle", "straddle": "straddle"}
 
 
 @dataclass
@@ -35,6 +41,7 @@ class StrikeSpec:
     is_call: bool | None = None  # for a delta strike, which side it was quoted on
     side_explicit: bool = False  # True when the text itself said call or put
     text: str = ""
+    atm_kind: str = "convention"  # for an ATM strike: "convention" | "forward" | "straddle"
 
 
 def parse_strike(text) -> StrikeSpec:
@@ -48,8 +55,10 @@ def parse_strike(text) -> StrikeSpec:
     if isinstance(text, (int, float)):
         return StrikeSpec("absolute", float(text), text=str(text))
     s = str(text).strip()
-    if s.lower() in _ATM_WORDS:
-        return StrikeSpec("atm", text="ATM")
+    atm_kind = _ATM_WORDS.get(s.lower())
+    if atm_kind:
+        label = {"convention": "ATM", "forward": "ATMF", "straddle": "DNS"}[atm_kind]
+        return StrikeSpec("atm", text=label, atm_kind=atm_kind)
     m = _DELTA_RE.match(s)
     if m:
         sign, number, side = m.group(1), float(m.group(2)), (m.group(3) or "").lower()
@@ -96,7 +105,12 @@ def resolve_strike(surface, text, slice_, forward: float, expiry_dt, *,
     if spec.kind == "absolute":
         return spec.value / forward, spec.value, spec
     if spec.kind == "atm":
-        ratio = float(slice_.strikes[2])
+        if spec.atm_kind == "forward":
+            ratio = 1.0
+        elif spec.atm_kind == "straddle":
+            ratio = float(black.dns_strike(1.0, slice_.atm_vol, slice_.t, surface.conv))
+        else:
+            ratio = float(slice_.strikes[2])
         return ratio, ratio * forward, spec
     kind_hint = (option_type or "Auto").strip().upper()[:1]
     if spec.side_explicit:
@@ -387,7 +401,7 @@ def quick_vol(book, pair: str, expiry, strike="ATM", *,
     # with no feed exactly as it does for one with a level.
     delta_is_call = bool(spec.is_call) if spec.kind == "delta" else True
     delta_pct = float(black.delta(1.0, ratio, vol, t, delta_is_call,
-                                  surface.conv)) * 100.0
+                                  slice_.conv)) * 100.0
 
     warnings = list(slice_.warnings)
     if scaled:
@@ -408,6 +422,9 @@ def quick_vol(book, pair: str, expiry, strike="ATM", *,
         "side_explicit": side_asked,
         "delta": delta_pct, "delta_is_call": delta_is_call,
         "premium_adjusted": bool(surface.conv),
+        "delta_kind": slice_.conv.delta_label(),
+        "atm_kind": surface.conv.atm_label(t),
+        "convention": slice_.conv.describe(),
         "scaled": scaled, "cut": cut, "method": method or surface.method,
         "forward_source": source,
         "spot": float(level["spot"]) if source == "feed" else None,
@@ -484,7 +501,16 @@ class LegResult:
     atm_vol: float = 0.0
     premium_dom: float = 0.0        # domestic per 1 unit of base, undiscounted
     premium_pct_base: float = 0.0   # % of base notional
+    # The premium as paid: the forward premium discounted at the domestic
+    # (quote) currency's RATES-tab rate to the premium date.  ``None`` when
+    # the tab has no rate for the currency, and ``discounted`` says which.
+    premium_pv_dom: float | None = None
+    premium_pv_pct_base: float | None = None
+    pv_amount: float | None = None
+    discounted: bool = False
+    df_domestic: float | None = None
     delta_pct: float = 0.0          # in the pair's quoted convention
+    delta_kind: str = "forward delta"   # spot or forward, and why
     smile_delta_pct: float = 0.0
     # millions of base the hedge moves by per 1% move in spot, on the smile
     smile_cash_gamma: float = 0.0
@@ -508,10 +534,36 @@ class LegResult:
 def price_leg(book, leg: OptionLeg) -> LegResult:
     """Price one leg, converting any failure into a reported error."""
     try:
-        return _price_leg(book, leg)
+        return _discounted(book, _price_leg(book, leg))
     except (ValueError, KeyError, ConvergenceError, ZeroDivisionError) as exc:
         return LegResult(ok=False, label=leg.label, pair=leg.pair,
                          error=f"{type(exc).__name__}: {exc}")
+
+
+def _discounted(book, r: LegResult) -> LegResult:
+    """Put the premium as paid beside the forward premium, where a rate allows.
+
+    Every price above is a forward value.  What changes hands is that value
+    discounted at the domestic currency's rate from the option's settlement
+    to the premium date -- the spot date, so the period is the same one the
+    forward itself covers, ``t`` to a day -- and in the base currency that is
+    the same money converted at today's spot.  The exotics get the same
+    treatment: their price is a forward value per unit of payout and
+    discounts the same way.  No rate on the tab is no discounting, said
+    rather than assumed: ``premium_pv_*`` stays ``None`` and ``discounted``
+    is ``False``.
+    """
+    if not r.ok:
+        return r
+    df = book.discount_factor(r.pair[3:6], r.t) if hasattr(book, "discount_factor") else None
+    if df is None:
+        return r
+    r.df_domestic = float(df)
+    r.discounted = True
+    r.premium_pv_dom = r.premium_dom * df
+    r.premium_pv_pct_base = r.premium_pct_base * df
+    r.pv_amount = r.premium_amount * df
+    return r
 
 
 def _resolve_market(book, leg: OptionLeg, expiry: date, settle: date | None = None):
@@ -743,7 +795,9 @@ def _price_leg(book, leg: OptionLeg) -> LegResult:
 
     # ---- vanilla --------------------------------------------------------
     premium_dom = float(black.price(forward, strike, vol, t, is_call))
-    delta = float(black.delta(forward, strike, vol, t, is_call, surface.conv))
+    # The slice's convention: spot delta where the pair quotes one and the
+    # RATES tab can price it, forward delta otherwise -- and the row says which.
+    delta = float(black.delta(forward, strike, vol, t, is_call, sl.conv))
     vega = float(black.vega(forward, strike, vol, t)) / 100.0
     gamma = float(black.gamma(forward, strike, vol, t))
     try:
@@ -769,7 +823,8 @@ def _price_leg(book, leg: OptionLeg) -> LegResult:
         **common, strike=strike, strike_ratio=ratio, strike_spec=spec.text,
         is_call=is_call, vol=vol * 100.0, fair_value=premium_dom,
         premium_dom=premium_dom, premium_pct_base=premium_dom / spot * 100.0,
-        delta_pct=delta * 100.0, smile_delta_pct=smile_delta * 100.0,
+        delta_pct=delta * 100.0, delta_kind=sl.conv.delta_label(),
+        smile_delta_pct=smile_delta * 100.0,
         smile_cash_gamma=notional * smile_gamma,
         vega_dom=vega, gamma=gamma,
         premium_amount=notional * premium_dom, vega_amount=notional * vega,
@@ -784,13 +839,21 @@ def price_strip(book, legs: list[OptionLeg]) -> dict:
     for r in results:
         if not r.ok:
             continue
-        bucket = totals.setdefault(r.pair, {"premium": 0.0, "vega": 0.0, "delta": 0.0})
+        bucket = totals.setdefault(r.pair, {"premium": 0.0, "vega": 0.0, "delta": 0.0,
+                                            "pv_premium": 0.0})
         bucket["premium"] += r.premium_amount
         bucket["vega"] += r.vega_amount
         bucket["delta"] += r.delta_amount
+        # The premium as paid totals only if every leg on the pair could be
+        # discounted; one leg without a rate makes the total None rather
+        # than a sum of two different kinds of money.
+        if bucket["pv_premium"] is not None:
+            bucket["pv_premium"] = (None if r.pv_amount is None
+                                    else bucket["pv_premium"] + r.pv_amount)
     return {
         "legs": [r.__dict__ for r in results],
         "totals": totals,
         "errors": sum(1 for r in results if not r.ok),
-        "note": "premiums are undiscounted forward values; this model carries no rate curve",
+        "note": ("premiums are forward values; the premium as paid (pv_*) is the same "
+                 "discounted at the term currency's RATES-tab rate, None without one"),
     }

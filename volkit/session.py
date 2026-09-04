@@ -79,13 +79,51 @@ EXPORT_SUFFIX = "_marked"
 #: session file alone, so the file it replaced is kept beside it.
 BACKUP_INFIX = ".bak-"
 
-#: How many of those backups to keep.  It used to be all of them, which was
-#: right while an export was a thing a desk did occasionally and the workbook
-#: was the book of record.  As the *store*, a save is a save: a full copy of
-#: the workbook per write, kept forever, fills a folder with files nobody
-#: reads and buries the one somebody wants.  The most recent are the ones an
-#: undo reaches for, so those are what is kept.
-BACKUP_KEEP = 20
+#: Where they are kept: ``vol_marks.backups/`` beside the workbook.  They used
+#: to sit in the workbook's own folder, which is the folder a person opens to
+#: find the workbook -- twenty near-identical files with the one they want in
+#: the middle of them.  Copies made before this existed are moved in on the
+#: next write rather than left behind.
+BACKUP_DIR_SUFFIX = ".backups"
+
+#: The one copy that is never pruned: the workbook as it was before the first
+#: write that flattened it.  openpyxl carries no images, charts or pivots
+#: through a round trip, so a file that *has* them is irreplaceable and every
+#: copy taken after it is not -- once the book is flat, a later version is the
+#: previous one plus a session document.  That asymmetry is the whole reason
+#: pruning can be aggressive: what cannot be rebuilt is kept forever, and what
+#: can is kept for as long as it is useful.  ``vol_marks.origin.xlsx``, and a
+#: second one is numbered rather than written over.
+ORIGIN_INFIX = ".origin"
+
+#: How the rest are thinned, oldest first: the newest few whatever their age,
+#: then one an hour, one a day, one a week, one a month.  Count alone was the
+#: old rule and it kept twenty copies of one afternoon -- twenty saves between
+#: lunch and the close and yesterday's file is gone, which is exactly the one
+#: somebody asks for.  Thinning by time keeps fewer files *and* more history:
+#: about thirty of them, reaching back half a year.  The newest in each bucket
+#: is the one kept, so a daily copy is that day as it was left.
+BACKUP_KEEP_LATEST = 5
+BACKUP_KEEP_HOURLY = 12
+BACKUP_KEEP_DAILY = 14
+BACKUP_KEEP_WEEKLY = 8
+BACKUP_KEEP_MONTHLY = 6
+
+#: Where the cheap history goes: ``vol_marks.history/`` beside the workbook,
+#: a stamped copy of the session document each export wrote plus one line per
+#: write in ``history.jsonl``.  A backup is a copy of the whole container; a
+#: session document is a few kilobytes that says what was *marked*, and
+#: ``apply_document`` puts it back.  So the marks are versioned deeply and the
+#: container shallowly, which is the right way round: the expensive copies
+#: answer "give me the file back", and these answer "what did we mark on
+#: Tuesday, and what changed since".
+HISTORY_DIR_SUFFIX = ".history"
+HISTORY_LOG = "history.jsonl"
+
+#: How many session snapshots to keep.  The log line is never pruned -- it is
+#: one line of text -- so a write stays in the record after its document has
+#: gone.
+HISTORY_KEEP = 500
 
 
 #: What a pair's PARAMS column starts at when the screen creates it: the
@@ -249,16 +287,14 @@ def add_pair(workbook, pair: str, *, atm: float, quotes: dict | None = None,
                      f"{name}: a quote sheet with no tenors yet, so it has no smile until "
                      f"one is quoted on the marking screen")
 
-    bak = _backup_path(src)
-    with open(bak, "wb") as fh:
-        fh.write(blob)
-    notes.append(f"the workbook as it was is kept at {bak.name}")
-    pruned = prune_backups(src)
-    if pruned:
-        notes.append(f"{len(pruned)} older backup(s) removed, {BACKUP_KEEP} kept")
+    kept = keep_backup(src, blob)
+    notes.extend(kept["notes"])
     _save_workbook(wb, src, cached)
-    return {"written": str(src), "backup": str(bak), "pair": name, "quoted": quoted,
-            "notes": notes, "stamp": workbook_stamp(src)}
+    out = {"written": str(src), "backup": kept["backup"], "pair": name, "quoted": quoted,
+           "notes": notes, "pruned": kept["pruned"], "reused": kept["reused"],
+           "stamp": workbook_stamp(src)}
+    record_write(src, what="add pair", wrote=out)
+    return out
 
 
 def remove_pair(workbook, pair: str, *, expect: str = "", force: bool = False) -> dict:
@@ -315,16 +351,13 @@ def remove_pair(workbook, pair: str, *, expect: str = "", force: bool = False) -
         notes.append(f"{name}: {' and '.join(kept)} left in place, so nothing reads "
                      f"{'them' if len(kept) > 1 else 'it'} now; adding the pair back finds "
                      f"what it had")
-    bak = _backup_path(src)
-    with open(bak, "wb") as fh:
-        fh.write(blob)
-    notes.append(f"the workbook as it was is kept at {bak.name}")
-    pruned = prune_backups(src)
-    if pruned:
-        notes.append(f"{len(pruned)} older backup(s) removed, {BACKUP_KEEP} kept")
+    kept = keep_backup(src, blob)
+    notes.extend(kept["notes"])
     _save_workbook(wb, src, cached)
-    return {"written": str(src), "backup": str(bak), "pair": name, "notes": notes,
-            "stamp": workbook_stamp(src)}
+    out = {"written": str(src), "backup": kept["backup"], "pair": name, "notes": notes,
+           "pruned": kept["pruned"], "reused": kept["reused"], "stamp": workbook_stamp(src)}
+    record_write(src, what="remove pair", wrote=out)
+    return out
 
 
 def write_config_tabs(workbook, tabs: dict, *, expect: str = "",
@@ -375,20 +408,18 @@ def write_config_tabs(workbook, tabs: dict, *, expect: str = "",
     notes = [configsheets.write_rows(wb, sheet, written[sheet], rows,
                                      header=configsheets.EDITABLE[sheet][1])
              for sheet, rows in sorted(tabs.items())]
-    bak = _backup_path(src)
-    with open(bak, "wb") as fh:
-        fh.write(blob)
-    notes.append(f"the workbook as it was is kept at {bak.name}")
-    pruned = prune_backups(src)
-    if pruned:
-        notes.append(f"{len(pruned)} older backup(s) removed, {BACKUP_KEEP} kept")
+    kept = keep_backup(src, blob)
+    notes.extend(kept["notes"])
     _save_workbook(wb, src, cached)
     locked = excel_lock(src)
     if locked is not None:
         notes.append(f"{locked.name} is beside the workbook, so Excel probably has it open; "
                      f"anything it saves afterwards is written over this")
-    return {"written": str(src), "backup": str(bak), "tabs": sorted(tabs),
-            "notes": notes, "pruned": pruned, "stamp": workbook_stamp(src)}
+    out = {"written": str(src), "backup": kept["backup"], "tabs": sorted(tabs),
+           "notes": notes, "pruned": kept["pruned"], "reused": kept["reused"],
+           "stamp": workbook_stamp(src)}
+    record_write(src, what="configuration tab", wrote=out)
+    return out
 
 
 def round_trip_losses(path) -> list[str]:
@@ -403,12 +434,33 @@ def round_trip_losses(path) -> list[str]:
     once, not to discover.
     """
     import zipfile
-    out: list[str] = []
     try:
         with zipfile.ZipFile(Path(path)) as z:
             names = z.namelist()
     except (OSError, zipfile.BadZipFile) as exc:
         return [f"cannot look inside {Path(path).name}: {exc}"]
+    return _losses_in(names)
+
+
+def round_trip_losses_bytes(blob: bytes) -> list[str]:
+    """The same question of a workbook already read into memory.
+
+    Asked of the bytes a write is about to replace rather than of the file:
+    they are the copy that will be kept, and a second writer must not be able
+    to change the answer between the question and the copy.
+    """
+    import io as _io
+    import zipfile
+    try:
+        with zipfile.ZipFile(_io.BytesIO(blob)) as z:
+            names = z.namelist()
+    except (OSError, zipfile.BadZipFile):
+        return []
+    return _losses_in(names)
+
+
+def _losses_in(names) -> list[str]:
+    out: list[str] = []
     for what, prefix in (("image", "xl/media/"), ("chart", "xl/charts/chart"),
                          ("pivot table", "xl/pivotTables/pivotTable"),
                          ("drawing", "xl/drawings/drawing")):
@@ -449,22 +501,406 @@ def excel_lock(path) -> Path | None:
     return lock if lock.exists() else None
 
 
-def prune_backups(src, keep: int = BACKUP_KEEP) -> list[str]:
-    """Delete all but the newest ``keep`` backups of one workbook.
+def backup_dir(src, *, create: bool = False) -> Path:
+    """The folder this workbook's copies live in, made if asked for."""
+    p = Path(src)
+    d = p.parent / f"{p.stem}{BACKUP_DIR_SUFFIX}"
+    if create:
+        d.mkdir(parents=True, exist_ok=True)
+    return d
 
-    Returns what it removed.  Newest by name, which is newest by time: the
-    stamp is written so that it sorts.
+
+def _adopt_loose_backups(src) -> list[str]:
+    """Move copies made before there was a folder into it.
+
+    Beside the workbook is where they used to go.  Left there they would be
+    pruned by one rule and listed by another, and the folder they clutter is
+    the one this change exists to clear.
+    """
+    p, moved = Path(src), []
+    loose = sorted(p.parent.glob(f"{p.stem}{BACKUP_INFIX}*{p.suffix}"))
+    if not loose:
+        return moved
+    d = backup_dir(src, create=True)
+    for old in loose:
+        dst = d / old.name
+        n = 2
+        while dst.exists():
+            dst = d / f"{old.stem}-{n}{old.suffix}"
+            n += 1
+        try:
+            old.replace(dst)
+            moved.append(dst.name)
+        except OSError:
+            continue
+    return moved
+
+
+def _backup_when(path: Path) -> datetime:
+    """When a copy was taken: off its stamped name, and off the file if the
+    name does not carry one (a copy somebody renamed by hand)."""
+    stem = path.stem
+    i = stem.find(BACKUP_INFIX)
+    if i >= 0:
+        text = stem[i + len(BACKUP_INFIX):]
+        for fmt in ("%Y%m%d-%H%M%S", "%Y%m%d-%H%M%S-%f"):
+            try:
+                return datetime.strptime(text.split("-")[0] + "-" + text.split("-")[1], fmt)
+            except (ValueError, IndexError):
+                pass
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime)
+    except OSError:
+        return datetime.fromtimestamp(0)
+
+
+def list_backups(src) -> list[dict]:
+    """Every copy of this workbook, newest first.
+
+    ``origin`` marks the one that is never pruned.  Reported rather than only
+    counted: a list nobody can see is a list nobody trusts, and the question a
+    person actually has is "which of these is the one from before lunch".
+
+    Copies made before there was a folder are listed from beside the workbook
+    too, and are thinned and restored like any other.  A write moves them in;
+    until one happens, a rule that could not see them would be a second rule.
+    """
+    p, d = Path(src), backup_dir(src)
+    seen: set[Path] = set()
+    out = []
+    here = sorted(d.iterdir()) if d.is_dir() else []
+    loose = sorted(p.parent.glob(f"{p.stem}{BACKUP_INFIX}*{p.suffix}"))
+    for f in here + loose:
+        if f in seen or not f.is_file() or f.suffix.lower() != p.suffix.lower():
+            continue
+        if not f.name.startswith(p.stem + "."):
+            continue
+        seen.add(f)
+        try:
+            size = f.stat().st_size
+        except OSError:
+            continue
+        out.append({"name": f.name, "path": str(f), "bytes": size,
+                    "when": _backup_when(f).isoformat(timespec="seconds"),
+                    "origin": ORIGIN_INFIX in f.stem[len(p.stem):],
+                    "loose": f.parent != d})
+    out.sort(key=lambda r: (r["origin"], r["when"]), reverse=True)
+    return out
+
+
+def _thin(rows: list[tuple[datetime, Path]]) -> set[Path]:
+    """Which of these copies to keep, by the buckets at the top of the file.
+
+    Newest first in, so the newest of each hour, day, week and month is the
+    one that survives it.
+    """
+    keep: set[Path] = set()
+    rows = sorted(rows, key=lambda r: r[0], reverse=True)
+    for when, path in rows[:max(0, BACKUP_KEEP_LATEST)]:
+        keep.add(path)
+    # The bucket a copy falls in, written out rather than left to strftime:
+    # ``%G%V`` is the C library's and not Python's, and the week number is one
+    # of the two the Windows build would have had to be trusted with.
+    buckets = (
+        (lambda w: (w.year, w.month, w.day, w.hour), BACKUP_KEEP_HOURLY),
+        (lambda w: (w.year, w.month, w.day), BACKUP_KEEP_DAILY),
+        (lambda w: w.isocalendar()[:2], BACKUP_KEEP_WEEKLY),
+        (lambda w: (w.year, w.month), BACKUP_KEEP_MONTHLY),
+    )
+    for key, want in buckets:
+        seen: dict = {}
+        for when, path in rows:
+            seen.setdefault(tuple(key(when)), path)
+            if len(seen) >= max(0, want):
+                break
+        keep.update(seen.values())
+    return keep
+
+
+def prune_backups(src, keep: int | None = None) -> list[str]:
+    """Thin this workbook's copies, and say which ones went.
+
+    ``keep`` is the old rule -- the newest that many and nothing else -- kept
+    for a caller that asks for a number outright.  The default is the thinning
+    at the top of this file, which is what a write uses: a count alone throws
+    away last week to make room for this afternoon.
+
+    The origin copy is never a candidate.  Nothing else in the folder is
+    touched, either: a file somebody put there by hand is theirs.
     """
     p = Path(src)
-    found = sorted(p.parent.glob(f"{p.stem}{BACKUP_INFIX}*{p.suffix}"))
+    d = backup_dir(src)
+    if not d.is_dir():
+        return []
+    rows = [(_backup_when(Path(r["path"])), Path(r["path"]))
+            for r in list_backups(src) if not r["origin"]]
+    if keep is None:
+        wanted = _thin(rows)
+    else:
+        wanted = {path for _, path in
+                  sorted(rows, key=lambda r: r[0], reverse=True)[:max(0, int(keep))]}
     gone: list[str] = []
-    for old in found[:max(0, len(found) - max(0, int(keep)))]:
+    for _, path in sorted(rows, key=lambda r: r[0]):
+        if path in wanted:
+            continue
         try:
-            old.unlink()
-            gone.append(old.name)
+            path.unlink()
+            gone.append(path.name)
         except OSError:
             continue
     return gone
+
+
+def keep_backup(src, blob: bytes) -> dict:
+    """Keep the bytes a write is about to replace, and thin what is there.
+
+    One place, because five write paths did the same four lines and a fix to
+    one of them was a fix to one of them.  What it decides:
+
+    * **Is this copy irreplaceable?**  If the file being replaced still holds
+      images, charts or pivots, openpyxl is about to drop them and this is the
+      last copy that has them.  It is kept as the origin and never pruned.
+    * **Is it the same file again?**  A write with nothing new in it used to
+      leave a byte-identical copy beside the last one.  The newest copy is
+      compared -- size first, then the bytes -- and an identical write keeps
+      no new file and says so.
+    * **What can go?**  The rest are thinned by time, not by count.
+
+    Returns ``{"backup", "origin", "reused", "pruned", "moved", "notes"}``.
+    ``backup`` is the copy that now holds these bytes, which on a repeated
+    write is the one that was already there.
+    """
+    p = Path(src)
+    notes: list[str] = []
+    moved = _adopt_loose_backups(src)
+    if moved:
+        notes.append(f"{len(moved)} older backup(s) moved into {backup_dir(src).name}/")
+    d = backup_dir(src, create=True)
+
+    # Irreplaceable?  Asked of the bytes in hand rather than of the file on
+    # disk: they are the same bytes, and a second writer must not be able to
+    # change the answer between the question and the copy.
+    losses = round_trip_losses_bytes(blob)
+    if losses:
+        origin = d / f"{p.stem}{ORIGIN_INFIX}{p.suffix}"
+        n = 2
+        while origin.exists():
+            origin = d / f"{p.stem}{ORIGIN_INFIX}-{n}{p.suffix}"
+            n += 1
+        with open(origin, "wb") as fh:
+            fh.write(blob)
+        notes.append(f"the workbook as it was is kept at {origin.name}, and kept for good: "
+                     f"it holds {', '.join(losses)} that a write does not carry through")
+        pruned = prune_backups(src)
+        if pruned:
+            notes.append(f"{len(pruned)} older backup(s) thinned out")
+        return {"backup": str(origin), "origin": str(origin), "reused": False,
+                "pruned": pruned, "moved": moved, "notes": notes}
+
+    # The same file again?
+    same = _same_as_newest(src, blob)
+    if same is not None:
+        notes.append(f"the workbook was already the file kept at {same.name}, so no second "
+                     f"copy of it was made")
+        return {"backup": str(same), "origin": "", "reused": True,
+                "pruned": [], "moved": moved, "notes": notes}
+
+    bak = _backup_path(src)
+    with open(bak, "wb") as fh:
+        fh.write(blob)
+    notes.append(f"the workbook as it was is kept at {bak.name}")
+    pruned = prune_backups(src)
+    if pruned:
+        notes.append(f"{len(pruned)} older backup(s) thinned out, "
+                     f"{len(list_backups(src))} kept")
+    return {"backup": str(bak), "origin": "", "reused": False,
+            "pruned": pruned, "moved": moved, "notes": notes}
+
+
+#: The part of a workbook that changes on every save whatever was in it.
+#: openpyxl writes ``dcterms:modified`` as the moment it saved, so two saves of
+#: an unchanged book are never the same bytes -- comparing the files whole
+#: would have found a difference every time and kept a copy every time, which
+#: is the thing this is here to stop.
+VOLATILE_PARTS = ("docProps/core.xml",)
+
+
+def content_digest(blob: bytes) -> str:
+    """What is *in* a workbook, as one string, ignoring when it was saved.
+
+    Every part of the package by name and by the checksum of its contents --
+    the CRC the zip already carries, so nothing is decompressed -- with the
+    parts above left out.  Two workbooks with the same digest hold the same
+    cells, sheets and formulas and differ only in the stamp the library put on
+    them as it wrote.
+
+    Falls back to the bytes themselves for anything that will not open as a
+    package: a digest that quietly said "the same" for two files it could not
+    read would keep no copy of either.
+    """
+    import hashlib
+    import io as _io
+    import zipfile
+    h = hashlib.sha256()
+    try:
+        with zipfile.ZipFile(_io.BytesIO(blob)) as z:
+            for info in sorted(z.infolist(), key=lambda i: i.filename):
+                if info.filename in VOLATILE_PARTS:
+                    continue
+                h.update(f"{info.filename}:{info.CRC}:{info.file_size}\n".encode())
+    except (OSError, zipfile.BadZipFile):
+        return hashlib.sha256(blob).hexdigest()
+    return h.hexdigest()
+
+
+def _same_as_newest(src, blob: bytes) -> Path | None:
+    """The newest copy, if it holds the same workbook as these bytes."""
+    rows = [r for r in list_backups(src)]
+    if not rows:
+        return None
+    newest = max(rows, key=lambda r: r["when"])
+    path = Path(newest["path"])
+    try:
+        return path if content_digest(path.read_bytes()) == content_digest(blob) else None
+    except OSError:
+        return None
+
+
+def history_dir(src, *, create: bool = False) -> Path:
+    """Where the cheap history of one workbook lives."""
+    p = Path(src)
+    d = p.parent / f"{p.stem}{HISTORY_DIR_SUFFIX}"
+    if create:
+        d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def record_write(src, *, what: str, wrote: dict, doc: dict | None = None) -> dict:
+    """Log one write of this workbook, and keep the marks it wrote.
+
+    Two things, of very different size.  The **line** goes into
+    ``history.jsonl`` and is a few hundred bytes: when, what kind of write,
+    which pairs or tabs, where the copy went, what was thinned.  It is never
+    pruned, so the record of a write outlives the copy of it.  The
+    **document** is the session an export wrote -- some kilobytes of the marks
+    themselves, which ``apply_document`` puts back -- and it is what makes a
+    deep history affordable: a hundred of these cost less than one copy of the
+    workbook, and they answer the question a backup answers badly, which is
+    what was marked rather than what the file looked like.
+
+    Best effort.  A write that succeeded is not undone because its log line
+    could not be appended, so this reports and never raises.
+    """
+    out = {"log": "", "document": "", "problems": []}
+    stamp = datetime.now().astimezone()
+    try:
+        d = history_dir(src, create=True)
+        if doc is not None:
+            name = stamp.strftime("%Y%m%d-%H%M%S") + ".json"
+            snap = d / name
+            n = 2
+            while snap.exists():
+                snap = d / (stamp.strftime("%Y%m%d-%H%M%S") + f"-{n}.json")
+                n += 1
+            snap.write_text(json.dumps(doc, indent=1, sort_keys=True, default=str),
+                            encoding="utf-8")
+            out["document"] = str(snap)
+        line = {"when": stamp.isoformat(timespec="seconds"), "what": what,
+                "workbook": str(Path(src).name),
+                "backup": Path(wrote.get("backup") or "").name,
+                "reused": bool(wrote.get("reused")),
+                "document": Path(out["document"]).name if out["document"] else "",
+                "pairs": wrote.get("pairs") or ([wrote["pair"]] if wrote.get("pair") else []),
+                "tabs": wrote.get("tabs") or [],
+                "pruned": len(wrote.get("pruned") or []),
+                "problems": len(wrote.get("problems") or [])}
+        log = d / HISTORY_LOG
+        with log.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(line, sort_keys=True) + "\n")
+        out["log"] = str(log)
+        out["problems"].extend(prune_history(src))
+    except Exception as exc:  # noqa: BLE001 - the write it records already succeeded
+        # Deliberately everything.  This runs *after* the workbook has been
+        # written, and a log line that could not be appended must not come
+        # back to the caller as a failed write -- it would be reported as the
+        # workbook not having been saved, and somebody would write it again.
+        out["problems"].append(f"the write is done; its history line is not: {exc}")
+    return out
+
+
+def prune_history(src, keep: int = HISTORY_KEEP) -> list[str]:
+    """Drop the oldest session snapshots past ``keep``.  The log is left
+    alone: it is one line of text per write and it is the part that has to
+    reach back further than the files do."""
+    d = history_dir(src)
+    if not d.is_dir():
+        return []
+    found = sorted(f for f in d.glob("*.json") if f.is_file())
+    gone = []
+    for old in found[:max(0, len(found) - max(0, int(keep)))]:
+        try:
+            old.unlink()
+        except OSError as exc:
+            gone.append(f"cannot remove {old.name}: {exc}")
+    return gone
+
+
+def read_history(src, limit: int = 60) -> list[dict]:
+    """The last writes of this workbook, newest first.
+
+    A line that cannot be read is skipped rather than fatal: the log is a
+    record, and a record that refuses to be read because one line of it is
+    damaged is worse than one with a hole in it.
+    """
+    log = history_dir(src) / HISTORY_LOG
+    out: list[dict] = []
+    try:
+        text = log.read_text(encoding="utf-8")
+    except OSError:
+        return out
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(row, dict):
+            out.append(row)
+    out.reverse()
+    return out[:max(0, int(limit))]
+
+
+def restore_backup(src, name: str) -> dict:
+    """Put one of the copies back, keeping what it replaces.
+
+    An undo that cannot itself be undone is a second way to lose a morning, so
+    the file being written over is kept exactly as a write would keep it.  The
+    caller reloads: the workbook on disk is no longer the one it read.
+    """
+    p = Path(src)
+    d = backup_dir(src)
+    want = str(name or "").strip()
+    rows = {r["name"]: r for r in list_backups(src)}
+    if want not in rows:
+        raise SessionError(f"{want!r} is not a copy of {p.name} in {d.name}/"
+                           if want else "name the copy to put back")
+    blob = Path(rows[want]["path"]).read_bytes()
+    with p.open("rb") as fh:
+        now = fh.read()
+    kept = keep_backup(p, now)
+    with open(p, "wb") as fh:
+        fh.write(blob)
+    notes = list(kept["notes"])
+    notes.insert(0, f"{p.name} is now the copy taken at {rows[want]['when'].replace('T', ' ')}"
+                    f" ({want})")
+    locked = excel_lock(p)
+    if locked is not None:
+        notes.append(f"{locked.name} is beside the workbook, so Excel probably has it open; "
+                     f"anything it saves afterwards is written over this")
+    return {"restored": want, "workbook": str(p), "backup": kept["backup"],
+            "notes": notes, "stamp": workbook_stamp(p)}
 
 #: How the workbook spells each curve parameter's PARAMS row, for a row the
 #: sheet does not have yet.  The reader accepts these (``marketdata.PARAM_ROWS``).
@@ -1403,6 +1839,7 @@ def export_workbook(doc: dict, workbook: str | Path, out: str | Path | None = No
         notes.append(_write_wing_ratios_sheet(wb, written_ratios))
 
     backup = ""
+    reused = False
     pruned: list[str] = []
     if not written:
         problems.append("nothing was written")
@@ -1411,14 +1848,11 @@ def export_workbook(doc: dict, workbook: str | Path, out: str | Path | None = No
         # file as it was read, so the backup is the bytes themselves and not
         # a re-read that a second writer could have moved underneath us.
         if dst.exists() and dst.resolve() == src.resolve():
-            bak = _backup_path(src)
-            with open(bak, "wb") as fh:
-                fh.write(blob)
-            backup = str(bak)
-            notes.append(f"the workbook as it was is kept at {bak.name}")
-            pruned = prune_backups(src)
-            if pruned:
-                notes.append(f"{len(pruned)} older backup(s) removed, {BACKUP_KEEP} kept")
+            kept = keep_backup(src, blob)
+            backup = kept["backup"]
+            reused = kept["reused"]
+            notes.extend(kept["notes"])
+            pruned = kept["pruned"]
         _save_workbook(wb, dst, cached)
         n = sum(len(v) for v in cached.values())
         if n:
@@ -1429,21 +1863,30 @@ def export_workbook(doc: dict, workbook: str | Path, out: str | Path | None = No
         notes.append(f"{Path(locked).name} is beside the workbook, so Excel probably has it "
                      f"open. What is written here is what the tool holds; anything Excel "
                      f"saves afterwards is written over it")
-    return {"written": str(dst) if written else "", "backup": backup,
-            "pairs": written, "problems": problems, "notes": notes,
-            "in_place": bool(in_place), "stamp": workbook_stamp(dst) if written else "",
-            "stale": stale, "pruned": pruned, "locked": locked}
+    out = {"written": str(dst) if written else "", "backup": backup,
+           "pairs": written, "problems": problems, "notes": notes, "reused": reused,
+           "in_place": bool(in_place), "stamp": workbook_stamp(dst) if written else "",
+           "stale": stale, "pruned": pruned, "locked": locked}
+    # The marks themselves, kept beside the workbook they went into.  Only for
+    # a write over the book of record: a named copy is a file the person is
+    # holding on to, and its history is that file's, not this workbook's.
+    if written and dst.resolve() == src.resolve():
+        out["history"] = record_write(src, what="marks", wrote=out, doc=doc)
+    return out
 
 
 def _backup_path(src: Path) -> Path:
     """Where the bytes an in-place export replaces are kept.  Stamped to the
     second in local time, like the session file's own ``saved``; two exports
-    inside one second do not overwrite each other's backup."""
+    inside one second do not overwrite each other's backup.  In the workbook's
+    own ``.backups`` folder rather than beside it: the folder a person opens to
+    find the workbook is not the place to keep thirty copies of it."""
+    d = backup_dir(src, create=True)
     stamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
-    bak = src.with_name(f"{src.stem}{BACKUP_INFIX}{stamp}{src.suffix}")
+    bak = d / f"{Path(src).stem}{BACKUP_INFIX}{stamp}{Path(src).suffix}"
     n = 2
     while bak.exists():
-        bak = src.with_name(f"{src.stem}{BACKUP_INFIX}{stamp}-{n}{src.suffix}")
+        bak = d / f"{Path(src).stem}{BACKUP_INFIX}{stamp}-{n}{Path(src).suffix}"
         n += 1
     return bak
 
@@ -1638,11 +2081,9 @@ def migrate_wing_ratios(workbook, out=None, *, in_place: bool = False) -> dict:
     notes.append(_write_wing_ratios_sheet(wb, by_pair))
     backup = ""
     if dst.exists() and dst.resolve() == src.resolve():
-        bak = _backup_path(src)
-        with open(bak, "wb") as fh:
-            fh.write(blob)
-        backup = str(bak)
-        notes.append(f"the workbook as it was is kept at {bak.name}")
+        kept = keep_backup(src, blob)
+        backup = kept["backup"]
+        notes.extend(kept["notes"])
     _save_workbook(wb, dst, cached)
     found = sum(1 for rows in by_pair.values() for row in rows.values()
                 if any(v is not None for v in row.values()))

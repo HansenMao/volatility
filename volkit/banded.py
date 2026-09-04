@@ -427,7 +427,7 @@ class _BodyFit:
             raise ValueError(f"need a positive ATM vol and time, got {atm_vol!r}, {t!r}")
         self.band, self.forward, self.t, self.atm_vol, self.conv = band, forward, t, atm_vol, conv
         self.label = label or f"{t:.4f}y"
-        self.K_atm = black.dns_strike(forward, atm_vol, t, conv)
+        self.K_atm = black.atm_strike(forward, atm_vol, t, conv)
         self.is_call = self.K_atm >= forward
         self.atm_ref = float(black.price(forward, self.K_atm, atm_vol, t, self.is_call))
         self.atm_vega = float(black.vega(forward, self.K_atm, atm_vol, t))

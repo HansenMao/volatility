@@ -194,16 +194,40 @@ Each of these is a precedence stated once and said on the row:
   name is dropped with a note. Dates are read in the spellings
   `timeutil.parse_datetime` reads (`30sep26`, `30-Sep-2026`, `2026/09/30`),
   gated by shape so a number is never one.
+- **A weekday name is an intra-week expiry** (`_WEEKDAYS`, `_next_weekday`):
+  `fri`, `friday`, `thurs` and the rest are the next such day **strictly
+  after** today -- one to seven days, never today, because a run quoting "Mon"
+  on a Monday means the Monday coming and an expiry this morning is no expiry.
+  It is dated in the parse, so nothing downstream knows a weekday from a
+  written date, and the note says which date it landed on. Three letters or
+  more only: a two-letter abbreviation is a word a sentence has in it. It
+  needs the caller's `today` (as `06Nov` does) and says so when there is
+  none. It is the **weakest** way to say when -- an explicit tenor or date on
+  the same line beats it and it is dropped with a note (`_settle_expiries`),
+  and a day name in front of a **time** is the day the run was written and
+  not an expiry at all, which is what keeps `mon 09:15 1M ATM` a 1M.
 - **The side matters only where it changes the number.** A volatility at an
   absolute strike is one number for the call and the put, so `_settle_side`
   drops it, `6M 1.10 call` and `6M 1.10 put` are one quote, and the later
   supersedes the earlier. With a delta the side picks the wing (`-25d` and
-  `25dp` are the put). On a **premium** it is required, as is the strike.
+  `25dp` are the put). On a **premium** it is required, as is the strike --
+  **except on a `live` line**, which is an option dealt without its delta
+  hedge and so a low-delta one: it is out of the money, so the side is read
+  from the **moneyness** against the forward, above it the call and below it
+  the put. `_settle_side` leaves `is_call` open (the parse has no feed behind
+  it) and says so on the row; `marketmaker.side_from_moneyness` settles it
+  where the forward is known -- `premiums_as_vols` for a pasted market,
+  `_premium_row` for a request -- and a side read off a strike that turns out
+  to be inside 40 delta carries the warning that says to write the word.
 - **A premium is a price, not a volatility** (`quote_kind`): `prem`,
   `premium`, `live`, `pips`, or a currency word right after the price make
-  it one; `pips`, `%`/`pct` and the currency word give the unit
+  it one; `pips`, `%`/`pct`, `bp`/`bps` and the currency word give the unit
   (`premium_unit`: `pips`, `pct` of the base notional, or a `price` in the
-  term currency per unit of base). It never votes in `_decide_unit` and is
+  term currency per unit of base). **A basis point is a hundredth of a per
+  cent**: `5bp` is carried as 0.05 `pct`, glued to its number (`5bp`,
+  `12/14bp`) or as a word after it, and a number that named its own unit is
+  the price, which is what makes `6M 1.25 live 12bp` a strike and a choice
+  price rather than two prices. It never votes in `_decide_unit` and is
   never scaled. `marketmaker.premiums_as_vols` turns it into a volatility
   two-way **once**, against the feed's forward at its own expiry, so the fit,
   the residuals and the market table read one unit; no feed is a row that

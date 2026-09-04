@@ -33,11 +33,16 @@ from .timeutil import Clock, tenor_to_years
 PARAM_NAMES = ("slog10", "slog25", "rho25", "rho10")
 
 #: The four quotes one tenor of a pair's sheet holds, in the order a marker
-#: reads them: each wing's risk reversal beside its own market strangle.  The
-#: workbook's own columns (``marketdata.SMILE_COLUMNS``) and the fields of
+#: reads them: both risk reversals, then both market strangles, each pair of
+#: them widest delta first.  Grouped by the quote rather than by the wing
+#: because that is how the two are read -- a skew against a skew and a wing
+#: against a wing -- and it is the order a marker's own sheet is laid out in.
+#: The workbook's own columns (``marketdata.SMILE_COLUMNS``) and the fields of
 #: :class:`SmileMark`; named here so the marking screen, the session file and
-#: the workbook writer all mean the same four things by "the quotes".
-QUOTE_FIELDS = ("rr_25", "st_25", "rr_10", "st_10")
+#: the workbook writer all mean the same four things by "the quotes", and in
+#: one order: nothing keys off the position, so this tuple is the only place
+#: the order of the columns is decided.
+QUOTE_FIELDS = ("rr_25", "rr_10", "st_25", "st_10")
 
 #: How each is labelled where a person reads it -- the sheet's own headings.
 QUOTE_LABELS = {"rr_25": "RR 25d", "st_25": "ST 25d",
@@ -236,6 +241,11 @@ class VolSurface:
     # refuses rather than guessing a level.  Signature: (t years) -> forward
     # or None.
     forward_lookup: object | None = None
+    # The base currency's discount factor at an expiry, from the workbook's
+    # RATES tab, for reading spot deltas.  The Book sets this; without it
+    # every delta is a forward delta and the slice says so.  Signature:
+    # (currency, t years) -> discount factor or None.
+    discount_lookup: object | None = None
     param_overwrites: dict[str, dict[str, float]] = field(default_factory=dict)
     # A quote typed on the marking screen, replacing the one the workbook's
     # sheet holds for that tenor -- ``{TENOR: {field: value}}`` in decimals.
@@ -265,9 +275,23 @@ class VolSurface:
     warnings: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
-        if not isinstance(self.conv, DeltaConvention):
-            self.conv = DeltaConvention(bool(self.conv))
+        # The ATM boundary is a tenor, and here it becomes that tenor's own
+        # calendar expiry on this book's valuation date -- so "beyond 1y" is
+        # beyond the 1Y pillar, whatever the calendar makes its length.
+        self.conv = DeltaConvention.of(self.conv).resolved(self.tenor_years)
         self._slices: dict[tuple, SmileSlice] = {}
+
+    def slice_conv(self, t: float) -> DeltaConvention:
+        """The pair's conventions at one tenor: with the discount factor a
+        spot delta needs there, or the reason it is a forward delta instead."""
+        ccy = self.pair[:3].upper()
+        df = None
+        if self.discount_lookup is not None and self.conv.wants_spot_delta(t):
+            try:
+                df = self.discount_lookup(ccy, t)
+            except Exception:  # noqa: BLE001 -- a rates table that cannot answer is no rate
+                df = None
+        return self.conv.at(t, df, ccy)
 
     @property
     def clock(self) -> Clock:
@@ -524,10 +548,11 @@ class VolSurface:
                 atm_vol = self.atm.term_vol(t)
             msgs = []
             try:
-                c25 = sabr.calibrate(atm_vol, mark.rr_25, mark.st_25, 0.25, t, self.conv,
+                conv = self.slice_conv(t)
+                c25 = sabr.calibrate(atm_vol, mark.rr_25, mark.st_25, 0.25, t, conv,
                                      prior=prev25, prior_weight=prior_weight,
                                      max_solutions=max_solutions)
-                c10 = sabr.calibrate(atm_vol, mark.rr_10, mark.st_10, 0.10, t, self.conv,
+                c10 = sabr.calibrate(atm_vol, mark.rr_10, mark.st_10, 0.10, t, conv,
                                      prior=prev10, prior_weight=prior_weight,
                                      max_solutions=max_solutions)
                 prev25, prev10 = c25.params, c10.params
@@ -805,16 +830,17 @@ class VolSurface:
             raise ValueError(f"{self.pair}: ATM volatility is zero at {dt:%Y-%m-%d}")
         p = self.params_at(t)
         sqt = math.sqrt(t)
+        conv = self.slice_conv(t)
         s25 = SabrParams(
-            alpha=sabr.alpha_from_atm(atm_vol, black.dns_strike(forward, atm_vol, t, self.conv),
+            alpha=sabr.alpha_from_atm(atm_vol, black.atm_strike(forward, atm_vol, t, conv),
                                       p["rho25"], p["slog25"] / sqt, t, forward),
             rho=p["rho25"], volvol=p["slog25"] / sqt, t=t, f=forward)
         s10 = SabrParams(
-            alpha=sabr.alpha_from_atm(atm_vol, black.dns_strike(forward, atm_vol, t, self.conv),
+            alpha=sabr.alpha_from_atm(atm_vol, black.atm_strike(forward, atm_vol, t, conv),
                                       p["rho10"], p["slog10"] / sqt, t, forward),
             rho=p["rho10"], volvol=p["slog10"] / sqt, t=t, f=forward)
         band = self.band_for_slice(t, forward) if method == "BAND" else None
-        sl = SmileSlice.build(t, atm_vol, s25, s10, self.conv, forward=forward, method=method,
+        sl = SmileSlice.build(t, atm_vol, s25, s10, conv, forward=forward, method=method,
                               band=band, treatment=self.band_treatment)
         self._slices[key] = sl
         return sl
@@ -965,8 +991,8 @@ class VolSurface:
             v = atm + s
             if v <= 0:
                 return 1e6
-            kc = black.strike_from_delta(abs(delta), f, v, t, True, self.conv)
-            kp = black.strike_from_delta(-abs(delta), f, v, t, False, self.conv)
+            kc = black.strike_from_delta(abs(delta), f, v, t, True, sl.conv)
+            kp = black.strike_from_delta(-abs(delta), f, v, t, False, sl.conv)
             market = float(black.price(f, kc, v, t, True) + black.price(f, kp, v, t, False))
             model = float(black.price(f, kc, float(sl.vol(kc)), t, True)
                           + black.price(f, kp, float(sl.vol(kp)), t, False))
@@ -1001,15 +1027,17 @@ class VolSurface:
         for ``conv=False`` and says so; everything else wants the surface's
         own convention, which is what a desk quotes and hedges in.
         """
-        use = self.conv if conv is None else conv
         sl = self.slice_at(expiry, method, cut)
+        # The slice's own convention carries the foreign discount factor a
+        # spot delta needs; an override is read as a forward delta.
+        use = sl.conv if conv is None else DeltaConvention.of(conv)
         up, dn = fwd * (1.0 + bump), fwd * (1.0 - bump)
         pv_up = float(black.price(up, strike, float(sl.vol(strike / up)), sl.t, is_call,
                                   foreign_premium=bool(use)))
         pv_dn = float(black.price(dn, strike, float(sl.vol(strike / dn)), sl.t, is_call,
                                   foreign_premium=bool(use)))
         d_fwd = (up - dn) if not bool(use) else (up - dn) / fwd
-        return (pv_up - pv_dn) / d_fwd
+        return use.df_foreign * (pv_up - pv_dn) / d_fwd
 
     def smile_gamma(self, fwd: float, strike: float, expiry, is_call: bool = True,
                     method: str | None = None, cut: str = "TK", bump: float = 0.01,
@@ -1078,7 +1106,14 @@ class VolSurface:
         for d in sorted(deltas, reverse=True):
             kp, vp = sl.strike_from_delta(-d, False)
             rows.append({"label": f"{int(d * 100)}d put", "delta": -d, "strike": kp, "vol": vp})
-        rows.append({"label": "ATM", "delta": 0.5, "strike": sl.strikes[2], "vol": sl.atm_vol})
+        # The ATM anchor is the straddle or the forward by the pair's convention
+        # at this tenor; its delta is read rather than assumed, because at the
+        # forward it is not 50 and the row would otherwise say what it is not.
+        atm_delta = float(black.delta(sl.forward, sl.strikes[2], sl.atm_vol, sl.t, True,
+                                      sl.conv))
+        rows.append({"label": sl.conv.atm_label(sl.t) if sl.conv.atm_is_forward(sl.t)
+                     else "ATM", "delta": atm_delta, "strike": sl.strikes[2],
+                     "vol": sl.atm_vol})
         for d in sorted(deltas):
             kc, vc = sl.strike_from_delta(d, True)
             rows.append({"label": f"{int(d * 100)}d call", "delta": d, "strike": kc, "vol": vc})

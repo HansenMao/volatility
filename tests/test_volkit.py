@@ -168,6 +168,102 @@ class TestNumerics(unittest.TestCase):
 
 
 class TestBlack(unittest.TestCase):
+    def test_premium_adjustment_follows_the_premium_currency_not_the_first_letters(self):
+        """The crosses pay premium in their base currency and are adjusted.
+
+        The legacy flag was ``ccy[0:3] == 'USD'``, which read EURJPY, EURGBP,
+        AUDJPY and every other cross as unadjusted -- the wrong delta, and so
+        the wrong strike for every wing quote on them.
+        """
+        from volkit.black import DeltaConvention
+        adjusted = {"USDJPY", "USDCNH", "USDCAD", "EURJPY", "EURGBP", "AUDJPY", "GBPNZD",
+                    "EURCNH", "CNHHKD", "USDHKD"}
+        unadjusted = {"EURUSD", "GBPUSD", "AUDUSD", "NZDUSD", "XAUUSD"}
+        for pair in adjusted | unadjusted:
+            self.assertEqual(DeltaConvention.for_pair(pair).premium_adjusted, pair in adjusted, pair)
+        self.assertEqual(DeltaConvention.default_premium_currency("EURJPY"), "EUR")
+        self.assertEqual(DeltaConvention.default_premium_currency("USDJPY"), "USD")
+        self.assertEqual(DeltaConvention.default_premium_currency("EURUSD"), "USD")
+        # A desk can say otherwise, in the pair's own currencies only.
+        self.assertFalse(DeltaConvention.for_pair("EURJPY", premium_ccy="JPY").premium_adjusted)
+        with self.assertRaises(ValueError):
+            DeltaConvention.for_pair("EURJPY", premium_ccy="USD")
+        # The legacy True/False still coerces, and a convention passes through whole.
+        self.assertTrue(DeltaConvention.of(True).premium_adjusted)
+        c = DeltaConvention.for_pair("USDJPY", atmf_beyond="2y")
+        self.assertIs(DeltaConvention.of(c), c)
+
+    def test_the_atm_is_the_straddle_out_to_the_boundary_and_the_forward_beyond(self):
+        from volkit.black import DeltaConvention, atm_strike, dns_strike
+        c = DeltaConvention.for_pair("EURUSD")
+        self.assertEqual(c.atmf_beyond, "1y")
+        # the 1Y pillar itself, even a few days long on the calendar, is DNS
+        for t in (0.02, 0.5, 1.0, 1.0 + 0.5 / 365.25):
+            self.assertFalse(c.atm_is_forward(t), t)
+            self.assertAlmostEqual(atm_strike(1.0, 0.10, t, c), dns_strike(1.0, 0.10, t, c))
+            self.assertGreater(atm_strike(1.0, 0.10, t, c), 1.0)   # unadjusted: above F
+        for t in (1.5, 2.0, 5.0):
+            self.assertTrue(c.atm_is_forward(t), t)
+            self.assertEqual(atm_strike(1.0, 0.10, t, c), 1.0)
+        pa = DeltaConvention.for_pair("USDJPY")
+        self.assertLess(atm_strike(1.0, 0.10, 0.5, pa), 1.0)      # adjusted: below F
+        self.assertEqual(atm_strike(1.0, 0.10, 2.0, pa), 1.0)
+        # never / always / a different tenor
+        self.assertFalse(DeltaConvention.for_pair("USDCNH", atmf_beyond="never").atm_is_forward(30.0))
+        self.assertTrue(DeltaConvention.for_pair("USDCNH", atmf_beyond="always").atm_is_forward(0.01))
+        two = DeltaConvention.for_pair("USDJPY", atmf_beyond="2y")
+        self.assertFalse(two.atm_is_forward(1.5))
+        self.assertTrue(two.atm_is_forward(2.1))
+        # and the boundary resolves through a calendar: a 1Y that the calendar
+        # makes 371 days long keeps a 370-day expiry on the straddle side
+        resolved = c.resolved(lambda tenor: 371 / 365.2425)
+        self.assertFalse(resolved.atm_is_forward(370 / 365.2425))
+        self.assertTrue(resolved.atm_is_forward(380 / 365.2425))
+        self.assertIn("1Y", c.describe())
+        with self.assertRaises(ValueError):
+            DeltaConvention.for_pair("USDJPY", atmf_beyond="sometime")
+
+    def test_spot_delta_is_forward_delta_through_the_foreign_discount_factor(self):
+        """A 25 spot delta is a 25/DF forward delta, and the strike moves with it.
+
+        The pair's convention becomes a slice's through ``at``: with a
+        discount factor it reads spot delta, without one it reads forward
+        delta and says why, and beyond the boundary it reads forward delta
+        whatever the tab has.
+        """
+        from volkit.black import DeltaConvention, delta, dns_strike, strike_from_delta
+        c = DeltaConvention.for_pair("USDJPY")
+        self.assertTrue(c.spot_delta)
+        spot = c.at(1.0, 0.96, "USD")
+        fwd = c.at(1.0, None, "USD")
+        far = c.at(2.0, 0.92, "USD")
+        self.assertEqual((spot.delta_label(), fwd.delta_label(), far.delta_label()),
+                         ("spot delta", "forward delta (no USD rate on the RATES tab)",
+                          "forward delta"))
+        self.assertTrue(spot.delta_is_spot)
+        self.assertFalse(fwd.delta_is_spot)
+        K = strike_from_delta(0.25, 1.0, 0.10, 1.0, True, spot)
+        self.assertAlmostEqual(float(delta(1.0, K, 0.10, 1.0, True, spot)), 0.25, places=12)
+        self.assertAlmostEqual(float(delta(1.0, K, 0.10, 1.0, True, fwd)), 0.25 / 0.96, places=12)
+        self.assertLess(K, strike_from_delta(0.25, 1.0, 0.10, 1.0, True, fwd))
+        # the straddle strike is a delta-neutral point and does not move
+        self.assertEqual(dns_strike(1.0, 0.10, 1.0, spot), dns_strike(1.0, 0.10, 1.0, fwd))
+        # unadjusted put, same arithmetic
+        u = DeltaConvention.for_pair("EURUSD").at(0.5, 0.99, "EUR")
+        Kp = strike_from_delta(-0.25, 1.0, 0.08, 0.5, False, u)
+        self.assertAlmostEqual(float(delta(1.0, Kp, 0.08, 0.5, False, u)), -0.25, places=12)
+        # a spot delta above the discount factor names no strike
+        with self.assertRaises(ValueError):
+            strike_from_delta(0.97, 1.0, 0.10, 1.0, True, spot)
+        # a pair that quotes forward delta never asks for the factor
+        f = DeltaConvention.for_pair("USDCNH", delta_type="forward")
+        self.assertFalse(f.wants_spot_delta(0.5))
+        self.assertEqual(f.at(0.5, 0.96, "USD").df_foreign, 1.0)
+        with self.assertRaises(ValueError):
+            DeltaConvention.for_pair("USDCNH", delta_type="sideways")
+        # the legacy True/False is a forward delta
+        self.assertEqual(DeltaConvention.of(True).df_foreign, 1.0)
+
     def test_strike_delta_roundtrip_all_conventions(self):
         n = 0
         for vol in (0.02, 0.05, 0.12, 0.30):
@@ -392,7 +488,10 @@ class TestEvents(unittest.TestCase):
                          events=EventSchedule())
         when = datetime(2024, 3, 20, 18, 0, tzinfo=UTC)
         ev = curve.events.add(when, 0.030, "FOMC")
-        self.assertEqual(curve.calibrate_events(), [])
+        # 20 Mar 2024 really was Vernal Equinox Day, and the March FOMC really
+        # did land on it: the calendar says so, and the bump is still delivered
+        self.assertEqual(curve.calibrate_events(),
+                         ["FOMC at 2024-03-20 falls on a JP holiday for USDJPY"])
         self.assertAlmostEqual(curve.achieved_bump(ev), 0.030, places=9)
 
     def test_event_height_is_stable_across_the_day_roll(self):
@@ -465,7 +564,7 @@ class TestEvents(unittest.TestCase):
         from volkit.events import EventEntry
         curve = AtmCurve("USDJPY", BackboneParams(0.0605, 0.0765, 5.0, 0.007, 50.0), ASOF,
                          events=EventSchedule())
-        when = datetime(2024, 3, 20, 18, 0, tzinfo=UTC)
+        when = datetime(2024, 3, 21, 18, 0, tzinfo=UTC)   # the 20th is a JP holiday
         problems = curve.set_events([EventEntry(when, None, "FOMC", {"USD": 0.015, "JPY": 0.003}, 0.002)])
         self.assertEqual(problems, [])
         ev = curve.events.events[0]
@@ -567,6 +666,85 @@ class TestFxDateConventions(unittest.TestCase):
         self.assertFalse(self.c.is_settlement_day("EURJPY", thanksgiving))
         self.assertEqual(self.c.spot_date("EURJPY", date(2026, 11, 24)),
                          date(2026, 11, 27))
+
+    def test_a_us_holiday_on_t_plus_one_does_not_delay_spot_for_a_dollar_pair(self):
+        """The dollar needs one clear US working day before spot, not two.
+
+        19 Jan 2026 is Martin Luther King Day.  EURUSD dealt on Friday the
+        16th settles Tuesday the 20th: EUR counts Monday and Tuesday, USD needs
+        only one open day and Tuesday is it.  Counting the holiday against the
+        pair -- the old construction -- came back Wednesday the 21st, a day
+        late for every dollar pair after every Monday US holiday.
+        """
+        mlk = date(2026, 1, 19)
+        self.assertTrue(self.c.is_holiday("USD", mlk))
+        self.assertEqual(self.c.spot_date("EURUSD", date(2026, 1, 16)), date(2026, 1, 20))
+        self.assertEqual(self.c.spot_date("USDJPY", date(2026, 1, 16)), date(2026, 1, 20))
+        # ...while a US holiday on T+2 does delay it, for every pair: dealt
+        # Thursday the 15th the count lands on the Monday and rolls off it.
+        self.assertEqual(self.c.spot_date("EURUSD", date(2026, 1, 15)), date(2026, 1, 20))
+        self.assertEqual(self.c.spot_date("EURJPY", date(2026, 1, 15)), date(2026, 1, 20))
+
+    def test_the_other_currency_s_holiday_on_t_plus_one_does_delay_spot(self):
+        """21-23 Sep 2026 is Japan's Silver Week (the 22nd is the sandwiched day)."""
+        for day in (21, 22, 23):
+            self.assertTrue(self.c.is_holiday("JPY", date(2026, 9, day)), day)
+        self.assertEqual(self.c.spot_date("USDJPY", date(2026, 9, 17)), date(2026, 9, 24))
+        self.assertEqual(self.c.spot_date("USDJPY", date(2026, 9, 18)), date(2026, 9, 25))
+        # and it is the 1W's whole shape: dealt on the 14th it settles on the
+        # 24th and can only expire on the 17th, the last day that settles then
+        d = self.c.fx_dates("USDJPY", "1W", date(2026, 9, 14))
+        self.assertEqual((d.spot, d.expiry, d.delivery),
+                         (date(2026, 9, 16), date(2026, 9, 17), date(2026, 9, 24)))
+
+    def test_the_expiry_is_the_inverse_spot_and_takes_the_later_of_a_shared_pair(self):
+        """Thursday 15 and Friday 16 Jan 2026 both settle on Tuesday the 20th.
+
+        An option settling on the 20th expires on the Friday -- the latest day
+        whose spot date is the delivery -- not the Thursday that stepping two
+        business days back over the holiday produced.
+        """
+        self.assertEqual(self.c.expiry_from_delivery("EURUSD", date(2026, 1, 20)),
+                         date(2026, 1, 16))
+        self.assertEqual(self.c.delivery_from_expiry("EURUSD", date(2026, 1, 16)),
+                         date(2026, 1, 20))
+        d = self.c.fx_dates("EURUSD", "1M", date(2025, 12, 16))
+        self.assertEqual((d.spot, d.delivery, d.expiry),
+                         (date(2025, 12, 18), date(2026, 1, 20), date(2026, 1, 16)))
+
+    def test_when_no_expirable_day_settles_on_the_delivery_the_rule_says_so(self):
+        """1M from 27 Oct 2026 settles Monday 30 Nov, two days after Thanksgiving.
+
+        Only Thanksgiving itself settles on the 30th, and an option does not
+        expire on a pair holiday, so the expiry is the last day that settles
+        *by* the 30th -- Wednesday the 25th -- and the delivery stays put.
+        """
+        d = self.c.fx_dates("EURUSD", "1M", date(2026, 10, 27))
+        self.assertEqual(d.delivery, date(2026, 11, 30))
+        self.assertEqual(d.expiry, date(2026, 11, 25))
+        self.assertEqual(self.c.delivery_from_expiry("EURUSD", d.expiry), date(2026, 11, 27))
+        self.assertIn("no expirable day settles exactly on 2026-11-30", d.rule)
+
+    def test_the_fed_does_not_observe_saturday_holidays_but_the_commonwealth_moves_forward(self):
+        # 4 July 2026 is a Saturday: federal offices close the Friday, Fedwire
+        # does not, so the 3rd is a USD value date.
+        self.assertFalse(self.c.is_holiday("USD", date(2026, 7, 3)))
+        self.assertEqual(self.c.spot_date("EURUSD", date(2026, 7, 1)), date(2026, 7, 3))
+        # Columbus Day and Veterans Day shut Fedwire and so cannot be value dates
+        self.assertEqual(self.c.spot_date("EURUSD", date(2026, 10, 8)), date(2026, 10, 13))
+        # Canada Day 2028 is a Saturday and is taken on Monday the 3rd, not Friday
+        self.assertFalse(self.c.is_holiday("CAD", date(2028, 6, 30)))
+        self.assertTrue(self.c.is_holiday("CAD", date(2028, 7, 3)))
+
+    def test_japanese_substitute_and_citizens_holidays(self):
+        # 3 May 2026 is a Sunday; the 4th and 5th are holidays already, so the
+        # substitute is Wednesday the 6th
+        self.assertTrue(self.c.is_holiday("JPY", date(2026, 5, 6)))
+        self.assertFalse(self.c.is_holiday("JPY", date(2026, 5, 7)))
+        # the equinoxes, and the year-end bank holiday
+        self.assertTrue(self.c.is_holiday("JPY", date(2026, 3, 20)))
+        self.assertTrue(self.c.is_holiday("JPY", date(2027, 9, 23)))
+        self.assertTrue(self.c.is_holiday("JPY", date(2026, 12, 31)))
 
     def test_the_end_of_month_rule(self):
         """Off a month-end spot, a month tenor settles on a month end.
@@ -1309,6 +1487,117 @@ class TestPricing(unittest.TestCase):
         self.assertAlmostEqual(put["delta"], -10.0, places=6)
         self.assertIs(put["delta_is_call"], False)
 
+    def test_the_rates_tab_makes_the_deltas_spot_and_the_premium_paid(self):
+        """With a USD rate a 1Y USDJPY 25-delta quote lands on a lower strike.
+
+        Spot delta is forward delta times the USD discount factor, so the 25
+        the market quotes is a 26-and-a-bit forward delta and the strike is
+        nearer the money.  The premium as paid is the forward premium at the
+        JPY discount factor.  A currency with no rate stays a forward delta
+        and an undiscounted premium, said in so many words.
+        """
+        import tempfile
+        from volkit import session
+        from volkit.rates import RatesTable
+        d = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d, True)
+        wb = d / "marks.xlsx"
+        shutil.copy(WORKBOOK, wb)
+        session.write_config_tabs(wb, {"RATES": [
+            {"currency": "USD", "tenor": "1m", "rate": 5.3},
+            {"currency": "USD", "tenor": "1y", "rate": 5.0},
+            {"currency": "JPY", "tenor": "1y", "rate": 0.1}]})
+        table = RatesTable.load(wb)
+        self.assertEqual(table.currencies, ("JPY", "USD"))
+        self.assertAlmostEqual(table.rate("USD", 0.5), 0.053 + (0.050 - 0.053) * (0.5 - 1 / 12) / (1 - 1 / 12), places=9)
+        self.assertAlmostEqual(table.df("USD", 1.0), 1 / 1.05)
+        self.assertIsNone(table.df("EUR", 1.0))
+        self.assertIsNone(RatesTable.load(WORKBOOK))          # no tab: None, not empty
+        book = Book.from_excel(wb, ASOF).load_all(["USDJPY", "AUDUSD"])
+        self.assertTrue(any("RATES: JPY" in n for n in book.data.notes))
+        self.assertTrue(any(w.startswith("AUDUSD: quotes spot delta but the RATES tab has no AUD")
+                            for w in book.warnings))
+        self.assertFalse(any(w.startswith("USDJPY: quotes spot delta") for w in book.warnings))
+        book.feed = MarketFeed.load(FEED)
+        with_rate = quick_vol(book, "USDJPY", "1Y", "25d")
+        without = quick_vol(self.book, "USDJPY", "1Y", "25d")
+        self.assertEqual(with_rate["delta_kind"], "spot delta")
+        self.assertTrue(without["delta_kind"].startswith("forward delta (no USD rate"))
+        self.assertLess(with_rate["strike_ratio"], without["strike_ratio"])
+        self.assertAlmostEqual(with_rate["delta"], 25.0, places=6)
+        # forward delta beyond the boundary, tab or no tab
+        self.assertEqual(quick_vol(book, "USDJPY", "2Y", "25d")["delta_kind"], "forward delta")
+        # a 1M is barely moved: the factor is a month of USD rate
+        near = quick_vol(book, "USDJPY", "1M", "25d")["strike_ratio"]
+        near0 = quick_vol(self.book, "USDJPY", "1M", "25d")["strike_ratio"]
+        self.assertLess(abs(near - near0), abs(with_rate["strike_ratio"] - without["strike_ratio"]))
+        # the premium as paid
+        r = price_strip(book, [OptionLeg(pair="USDJPY", expiry="1Y", strike="ATM",
+                                         notional=10, direction=1)])["legs"][0]
+        self.assertTrue(r["discounted"])
+        self.assertAlmostEqual(r["df_domestic"], 1 / (1 + 0.001 * r["t"]), places=9)
+        self.assertAlmostEqual(r["premium_pv_dom"], r["premium_dom"] * r["df_domestic"])
+        self.assertAlmostEqual(r["pv_amount"], r["premium_amount"] * r["df_domestic"])
+        self.assertEqual(r["delta_kind"], "spot delta")
+        out0 = price_strip(self.book, [OptionLeg(pair="USDJPY", expiry="1Y", strike="ATM",
+                                                 notional=10, direction=1)])
+        r0 = out0["legs"][0]
+        self.assertFalse(r0["discounted"])
+        self.assertIsNone(r0["premium_pv_dom"])
+        # the pair total follows: a sum of paid premiums, or None if a leg has none
+        out = price_strip(book, [OptionLeg(pair="USDJPY", expiry="1Y", strike="ATM",
+                                           notional=10, direction=1),
+                                 OptionLeg(pair="USDJPY", expiry="3M", strike="25d",
+                                           notional=5, direction=-1)])
+        legs = out["legs"]
+        self.assertAlmostEqual(out["totals"]["USDJPY"]["pv_premium"],
+                               legs[0]["pv_amount"] + legs[1]["pv_amount"])
+        self.assertAlmostEqual(out["totals"]["USDJPY"]["premium"],
+                               legs[0]["premium_amount"] + legs[1]["premium_amount"])
+        self.assertIsNone(out0["totals"]["USDJPY"]["pv_premium"])
+        # a bad row is named
+        session.write_config_tabs(wb, {"RATES": [{"currency": "USD", "tenor": "1x", "rate": 5}]})
+        with self.assertRaises(ValueError) as ctx:
+            RatesTable.load(wb)
+        self.assertIn("RATES row", str(ctx.exception))
+
+    def test_the_three_spellings_of_the_money_and_the_long_dated_atm(self):
+        """``ATM`` is the convention, ``ATMF`` the forward, ``DNS`` the straddle.
+
+        On a 2Y the convention *is* the forward, so ATM and ATMF agree there
+        and DNS is the one that differs; on a 3M it is the other way round.
+        """
+        from volkit.black import atm_strike
+        for text, kind, label in (("atm", "convention", "ATM"), ("ATMF", "forward", "ATMF"),
+                                  ("dns", "straddle", "DNS"), ("50d", "straddle", "DNS")):
+            spec = parse_strike(text)
+            self.assertEqual((spec.kind, spec.atm_kind, spec.text), ("atm", kind, label), text)
+        short = {k: quick_vol(self.book, "USDJPY", "3M", k)["strike_ratio"]
+                 for k in ("ATM", "ATMF", "DNS")}
+        self.assertEqual(short["ATMF"], 1.0)
+        self.assertLess(short["DNS"], 1.0)               # premium adjusted: below F
+        self.assertEqual(short["ATM"], short["DNS"])
+        long = {k: quick_vol(self.book, "USDJPY", "2Y", k)["strike_ratio"]
+                for k in ("ATM", "ATMF", "DNS")}
+        self.assertEqual(long["ATM"], 1.0)
+        self.assertEqual(long["ATMF"], 1.0)
+        self.assertLess(long["DNS"], 1.0)
+        r = quick_vol(self.book, "USDJPY", "2Y", "ATM")
+        self.assertEqual(r["atm_kind"], "ATMF")
+        self.assertEqual(quick_vol(self.book, "USDJPY", "1Y", "ATM")["atm_kind"], "DNS")
+        self.assertEqual(r["delta_kind"], "forward delta")
+        self.assertIn("premium adjusted", r["convention"])
+        # and the smile's own ATM anchor is at the forward there, so the
+        # quoted ATM vol is read at the strike the market quotes it for
+        surface = self.book["USDJPY"]
+        sl = surface.slice_at(self.book.clock.datetime_from_years(2.0))
+        self.assertEqual(float(sl.strikes[2]), 1.0)
+        self.assertEqual(float(atm_strike(1.0, sl.atm_vol, sl.t, surface.conv)), 1.0)
+        row = [r for r in surface.smile_table(self.book.clock.datetime_from_years(2.0))
+               if r["label"] in ("ATM", "ATMF")][0]
+        self.assertEqual(row["label"], "ATMF")
+        self.assertNotAlmostEqual(row["delta"], 0.5, places=3)   # the forward is not 50 delta
+
     def test_the_delta_is_reported_under_the_pairs_own_convention(self):
         """Premium adjusted for a USD-base pair, unadjusted otherwise.
 
@@ -1323,7 +1612,10 @@ class TestPricing(unittest.TestCase):
         self.assertTrue(usd["premium_adjusted"])
         self.assertFalse(eur["premium_adjusted"])
         self.assertLess(usd["delta"], 50.0)
-        self.assertGreater(eur["delta"], 50.0)
+        # unadjusted, the delta-neutral straddle *is* the 50-delta strike, to
+        # rounding -- the old ``assertGreater(…, 50.0)`` was passing on 1e-13 of
+        # floating-point noise and flipped sign when the holiday weights moved
+        self.assertAlmostEqual(eur["delta"], 50.0, places=6)
 
     def test_the_delta_comes_back_for_a_pair_with_no_feed(self):
         """Delta is a function of moneyness, so it needs no level at all.
@@ -2612,6 +2904,51 @@ class TestConfigurationTabs(unittest.TestCase):
         wb.save(path)
         return path
 
+    def test_the_conventions_tab_reaches_the_pair_and_a_bad_row_is_a_problem(self):
+        """A desk states a pair's premium currency and ATM boundary on a tab.
+
+        Without a row the pair takes the market's conventions -- and those
+        make every cross premium adjusted, which the shipped workbook's
+        EURJPY now is.
+        """
+        import tempfile
+        from volkit import session
+        from volkit.marketdata import load_conventions, ExcelSource
+        d = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d, True)
+        wb_path = d / "marks.xlsx"
+        shutil.copy(WORKBOOK, wb_path)
+        # written the way the configuration screen writes it
+        session.write_config_tabs(wb_path, {"CONVENTIONS": [
+            {"pair": "EURJPY", "premium": "JPY", "atmf beyond": "2y", "delta": ""},
+            {"pair": "USDCNH", "premium": "", "atmf beyond": "never", "delta": "forward"},
+            {"pair": "GBPCHF", "premium": "GBP", "atmf beyond": "", "delta": ""},   # not in CONFIG
+        ]})
+        found = load_conventions(wb_path)
+        self.assertEqual(found["EURJPY"], {"premium": "JPY", "atmf_beyond": "2y", "delta": ""})
+        data = ExcelSource(wb_path).load()
+        self.assertEqual(data.problems, [])
+        eurjpy = data.pairs["EURJPY"].conventions()
+        self.assertFalse(eurjpy.premium_adjusted)          # the tab says JPY
+        self.assertEqual(eurjpy.atmf_beyond, "2y")
+        usdcnh = data.pairs["USDCNH"].conventions()
+        self.assertTrue(usdcnh.premium_adjusted)           # blank: the default, USD
+        self.assertFalse(usdcnh.atm_is_forward(30.0))      # never
+        self.assertFalse(usdcnh.spot_delta)                # forward delta at every tenor
+        self.assertTrue(eurjpy.spot_delta)                 # blank: spot, the majors' rule
+        self.assertTrue(data.pairs["AUDJPY"].conventions().premium_adjusted)   # no row: market
+        self.assertTrue(data.pairs["USDJPY"].conventions().atm_is_forward(1.5))
+        self.assertTrue(any("GBPCHF" in n and "CONFIG does not list it" in n for n in data.notes))
+        # and it reaches the surface, boundary resolved on the calendar
+        book = Book.from_excel(wb_path, ASOF).load_all(["EURJPY"])
+        self.assertFalse(book["EURJPY"].conv.premium_adjusted)
+        self.assertFalse(book["EURJPY"].conv.atm_is_forward(book["EURJPY"].tenor_years("2y")))
+        # a premium currency that is not the pair's is a problem, named by row
+        session.write_config_tabs(wb_path, {"CONVENTIONS": [
+            {"pair": "EURJPY", "premium": "USD", "atmf beyond": "", "delta": ""}]})
+        data = ExcelSource(wb_path).load()
+        self.assertTrue(any("CONVENTIONS row" in p and "USD" in p for p in data.problems))
+
     def test_an_absent_tab_is_none_and_an_empty_one_is_an_empty_list(self):
         from volkit import configsheets
         path = self._workbook([["pair", "lower", "upper"]])
@@ -2658,7 +2995,9 @@ class TestConfigurationTabs(unittest.TestCase):
         nothing about it.
         """
         from volkit import configsheets
-        optional = {"WING_RATIOS"}
+        # CONVENTIONS is optional for the same reason: a pair with no row takes
+        # the market's conventions, and most pairs never need a row.
+        optional = {"WING_RATIOS", "CONVENTIONS", "RATES"}
         needed = [s for s in configsheets.SHEETS if s not in optional]
         self.assertEqual([s for s in configsheets.present(WORKBOOK) if s not in optional],
                          needed)
@@ -5581,6 +5920,102 @@ class TestMarketMakerApi(unittest.TestCase):
             # And it survives a fresh service reading the same file.
             self.assertEqual(len(self.service(tmp).bank.for_pair("EURUSD").rules), 2)
 
+    def test_the_marking_card_never_holds_the_book_while_it_reads_the_archive(self):
+        """The archive is read on its own lock and let go before the book's is
+        taken.  Held the other way round -- the book under the archive -- a
+        folder scan or a download (minutes, and a language model behind them)
+        held the book too, and the Fit button beside the card, which asks the
+        archive nothing, sat there until they finished."""
+        import tempfile, threading
+
+        class Watched:
+            """A lock that knows how deep it is held, and by whom."""
+
+            def __init__(self):
+                self._lock = threading.RLock()
+                self.depth = 0
+
+            def __enter__(self):
+                self._lock.acquire()
+                self.depth += 1
+                return self
+
+            def __exit__(self, *exc):
+                self.depth -= 1
+                self._lock.release()
+
+        class WatchedArchive(Watched):
+            def __init__(self, book_lock):
+                super().__init__()
+                self.book_lock = book_lock
+                self.book_held = []
+
+            def __enter__(self):
+                super().__enter__()
+                self.book_held.append(self.book_lock.depth)
+                return self
+
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self.service(tmp)
+            service._lock = Watched()
+            service._archive_lock = WatchedArchive(service._lock)
+            out = service.mm_mark({"pair": "EURUSD", "text": self.RUN,
+                                   "target_source": "quotes"})
+            self.assertIn("proposal", out)
+            # It did read the archive, and the book was not held when it did.
+            self.assertTrue(service._archive_lock.book_held)
+            self.assertEqual(set(service._archive_lock.book_held), {0})
+            self.assertEqual(service._lock.depth, 0)
+
+    def test_the_tape_leans_the_mid_only_when_a_weight_says_so(self):
+        """The one inference in the package -- a print's side, decided against
+        our own mark -- may not move a price until a desk has said it may.
+        With a weight it leans the level and nothing else: a risk reversal is
+        a statement about shape, and what the tape paid for says nothing about
+        where the skew belongs."""
+        import tempfile
+        from datetime import timedelta
+        from volkit import archive as arch, black
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "archive.jsonl")
+            a = arch.Archive(path=path)
+            when = ASOF.now - timedelta(days=1)
+            expiry = (when + timedelta(days=30)).date().isoformat()
+            rows = [arch.Observation(
+                kind="forward", pair="EURUSD", at=when.isoformat(timespec="seconds"),
+                instrument="atm", tenor=expiry, expiry_date=expiry, rate=1.10,
+                action="NEWT", external_id="f1", via="sdr", source="sdr")]
+            # Six prints well above any mark this book carries: the tape paid.
+            px = float(black.price(1.10, 1.10, 0.25, 30 / 365.2425, True))
+            for i in range(6):
+                rows.append(arch.Observation(
+                    kind="trade", pair="EURUSD", at=when.isoformat(timespec="seconds"),
+                    instrument="outright", tenor=expiry, expiry_date=expiry,
+                    strike=1.10, is_call=True, premium=px * 100_000_000.0,
+                    premium_ccy="USD", notional=100_000_000.0, notional_ccy="EUR",
+                    action="NEWT", event="TRAD", external_id=str(i), via="sdr",
+                    source="sdr"))
+            a.extend(rows)
+            a.flush()
+            from volkit.webapp import BookService
+            service = BookService(str(WORKBOOK), ASOF, bank_path=str(Path(tmp) / "bank.json"),
+                                  archive_path=path)
+            ask = {"pair": "EURUSD", "request_text": "1M ATM\n1M 25d RR\n",
+                   "fallback_spread": "0.4"}
+            off = service.mm_quote(dict(ask))
+            self.assertTrue(off["flow"]["buckets"], off["flow"]["reason"])
+            self.assertIn("set a flow weight", off["flow"]["reason"])
+            self.assertEqual([r["skew_flow"] for r in off["sheet"]["rows"]], [0.0, 0.0])
+
+            on = service.mm_quote(dict(ask, flow_weight="0.5", flow_scale="100000"))
+            rows_on = {r["instrument"]: r for r in on["sheet"]["rows"]}
+            # Paid means marked up, by half a weight of the half width.
+            self.assertGreater(rows_on["atm"]["skew_flow"], 0.0)
+            self.assertAlmostEqual(rows_on["atm"]["skew_flow"], 0.5 * 0.5 * 0.4, places=6)
+            self.assertGreater(rows_on["atm"]["our_bid"], off["sheet"]["rows"][0]["our_bid"])
+            # And a risk reversal is left alone.
+            self.assertEqual(rows_on["rr"]["skew_flow"], 0.0)
+
     def test_a_bad_rule_set_is_rejected_without_touching_the_file(self):
         import tempfile
         with tempfile.TemporaryDirectory() as tmp:
@@ -6110,7 +6545,13 @@ class TestWebAssets(unittest.TestCase):
         beside it, by a person who has looked at them."""
         html = _source("volkit", "web", "index.html")
         js = html.split("<script>")[1].split("</script>")[0]
-        use = js.split("use.onclick=()=>{")[1].split("\n  };")[0]
+        # To the end of that handler and no further.  It used to cut at the
+        # next "\n  };", which is not in this function at all -- the slice ran
+        # on through whatever came after it, and the guard below started
+        # failing the day an unrelated function with a post() in it was
+        # written between this one and the next "  };".
+        use = js.split("use.onclick=()=>{")[1].split("\n}")[0]
+        self.assertIn("press Write", use)
         self.assertNotIn("post(", use)
         self.assertIn("row[into]", use)
         self.assertIn("press Write", use)
@@ -6414,6 +6855,24 @@ class TestWebAssets(unittest.TestCase):
         handler = src.split("def panel_from_request")[1]
         for f in fields | {"cut", "method", "field", "base"}:
             self.assertIn(f'"{f}"', handler, f"the server never reads {f!r}")
+
+    def test_every_overwrite_the_page_posts_is_one_the_server_handles(self):
+        """Same guard as the panel fields, on the marking screen's own route.
+
+        ``overwrite`` answers an unknown kind with a raised error rather than
+        a shrug, so a kind the page invented would be a box that reports a
+        failure every time it is touched.  Added with the block paste, which
+        is the first kind the marking table posts that no single box does.
+        """
+        import re as _re
+        js = _source("volkit", "web", "index.html").split("<script>")[1].split("</script>")[0]
+        posted = set(_re.findall(
+            r"/api/overwrite'\s*,\s*(?:Object\.assign\()?\{.*?kind:'([a-z_]+)'", js, _re.S))
+        self.assertIn("quotes", posted, "the block paste is not posted from the page")
+        self.assertIn("quote", posted)
+        handler = _source("volkit", "webapp.py").split("def overwrite(")[1].split("\n    def ")[0]
+        served = set(_re.findall(r'kind == "([a-z_]+)"', handler))
+        self.assertEqual(posted - served, set())
 
     def test_the_monitor_panel_fields_are_all_understood_by_the_server(self):
         """Same guard as the listed, market-maker and comparison panels.
@@ -6912,6 +7371,58 @@ class TestQuoteMarking(unittest.TestCase):
                            "field": "rr_25", "value": -0.5})
         self.assertIn("4M", {r["tenor"].upper()
                              for r in service.marks({"pair": "USDJPY"})["atm"]})
+
+    def test_a_block_of_quotes_is_written_and_fitted_as_one_edit(self):
+        """What a paste out of a spreadsheet posts.
+
+        One request rather than the single-quote route in a loop: the screen
+        can hand over four columns and a dozen tenors at once, and a refit per
+        cell would fit the pair fifty times to answer one paste.
+        """
+        from volkit.webapp import BookService
+        from volkit.surface import QUOTE_FIELDS
+        service = BookService(str(WORKBOOK), ASOF)
+        block = [{"tenor": t, "field": f, "value": v}
+                 for t, vals in (("3M", (-0.80, -1.40, 0.22, 0.75)),
+                                 ("6M", (-0.85, -1.50, 0.24, 0.80)))
+                 for f, v in zip(QUOTE_FIELDS, vals)]
+        out = service.overwrite({"pair": "USDJPY", "kind": "quotes", "cells": block})
+        self.assertEqual(out["problems"], [])
+        rows = {r["tenor"].upper(): r for r in service.marks({"pair": "USDJPY"})["atm"]}
+        for tenor, vals in (("3M", (-0.80, -1.40, 0.22, 0.75)),
+                            ("6M", (-0.85, -1.50, 0.24, 0.80))):
+            self.assertTrue(rows[tenor]["quotes_marked"], tenor)
+            self.assertTrue(rows[tenor]["fitted"], tenor)
+            for f, v in zip(QUOTE_FIELDS, vals):
+                self.assertAlmostEqual(rows[tenor]["quotes"][f], v, places=6)
+        # A blank cell of the block is that quote given back to the sheet.
+        service.overwrite({"pair": "USDJPY", "kind": "quotes",
+                           "cells": [{"tenor": "3M", "field": "rr_25", "value": None}]})
+        again = {r["tenor"].upper(): r
+                 for r in service.marks({"pair": "USDJPY"})["atm"]}["3M"]
+        self.assertAlmostEqual(again["quotes"]["rr_25"], again["quotes_sheet"]["rr_25"])
+
+    def test_a_block_of_quotes_that_is_refused_writes_none_of_it(self):
+        """Half a pasted table is not a table anybody typed.
+
+        The single-quote route refuses a negative strangle in the box it was
+        typed into, where there is nothing else to undo.  A block refused
+        halfway would leave the pair holding the rows before the bad cell and
+        no way back to what was there, so the whole block is put back.
+        """
+        from volkit.webapp import BookService
+        service = BookService(str(WORKBOOK), ASOF)
+        before = {r["tenor"].upper(): dict(r["quotes"])
+                  for r in service.marks({"pair": "USDJPY"})["atm"]}
+        with self.assertRaises(ValueError) as cm:
+            service.overwrite({"pair": "USDJPY", "kind": "quotes", "cells": [
+                {"tenor": "1M", "field": "rr_25", "value": -0.50},
+                {"tenor": "1M", "field": "st_25", "value": -0.20}]})
+        self.assertIn("nothing was written", str(cm.exception))
+        self.assertIn("positive", str(cm.exception))
+        rows = {r["tenor"].upper(): r for r in service.marks({"pair": "USDJPY"})["atm"]}
+        self.assertFalse(rows["1M"]["quotes_marked"])
+        self.assertEqual({t: dict(r["quotes"]) for t, r in rows.items()}, before)
 
     def test_a_session_carries_the_quotes_in_points_and_refits_on_the_way_back(self):
         from volkit import session
@@ -7554,16 +8065,210 @@ class TestWorkbookAsDatabase(unittest.TestCase):
         self.assertEqual(after["USDJPY"].atm.tenor_overwrites, {})
         self.assertFalse(after["USDJPY"].anchor_tenors)
 
-    def test_the_backups_are_pruned_to_the_most_recent(self):
+    def test_the_copies_go_in_a_folder_and_a_repeated_write_makes_no_second_one(self):
+        """Two things that used to fill the workbook's own folder.
+
+        They sat beside the workbook -- the folder a person opens to find the
+        workbook -- and a write with nothing new in it left a byte-identical
+        copy next to the last one.
+        """
         from volkit import session
         wb = self.workbook()
         doc = self.marked(wb)
         for _ in range(4):
             session.export_workbook(doc, wb, in_place=True, force=True)
-        kept = sorted(wb.parent.glob(f"{wb.stem}{session.BACKUP_INFIX}*{wb.suffix}"))
-        self.assertEqual(len(kept), 4)
-        self.assertEqual(session.prune_backups(wb, keep=2) and len(
-            list(wb.parent.glob(f"{wb.stem}{session.BACKUP_INFIX}*{wb.suffix}"))), 2)
+        self.assertEqual(sorted(wb.parent.glob(f"{wb.stem}{session.BACKUP_INFIX}*")), [],
+                         "copies are still beside the workbook")
+        rows = session.list_backups(wb)
+        self.assertTrue(rows)
+        self.assertTrue(all(Path(r["path"]).parent == session.backup_dir(wb) for r in rows))
+        # The last write repeated bytes that were already kept, so it kept no
+        # second copy of them and said so.
+        out = session.export_workbook(doc, wb, in_place=True, force=True)
+        self.assertTrue(out["reused"], out["notes"])
+        self.assertEqual(len(session.list_backups(wb)), len(rows))
+        self.assertTrue(any("already the file kept at" in n for n in out["notes"]),
+                        out["notes"])
+
+    def test_two_saves_of_an_unchanged_book_are_the_same_workbook(self):
+        """The stamp the library writes is not a change to the workbook.
+
+        openpyxl puts the moment it saved into ``docProps/core.xml``, so two
+        saves of a book nobody touched are never the same *bytes*.  Comparing
+        the files whole found a difference every time and kept a copy every
+        time -- the dedupe passed its first test only because both writes
+        landed inside one second.
+        """
+        import time
+        from volkit import session
+        wb = self.workbook()
+        doc = self.marked(wb)
+        session.export_workbook(doc, wb, in_place=True, force=True)
+        first = wb.read_bytes()
+        time.sleep(1.1)
+        session.export_workbook(doc, wb, in_place=True, force=True)
+        second = wb.read_bytes()
+        self.assertNotEqual(first, second, "openpyxl stopped stamping the save time")
+        self.assertEqual(session.content_digest(first), session.content_digest(second))
+        # A cell that actually moved is a different workbook, stamp or no.
+        book = Book.from_excel(wb, ASOF).load_all(["USDJPY"])
+        book["USDJPY"].atm.overwrite_tenor("3m", 0.10)
+        session.export_workbook(session.capture(book, ["USDJPY"]), wb,
+                                in_place=True, force=True)
+        self.assertNotEqual(session.content_digest(second),
+                            session.content_digest(wb.read_bytes()))
+
+    def test_copies_made_before_there_was_a_folder_are_moved_into_it(self):
+        """A rule that could not see them would be a second rule."""
+        from volkit import session
+        wb = self.workbook()
+        loose = wb.with_name(f"{wb.stem}{session.BACKUP_INFIX}20200101-090000{wb.suffix}")
+        loose.write_bytes(b"an old copy")
+        self.assertEqual([r["name"] for r in session.list_backups(wb)], [loose.name])
+        self.assertTrue(session.list_backups(wb)[0]["loose"])
+        session.export_workbook(self.marked(wb), wb, in_place=True, force=True)
+        self.assertFalse(loose.exists())
+        self.assertIn(loose.name, [r["name"] for r in session.list_backups(wb)])
+        self.assertFalse(session.list_backups(wb)[-1]["loose"])
+
+    def test_the_copies_are_thinned_by_age_and_not_by_count(self):
+        """Twenty saves between lunch and the close used to push out
+        yesterday's file, which is the one somebody asks for."""
+        from datetime import timedelta
+        from volkit import session
+        wb = self.workbook()
+        d = session.backup_dir(wb, create=True)
+        now = datetime.now()
+        whens = [now - timedelta(minutes=6 * i) for i in range(40)]          # one afternoon
+        whens += [now - timedelta(days=k, hours=3) for k in range(1, 61)]    # two months
+        for when in whens:
+            (d / f"{wb.stem}{session.BACKUP_INFIX}"
+                 f"{when.strftime('%Y%m%d-%H%M%S')}{wb.suffix}").write_bytes(b"x")
+        self.assertEqual(len(session.list_backups(wb)), 100)
+        gone = session.prune_backups(wb)
+        kept = session.list_backups(wb)
+        self.assertTrue(30 < len(gone) < 90)
+        self.assertLess(len(kept), 40, "thinning kept too many")
+        self.assertGreater(len(kept), 10, "thinning kept too few")
+        # Fewer files *and* more history: the oldest survivor is weeks back,
+        # where the count rule would have stopped inside the afternoon.
+        oldest = min(r["when"] for r in kept)
+        self.assertLess(oldest, (now - timedelta(days=30)).isoformat(timespec="seconds"))
+        # ...and the newest few are all there, because an undo reaches for one
+        # of those.
+        newest = sorted((r["when"] for r in kept), reverse=True)
+        self.assertEqual(len(newest[:session.BACKUP_KEEP_LATEST]),
+                         session.BACKUP_KEEP_LATEST)
+        # The old rule is still there for a caller that asks for a number.
+        session.prune_backups(wb, keep=3)
+        self.assertEqual(len(session.list_backups(wb)), 3)
+
+    def test_the_copy_that_cannot_be_rebuilt_is_kept_for_good(self):
+        """openpyxl carries no chart through a round trip, so the copy taken
+        before the write that flattens one is the only place it still exists.
+        Every copy after it is the previous one plus a session document, which
+        is why the rest can be thinned hard."""
+        import zipfile
+        from volkit import session
+        wb = self.workbook()
+        # A workbook with a part a write would drop.
+        blob = wb.read_bytes()
+        with zipfile.ZipFile(wb, "a") as z:
+            z.writestr("xl/charts/chart1.xml", "<c/>")
+        self.assertTrue(session.round_trip_losses(wb))
+        kept = session.keep_backup(wb, wb.read_bytes())
+        self.assertTrue(kept["origin"])
+        self.assertIn(session.ORIGIN_INFIX, Path(kept["origin"]).stem)
+        self.assertTrue(any("kept for good" in n for n in kept["notes"]), kept["notes"])
+        # Now flat, so later copies are ordinary ones...
+        wb.write_bytes(blob)
+        session.keep_backup(wb, blob)
+        rows = session.list_backups(wb)
+        self.assertEqual(sum(1 for r in rows if r["origin"]), 1)
+        # ...and no amount of thinning touches the one that matters.
+        session.prune_backups(wb, keep=0)
+        rows = session.list_backups(wb)
+        self.assertEqual([r["origin"] for r in rows], [True])
+
+    def test_the_screen_and_the_command_read_the_same_versions(self):
+        """The four pieces: the model, a route, a subcommand on the same
+        function, and the card.  A history the GUI could see and the CLI could
+        not would be two histories."""
+        import io as _io
+        from contextlib import redirect_stdout
+        from volkit import cli, session
+        from volkit.webapp import BookService
+        wb = self.workbook()
+        service = BookService(str(wb), ASOF)
+        service.overwrite({"pair": "USDJPY", "kind": "atm", "tenor": "1M", "value": 9.25})
+        service.session_save({"path": str(wb.parent / "marks.json")})
+        service.session_export({"path": str(wb.parent / "marks.json")})
+        seen = service.workbook_versions()
+        self.assertEqual([r["name"] for r in seen["backups"]],
+                         [r["name"] for r in session.list_backups(wb)])
+        self.assertEqual(seen["folder"], session.backup_dir(wb).name)
+        self.assertEqual(len(seen["writes"]), 1)
+        buf = _io.StringIO()
+        with redirect_stdout(buf):
+            cli.main(["-w", str(wb), "versions"])
+        text = buf.getvalue()
+        self.assertIn(seen["backups"][0]["name"], text)
+        self.assertIn("write(s), newest first", text)
+        # And the restore is the same function under both.
+        name = seen["backups"][0]["name"]
+        out = service.workbook_restore({"name": name})
+        self.assertTrue(out["ok"])
+        self.assertEqual(service.book["USDJPY"].atm.tenor_overwrites, {},
+                         "the restore did not put the workbook back")
+
+    def test_a_copy_can_be_put_back_and_that_is_undoable_too(self):
+        from volkit import session
+        wb = self.workbook()
+        before = wb.read_bytes()
+        session.export_workbook(self.marked(wb), wb, in_place=True, force=True)
+        self.assertNotEqual(wb.read_bytes(), before)
+        name = [r["name"] for r in session.list_backups(wb)][0]
+        out = session.restore_backup(wb, name)
+        self.assertEqual(wb.read_bytes(), before)
+        self.assertEqual(out["restored"], name)
+        # What the restore replaced is kept, so the undo has an undo.
+        self.assertTrue(Path(out["backup"]).exists())
+        self.assertNotEqual(Path(out["backup"]).read_bytes(), before)
+        with self.assertRaises(session.SessionError):
+            session.restore_backup(wb, "not-a-copy.xlsx")
+
+    def test_every_write_is_logged_and_an_export_keeps_the_marks_beside_it(self):
+        """The cheap half of the history.
+
+        A copy of the workbook is tens or hundreds of kilobytes and there are
+        a couple of dozen of them; a line of the log is a few hundred bytes
+        and there is one per write, for good.  So a write whose copy has been
+        thinned away is still on the record, and where the write was an export
+        the session document beside it says what was marked.
+        """
+        from volkit import session
+        wb = self.workbook()
+        doc = self.marked(wb)
+        out = session.export_workbook(doc, wb, in_place=True, force=True)
+        session.write_config_tabs(wb, {"PEG_BANDS": [
+            {"pair": "USDHKD", "lower": 7.75, "upper": 7.85, "note": "HKMA"}]})
+        log = session.read_history(wb)
+        self.assertEqual([r["what"] for r in log], ["configuration tab", "marks"])
+        self.assertEqual(log[1]["pairs"], ["USDJPY"])
+        self.assertEqual(log[0]["tabs"], ["PEG_BANDS"])
+        # The document is the marks, and it loads as the session it came from.
+        snap = session.history_dir(wb) / log[1]["document"]
+        self.assertTrue(snap.exists())
+        self.assertLess(snap.stat().st_size, wb.stat().st_size / 4,
+                        "a session document should be a fraction of a workbook")
+        back = Book.from_excel(wb, ASOF).load_all(["USDJPY"])
+        back["USDJPY"].atm.clear_overwrite("1m")
+        session.apply_document(back, session.load(snap), ["USDJPY"])
+        self.assertEqual(back["USDJPY"].atm.tenor_overwrites, {"1m": 0.0925})
+        # A copy written somewhere else is that file's history, not this one's.
+        n = len(session.read_history(wb))
+        session.export_workbook(doc, wb, wb.with_name("elsewhere.xlsx"))
+        self.assertEqual(len(session.read_history(wb)), n)
 
     def test_a_configuration_tab_is_written_and_read_back(self):
         from volkit import session
@@ -10464,6 +11169,43 @@ class TestQuoteGrammar(unittest.TestCase):
         self.assertAlmostEqual(col.quotes[0].strike, 1.09)
         self.assertIsNone(col.quotes[0].delta)
 
+    def test_a_weekday_is_an_intra_week_expiry(self):
+        """A day name is the next one of that day from today: a run that wants
+        a date this week writes 'Fri', and counting the days by hand is how a
+        quote lands a day off the option it was quoting."""
+        from datetime import date
+        friday = date(2026, 9, 4)                     # a Friday
+        run = self.parse("mon atm 8.1/8.5\nwed 1.1000 call 7.9/8.4\n"
+                         "thursday 25d fly 0.20/0.28\nfri 25d rr -0.30/-0.10\n",
+                         today=friday)
+        self.assertEqual(run.skipped, ())
+        self.assertEqual([str(q.expiry)[:10] for q in run.quotes],
+                         ["2026-09-07", "2026-09-09", "2026-09-10", "2026-09-11"])
+        self.assertTrue(any("next Monday from today" in n for n in run.quotes[0].notes))
+        # Strictly forward: 'Fri' read on a Friday is the Friday coming, not
+        # an expiry this morning, which is no expiry at all.
+        self.assertEqual(str(run.quotes[3].expiry)[:10], "2026-09-11")
+        # The weakest way to say when: anything else on the line beats it.
+        both = self.parse("fri 1M atm 8.2/8.6\n", today=friday)
+        self.assertEqual(str(both.quotes[0].expiry), "1M")
+        self.assertTrue(any("the weekday is read as the day it was written" in n
+                            for n in both.quotes[0].notes))
+        # A day name in front of a time is the day the run was written. Read
+        # as an expiry it would beat the tenor beside it and move the quote a
+        # month, which is the one way a weekday could do real damage.
+        stamped = self.parse("mon 09:15 1M atm 8.2/8.6\n", today=friday)
+        self.assertEqual(str(stamped.quotes[0].expiry), "1M")
+        self.assertEqual(stamped.quotes[0].timestamp_text, "09:15")
+        # Both legs of a spread may be weekdays.
+        sp = self.parse("mon vs fri atm 0.10/0.20\n", today=friday)
+        self.assertEqual([str(sp.quotes[0].expiry)[:10], str(sp.quotes[0].expiry_far)[:10]],
+                         ["2026-09-07", "2026-09-11"])
+        # And with no clock behind the run there is nothing to count from, so
+        # it is said rather than guessed.
+        none = self.parse("mon atm 8.1/8.5\n")
+        self.assertEqual(none.quotes, ())
+        self.assertIn("no tenor or expiry", none.skipped[0][2])
+
     def test_a_date_beats_a_tenor(self):
         q = self.parse("1M 2026-09-30 atm 8.1/8.5\n").quotes[0]
         self.assertEqual(str(q.expiry)[:10], "2026-09-30")
@@ -10480,7 +11222,9 @@ class TestQuoteGrammar(unittest.TestCase):
         """'6M 1.10 call' and '6M 1.10 put' are one volatility, so they are one
         quote and the later one supersedes the earlier.  '25d call' and
         '25d put' are two strikes.  A premium at a strike needs the side,
-        because a call and a put there are two different prices."""
+        because a call and a put there are two different prices -- unless the
+        line said 'live', which is a low-delta option and so names its side by
+        which side of the forward the strike sits on."""
         run = self.parse("6M 1.10 call 7.9/8.4\n6M 1.10 put 7.95/8.45\n")
         self.assertEqual(len(run.quotes), 1)
         self.assertIsNone(run.quotes[0].is_call)
@@ -10489,8 +11233,13 @@ class TestQuoteGrammar(unittest.TestCase):
         self.assertEqual([q.is_call for q in wings.quotes], [True, False])
         self.assertEqual(len(wings.superseded), 1)
         live = self.parse("6M 1.10 live 0.0125/0.0135\n")
-        self.assertEqual(live.quotes, ())
-        self.assertIn("needs the side", live.skipped[0][2])
+        self.assertEqual(live.skipped, ())
+        self.assertIsNone(live.quotes[0].is_call)
+        self.assertTrue(any("moneyness" in n for n in live.quotes[0].notes))
+        # A premium that did not say 'live' still needs the side written out.
+        prem = self.parse("6M 1.10 prem 0.0125/0.0135\n")
+        self.assertEqual(prem.quotes, ())
+        self.assertIn("needs the side", prem.skipped[0][2])
 
     def test_a_premium_is_read_in_its_unit_and_never_scaled(self):
         run = self.parse("1M atm 8.2/8.6\n"
@@ -10513,6 +11262,27 @@ class TestQuoteGrammar(unittest.TestCase):
         self.assertIn("premium", self.parse("1M atm 0.5/0.6 prem\n").skipped[0][2])
         # A currency that is neither leg is refused rather than guessed.
         self.assertIn("not a leg", self.parse("3M 1.10 call 0.01/0.02 chf\n").skipped[0][2])
+
+    def test_basis_points_are_a_hundredth_of_a_per_cent(self):
+        """'5bp' is 0.05% of the base notional and never 5 of anything.  It is
+        read glued to its number or as the word after it, on one side of a
+        two-way or on both -- and because the price named its own unit, the
+        number beside it that did not is the strike."""
+        run = self.parse("6M 1.2500 live 12/14bp\n"
+                         "3M 1.3000 call 8bps prem\n"
+                         "1M 1.1000 live 5 bp / 7 bp\n"
+                         "2M 1.0500 live 9 bps\n")
+        self.assertEqual(run.skipped, ())
+        self.assertEqual([(q.premium_unit, round(q.bid, 6), round(q.ask, 6)) for q in run.quotes],
+                         [("pct", 0.12, 0.14), ("pct", 0.08, 0.08),
+                          ("pct", 0.05, 0.07), ("pct", 0.09, 0.09)])
+        self.assertEqual([q.strike for q in run.quotes], [1.25, 1.30, 1.10, 1.05])
+        self.assertTrue(all(q.quote_kind == "premium" for q in run.quotes))
+        self.assertTrue(any("hundredth of a per cent" in n for n in run.quotes[0].notes))
+        # A digit has to come before the unit, so GBP is a currency and a
+        # volatility line is not turned into a premium by the letters in it.
+        self.assertIsNone(quotes._BPS_NUM.search("gbpusd"))
+        self.assertEqual(self.parse("1M atm 8.1/8.5\n").quotes[0].quote_kind, "vol")
 
     def test_lines_for_another_pair_are_passed_over_not_refused(self):
         run = self.parse("1M atm 8.2/8.6\n"
@@ -10608,6 +11378,56 @@ class TestQuoteGrammarOnTheBook(unittest.TestCase):
         bare, why = mm.premiums_as_vols(list(run.quotes), expiries, {}, "EURUSD")
         self.assertEqual(bare[0].quote_kind, "premium")
         self.assertIn("no forward feed", why[0])
+
+    def test_a_live_line_takes_its_side_from_the_moneyness(self):
+        """A live option is dealt without its delta hedge, which is what makes
+        it a low-delta option: it is the out-of-the-money one, so the side of
+        the forward the strike sits on names the call or the put.  The parse
+        leaves the side open -- it has no forward -- and the conversion here
+        settles it and says so."""
+        from volkit import marketmaker as mm
+        run = quotes.parse_quotes("3M 1.2500 live 12/14bp\n3M 0.9500 live 8/10bp\n",
+                                  pair="EURUSD")
+        self.assertEqual(run.skipped, ())
+        self.assertEqual([q.is_call for q in run.quotes], [None, None])
+        # 12bp is 0.12% of the base notional, not 12 of anything.
+        self.assertEqual([(q.premium_unit, q.bid, q.ask) for q in run.quotes],
+                         [("pct", 0.12, 0.14), ("pct", 0.08, 0.10)])
+        expiries = mm.resolve_expiries(self.book.clock, run.quotes)
+        levels = mm._levels_for(self.book, "EURUSD", expiries)
+        out, errors = mm.premiums_as_vols(list(run.quotes), expiries, levels, "EURUSD")
+        self.assertEqual(errors, ["", ""])
+        F = levels["3M"]["forward"]
+        self.assertLess(F, 1.25)
+        self.assertGreater(F, 0.95)
+        # Above the forward the call, below it the put, and both said outright.
+        self.assertEqual([q.is_call for q in out], [True, False])
+        for q in out:
+            self.assertTrue(any("read from the moneyness" in n for n in q.notes), q.notes)
+        # And the volatility it lands on reprices the premium it came from.
+        _, t = expiries["3M"]
+        spot = levels["3M"]["spot"]
+        for q, px, k in ((out[0], (0.12, 0.14), 1.25), (out[1], (0.08, 0.10), 0.95)):
+            for v, p in zip((q.bid, q.ask), px):
+                self.assertAlmostEqual(float(black.price(F, k, v, t, bool(q.is_call))),
+                                       p * spot / 100.0, places=12)
+
+    def test_a_side_read_off_a_near_the_money_strike_says_so(self):
+        """The moneyness names the side because a live option is far out of
+        the money.  Read off a strike that is not, it is a guess, and the row
+        carries the warning that says which way to write it out."""
+        from volkit import marketmaker as mm
+        expiries = mm.resolve_expiries(self.book.clock, [])
+        near = quotes.parse_quotes("3M atm 8.0/8.4\n", pair="EURUSD")
+        expiries = mm.resolve_expiries(self.book.clock, near.quotes)
+        F = mm._levels_for(self.book, "EURUSD", expiries)["3M"]["forward"]
+        run = quotes.parse_quotes(f"3M {F * 1.001:.4f} live 2.0/2.4%\n", pair="EURUSD")
+        expiries = mm.resolve_expiries(self.book.clock, run.quotes)
+        levels = mm._levels_for(self.book, "EURUSD", expiries)
+        out, errors = mm.premiums_as_vols(list(run.quotes), expiries, levels, "EURUSD")
+        self.assertEqual(errors, [""])
+        self.assertIs(out[0].is_call, True)
+        self.assertTrue(any("not the low-delta one" in n for n in out[0].notes), out[0].notes)
 
     def test_a_structure_values_as_the_signed_sum_of_its_legs(self):
         from volkit import marketmaker as mm
@@ -11823,6 +12643,58 @@ class TestKaceFeed(unittest.TestCase):
         self.assertIn(kace.ENV_URL, str(ctx.exception))
         with self.assertRaises(kace.KacePostError):
             kace.post_message("<m/>", "ftp://kace/x", opener=fake)
+
+    def test_an_old_tls_server_is_reached_by_stepping_down_and_the_post_says_how(self):
+        """kACE offers 1024-bit Diffie-Hellman and OpenSSL 3 refuses it by default.
+
+        The desk saw ``[SSL: DH_KEY_TOO_SMALL] dh key too small`` from the
+        Post button while the poster web page worked, because a browser never
+        offers finite-field DH and the server falls back to ECDHE or RSA with
+        it.  So the poster does the same, one step at a time, keeps the step
+        that worked for the host, and reports it with the post.
+        """
+        import urllib.error
+        from unittest import mock
+        from volkit import kace
+        calls: list[int] = []
+
+        def fake_post_once(url, body, headers, *, timeout, context):
+            step = len(calls)
+            calls.append(step)
+            if step == 0:
+                raise urllib.error.URLError("[SSL: DH_KEY_TOO_SMALL] dh key too small (_ssl.c:1010)")
+            return 200, self.REPLY_OK.encode()
+
+        kace._TLS_STEP_BY_HOST.clear(); kace._TLS_NOTE_BY_HOST.clear()
+        with mock.patch.object(kace, "_post_once", fake_post_once):
+            r = kace.post_message("<gfi_message/>", "https://kace:8500/pricing", insecure=True)
+            self.assertTrue(r.ok)
+            self.assertEqual(calls, [0, 1])
+            self.assertIn("without finite-field Diffie-Hellman", r.message)
+            self.assertEqual(kace._TLS_STEP_BY_HOST["kace:8500"], 1)
+            # the next post to the same host starts at the step that worked
+            r = kace.post_message("<gfi_message/>", "https://kace:8500/pricing", insecure=True)
+            self.assertEqual(calls, [0, 1, 2])   # one call, no re-learning
+            self.assertTrue(r.ok)
+        # A certificate problem is never stepped around: it is the error, with the hint.
+        kace._TLS_STEP_BY_HOST.clear(); kace._TLS_NOTE_BY_HOST.clear()
+
+        def bad_cert(*a, **k):
+            raise urllib.error.URLError("[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed")
+        with mock.patch.object(kace, "_post_once", bad_cert):
+            with self.assertRaises(kace.KacePostError) as ctx:
+                kace.post_message("<gfi_message/>", "https://kace:8500/pricing")
+        self.assertIn("--kace-ca", str(ctx.exception))
+        # And a server nothing reaches says what was tried.
+        def never(*a, **k):
+            raise urllib.error.URLError("[SSL: SSLV3_ALERT_HANDSHAKE_FAILURE] handshake failure")
+        with mock.patch.object(kace, "_post_once", never):
+            with self.assertRaises(kace.KacePostError) as ctx:
+                kace.post_message("<gfi_message/>", "https://kace:8500/pricing")
+        self.assertIn("after also trying", str(ctx.exception))
+        self.assertIn("security level 0", str(ctx.exception))
+        # The plain http route has no TLS to step down and is untouched.
+        self.assertEqual(kace.tls_note("http://kace:8500/x"), "")
 
     def test_the_post_log_and_a_refused_post(self):
         import tempfile

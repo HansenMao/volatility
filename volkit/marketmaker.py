@@ -548,7 +548,7 @@ class Evaluator:
             rho, slog = p[f"rho{which}"], p[f"slog{which}"]
             nu = slog / math.sqrt(t)
             alpha = sabr.alpha_from_atm(
-                atm_vol, black.dns_strike(1.0, atm_vol, t, self.s.conv), rho, nu, t, 1.0)
+                atm_vol, black.atm_strike(1.0, atm_vol, t, self.s.conv), rho, nu, t, 1.0)
             hit = SabrParams(alpha=alpha, rho=rho, volvol=nu, t=t, f=1.0)
             self._wing[key] = hit
         return hit
@@ -752,6 +752,40 @@ def _levels_for(book, pair: str, expiries: dict) -> dict:
             for key, (dt, _) in expiries.items()}
 
 
+def side_from_moneyness(strike, forward) -> bool:
+    """Which side a strike names when the line did not say.
+
+    Only ever asked of a **live** option -- one dealt without its delta hedge,
+    which is what makes it a low-delta option -- so it is the out-of-the-money
+    one: above the forward it is the call, below it the put.  At the forward
+    either answer is the same option to within the smile, and the call is
+    taken, as the pricing screen's own strike box does.
+    """
+    return float(strike) >= float(forward)
+
+
+def _side_note(q, is_call: bool, forward: float) -> str:
+    return (f"no side on the line, so it was read from the moneyness: the strike "
+            f"{q.strike:g} is {'above' if is_call else 'below'} the forward {forward:g}, "
+            f"so this is the {'call' if is_call else 'put'} -- a live option is the "
+            f"out-of-the-money one")
+
+
+def _side_warning(q, is_call: bool, forward: float, vol: float, t: float) -> str:
+    """Said when a side read off the moneyness was read off a near-the-money
+    strike: the rule is only as good as the option being far out of it, and a
+    45-delta option is one the run should have named a side for."""
+    try:
+        d = abs(float(black.delta(forward, q.strike, vol, t, is_call)))
+    except (ValueError, ArithmeticError):
+        return ""
+    if d <= 0.40:
+        return ""
+    return (f"the side was read from the moneyness, but at {d * 100:.0f} delta this option is "
+            f"not the low-delta one a live price usually is; write 'call' or 'put' if the "
+            f"other side was meant")
+
+
 def premiums_as_vols(quotes, expiries: dict, levels: dict, pair: str) -> tuple[list, list[str]]:
     """Every premium quote in the run, as the volatility two-way it implies.
 
@@ -787,6 +821,12 @@ def premiums_as_vols(quotes, expiries: dict, levels: dict, pair: str) -> tuple[l
                           f"no forward feed for {pair}")
             continue
         _, t = expiries[_key(q.expiry)]
+        # A live line may carry no side: the parse leaves it open because the
+        # forward it is read against lives here and not there.
+        side_note = ""
+        if q.is_call is None and q.strike is not None:
+            q = MarketQuote(**{**vars(q), "is_call": side_from_moneyness(q.strike, fwd)})
+            side_note = _side_note(q, bool(q.is_call), fwd)
         try:
             if q.premium_unit == "pips":
                 if not pip:
@@ -807,8 +847,12 @@ def premiums_as_vols(quotes, expiries: dict, levels: dict, pair: str) -> tuple[l
             continue
         lo, hi = sorted(vols)
         unit = {"pips": "pips", "pct": "%", "price": ""}[q.premium_unit or "price"]
+        extra = ()
+        if side_note:
+            warn = _side_warning(q, bool(q.is_call), fwd, 0.5 * (lo + hi), t)
+            extra = (side_note,) + ((warn,) if warn else ())
         out.append(MarketQuote(**{**vars(q), "bid": lo, "ask": hi, "quote_kind": "vol",
-                                  "premium_unit": None, "notes": q.notes + (
+                                  "premium_unit": None, "notes": q.notes + extra + (
             f"premium {q.bid:g}/{q.ask:g} {unit} ({how}) inverted against the forward "
             f"{fwd:g}: {lo * 100:.3f}/{hi * 100:.3f} vol. Undiscounted, so a touch low on a "
             f"long-dated option",)}))
@@ -1106,10 +1150,31 @@ class Skew:
     fair: float
     axe: float
     bank: float
+    #: What the tape has been doing, as a lean.  Positive is the market having
+    #: paid for volatility, which is a reason to mark *up*: the street is
+    #: getting shorter and the next caller is more likely another buyer.
+    flow: float
     total: float
     capped: bool
     cap: float | None
     reason: str = ""
+
+
+def _bucket_days(label: str) -> float | None:
+    """A representative number of days for a tenor bucket.
+
+    The geometric middle of the bucket rather than its edge: a bucket that
+    reaches from a month to three is answered at about seven weeks, which is
+    where its evidence actually sits, and the open-ended one is answered at
+    twice its floor rather than at infinity.
+    """
+    from .synthesis import BUCKETS
+    prev = 1.0
+    for edge, name in BUCKETS:
+        if name == label:
+            return 2.0 * prev if edge == float("inf") else math.sqrt(max(prev, 1.0) * edge)
+        prev = edge
+    return None
 
 
 def _interp(ts: list[float], values: list[float], t: float) -> float | None:
@@ -1120,23 +1185,32 @@ def _interp(ts: list[float], values: list[float], t: float) -> float | None:
 
 def skew_for(q: MarketQuote, t: float, *, half_width: float | None, richness, axe,
              fair_weight: float, axe_weight: float, cap_ratio: float,
-             bank_shift: float) -> Skew:
+             bank_shift: float, flow=None, flow_weight: float = 0.0) -> Skew:
     """How far to lean the mid, and why.
 
-    Both leans point the same way: a rich market and a long position are both
-    reasons to *want to sell*, and you attract a seller's trade by shading the
-    price down, not up.  Both are capped as a fraction of the width, so an axe
-    can lean the price inside the market but cannot on its own walk it out of
-    the market -- which would stop being a quote and start being a bet.
+    The first two leans point the same way: a rich market and a long position
+    are both reasons to *want to sell*, and you attract a seller's trade by
+    shading the price down, not up.
+
+    The third points the other way, and deliberately.  ``flow`` is what the
+    printed tape has been doing -- positive when the market has been *paying*
+    for volatility -- and that is a reason to mark **up**: the street is
+    getting shorter as it sells, and the next caller is more likely to be
+    another buyer.  A desk that reads it the other way, as a crowd to fade,
+    sets a negative weight and the same arithmetic runs backwards.
+
+    All of them are capped together as a fraction of the width, so no lean and
+    no combination of leans can walk the price out of the market on its own --
+    which would stop being a quote and start being a bet.
     """
     level = q.instrument in _LEVEL_INSTRUMENTS or (
         q.instrument == "spread" and (q.leg or "atm") in _LEVEL_INSTRUMENTS)
     reason = ""
-    fair = axe_part = 0.0
+    fair = axe_part = flow_part = 0.0
     if not level:
-        reason = (f"a {q.instrument} is not a level, so neither the fair-value richness nor a "
-                  f"vega position says where it should be marked; only the bank's own shift "
-                  f"applies")
+        reason = (f"a {q.instrument} is not a level, so neither the fair-value richness, a "
+                  f"vega position nor the printed tape says where it should be marked; only "
+                  f"the bank's own shift applies")
     else:
         if richness is not None:
             fair = -fair_weight * richness
@@ -1144,13 +1218,17 @@ def skew_for(q: MarketQuote, t: float, *, half_width: float | None, richness, ax
             axe_part = -axe_weight * max(-1.0, min(1.0, axe)) * half_width
         elif axe is not None:
             reason = "there is no width for this quote, so the axe has nothing to lean against"
-    total = fair + axe_part + bank_shift
+        if flow is not None and half_width is not None:
+            flow_part = flow_weight * max(-1.0, min(1.0, flow)) * half_width
+        elif flow is not None and not reason:
+            reason = "there is no width for this quote, so the tape has nothing to lean against"
+    total = fair + axe_part + flow_part + bank_shift
     cap = None if half_width is None else cap_ratio * half_width
     capped = False
     if cap is not None and abs(total) > cap:
         total = math.copysign(cap, total)
         capped = True
-    return Skew(fair=fair, axe=axe_part, bank=bank_shift, total=total,
+    return Skew(fair=fair, axe=axe_part, bank=bank_shift, flow=flow_part, total=total,
                 capped=capped, cap=cap, reason=reason)
 
 
@@ -1713,6 +1791,17 @@ class QuotePanel:
     vega_scale: float = 0.0
     fair_weight: float = 0.25
     axe_weight: float = 0.5
+    #: The printed tape's lean.  **Off unless a weight is set**: what the
+    #: dissemination file says about direction is inferred and not published,
+    #: and a desk may not want an inference moving its price at all.  Positive
+    #: leans the mid *up* when the tape has been paying (see `skew_for`).
+    flow_weight: float = 0.0
+    #: The net vega, in the base currency per volatility point, that counts as
+    #: a full lean.  The flow is divided by it and clamped to one.
+    flow_scale: float = 5_000_000.0
+    flow_half_life: float = 5.0
+    flow_lookback_days: float = 30.0
+    flow_tolerance: float = 0.03
     skew_cap: float = 1.0
     horizon_days: float = 30.0
     lookback_days: float | None = None
@@ -1739,7 +1828,8 @@ class QuotePanel:
             "pair": self.pair, "cut": self.cut, "method": method, "label": self.label,
             "valuation": clock.now.isoformat(),
             "notes": list(self.notes), "warnings": [], "unavailable": {},
-            "sheet": None, "bank": None, "axe": None, "fair": None, "marks": None,
+            "sheet": None, "bank": None, "axe": None, "fair": None, "flow": None,
+            "marks": None,
         }
 
         asked = parse_requests(self.request_text, pair=self.pair,
@@ -1811,8 +1901,10 @@ class QuotePanel:
             rich_at, fair_block = self._fair(book, hist, method)
             out["fair"] = fair_block
             ev = Evaluator(surface, method, self.cut)
-            rows = [self._row(q, ev, expiries, forwards, pk, rich_at, axe_at, market,
-                              synthesis)
+            flow_at, flow_block = self._flow(archive, ev, clock, expiries, forwards, hist)
+            out["flow"] = flow_block
+            rows = [self._row(q, ev, expiries, forwards, pk, rich_at, axe_at, flow_at,
+                              market, synthesis)
                     for q in requests]
 
         stood = dict(self.marks or {})
@@ -1875,8 +1967,15 @@ class QuotePanel:
                                    f"stands")
             return
         level = self._level_at(t, expiry)
+        is_call = q.is_call
+        if is_call is None and q.strike is not None:
+            is_call = side_from_moneyness(q.strike, forward)
+            row["notes"].append(_side_note(q, bool(is_call), forward))
+            warn = _side_warning(q, bool(is_call), forward, 0.5 * (bid + ask), t)
+            if warn:
+                row["warnings"].append(warn)
         try:
-            prices = [float(black.price(forward, q.strike, v, t, bool(q.is_call)))
+            prices = [float(black.price(forward, q.strike, v, t, bool(is_call)))
                       for v in (bid, ask)]
         except (ValueError, ArithmeticError) as exc:
             row["warnings"].append(f"the premium could not be priced: {exc}")
@@ -1909,7 +2008,7 @@ class QuotePanel:
         except (ValueError, KeyError):
             return {}
 
-    def _row(self, q, ev, expiries, forwards, pk: PairKnowledge, rich_at, axe_at,
+    def _row(self, q, ev, expiries, forwards, pk: PairKnowledge, rich_at, axe_at, flow_at,
              market: dict, synthesis=None) -> dict:
         dt_key = _key(_row_expiry(q))
         t = expiries[dt_key][1]
@@ -1926,13 +2025,13 @@ class QuotePanel:
             "days": days, "size": q.size, "size_basis": q.size_basis,
             "sign": q.sign, "direction": q.direction,
             "model": None,
-            "skew_fair": None, "skew_axe": None, "skew_bank": None,
+            "skew_fair": None, "skew_axe": None, "skew_flow": None, "skew_bank": None,
             "skew_total": None, "skew_cap": None, "skew_capped": False, "skew_reason": "",
             "our_mid": None, "our_bid": None, "our_ask": None,
             "width": None, "width_source": None, "floor": None,
             "market_bid": None, "market_ask": None, "market_mid": None, "market_width": None,
             "position": None, "edge": None, "crossing": "",
-            "richness": None, "axe": None, "verdict": "",
+            "richness": None, "axe": None, "flow": None, "verdict": "",
             "archive_width": None, "archive_observations": None, "archive_level": None,
             "archive_gap": None, "flags": [],
             # The bank's prose kept apart from the reader's own notes: a
@@ -2017,6 +2116,7 @@ class QuotePanel:
             t_near = expiries[_key(q.expiry)][1]
             richness = (None if rich_at is None else rich_at(t) - rich_at(t_near))
             axe = (None if axe_at is None else axe_at(t) - axe_at(t_near))
+            flow = (None if flow_at is None else flow_at(t) - flow_at(t_near))
             row["notes"].append(
                 f"the width and the shading are taken across the spread: the bank rule is "
                 f"matched on the {_key(q.expiry_far)} leg, and the richness and the axe are "
@@ -2024,14 +2124,18 @@ class QuotePanel:
         else:
             richness = None if rich_at is None else rich_at(t)
             axe = None if axe_at is None else axe_at(t)
+            flow = None if flow_at is None else flow_at(t)
         row["richness"] = None if richness is None else richness * 100.0
         row["axe"] = axe
+        row["flow"] = flow
         skew = skew_for(q, t, half_width=None if width is None else width / 2.0,
                         richness=richness, axe=axe, fair_weight=self.fair_weight,
                         axe_weight=self.axe_weight, cap_ratio=self.skew_cap,
-                        bank_shift=q.sign * overlay.shift / 100.0)
+                        bank_shift=q.sign * overlay.shift / 100.0,
+                        flow=flow, flow_weight=self.flow_weight)
         row["skew_fair"] = skew.fair * 100.0
         row["skew_axe"] = skew.axe * 100.0
+        row["skew_flow"] = skew.flow * 100.0
         row["skew_bank"] = skew.bank * 100.0
         row["skew_total"] = skew.total * 100.0
         row["skew_cap"] = None if skew.cap is None else skew.cap * 100.0
@@ -2111,6 +2215,97 @@ class QuotePanel:
                 for k in sorted(profile, key=tenor_to_years)]
         block["reason"] = (f"{len(profile)} tenor(s), against an axe scale of "
                            f"{self.vega_scale:g}; held flat outside the pasted range")
+        return (lambda t: _interp(ts, vals, t)), block
+
+    def _flow(self, archive, ev, clock, expiries, forwards, hist) -> tuple[object, dict]:
+        """What the printed tape has been doing, as a lean per tenor.
+
+        The one inference in this panel.  The dissemination file publishes no
+        buyer and no seller, so a print's side is decided by where it sat
+        against **our own mark** -- which means the answer moves when the
+        marks move, and the card says so rather than presenting it as
+        something the file stated.
+
+        Off unless ``flow_weight`` is set: a desk that has not looked at the
+        tape should not have it moving a price, and an inference that quietly
+        leans a quote is the failure this whole package is written against.
+        """
+        block = {"available": False, "reason": "", "weight": self.flow_weight,
+                 "scale": self.flow_scale, "half_life": self.flow_half_life,
+                 "lookback_days": self.flow_lookback_days,
+                 "tolerance": self.flow_tolerance,
+                 "buckets": [], "prints": [], "notes": [], "warnings": []}
+        if archive is None:
+            block["reason"] = ("no observation archive is loaded, so there is no printed tape "
+                               "to read")
+            return None, block
+        from . import flow as flow_mod
+
+        def mark_vol(days, strike, forward_unused=None, forward=None):
+            """Our own volatility at that strike, on the marks being quoted."""
+            fwd = forward if forward is not None else forward_unused
+            try:
+                t = max(float(days) / DAYS_IN_YEAR, 1e-9)
+                dt = clock.datetime_from_years(t)
+                return float(ev.strike_vol(dt, t, float(strike) / float(fwd))) * 100.0
+            except Exception:            # noqa: BLE001 - a strike off the surface takes no side
+                return None
+
+        try:
+            read = flow_mod.read_flow(
+                archive, self.pair, asof=clock.now,
+                mark_vol=lambda days, strike, is_call, fwd: mark_vol(days, strike, forward=fwd),
+                hist_pair=(hist if hist is not None else None),
+                half_life=self.flow_half_life, min_effective=self.archive_min_effective,
+                lookback_days=self.flow_lookback_days, tolerance=self.flow_tolerance)
+        except Exception as exc:         # noqa: BLE001 - a section that fails empties only itself
+            block["reason"] = f"the printed tape could not be read: {exc}"
+            return None, block
+
+        block["notes"] = list(read.notes)
+        block["buckets"] = [{
+            "bucket": b.bucket, "prints": b.prints, "paid": b.paid, "given": b.given,
+            "unclear": b.unclear, "calls": b.calls, "puts": b.puts,
+            "paid_vega": b.paid_vega, "given_vega": b.given_vega, "net_vega": b.net_vega,
+            "gross_vega": b.gross_vega, "effective": b.effective,
+            "newest_days": b.newest_days, "enough": b.enough, "why_not": b.why_not,
+            "net": b.net(self.flow_scale), "line": b.describe(),
+        } for b in read.buckets]
+        block["prints"] = [{
+            "at": p.at, "days": p.days, "bucket": p.bucket, "strike": p.strike,
+            "is_call": p.is_call, "vol": p.vol, "mark": p.mark, "notional": p.notional,
+            "vega": p.vega, "side": p.side, "forward": p.forward, "why": p.why,
+            "line": p.describe(),
+        } for p in read.prints[-200:]]
+        if not read.buckets:
+            block["reason"] = ("the archive holds no printed trade for this pair that could be "
+                               "turned into a volatility; 'Fetch from DTCC' and 'Scan folders' "
+                               "fill it")
+            return None, block
+        block["available"] = True
+        if not self.flow_weight:
+            block["reason"] = ("the tape is read and shown, and it is leaning nothing: set a "
+                               "flow weight above zero to let it shade the mid")
+            return None, block
+        ts, vals = [], []
+        for b in read.buckets:
+            net = b.net(self.flow_scale)
+            if net is None:
+                continue
+            days = _bucket_days(b.bucket)
+            if days is None:
+                continue
+            ts.append(days / DAYS_IN_YEAR)
+            vals.append(net)
+        if not ts:
+            block["reason"] = ("no bucket has enough behind it to lean on; what printed is "
+                               "shown and applied to nothing")
+            return None, block
+        order = sorted(range(len(ts)), key=lambda i: ts[i])
+        ts = [ts[i] for i in order]
+        vals = [vals[i] for i in order]
+        block["reason"] = (f"{len(ts)} bucket(s) with enough behind them, against a scale of "
+                           f"{self.flow_scale:,.0f}; held flat outside them")
         return (lambda t: _interp(ts, vals, t)), block
 
     def _fair(self, book, hist, method) -> tuple[object, dict]:
@@ -2302,6 +2497,11 @@ def quote_panel_from_request(payload: dict) -> QuotePanel:
         archive_half_life=_opt_float(payload, "archive_half_life", 5.0),
         archive_min_effective=_opt_float(payload, "archive_min_effective", 2.0),
         archive_lookback_days=_opt_float(payload, "archive_lookback_days", 90.0),
+        flow_weight=_opt_float(payload, "flow_weight", 0.0) or 0.0,
+        flow_scale=_opt_float(payload, "flow_scale", 5_000_000.0) or 5_000_000.0,
+        flow_half_life=_opt_float(payload, "flow_half_life", 5.0),
+        flow_lookback_days=_opt_float(payload, "flow_lookback_days", 30.0),
+        flow_tolerance=_opt_float(payload, "flow_tolerance", 0.03),
     )
 
 

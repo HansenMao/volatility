@@ -26,6 +26,7 @@ from .cross import CorrelationCurve, CrossAtmCurve, infer_leg_signs
 from .events import EventBook, EventSchedule
 from .feed import MarketFeed
 from .marketdata import ExcelSource, MarketData, MarketDataError
+from .rates import RatesTable
 from .surface import VolSurface, WingRatio, load_wing_ratios
 from .vegaweights import VegaWeights, load_vega_weights
 from .timeutil import DAYS_IN_YEAR, Clock, parse_datetime
@@ -66,6 +67,11 @@ class Book:
     #: differently for it -- but read with the book so the marking screen and
     #: the command line share one answer about what a workbook says.
     vega_weights: VegaWeights = field(default_factory=VegaWeights)
+    #: The ``RATES`` tab: simple deposit rates by currency and tenor, for the
+    #: foreign discount factor a spot delta needs and the domestic one a
+    #: premium is paid at.  Absent, every delta is a forward delta and every
+    #: premium undiscounted -- and each says so.
+    rates: RatesTable = field(default_factory=RatesTable)
 
     @classmethod
     def from_excel(cls, path: str | Path, clock: Clock | None = None, *,
@@ -77,6 +83,7 @@ class Book:
         book.bands = book._default_bands(bands or path)
         book.wing_ratios = book._default_wing_ratios(path)
         book.vega_weights = book._default_vega_weights(path)
+        book.rates = book._default_rates(path)
         book.calendars = calendars if calendars is not None else book._default_calendars(path)
         return book
 
@@ -115,6 +122,31 @@ class Book:
         except (OSError, ValueError) as exc:
             self.warnings.append(f"wing ratios: {exc}")
             return {}
+
+    def _default_rates(self, path: str | Path | None) -> RatesTable:
+        """The ``RATES`` tab, or an empty table.
+
+        A workbook without it is the ordinary case for one that predates the
+        tab: deltas are then forward deltas, as they always were, and the
+        surfaces say so.  A tab that cannot be read is a warning, because a
+        desk that wrote one meant its rates to apply.
+        """
+        if path is None:
+            return RatesTable()
+        try:
+            table = RatesTable.load(path)
+        except (OSError, ValueError) as exc:
+            self.warnings.append(f"rates: {exc}")
+            return RatesTable()
+        if table is None:
+            return RatesTable()
+        if table.currencies:
+            self.data.notes.append(f"RATES: {table.describe()} read from the workbook")
+        return table
+
+    def discount_factor(self, ccy: str, t: float) -> float | None:
+        """The ``RATES`` tab's discount factor for ``ccy`` at ``t`` years, or None."""
+        return self.rates.df(ccy, t)
 
     def _default_vega_weights(self, path: str | Path | None) -> VegaWeights:
         """The ``Vega Weights`` tab, or an absent one.
@@ -456,9 +488,17 @@ class Book:
 
         surface = VolSurface(
             pair=name, atm=atm,
-            conv=DeltaConvention(spec.resolved_premium_adjusted()),
+            conv=spec.conventions(),
             wing_ratios=dict(self.wing_ratios.get(name, {})),
         )
+        # A closure over the book, like the forward lookup: a RATES tab
+        # written after the build is picked up by the next slice.
+        surface.discount_lookup = lambda ccy, t: self.discount_factor(ccy, t)
+        if surface.conv.spot_delta and not self.rates.has(name[:3]):
+            self.warnings.append(
+                f"{name}: quotes spot delta but the RATES tab has no {name[:3]} rate, so "
+                f"its deltas are read as forward deltas -- a 25-delta wing sits a "
+                f"fraction of a delta off where the market means it, most at 1Y")
         self._attach_band(name, surface)
         # The marks a session wrote into the workbook (the ``atm 1m`` /
         # ``shift rho25`` rows and the BANDS sheet) go on through the same

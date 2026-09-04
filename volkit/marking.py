@@ -907,7 +907,37 @@ class MarkPanel:
             "mid_pull": self.mid_pull, "max_nfev": self.max_nfev, "apply": False,
         }
 
-    def run(self, book, journal: rem.Journal, archive=None, rules=None) -> dict:
+    def archive_evidence(self, archive, *, asof) -> dict | None:
+        """What the observation archive says, on its own, before the book.
+
+        The archive half of :meth:`_critique`, split out so a server can read
+        it under the archive's own lock and let that lock go before it takes
+        the book's.  Holding both at once is what let a folder scan or a
+        download -- minutes, and possibly a language model -- freeze the fit
+        button on a screen that was not asking the archive anything.
+
+        Returns the synthesis and the file it came from, or ``None`` when
+        there is no archive to read.
+        """
+        if archive is None:
+            return None
+        from . import synthesis as syn
+        return {"synthesis": syn.synthesize(archive, self.pair, asof=asof,
+                                            half_life=self.half_life,
+                                            min_effective=self.min_effective,
+                                            lookback_days=self.evidence_lookback),
+                "path": archive.path}
+
+    def run(self, book, journal: rem.Journal, archive=None, rules=None,
+            archive_evidence: dict | None = None) -> dict:
+        """The card's whole answer.
+
+        ``archive_evidence`` is what :meth:`archive_evidence` returned, when
+        the caller read the archive itself; given one, nothing here touches
+        ``archive``, which is how the server keeps the archive's lock off the
+        book's.  Without one the archive is read here, as the command line
+        does.
+        """
         from . import marketmaker as mm
         from .quotes import parse_quotes
 
@@ -1006,34 +1036,37 @@ class MarkPanel:
 
         # -- what the quoting agent makes of it -------------------------------
         if self.use_archive:
-            out["critique"] = self._critique(book, archive, proposal, method, forwards,
-                                             clock, out["notes"])
+            if archive_evidence is None and archive is not None:
+                archive_evidence = self.archive_evidence(archive, asof=clock.now)
+            out["critique"] = self._critique(book, archive_evidence, proposal, method,
+                                             forwards, out["notes"])
         out["warnings"].extend(surface.warnings[-6:])
         return out
 
-    def _critique(self, book, archive, proposal, method, forwards, clock, notes):
-        """The quoting agent's score of the proposal, or the reason there is none."""
+    def _critique(self, book, archive_evidence, proposal, method, forwards, notes):
+        """The quoting agent's score of the proposal, or the reason there is none.
+
+        Takes the archive's answer rather than the archive: everything here is
+        the book's work, so nothing on this path holds the archive open.
+        """
         from . import consult
-        from . import synthesis as syn
-        if archive is None:
+        if archive_evidence is None:
             notes.append("no observation archive was given, so the proposal was not scored "
                          "against what the market has shown")
             return None
-        synthesis = syn.synthesize(archive, self.pair, asof=clock.now,
-                                   half_life=self.half_life,
-                                   min_effective=self.min_effective,
-                                   lookback_days=self.evidence_lookback)
+        synthesis = archive_evidence["synthesis"]
+        archive_path = archive_evidence["path"]
         findings, f_notes = consult.findings_from(book, self.pair, synthesis, method=method,
                                                  cut=self.cut, forwards=forwards)
         notes.extend(f_notes)
         if not findings:
             return {"available": False, "verdict": "nothing to judge", "findings": [],
                     "rows": [], "notes": list(f_notes), "inside_before": 0,
-                    "inside_after": 0, "archive": archive.path}
+                    "inside_after": 0, "archive": archive_path}
         judged = consult.critique(book, self.pair, findings, proposal.after, method=method,
                                   cut=self.cut, forwards=forwards)
         return {
-            "available": True, "archive": archive.path, "verdict": judged.verdict,
+            "available": True, "archive": archive_path, "verdict": judged.verdict,
             "inside_before": judged.inside_before, "inside_after": judged.inside_after,
             "broke": [r.key for r in judged.broke], "fixed": [r.key for r in judged.fixed],
             "findings": [{"key": consult._key(f), "describe": f.describe(),

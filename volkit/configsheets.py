@@ -54,6 +54,11 @@ SHEETS: dict[str, str] = {
     "PEG_BANDS": "managed / pegged trading bands: pair, lower, upper, note",
     "KACE_SPREADS": "the kACE pillars and the ATM width at each: pair, tenor, spread",
     "HOLIDAYS": "holiday dates no rule derives: country, date, remove",
+    "CONVENTIONS": "a pair's quoting conventions where they differ from the market's: "
+                   "pair, premium (the currency it is paid in), atmf beyond (a tenor, "
+                   "never, or always), delta (spot or forward)",
+    "RATES": "simple deposit rates for the discount factors a spot delta and a paid "
+             "premium need: currency, tenor, rate (% p.a.)",
     "WING_RATIOS": "how each tenor's 10-delta wings follow its 25-delta ones: "
                    "pair, tenor, st, rr",
     "Vega Weights": "how far each tenor moves when the anchor moves one vol point: "
@@ -71,6 +76,8 @@ EDITABLE: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "PEG_BANDS": (("pair", "lower", "upper", "note"), ("pair", "lower", "upper")),
     "KACE_SPREADS": (("pair", "tenor", "spread"), ("pair", "tenor")),
     "HOLIDAYS": (("country", "date", "remove"), ("country", "date")),
+    "CONVENTIONS": (("pair", "premium", "atmf beyond", "delta"), ("pair",)),
+    "RATES": (("currency", "tenor", "rate"), ("currency", "tenor", "rate")),
     "WING_RATIOS": (("pair", "tenor", "st", "rr"), ("pair", "tenor")),
     "Vega Weights": (("tenor", "default", "note"), ("tenor", "default")),
 }

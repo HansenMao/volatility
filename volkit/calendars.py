@@ -54,9 +54,16 @@ def _nth_weekday(year: int, month: int, weekday: int, n: int) -> date:
 
 
 def _observed(d: date) -> date:
-    """US federal observation: Saturday -> Friday, Sunday -> Monday."""
-    if d.weekday() == 5:
-        return d - timedelta(days=1)
+    """Federal Reserve observation: Sunday -> Monday, Saturday **not observed**.
+
+    What matters for a value date is whether dollars can move, and that is the
+    Fed's calendar, not the federal government's.  The two differ on Saturdays:
+    federal employees get the preceding Friday off, but "for holidays falling
+    on Saturday, Federal Reserve Banks and Branches will be open the preceding
+    Friday" -- Fedwire runs, so the Friday is a good USD value date.  The
+    earlier rule here moved Saturday holidays to Friday, which ruled out a day
+    the market settles on (3 July 2026, 24 December 2027).
+    """
     if d.weekday() == 6:
         return d + timedelta(days=1)
     return d
@@ -80,6 +87,43 @@ def _observed_forward(dates: list[date]) -> set[date]:
     return taken
 
 
+def _jp_equinoxes(year: int) -> tuple[date, date]:
+    """Vernal and Autumnal Equinox Day, by the standard approximation (1980-2099).
+
+    Both are public holidays and both are missing from a rule set that lists
+    only fixed dates and n-th Mondays.  The autumnal one matters most: with
+    Respect for the Aged Day on the third Monday it makes a "Silver Week", and
+    the weekday sandwiched between them becomes a holiday too.
+    """
+    k = year - 1980
+    vernal = int(20.8431 + 0.242194 * k - k // 4)
+    autumnal = int(23.2488 + 0.242194 * k - k // 4)
+    return date(year, 3, vernal), date(year, 9, autumnal)
+
+
+def _jp_observed(fixed: set[date]) -> set[date]:
+    """Japan's substitute and citizens' holidays, applied to a year's dates.
+
+    A holiday on a Sunday is made up on the next day that is not itself a
+    holiday (so 3 May on a Sunday is made up on the 6th, after Greenery Day
+    and Children's Day, not on the 4th).  A weekday with a holiday on both
+    sides is a holiday -- the "citizens' holiday" that turns Respect for the
+    Aged Day plus the Autumnal Equinox into three closed days.
+    """
+    out = set(fixed)
+    for d in sorted(fixed):
+        if d.weekday() == 6:
+            sub = d + timedelta(days=1)
+            while sub in out:
+                sub += timedelta(days=1)
+            out.add(sub)
+    for d in sorted(out):
+        between = d + timedelta(days=1)
+        if between.weekday() < 6 and between not in out and between + timedelta(days=1) in out:
+            out.add(between)
+    return out
+
+
 @functools.lru_cache(maxsize=256)
 def _builtin_holidays(country: str, year: int) -> frozenset[date]:
     """Rule-based fallback calendars for the majors.
@@ -101,6 +145,8 @@ def _builtin_holidays(country: str, year: int) -> frozenset[date]:
             _observed(date(year, 6, 19)),     # Juneteenth
             _observed(date(year, 7, 4)),
             _nth_weekday(year, 9, 0, 1),      # Labor
+            _nth_weekday(year, 10, 0, 2),     # Columbus: Fedwire shut, no USD value date
+            _observed(date(year, 11, 11)),    # Veterans: likewise
             _nth_weekday(year, 11, 3, 4),     # Thanksgiving
             _observed(date(year, 12, 25)),
         }
@@ -111,44 +157,45 @@ def _builtin_holidays(country: str, year: int) -> frozenset[date]:
                 _nth_weekday(year, 8, 0, -1)}     # Summer
         out |= _observed_forward([date(year, 1, 1), date(year, 12, 25), date(year, 12, 26)])
     elif country == "JP":
-        out |= {
+        vernal, autumnal = _jp_equinoxes(year)
+        fixed = {
             date(year, 1, 1), date(year, 1, 2), date(year, 1, 3),
             _nth_weekday(year, 1, 0, 2),      # Coming of Age
             date(year, 2, 11), date(year, 2, 23),
+            vernal,                           # Vernal Equinox
             date(year, 4, 29), date(year, 5, 3), date(year, 5, 4), date(year, 5, 5),
             _nth_weekday(year, 7, 0, 3),      # Marine
             date(year, 8, 11),
             _nth_weekday(year, 9, 0, 3),      # Respect for the Aged
+            autumnal,                         # Autumnal Equinox
             _nth_weekday(year, 10, 0, 2),     # Sports
             date(year, 11, 3), date(year, 11, 23),
         }
-        # Japanese substitute holidays: a Sunday holiday rolls to Monday.
-        out |= {d + timedelta(days=1) for d in list(out) if d.weekday() == 6}
+        # 2 and 3 January and 31 December are bank holidays rather than
+        # public ones; the JPY cannot settle on any of them.
+        out |= _jp_observed(fixed) | {date(year, 12, 31)}
     elif country == "SG":
         # Solar-fixed Singapore holidays.  Chinese New Year, Hari Raya, Deepavali
         # and Vesak are lunar and must come from overrides.
         out |= _observed_forward([date(year, 1, 1), date(year, 5, 1), date(year, 8, 9),
                                   date(year, 12, 25)])
     elif country == "CA":
-        out |= {
-            _observed(date(year, 1, 1)), good_friday,
-            _nth_weekday(year, 9, 0, 1), _observed(date(year, 7, 1)),
-            _nth_weekday(year, 10, 0, 2), _observed(date(year, 12, 25)),
-            _observed(date(year, 12, 26)),
-        }
+        # Weekend holidays are observed on the following weekday, not the
+        # preceding Friday: Canada Day on a Saturday is Monday the 3rd.
+        out |= {good_friday, _nth_weekday(year, 9, 0, 1), _nth_weekday(year, 10, 0, 2)}
+        out |= _observed_forward([date(year, 1, 1), date(year, 7, 1),
+                                  date(year, 12, 25), date(year, 12, 26)])
     elif country == "NZ":
-        out |= {
-            _observed(date(year, 1, 1)), _observed(date(year, 1, 2)),
-            date(year, 2, 6), good_friday, easter_monday, date(year, 4, 25),
-            _nth_weekday(year, 6, 0, 1), _nth_weekday(year, 10, 0, 4),
-            _observed(date(year, 12, 25)), _observed(date(year, 12, 26)),
-        }
+        # "Mondayised" -- Waitangi and ANZAC included, since 2014.
+        out |= {good_friday, easter_monday, _nth_weekday(year, 6, 0, 1),
+                _nth_weekday(year, 10, 0, 4)}
+        out |= _observed_forward([date(year, 1, 1), date(year, 1, 2), date(year, 2, 6),
+                                  date(year, 4, 25), date(year, 12, 25), date(year, 12, 26)])
     elif country == "AU":
-        out |= {
-            _observed(date(year, 1, 1)), date(year, 1, 26), good_friday,
-            easter_monday, date(year, 4, 25), _observed(date(year, 12, 25)),
-            _observed(date(year, 12, 26)),
-        }
+        # ANZAC Day is not substituted; the rest move forward.
+        out |= {good_friday, easter_monday, date(year, 4, 25)}
+        out |= _observed_forward([date(year, 1, 1), date(year, 1, 26),
+                                  date(year, 12, 25), date(year, 12, 26)])
     elif country == "EU":
         out |= {
             date(year, 1, 1), good_friday, easter_monday, date(year, 5, 1),
@@ -194,13 +241,22 @@ CURRENCY_CALENDARS: dict[str, tuple[str, ...]] = {
 #: or not they are in the pair.  Every FX trade settles through New York, so a
 #: US holiday cannot be a value date for EURJPY any more than for EURUSD.
 #:
-#: It does *not* stop the count.  The market convention is precise about this
-#: and the two halves are easy to conflate: for a pair with no dollar in it
-#: the two business days to spot are counted on the two currencies' own
-#: calendars, and US holidays are simply not looked at -- but the date that
-#: count lands on must then also be good in USD, and is rolled forward until
-#: it is.  Counting US holidays as well would push EURJPY spot out a day every
-#: Thanksgiving, which is not what the market does.
+#: The dollar's holidays are treated differently from every other currency's
+#: in the spot-date count, and the difference is the whole convention:
+#:
+#: * A non-USD currency needs the full spot lag of *its own* business days
+#:   between the trade date and spot -- two clear working days for a T+2 pair.
+#: * USD needs **one fewer**: one clear US working day for a T+2 pair, none
+#:   for a T+1 pair.  A US holiday on T+1 therefore does not delay spot for
+#:   anybody -- EURUSD dealt on the Friday before Martin Luther King Day
+#:   settles on the Tuesday, not the Wednesday.
+#: * The date the counts land on must then be a good day in every calendar,
+#:   USD included, and is rolled forward until it is.  A US holiday on T+2
+#:   *does* delay spot, for every pair.
+#:
+#: Counting US holidays like the pair's own -- which is what this used to do
+#: for any pair with a dollar in it -- put EURUSD and USDJPY spot a day late
+#: after every Monday US holiday.
 SETTLEMENT_CURRENCIES: tuple[str, ...] = ("USD",)
 
 
@@ -367,17 +423,39 @@ class CalendarSet:
         """Settlement lag in business days.  USDCAD is T+1, the rest T+2."""
         return 1 if pair.upper() in {"USDCAD", "CADUSD"} else 2
 
+    def _counted_lag(self, ccy: str, lag: int) -> int:
+        """How many of its own business days a currency needs before spot.
+
+        The settlement currency (USD) needs one fewer than the pair's lag; see
+        ``SETTLEMENT_CURRENCIES``.  Every other currency needs the full lag.
+        """
+        return max(lag - 1, 0) if ccy in SETTLEMENT_CURRENCIES else lag
+
     def spot_date(self, pair: str, today: date) -> date:
         """Where a spot deal struck on ``today`` settles.
 
-        The count is on the pair's own calendars and the date it lands on is
-        then rolled forward to a day USD can settle too -- the two halves of
-        the market convention, in that order.  Doing it the other way round
-        (counting US holidays as business days for the pair) pushes EURJPY
-        spot out a day every Thanksgiving, which is not what the market does.
+        Each currency is counted **separately on its own calendar** -- the
+        pair's two, plus the settlement currency whether or not it is in the
+        pair -- and the latest landing wins.  The dollar's count is one day
+        shorter than the others' (``SETTLEMENT_CURRENCIES`` says why), so a
+        US holiday on T+1 delays nothing.  The date that wins must then be a
+        day every one of those calendars is open, and is rolled forward until
+        it is: a US holiday on T+2 delays everyone, and so does a JPY holiday
+        landed on by the EUR count.
+
+        Counting the two currencies together on one merged calendar is not
+        the same thing.  It needs two days on which *both* are open, where the
+        convention needs two days on which *each* is open; the two agree
+        except when the holidays alternate, and then the merged count is a
+        day late.
         """
+        pair = pair.upper()
         today = today.date() if isinstance(today, datetime) else today
-        landed = self._add_open_days(self.countries_for(pair), today, self.spot_lag(pair))
+        lag = self.spot_lag(pair)
+        landed = today
+        for ccy in dict.fromkeys((pair[:3], pair[3:6], *SETTLEMENT_CURRENCIES)):
+            calendars = CURRENCY_CALENDARS.get(ccy, ())
+            landed = max(landed, self._add_open_days(calendars, today, self._counted_lag(ccy, lag)))
         return self.roll_settlement(pair, landed, "following")
 
     def last_settlement_day(self, pair: str, year: int, month: int) -> date:
@@ -397,15 +475,49 @@ class CalendarSet:
         return d == self.last_settlement_day(pair, d.year, d.month)
 
     def delivery_from_expiry(self, pair: str, expiry: date) -> date:
-        """The value date of an option expiring on ``expiry``: the spot lag on."""
+        """The value date of an option expiring on ``expiry``.
+
+        It is the spot date of the expiry date -- an exercised option is a
+        spot trade dealt on expiry day -- and so it takes the same dollar rule
+        as the spot date: a US holiday the day after expiry does not delay
+        delivery, a US holiday two days after does.
+        """
         expiry = expiry.date() if isinstance(expiry, datetime) else expiry
-        landed = self._add_open_days(self.countries_for(pair), expiry, self.spot_lag(pair))
-        return self.roll_settlement(pair, landed, "following")
+        return self.spot_date(pair, expiry)
 
     def expiry_from_delivery(self, pair: str, delivery: date) -> date:
-        """The expiry of an option settling on ``delivery``: the spot lag back."""
+        """The expiry of an option settling on ``delivery``: the *inverse* spot.
+
+        The latest day the option can expire on whose spot date is
+        ``delivery``.  That is the market's definition, and it is not the same
+        as stepping the spot lag back on a calendar: around a Monday US
+        holiday two consecutive trade dates share a spot date, and stepping
+        back on a calendar that counts the holiday picks the earlier of them,
+        so a EURUSD option settling on the Tuesday after Martin Luther King
+        Day expired on the Thursday before it rather than the Friday.
+
+        The day must be one the option can expire on -- open on the pair's
+        own calendars.  When no such day settles exactly on ``delivery``
+        (the walk back lands on Thanksgiving, say) the last expirable day
+        that settles *by* it is returned, and ``fx_dates`` says so in its
+        rule; the tenor's delivery date is the anchor and does not move.
+        """
         delivery = delivery.date() if isinstance(delivery, datetime) else delivery
-        return self._add_open_days(self.countries_for(pair), delivery, -self.spot_lag(pair))
+        expirable = self.countries_for(pair)
+        d = delivery
+        for _ in range(60):
+            d -= timedelta(days=1)
+            settles = self.spot_date(pair, d)
+            if settles > delivery:
+                continue
+            if settles == delivery:
+                if self._is_open(expirable, d):
+                    return d
+                continue
+            # spot(d) is before delivery, so no later expirable day settles
+            # on it either: fall back to the last one that settles by then.
+            return self._roll_open(expirable, d, "preceding")
+        raise RuntimeError(f"no expiry for {pair} settling on {delivery}")  # pragma: no cover
 
     def fx_dates(self, pair: str, tenor: str, today: date,
                  convention: str = "modified_following") -> FxDates:
@@ -425,9 +537,10 @@ class CalendarSet:
 
         * A **week, month or year** tenor is a *delivery* offset: the tenor is
           added to the spot date by calendar arithmetic, adjusted modified
-          following on the value-date calendars, and the expiry is the spot
-          lag back from it on the pair's own.  Month and year tenors also take
-          the **end-of-month rule** (:meth:`is_month_end`).
+          following on the value-date calendars, and the expiry is the
+          inverse spot of it -- the latest expirable day whose own spot date
+          is that delivery (:meth:`expiry_from_delivery`).  Month and year
+          tenors also take the **end-of-month rule** (:meth:`is_month_end`).
 
         ``today`` is the book's valuation date.  Nothing here reads the
         machine clock (§4).
@@ -457,6 +570,9 @@ class CalendarSet:
             rule = (f"{label} on the spot date {spot} is {target}, "
                     f"{convention.replace('_', ' ')} to {delivery}")
         expiry = self.expiry_from_delivery(pair, delivery)
+        if self.spot_date(pair, expiry) != delivery:
+            rule += (f"; no expirable day settles exactly on {delivery}, so the expiry is "
+                     f"{expiry}, the last that settles by then")
         return FxDates(pair, label, today, spot, expiry, delivery, rule)
 
     def dates_for_expiry(self, pair: str, expiry: date, today: date) -> FxDates:

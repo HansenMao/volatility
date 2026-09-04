@@ -1086,7 +1086,10 @@ the one shape the poster page shows (a `gfi_message` with a `<response>`);
 anything else is a failure with the first line of what came back. Every
 post is a line in `kace_posts.jsonl` beside the workbook. `--kace-ca` /
 `--kace-insecure` for an internal certificate; `--dry-run` to see what would
-go. `claude/kace-export-design.md` has the history.
+go. The server's 1024-bit DH key, which OpenSSL 3 refuses by default
+(`DH_KEY_TOO_SMALL`), is handled by stepping the handshake down as a browser
+would, and the post says which step it took. `claude/kace-export-design.md`
+has the history.
 
 ### Saving a session
 
@@ -1143,8 +1146,8 @@ volkit session marks.json --to-workbook --pair USDJPY   # one pair only
 
 **Write to workbook** on the Vol marking panel does the third of these: it
 saves the marks and then writes the *file* into the loaded workbook, asking
-first and keeping the workbook it replaced beside it as
-`vol_marks.bak-20260901-142530.xlsx`. What is exported is always the saved
+first and keeping the workbook it replaced as
+`vol_marks.backups/vol_marks.bak-20260901-142530.xlsx`. What is exported is always the saved
 file, never the live book, so nothing reaches the book of record that is not
 already written down in the JSON beside it.
 
@@ -1170,8 +1173,14 @@ existing workbook over, once.
 
 A write over the original is **refused** if the file has changed since the
 marks were made -- another volkit, or somebody saving it from Excel -- rather
-than overwriting whatever they did; `--force` is the way past it. The backups
-are pruned to the twenty most recent. What it writes
+than overwriting whatever they did; `--force` is the way past it. The copies
+are kept by age rather than by count -- the newest few, then one an hour, a
+day, a week and a month -- a write that changes nothing keeps no second copy
+(compared on what is in the sheets, not on the bytes, because openpyxl stamps
+the save time into every save), and the one taken before it was first flattened
+is never thinned out because it is the only one holding what a round trip
+cannot carry. `volkit versions` lists them and the log of every write beside
+them, and puts one back. What it writes
 loads as the session it came from; formulas and their last values are kept,
 images and charts are not -- which is why an in-place write keeps the backup
 and why the plain `--to-workbook` still writes a copy. A pair is replaced,

@@ -603,6 +603,77 @@ def _https_context(ca: str | None, insecure: bool) -> ssl.SSLContext:
     return ctx
 
 
+#: The TLS handshakes tried, in order, against a server whose TLS is older than
+#: the OpenSSL this Python ships with will accept by default.
+#:
+#: kACE answers with ``[SSL: DH_KEY_TOO_SMALL] dh key too small``: it offers a
+#: 1024-bit Diffie-Hellman group for key exchange, and OpenSSL 3 refuses to
+#: talk to one at its default security level.  The poster web page never sees
+#: this because browsers dropped finite-field DH years ago and the server then
+#: negotiates ECDHE or plain RSA with them instead.  So the first fallback is
+#: to do what a browser does -- leave DH out of the offer, which changes
+#: nothing about certificate checking -- and only if the server has *nothing*
+#: else does the last resort lower OpenSSL's bar to what the server can do.
+#: Whichever step works is remembered per host and reported with the post,
+#: so a desk knows exactly how it is talking to its pricing platform.
+_TLS_STEPS: tuple[tuple[str, bool, bool], ...] = (   # (label, drop DHE, security level 0)
+    ("", False, False),
+    ("without finite-field Diffie-Hellman, as a browser would", True, False),
+    ("at OpenSSL security level 0 (the server's TLS is old)", False, True),
+)
+_BROWSER_RSA_SUITES = ("AES128-GCM-SHA256", "AES256-GCM-SHA384", "AES128-SHA", "AES256-SHA")
+_TLS_STEP_BY_HOST: dict[str, int] = {}
+_TLS_NOTE_BY_HOST: dict[str, str] = {}
+_LEGACY_TLS_SIGNS = ("DH_KEY_TOO_SMALL", "DH KEY TOO SMALL", "HANDSHAKE_FAILURE",
+                     "NO_SHARED_CIPHER", "NO_CIPHERS_AVAILABLE", "UNSUPPORTED_PROTOCOL",
+                     "WRONG_SSL_VERSION", "PROTOCOL_VERSION", "WRONG_VERSION_NUMBER",
+                     "EE_KEY_TOO_SMALL", "CA_KEY_TOO_SMALL", "CA_MD_TOO_WEAK")
+
+
+def _tls_context(ca: str | None, insecure: bool, step: int) -> ssl.SSLContext:
+    ctx = _https_context(ca, insecure)
+    _, drop_dhe, level0 = _TLS_STEPS[step]
+    if not (drop_dhe or level0):
+        return ctx
+    # Python's own hardened cipher list, edited -- not OpenSSL's wider DEFAULT.
+    names = [c["name"] for c in ctx.get_ciphers()
+             if not (drop_dhe and c["name"].startswith("DHE-"))]
+    if drop_dhe:
+        # ...plus the RSA key-exchange suites a browser still offers, which is
+        # what a server with nothing but old DH and RSA agrees with a browser.
+        names += _BROWSER_RSA_SUITES
+    ctx.set_ciphers(":".join(names) + (":@SECLEVEL=0" if level0 else ""))
+    if level0:
+        # an old server may also be a TLS 1.0/1.1 server
+        ctx.minimum_version = ssl.TLSVersion.TLSv1
+    return ctx
+
+
+def _is_legacy_tls(reason: str) -> bool:
+    text = reason.upper()
+    return any(sign in text for sign in _LEGACY_TLS_SIGNS)
+
+
+def tls_note(url: str) -> str:
+    """How the last post to ``url``'s host had to talk TLS, or '' if normally."""
+    return _TLS_NOTE_BY_HOST.get(urllib.parse.urlsplit(url).netloc.lower(), "")
+
+
+def _post_once(url: str, body: bytes, headers: dict, *, timeout: float,
+               context: ssl.SSLContext | None) -> tuple[int, bytes]:
+    """One POST through urllib; the bit the fallback loop below wraps."""
+    handlers = [urllib.request.ProxyHandler({})]
+    if context is not None:
+        handlers.append(urllib.request.HTTPSHandler(context=context))
+    opener = urllib.request.build_opener(*handlers)
+    request = urllib.request.Request(url, data=body, headers=headers, method="POST")
+    try:
+        with opener.open(request, timeout=timeout) as reply:
+            return getattr(reply, "status", 200), reply.read()
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.read()[:8192]
+
+
 def http_post(url: str, body: bytes, headers: dict, *, timeout: float,
               ca: str | None = None, insecure: bool = False) -> tuple[int, bytes]:
     """The real network: one POST, no proxy.  Replaced wholesale in tests.
@@ -611,28 +682,42 @@ def http_post(url: str, body: bytes, headers: dict, *, timeout: float,
     corporate proxy the DTCC download goes out through is exactly the thing
     that must not see this request.  An empty ``ProxyHandler`` is what stops
     urllib installing one from the environment or the Windows registry.
+
+    Over HTTPS the handshake is tried the ordinary way first and then down
+    ``_TLS_STEPS`` when the server's TLS is what refuses it; the step that
+    worked is kept for the host so later posts do not re-learn it.
     """
-    handlers = [urllib.request.ProxyHandler({})]
-    if url.lower().startswith("https:"):
-        handlers.append(urllib.request.HTTPSHandler(context=_https_context(ca, insecure)))
-    opener = urllib.request.build_opener(*handlers)
-    request = urllib.request.Request(url, data=body, headers=headers, method="POST")
-    try:
-        with opener.open(request, timeout=timeout) as reply:
-            return getattr(reply, "status", 200), reply.read()
-    except urllib.error.HTTPError as exc:
-        return exc.code, exc.read()[:8192]
-    except urllib.error.URLError as exc:
-        reason = str(exc.reason)
-        hint = ""
-        if "CERTIFICATE_VERIFY_FAILED" in reason or "certificate" in reason.lower():
-            hint = (" -- the server's certificate is not one this machine trusts; name the "
-                    "desk's CA bundle with --kace-ca, or --kace-insecure to post without "
-                    "checking it")
-        raise KacePostError(f"could not reach {url} (directly, through no proxy): "
-                            f"{reason}{hint}") from None
-    except (TimeoutError, OSError) as exc:
-        raise KacePostError(f"could not reach {url}: {exc}") from None
+    https = url.lower().startswith("https:")
+    host = urllib.parse.urlsplit(url).netloc.lower()
+    start = _TLS_STEP_BY_HOST.get(host, 0) if https else 0
+    steps = range(start, len(_TLS_STEPS)) if https else range(1)
+    tried: list[str] = []
+    for step in steps:
+        context = _tls_context(ca, insecure, step) if https else None
+        try:
+            status, raw = _post_once(url, body, headers, timeout=timeout, context=context)
+        except urllib.error.URLError as exc:
+            reason = str(exc.reason)
+            if https and _is_legacy_tls(reason) and step + 1 < len(_TLS_STEPS):
+                tried.append(reason)
+                continue
+            hint = ""
+            if "CERTIFICATE_VERIFY_FAILED" in reason or "certificate" in reason.lower():
+                hint = (" -- the server's certificate is not one this machine trusts; name "
+                        "the desk's CA bundle with --kace-ca, or --kace-insecure to post "
+                        "without checking it")
+            elif tried:
+                hint = (" -- after also trying " + " and ".join(
+                    _TLS_STEPS[i][0] for i in range(start + 1, step + 1)))
+            raise KacePostError(f"could not reach {url} (directly, through no proxy): "
+                                f"{reason}{hint}") from None
+        except (TimeoutError, OSError) as exc:
+            raise KacePostError(f"could not reach {url}: {exc}") from None
+        if https:
+            _TLS_STEP_BY_HOST[host] = step
+            _TLS_NOTE_BY_HOST[host] = (f"TLS {_TLS_STEPS[step][0]}" if step else "")
+        return status, raw
+    raise KacePostError(f"could not reach {url}")  # pragma: no cover
 
 
 def post_message(xml_text: str, url: str, *, opener=None, timeout: float = POST_TIMEOUT,
@@ -657,6 +742,9 @@ def post_message(xml_text: str, url: str, *, opener=None, timeout: float = POST_
                           message=f"HTTP {status} from {url}: {first[:160] or '(no body)'}",
                           reply=text[:4000])
     ok, took, message = read_reply(text)
+    note = tls_note(url) if send is http_post else ""
+    if note:
+        message += f" ({note})"
     return PostResult(url=url, ok=ok, status=status, processing_time=took, message=message,
                       reply=text[:4000], bytes_sent=len(body))
 

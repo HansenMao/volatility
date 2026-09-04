@@ -198,6 +198,51 @@ def _book(args, pairs=None) -> Book:
     return book
 
 
+def cmd_versions(args) -> int:
+    """The workbook's own copies and the log of what wrote it.
+
+    The same three functions the Workbook card calls, so a desk with no
+    browser open can see the history, thin it and put a copy back.
+    """
+    wb = Path(args.workbook)
+    if not wb.exists():
+        print(f"FAILED: workbook not found: {wb}", file=sys.stderr)
+        return 2
+    if args.restore:
+        try:
+            out = session.restore_backup(wb, args.restore)
+        except session.SessionError as exc:
+            print(f"FAILED: {exc}", file=sys.stderr)
+            return 2
+        for note in out["notes"]:
+            print(f"  . {note}")
+        return 0
+    if args.prune:
+        gone = session.prune_backups(wb, keep=args.keep)
+        print(f"{len(gone)} copy(s) removed, {len(session.list_backups(wb))} kept")
+        for name in gone:
+            print(f"  - {name}")
+        return 0
+
+    copies = session.list_backups(wb)
+    total = sum(int(r["bytes"]) for r in copies)
+    print(f"{wb.name}: {len(copies)} copy(s) in {session.backup_dir(wb).name}/, "
+          f"{total / 1e6:.1f} MB")
+    for r in copies:
+        print(f"  {r['when'].replace('T', ' ')}  {r['bytes'] / 1e6:8.3f} MB  {r['name']}"
+              + ("   kept for good" if r["origin"] else ""))
+    writes = session.read_history(wb, limit=args.log)
+    if writes:
+        print(f"\nthe last {len(writes)} write(s), newest first:")
+        for w in writes:
+            what = ", ".join(w.get("pairs") or w.get("tabs") or []) or w.get("what", "")
+            print(f"  {str(w.get('when', '')).replace('T', ' ')[:19]}  {w.get('what', ''):<18}"
+                  f"{what[:40]:<42}{w.get('document', '')}")
+    elif not copies:
+        print("nothing has written this workbook yet")
+    return 0
+
+
 def cmd_check(args) -> int:
     """Validate a workbook and report everything wrong with it at once."""
     try:
@@ -432,7 +477,8 @@ def cmd_vol(args) -> int:
         # both and so does this, whichever of the two was asked for.
         print(f"  delta {r['delta']:+.2f} "
               f"({'call' if r['delta_is_call'] else 'put'}, "
-              f"{'premium adjusted' if r['premium_adjusted'] else 'unadjusted'})")
+              f"{'premium adjusted' if r['premium_adjusted'] else 'unadjusted'} "
+              f"{r['delta_kind']}; ATM here = {r['atm_kind']})")
         if r["forward_source"] == "feed":
             print(f"  spot {r['spot']:.6f}  forward {r['forward']:.6f} to {r['settle']}"
                   + (f"  (the {r['via']} triangle; the feed does not quote "
@@ -2490,6 +2536,19 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = add_command("check", parents=[common], help="validate the workbook without building anything")
     s.set_defaults(func=cmd_check)
+
+    s = add_command("versions", parents=[common],
+                    help="the workbook's kept copies and the log of what wrote it")
+    s.add_argument("--restore", metavar="NAME",
+                   help="put one of the copies back, keeping what it replaces")
+    s.add_argument("--prune", action="store_true",
+                   help="thin the copies now, by the same rule a write uses")
+    s.add_argument("--keep", type=int, metavar="N",
+                   help="with --prune: keep the newest N and nothing else, instead of "
+                        "the newest few plus one an hour, a day, a week and a month")
+    s.add_argument("--log", type=int, default=20, metavar="N",
+                   help="how many writes of the log to print (default 20)")
+    s.set_defaults(func=cmd_versions)
 
     s = add_command("session", parents=[common],
                     help="save the marks on the book to a file, or put a saved file back")

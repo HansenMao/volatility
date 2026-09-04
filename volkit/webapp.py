@@ -1217,6 +1217,34 @@ class BookService:
                 surface.overwrite_quote(q["tenor"], q["field"],
                                         float(q["value"]) / 100.0)
                 refit = True
+            elif kind == "quotes":
+                # A block of quotes written together -- what a paste out of a
+                # spreadsheet is.  Not the single-quote route in a loop: that
+                # would refit once per cell, and a block that failed halfway
+                # would leave the pair holding half a table nobody typed.  So
+                # every cell is written against a snapshot and the snapshot is
+                # put back if any one of them is refused; the fit happens once,
+                # after the last cell, like it does for a single quote.
+                cells = q.get("cells")
+                if not isinstance(cells, list) or not cells:
+                    raise ValueError("a block of quotes needs at least one cell")
+                keep_q = {t: dict(v) for t, v in surface.quote_overwrites.items()}
+                keep_r = {t: dict(v) for t, v in surface.ratio_overwrites.items()}
+                try:
+                    for cell in cells:
+                        tenor, field = cell.get("tenor"), cell.get("field")
+                        raw = cell.get("value")
+                        if raw is None or raw == "":
+                            surface.clear_quote_overwrite(tenor, field)
+                        else:
+                            surface.overwrite_quote(tenor, field, float(raw) / 100.0)
+                except Exception as exc:  # noqa: BLE001 - reported to the browser
+                    surface.quote_overwrites.clear()
+                    surface.quote_overwrites.update(keep_q)
+                    surface.ratio_overwrites.clear()
+                    surface.ratio_overwrites.update(keep_r)
+                    raise ValueError(f"nothing was written: {exc}") from None
+                refit = True
             elif kind == "clear_quote":
                 surface.clear_quote_overwrite(q.get("tenor") or None,
                                               q.get("field") or None)
@@ -1507,6 +1535,52 @@ class BookService:
                     force=bool(payload.get("force")))
             else:
                 raise ValueError(f"unknown action {action!r}; expected 'add' or 'remove'")
+            self.reload()
+            return {"ok": True, "wrote": out, **self.state()}
+
+    def workbook_versions(self, q: dict | None = None) -> dict:
+        """Every copy of the workbook, and the log of what wrote it.
+
+        Two lists that answer two different questions and are not the same
+        length.  The **copies** are whole files and there are a couple of
+        dozen of them, thinned by time; putting one back is a button.  The
+        **writes** are one line each and reach back to the first one, so a
+        write whose copy has been thinned away is still on the record, and the
+        session document beside it -- when the write was an export of marks --
+        is what those marks were.
+        """
+        with self._lock:
+            path = self.path
+            copies = session.list_backups(path)
+            return {"workbook": path,
+                    "folder": session.backup_dir(path).name,
+                    "history_folder": session.history_dir(path).name,
+                    "backups": copies,
+                    "bytes": sum(int(r["bytes"]) for r in copies),
+                    "writes": session.read_history(path, limit=int((q or {}).get("limit")
+                                                                   or 40)),
+                    "losses": session.round_trip_losses(path),
+                    "keep": {"latest": session.BACKUP_KEEP_LATEST,
+                             "hourly": session.BACKUP_KEEP_HOURLY,
+                             "daily": session.BACKUP_KEEP_DAILY,
+                             "weekly": session.BACKUP_KEEP_WEEKLY,
+                             "monthly": session.BACKUP_KEEP_MONTHLY}}
+
+    def workbook_restore(self, payload: dict) -> dict:
+        """Put one of the copies back, and read the book again on top of it.
+
+        The same refusal the configuration card makes, and for the same
+        reason: this replaces the file the session's marks were made against,
+        and the reload that follows would drop them.  What it replaces is
+        itself kept, so the undo has an undo.
+        """
+        with self._lock:
+            if self.dirty and not payload.get("force"):
+                raise ValueError(
+                    "this session has marks the workbook does not hold, and putting a copy "
+                    "back re-reads the workbook, which would drop them. Save them into the "
+                    "workbook first, or press again to restore anyway")
+            out = session.restore_backup(self.path, str(payload.get("name") or ""))
             self.reload()
             return {"ok": True, "wrote": out, **self.state()}
 
@@ -1927,12 +2001,26 @@ class BookService:
         """
         from .marking import panel_from_request as mark_panel_from_request
         panel = mark_panel_from_request(payload)
+        # The archive is read first, on its own lock, and that lock is let go
+        # before the book's is taken.  Held the other way round -- the book
+        # under the archive -- a folder scan or a DTCC download (minutes, and
+        # possibly a language model behind them) held the book too, and the
+        # Fit button beside this card, which asks the archive nothing, sat
+        # there spinning until they finished.  Nothing below touches the
+        # archive: `evidence` is its whole answer.
         with self._lock:
             if self.book is None:
                 raise ValueError(self.load_error or "no workbook is loaded")
+            asof = self.book.clock.now
+        evidence = None
+        if panel.use_archive:
             with self._archive_lock:
-                out = panel.run(self.book, self.journal, archive=self.archive,
-                                rules=self.rules)
+                evidence = panel.archive_evidence(self.archive, asof=asof)
+        with self._lock:
+            if self.book is None:
+                raise ValueError(self.load_error or "no workbook is loaded")
+            out = panel.run(self.book, self.journal, rules=self.rules,
+                            archive_evidence=evidence)
             self.dirty = self.dirty  # a proposal leaves the book as it found it
         out["journal_error"] = self.journal_error
         out["rules_error"] = self.rules_error
@@ -2413,6 +2501,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self.service.config_tabs(q))
             elif url.path == "/api/vega":
                 self._json(self.service.vega_weights(q))
+            elif url.path == "/api/workbook/versions":
+                self._json(self.service.workbook_versions(q))
             elif url.path == "/api/marks":
                 self._json(self.service.marks(q))
             elif url.path == "/api/curve":
@@ -2552,6 +2642,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self.service.atm_bump(payload))
             elif url.path == "/api/config/pair":
                 self._json(self.service.config_pair(payload))
+            elif url.path == "/api/workbook/restore":
+                self._json(self.service.workbook_restore(payload))
             elif url.path == "/api/monitor/curves":
                 self._json(self.service.compare_curves(payload))
             elif url.path == "/api/monitor":

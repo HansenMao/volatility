@@ -58,6 +58,9 @@ table.grid th,table.grid td{border-bottom:1px solid var(--line);padding:0;height
 table.grid td.rh,table.grid th.rh{position:sticky;left:0;z-index:5;background:var(--head);
   padding:0 10px;text-align:left;color:var(--muted);font-size:11px;font-weight:600;
   border-right:1px solid var(--line);width:152px}
+.premtog{float:right;text-transform:none;font-size:10.5px;color:var(--muted)}
+.premtog button{padding:1px 7px;font-size:10.5px;margin-left:3px;border-radius:10px}
+.premtog button.on{background:var(--ink);color:var(--bg);border-color:var(--ink)}
 table.grid tr.sec td{background:var(--bg);font-size:10px;text-transform:uppercase;
   letter-spacing:.9px;color:var(--muted);font-weight:700;padding:5px 10px;text-align:left}
 table.grid td.cell{padding:0}
@@ -366,12 +369,40 @@ table.mmrules input.n{text-align:right}
 table.mmrules .rm{cursor:pointer;color:var(--muted);font-weight:700;padding:0 4px}
 table.mmrules .rm:hover{color:var(--bad)}
 td.mmv{font-variant-numeric:tabular-nums}
-td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;line-height:1.3}
+td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;line-height:1.3;
+  background:color-mix(in srgb,var(--accent) 6%,transparent)}
+/* The message under a quote is the exception rather than the rule: a run of
+   twenty quotes should read as twenty lines and not forty.  It is there on
+   the hover and stays there on a click, so a line can be read with both hands
+   free -- and the line says it has one, because a message nobody can see is
+   the same as no message. */
+tr.mmwhyrow{display:none}
+tr.mmline:hover+tr.mmwhyrow,tr.mmwhyrow:hover,tr.mmwhyrow.pin{display:table-row}
+tr.mmline.haswhy{cursor:pointer}
+tr.mmline.haswhy>td:first-child::after{content:"\2009\2026";color:var(--muted);font-size:10px}
+tr.mmline.haswhy:hover>td:first-child::after,
+tr.mmline.haswhy.pinned>td:first-child::after{color:var(--accent)}
+tr.mmline:hover>td{background:color-mix(in srgb,var(--accent) 7%,transparent)}
+/* The mark against the two-way it is read against.  Through one side of it is
+   the thing to see first on the sheet, so it is the only thing coloured that
+   loudly; the outer quarter of the spread is a warning and the middle is left
+   alone. */
+tr.mmline>td.mmnow.edge{color:var(--warn)}
+tr.mmline>td.mmnow.thru{color:var(--bad);
+  background:color-mix(in srgb,var(--bad) 15%,transparent)}
+tr.mmline>td.mmnow.thru b{font-weight:700}
+td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
 .mmtag{display:inline-block;padding:1px 7px;border-radius:20px;font-size:10px;font-weight:650}
 .mmtag.in{background:color-mix(in srgb,var(--good) 16%,transparent);color:var(--good)}
 .mmtag.out{background:color-mix(in srgb,var(--warn) 18%,transparent);color:var(--warn)}
 .mmtag.thru{background:color-mix(in srgb,var(--bad) 16%,transparent);color:var(--bad)}
 .mmtag.none{background:var(--bg);color:var(--muted)}
+/* A run that is taking its time says how long, and past ten seconds says the
+   other thing it might be: waiting its turn behind another run rather than
+   working.  A spinner that cannot tell those apart is the whole reason a
+   queued fit reads as a broken one. */
+.elapsed{color:var(--muted);font-variant-numeric:tabular-nums}
+.queued{color:var(--warn)}
 .etoheld{font-style:normal;margin-left:4px;padding:1px 5px;border-radius:20px;font-size:9.5px;
   font-weight:650;background:color-mix(in srgb,var(--warn) 18%,transparent);color:var(--warn)}
 </style>
@@ -477,8 +508,12 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
     <code>Auto</code> as <code>C</code> or <code>P</code>. Type <code>25d</code> in again to
     solve the strike afresh against the marks as they now stand.
     <b>Price (pips)</b> is the vanilla premium the way it is quoted: the term currency per
-    unit of base through the pair's own pip — 10,000 on most pairs, 100 on a yen pair —
-    undiscounted, this model carrying no rate curve. An exotic's price is a fraction of its
+    unit of base through the pair's own pip — 10,000 on most pairs, 100 on a yen pair.
+    The <b>premium toggle</b> on the Results bar reads the three premium rows and the totals
+    either as the <i>forward</i> (undiscounted) value the model makes or as <i>spot</i>, the
+    premium as paid: the same value discounted at the term currency's <code>RATES</code>-tab
+    rate to the premium date. A dash under spot is a term currency with no rate on the tab.
+    An exotic's price is a fraction of its
     payout rather than a price per unit of base, so it is shown as a percentage instead.
     <b>Smile cash gamma</b> is the base, in millions, the delta hedge moves by for a one per
     cent move in spot, taken along the smile like the delta above it.
@@ -555,7 +590,8 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
             tabs that configure it. These are not marks: a change here is written into the
             workbook and the book is read again on top of it, so <b>save your marks first</b>
             — a reload drops anything the workbook does not hold. What it replaces is kept
-            beside it as <code>&lt;name&gt;.bak-&lt;stamp&gt;.xlsx</code>.</div>
+            in <code>&lt;name&gt;.backups/</code> beside it, and is listed under
+            <b>Versions</b> below with a button to put it back.</div>
           <label>Pairs</label>
           <div class="scroll"><table class="mark" id="cfgpairs"></table></div>
           <div class="row" style="margin-top:9px;flex-wrap:wrap;gap:6px">
@@ -570,6 +606,7 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
             pair takes it out of <code>CONFIG</code> only — its column and its sheet stay, so
             adding it back finds what it had.</div>
           <div id="cfgtabs" style="margin-top:14px"></div>
+          <div id="cfgversions" style="margin-top:16px"></div>
           <div id="cfgconfirm" class="hide" style="display:flex;gap:8px;align-items:center;margin-top:9px;padding:8px 10px;border:1px solid var(--line);border-radius:6px"></div>
           <div class="msg" id="cfgmsg"></div>
         </div>
@@ -642,6 +679,15 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
           <span class="meta" id="mquotenote" style="margin-left:9px"
             title="a quote typed here replaces the pair sheet's for this session and refits that tenor; it is saved with the session and written into the sheet's own cell when the session is put back into the workbook"></span></h2>
         <div class="scroll"><table class="mark" id="matm"></table></div>
+        <div class="hint hide" id="mqpastehint" style="margin-top:7px">Quotes take a
+          <b>block paste</b>. Copy the columns out of a spreadsheet, click the box the block
+          starts in and paste: it fills right across the quote columns and down the tenors from
+          there, in one write and one refit. A leading <b>tenor column</b> is matched by name
+          rather than by position, and a <b>header row</b> is dropped. A blank cell is left as it
+          was &mdash; the way to take a quote off is still to empty its box &mdash; a derived
+          wing is skipped, and anything past the last tenor or the last column is ignored and
+          counted. One cell that is not a number refuses the whole block: half a pasted table is
+          not a table anybody typed.</div>
         <div class="hide" id="mratiorow" style="margin-top:11px">
           <div class="scroll"><table class="mark" id="mratio"></table></div>
           <div class="hint" style="margin-top:6px">Each tenor's <b>10-delta</b> wings as a
@@ -1164,6 +1210,14 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
     <div class="f"><label>Highlight</label><select id="mofield" style="width:150px"></select></div>
     <div class="f"><label>Big move (vol pts)</label>
       <input id="mobig" style="width:96px" placeholder="0.25" title="Every change at or over this is shaded, in all five columns; twice it is shaded harder. 0 turns it off."></div>
+    <div class="f"><label>All &middot; Was</label>
+      <select id="moallwas" style="width:126px" title="Sets the &ldquo;was&rdquo; end of every panel below at once. Blank means the panels do not agree; picking a source overwrites all of them."></select></div>
+    <div class="f"><label>All &middot; was on</label>
+      <input id="moallwasdate" style="width:104px" placeholder="mixed" title="Sets the &ldquo;was&rdquo; date of every panel at once. Only live while some panel reads the historical workbook."></div>
+    <div class="f"><label>All &middot; Now</label>
+      <select id="moallnow" style="width:126px" title="Sets the &ldquo;now&rdquo; end of every panel below at once. Blank means the panels do not agree; picking a source overwrites all of them."></select></div>
+    <div class="f"><label>All &middot; now on</label>
+      <input id="moallnowdate" style="width:104px" placeholder="mixed" title="Sets the &ldquo;now&rdquo; date of every panel at once. Only live while some panel reads the historical workbook."></div>
     <div class="acts">
       <button id="moadd">+ Panel</button>
       <button class="ghost" id="modup">Duplicate last</button>
@@ -1214,6 +1268,13 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
     still shown and the panel carries the reason it has no change. A tenor one end does not quote
     is a blank change, not a missing row. <b>Highlight</b> picks which of the five gets the levels
     column beside the changes; the changes themselves are always all five.
+    <br>The four <b>All</b> boxes in the control row are the same two ends written across every
+    panel at once: pick a source or type a date there and each panel takes it, which is how a
+    screen of pairs is moved from &ldquo;against last week&rdquo; to &ldquo;against yesterday&rdquo;
+    without editing each one. They read back what the panels hold — blank when the panels do not
+    agree — so they are a view of the list as much as a way to set it, and a panel edited on its
+    own afterwards simply blanks the box again. The date boxes go quiet when no panel is reading
+    the historical workbook, for the same reason a panel hides its own.
     <br><b>Curve comparison.</b> Any number of curves side by side, differenced against whichever
     one is marked <b>base</b>. A curve is the <i>fitted surface</i> at the cut and interpolation
     chosen above, the <i>workbook quotes</i> that went into it, one dated row of the historical
@@ -1244,6 +1305,10 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
     <div class="f"><label>Axe scale</label><input id="mmscale" placeholder="off" style="width:82px"></div>
     <div class="f"><label>Fair wt</label><input id="mmfair" value="0.25" style="width:62px"></div>
     <div class="f"><label>Axe wt</label><input id="mmaxe" value="0.5" style="width:62px"></div>
+    <div class="f"
+         title="What the printed tape may do to the mid. Zero is off, and off is the default: the dissemination file publishes no buyer and no seller, so the side of every print is inferred against our own mark. Positive marks up when the tape has been paying."><label>Flow wt</label><input id="mmflowwt" value="0" style="width:62px"></div>
+    <div class="f"
+         title="The net vega, in the base currency per volatility point, that counts as a full flow lean. The net is divided by it and clamped to one — calibrate it against the net vega column on the tape card below."><label>Flow scale</label><input id="mmflowscale" value="5000000" style="width:88px"></div>
     <div class="f"><label>Skew cap</label><input id="mmcap" value="1" style="width:66px"></div>
     <div class="f"><label>FV horizon (d)</label><input id="mmhorizon" value="30" style="width:88px"></div>
     <div class="acts">
@@ -1267,12 +1332,12 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
     <div class="mmleft">
       <section class="card"><h2>The market <small>paste the run, one quote a line</small></h2>
         <textarea id="mmtext" spellcheck="false" style="height:250px"
-          placeholder="1M ATM 8.20/8.60 in 100mm vega&#10;3M 25d RR 0.35/0.55 eur call over&#10;2M 25d fly 0.20/0.28&#10;6M 1.1000 call 7.90/8.40&#10;1M/3M ATM spread 0.30/0.55&#10;6M 1.10 call vs 1.15 call 0.35/0.55&#10;30sep26 1.1000 call 125/135 pips live&#10;USDJPY 1M ATM 9.0/9.4   (another pair: passed over)&#10;&#10;or as columns — time, expiry, strike, bid/offer:&#10;09:15, 1M, ATM,  8.20/8.60&#10;09:15, 3M, 1.0900, 8.10/8.50&#10;09:41, 1M, ATM,  8.25/8.65"></textarea>
+          placeholder="1M ATM 8.20/8.60 in 100mm vega&#10;3M 25d RR 0.35/0.55 eur call over&#10;2M 25d fly 0.20/0.28&#10;6M 1.1000 call 7.90/8.40&#10;1M/3M ATM spread 0.30/0.55&#10;6M 1.10 call vs 1.15 call 0.35/0.55&#10;30sep26 1.1000 call 125/135 pips live&#10;6M 1.2500 live 12/14bp   (no side: read from the moneyness)&#10;fri ATM 8.15/8.55   (a weekday: the next Friday from today)&#10;USDJPY 1M ATM 9.0/9.4   (another pair: passed over)&#10;&#10;or as columns — time, expiry, strike, bid/offer:&#10;09:15, 1M, ATM,  8.20/8.60&#10;09:15, 3M, 1.0900, 8.10/8.50&#10;09:41, 1M, ATM,  8.25/8.65"></textarea>
         <div class="msg" id="mmparse"></div></section>
 
       <section class="card"><h2>What we are asked for <small>one instrument a line, no prices</small></h2>
         <textarea id="mqtext" spellcheck="false" style="height:150px"
-          placeholder="1M ATM in 100mm&#10;3M 25d RR&#10;2M 25d fly&#10;6M 1.1000 call&#10;1M/3M ATM spread&#10;6M 1.10 call vs 1.15 call&#10;3M 1.0900 put live in pips&#10;&#10;the same words as the market box, with the price left off"></textarea>
+          placeholder="1M ATM in 100mm&#10;3M 25d RR&#10;2M 25d fly&#10;6M 1.1000 call&#10;1M/3M ATM spread&#10;6M 1.10 call vs 1.15 call&#10;3M 1.0900 put live in pips&#10;fri ATM&#10;&#10;the same words as the market box, with the price left off"></textarea>
         <div class="msg" id="mqparse"></div></section>
 
       <section class="card hide" id="mmtargetcard">
@@ -1340,6 +1405,26 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
 
       <section class="card"><h2>The market against the surface <small id="mmsheethead"></small></h2>
         <div id="mmsheet"></div></section>
+
+      <section class="card"><h2>The printed tape <small id="mqflowhead"></small></h2>
+        <div class="mmbar" style="margin:0 0 10px">
+          <div class="f"><label>Half-life (d)</label><input id="mmflowhalf" value="5" style="width:84px"></div>
+          <div class="f"><label>Lookback (d)</label><input id="mmflowlook" value="30" style="width:88px"></div>
+          <div class="f"><label>Tolerance</label><input id="mmflowtol" value="0.03" style="width:78px"></div>
+        </div>
+        <div id="mqflow"></div>
+        <details class="hint"><summary>What this is, and what it is not</summary>The dissemination file
+          publishes <b>what printed and never who bought</b> &mdash; there is no buyer, no seller and no
+          aggressor flag in it, by design. So a side here is <i>inferred</i>: each print is turned into
+          the volatility it implies, against the forward of its own date, and read as <b>paid</b> above
+          our mark and <b>given</b> below it, with anything inside the tolerance counted as unclear
+          rather than pushed to a side. The mark is the surface as it stands now and not as it stood
+          when the trade printed, which is why the half-life is short. Size is <b>vega</b>, in the base
+          currency per volatility point &mdash; the unit the axe above is typed in &mdash; because a
+          hundred million of a one-week option and of a two-year one are not the same amount of buying.
+          Trades whose size was published as the dissemination cap are counted in what printed and left
+          out of the vega, since the cap hides the size. Nothing here moves a price until
+          <b>Flow wt</b> is above zero.</details></section>
 
       <section class="card"><h2>Quoting agent <small id="agenthead"></small></h2>
         <div class="mmbar" style="margin:0 0 10px">
@@ -1445,6 +1530,15 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
     works in strike over forward. A <b>comma is a column boundary and a price never straddles
     one</b>: that is what tells <code>3M, 7.75, 8.30</code> (a choice price at the 7.75 strike)
     from <code>3M 7.75 8.30</code> (the two-way at-the-money it has always been).
+    <br><b>A weekday is an intra-week expiry.</b> <code>fri ATM 8.15/8.55</code> is the next
+    Friday from today and <code>mon 1.1000 call</code> the next Monday &mdash; the day names in
+    full or from three letters (<code>thu</code>, <code>thur</code>, <code>thurs</code>). Always
+    forward and never today: <code>Fri</code> read on a Friday is the Friday coming, because an
+    option quoted this morning to expire this morning is not what a run means, and the row says
+    which date it landed on. It is the <i>weakest</i> way to say when &mdash; a tenor or a date
+    on the same line is used instead, with a note &mdash; and a day name in front of a
+    <b>time</b> (<code>mon 09:15 1M ATM &hellip;</code>) is the day the run was written rather
+    than an expiry.
     <br><b>Timestamps, and what wins.</b> A line may start with <code>09:15</code>,
     <code>2024-02-28 09:15</code> or <code>[09:15]</code>. When two lines quote the <i>same
     thing</i>, the <b>later timestamp wins</b> whichever order they were pasted in; without
@@ -1474,6 +1568,26 @@ td.mmwhy{text-align:left;white-space:normal;color:var(--muted);font-size:10.5px;
     quote and <i>never</i> applied. The narrowest matching rule wins and every row names the rule
     that set it. There is no built-in default: a quote no rule matches gets no bid and no offer
     unless a fallback width is typed above, and says which it was.
+    <br><b>A premium, and what a live line leaves unsaid.</b> A price can be written as a
+    premium rather than a volatility &mdash; <code>pips</code>, <code>%</code>, a currency word,
+    or <code>bp</code>, which is a hundredth of a per cent of the base notional, so
+    <code>5bp</code> is 0.05% and never 5 of anything. It is inverted <i>once</i>, against the
+    feed&rsquo;s forward at that line&rsquo;s own expiry, and the row shows the volatility it
+    implies with the premium it came from beside it. A premium is dealt on a strike and normally
+    needs its side written out, because a call and a put there are two different prices; the
+    exception is <code>live</code> &mdash; an option dealt without its delta hedge, which is what
+    makes it a low-delta option. It is the out-of-the-money one, so the side is read from the
+    <b>moneyness</b>: above the forward the call, below it the put, said on the row. Read off a
+    strike that turns out to be near the money, the row warns that this was a guess at a
+    forty-delta option and asks for the word.
+    <br><b>The market table reads one line per quote.</b> The message a line carries &mdash;
+    warnings, the width&rsquo;s source, what the agent suggested &mdash; sits under it and is
+    shown on the <b>hover</b>; click the line to pin it open. A line that has one is marked with
+    an ellipsis after its name, so nothing is hidden that was not announced. The <b>Now</b>
+    column is coloured by where the mark sits in <i>that line&rsquo;s</i> two-way: plain inside
+    the middle of it, amber in the outer quarter, and in the alert colour when the mark is above
+    their offer or below their bid. Hovering the number says how far, in vol points and in
+    widths.
     <br><b>Nothing here touches the workbook.</b> The fit reports and then puts the marks back,
     and so does a quote made on them. Tick <b>keep the marks</b> to leave the fit on the loaded
     book &mdash; still in memory only, and a reload discards them.
@@ -1671,6 +1785,23 @@ const IN=[
  ['buffer','Barrier buffer %','text',TOUCH],
 ];
 const dash=v=>(v===0||v==null||!isFinite(v))?'—':null;
+/* Which premium the Results rows show: 'forward' (the undiscounted value the
+   model makes, what every price on this screen always was) or 'spot' (the
+   same value discounted at the term currency's RATES-tab rate to the premium
+   date -- what is paid).  One switch for the three premium rows and the
+   totals, so a screen never shows a forward price above a spot amount. */
+let PREM='forward';
+try{PREM=localStorage.getItem('volkit.premium')==='spot'?'spot':'forward'}catch(e){}
+const premWord=()=>PREM==='spot'?'spot (as paid)':'forward';
+const prem=(fwd,pv)=>r=>PREM==='spot'?r[pv]:r[fwd];
+function premCell(v,r,fmt){
+  if(PREM==='spot'&&v==null)return '<span title="no '+esc(String(r.pair||'').slice(3,6))
+    +' rate on the RATES tab, so the premium cannot be discounted; forward is the only value">\u2014</span>';
+  return fmt(v);
+}
+function setPrem(mode){PREM=mode==='spot'?'spot':'forward';
+  try{localStorage.setItem('volkit.premium',PREM)}catch(e){}
+  renderGrid();}
 /* What the model worked out, and nothing an input box above already holds.
    The expiry, the strike and the option type are *resolved into the boxes*
    -- a tenor comes back the one standard date, `ATM` / `25d` comes back the
@@ -1699,10 +1830,17 @@ const OUT=[
     Exotics are left off the row: their price is per unit of *payout* rather
     than per unit of base, and a percentage is how that is quoted, which the
     next row already is. */
- ['premium_dom','Price (pips)',(v,r,L)=>num(v*pipFor(L),2),'',VANILLA],
- ['premium_pct_base','Price % (of base / payout)',v=>num(v,4)],
+ /* One row each, read in the premium the toggle on the Results bar says:
+    the forward (undiscounted) value the model makes, or the premium as paid
+    -- the same value discounted at the term currency's RATES-tab rate to the
+    premium date.  A dash under "spot" is a term currency with no rate on the
+    tab; the forward value is then the only honest number, one click away. */
+ [prem('premium_dom','premium_pv_dom'),()=>'Price (pips), '+premWord(),(v,r,L)=>premCell(v,r,x=>num(x*pipFor(L),2)),'',VANILLA],
+ [prem('premium_pct_base','premium_pv_pct_base'),()=>'Price % (of base / payout), '+premWord(),(v,r)=>premCell(v,r,x=>num(x,4))],
  ['overhedge_cost','Overhedge cost',v=>dash(v)??num(v,6),'sign',['digital','one_touch','no_touch']],
- ['delta_pct','Delta %',v=>num(v,2)],
+ /* Spot delta where the pair quotes one and the RATES tab can price it,
+    forward delta otherwise; the small word says which and the hover says why. */
+ ['delta_pct','Delta %',(v,r)=>num(v,2)+(r&&r.delta_kind?' <span style="color:var(--muted);font-size:11px" title="'+esc(r.delta_kind)+'">'+(r.delta_kind.indexOf('spot')===0?'spot':'fwd')+'</span>':'')],
  ['smile_delta_pct','Smile delta %',v=>num(v,2),'',VANILLA],
  /* What the delta hedge has to be moved by, in millions of base, for a one
     per cent move in spot -- the gamma a desk says it is long or short, and
@@ -1710,7 +1848,7 @@ const OUT=[
     the row above it and not of the Black gamma. */
  ['smile_cash_gamma','Smile cash gamma (m base / 1%)',v=>num(v,4),'sign',VANILLA],
  ['vega_dom','Vega per vol pt',v=>num(v,6)],
- ['premium_amount','Premium amount',v=>num(v,4),'big sign'],
+ [prem('premium_amount','pv_amount'),()=>'Premium amount, '+premWord(),(v,r)=>premCell(v,r,x=>num(x,4)),'big sign'],
  ['vega_amount','Vega amount / vol pt',v=>num(v,4),'sign'],
  ['delta_amount','Delta hedge (m base)',v=>num(v,4),'sign'],
  ['pricing_method','Method',v=>esc(v),'',['digital','one_touch','no_touch']],
@@ -1794,7 +1932,9 @@ function renderGrid(){
     LEGS.forEach((L,i)=>{h+=applies(only,L)?`<td class="cell">${ctl(kind,i,k,L[k]??'')}</td>`
       :`<td class="na" title="${esc(prodOf(L))} does not use this">·</td>`;});
     h+='<td class="spacer"></td></tr>';});
-  h+=`<tr class="sec"><td colspan="${span}">Results</td></tr>`;
+  h+=`<tr class="sec"><td colspan="${span}">Results
+      <span class="premtog" title="the premium rows and the totals: the forward (undiscounted) value the model makes, or the premium as paid -- discounted at the term currency's RATES-tab rate to the premium date">premium:
+      <button class="ghost${PREM==='forward'?' on':''}" data-prem="forward">forward</button><button class="ghost${PREM==='spot'?' on':''}" data-prem="spot">spot</button></span></td></tr>`;
   const res=RESULT?RESULT.legs:[];
   // A leg that failed says so once, in the first result row that is on the
   // screen.  Anchoring that to a row by name meant removing the row took the
@@ -1802,23 +1942,29 @@ function renderGrid(){
   const shown=OUT.filter(o=>anyApplies(o[4]));
   const firstrow=shown.length?shown[0][0]:null;
   shown.forEach(([k,lab,fmt,cls,only])=>{
-    h+=`<tr><td class="rh">${lab}</td>`;
+    // A key may be a reader of the result rather than a field name, and a
+    // label may depend on the screen's own state (the premium toggle).
+    h+=`<tr><td class="rh">${typeof lab==='function'?lab():lab}</td>`;
     LEGS.forEach((L,i)=>{const r=res[i];
       if(!r){h+=`<td class="o">—</td>`;return}
       if(!r.ok){h+=`<td class="err" title="${esc(r.error)}">${k===firstrow?esc(r.error):''}</td>`;return}
       if(!applies(only,L)){h+=`<td class="na" title="${esc(prodOf(L))} does not use this">·</td>`;return}
-      const v=r[k]; let c='o '+(cls||'');
+      const v=typeof k==='function'?k(r):r[k]; let c='o '+(cls||'');
       if((cls||'').includes('sign')&&typeof v==='number')c+=v>0?' pos':(v<0?' neg':'');
       h+=`<td class="${c}">${fmt(v,r,L)}</td>`;});
     h+='<td class="spacer"></td></tr>';});
   h+='</tbody>';
   g.innerHTML=h;
   const t=RESULT?RESULT.totals:{};
-  $('#ptotals').innerHTML=Object.keys(t).length?Object.entries(t).map(([p,v])=>
-    `<div class="tot"><b>${esc(p)}</b>
-      <div><span>premium</span><span class="${v.premium>0?'pos':(v.premium<0?'neg':'')}">${num(v.premium,4)}</span></div>
+  $('#ptotals').innerHTML=Object.keys(t).length?Object.entries(t).map(([p,v])=>{
+    // The total follows the toggle; a pair with a leg that could not be
+    // discounted has no spot total, and says so rather than mixing the two.
+    const pv=PREM==='spot'?v.pv_premium:v.premium;
+    const ptxt=pv==null?'<span title="a leg on this pair has no term-currency rate on the RATES tab">—</span>':num(pv,4);
+    return `<div class="tot"><b>${esc(p)}</b>
+      <div><span>premium, ${PREM==='spot'?'spot':'fwd'}</span><span class="${pv>0?'pos':(pv<0?'neg':'')}">${ptxt}</span></div>
       <div><span>vega / vol pt</span><span>${num(v.vega,4)}</span></div>
-      <div><span>delta (m base)</span><span>${num(v.delta,4)}</span></div></div>`).join(''):'';
+      <div><span>delta (m base)</span><span>${num(v.delta,4)}</span></div></div>`}).join(''):'';
 }
 function saveLegs(){try{localStorage.setItem('volkit.legs',JSON.stringify(LEGS))}catch(e){}}
 function loadLegs(){
@@ -2056,6 +2202,8 @@ $('#pgrid').addEventListener('change',async e=>{
   schedulePrice();
 });
 $('#pgrid').addEventListener('click',e=>{
+  const tog=e.target.closest('[data-prem]');
+  if(tog){setPrem(tog.dataset.prem);return}
   const el=e.target.closest('[data-del]'); if(!el)return;
   LEGS.splice(+el.dataset.del,1); saveLegs(); RESULT=null; renderGrid(); schedulePrice();
 });
@@ -2275,10 +2423,15 @@ function paintMarks(){
   const nq=MARKS.atm.filter(r=>r.quotes_marked).length;
   $('#matmowcount').textContent=(!ow&&nown)?`· ${nown} marked`:'';
   const qn=$('#mquotenote');
+  /* Three things want this line, and they are not equals: a refusal beats
+     what the last paste did, and both beat the standing count of re-quoted
+     tenors. */
   qn.textContent=QPROB.length?QPROB.join(' · ')
-    :(nq?`${nq} tenor${nq===1?'':'s'} re-quoted`:'');
+    :(QPASTE||(nq?`${nq} tenor${nq===1?'':'s'} re-quoted`:''));
   qn.className=QPROB.length?'msg bad':'meta';
   const qcols=$('#mquoteshow').checked, QF=qcols?quoteFields():[];
+  /* The paste note belongs to the quote columns and goes with them. */
+  $('#mqpastehint').classList.toggle('hide',!qcols);
   // Two columns want to sit beside each other; anything more wants the card.
   $('#matm').className='mark'+((ow||qcols)?'':' tight');
   $('#matm').innerHTML=`<thead><tr><th>Tenor</th><th>${esc(MARKS.cut)} cut %</th>`+
@@ -2445,6 +2598,8 @@ function termBody(param){
 }
 async function applyMark(el){
   const o=mq(), v=el.value.trim();
+  /* What the last paste did is about the last paste, not about this box. */
+  QPASTE='';
   try{
     if(el.dataset.m==='atm'){
       if(v==='')await post('/api/overwrite',{pair:o.pair,kind:'clear_atm',tenor:el.dataset.tenor});
@@ -2479,6 +2634,113 @@ async function applyMark(el){
   }catch(e){alert(e.message)}
 }
 document.addEventListener('change',e=>{if(e.target.dataset&&e.target.dataset.m)applyMark(e.target)});
+
+/* ---- pasting a block of quotes ------------------------------------------
+   A marker keeps these four numbers in a spreadsheet and marks a pair by
+   moving the lot, so the table takes them the way the spreadsheet hands them
+   over: one paste, filling right and down from the box it starts in.  It is
+   the same edit as typing every box -- ordinary quote overwrites, refitted
+   and counted like the rest -- and it is posted whole rather than cell by
+   cell, because a block that failed at row nine is not something a person can
+   undo by hand.  What the paste last did is said beside the table; a cell it
+   could not use is named there rather than swallowed. */
+let QPASTE='';
+/* Vol points as a sheet writes them: 8.20, "8.20", " 8.2 ", 1,234 or 8.2%.
+   Blank comes back as '' and a word as null, and the two are not the same
+   answer -- one is a cell to leave alone and the other refuses the paste. */
+function qpNum(x){
+  const t=String(x==null?'':x).replace(/[,%\s]/g,'');
+  if(t==='')return '';
+  const v=Number(t);
+  return isFinite(v)?v:null;
+}
+function qpNorm(t){return String(t==null?'':t).replace(/\s+/g,'').toUpperCase()}
+/* Rows of cells.  Tab-separated is what a spreadsheet puts on the clipboard;
+   a column copied out of anything else arrives as plain lines, and commas or
+   runs of spaces are read as columns too so a pasted print-out still lands. */
+function qpGrid(text){
+  return String(text||'').replace(/\r\n?/g,'\n').replace(/\n+$/,'').split('\n')
+    .map(l=>l.indexOf('\t')>=0?l.split('\t'):l.trim().split(/\s*,\s*|\s{2,}|\s+/));
+}
+function qpBox(tenor,field){
+  return Array.prototype.slice.call(
+    document.querySelectorAll('#matm input[data-m="quote"]'))
+    .filter(b=>b.dataset.tenor===tenor&&b.dataset.field===field)[0]||null;
+}
+/* The block, read against the table it was dropped on.  Nothing is posted
+   from here: it answers with the cells it would write and everything it could
+   not, so the refusal and the note are decided in one place. */
+function qpPlan(el,text){
+  const QF=quoteFields(), tenors=(MARKS&&MARKS.atm||[]).map(r=>r.tenor);
+  let g=qpGrid(text);
+  const noNum=r=>r.every(c=>typeof qpNum(c)!=='number');
+  const anyWord=r=>r.some(c=>qpNum(c)===null);
+  if(g.length>1&&noNum(g[0])&&anyWord(g[0]))g=g.slice(1);
+  let labels=null;
+  if(g.length&&g.every(r=>qpNum(r[0])===null&&String(r[0]||'').trim()!==''))
+    {labels=g.map(r=>r[0]); g=g.map(r=>r.slice(1))}
+  const c0=Math.max(0,QF.indexOf(el.dataset.field));
+  const r0=Math.max(0,tenors.indexOf(el.dataset.tenor));
+  const out={cells:[],bad:[],derived:[],unknown:[],blank:0,past:0};
+  g.forEach((row,i)=>{
+    let tenor;
+    if(labels){
+      tenor=tenors.filter(t=>qpNorm(t)===qpNorm(labels[i]))[0];
+      if(!tenor){out.unknown.push(String(labels[i]).trim());return}
+    }else{
+      tenor=tenors[r0+i];
+      if(!tenor){out.past+=row.length;return}
+    }
+    row.forEach((raw,j)=>{
+      const f=QF[c0+j];
+      if(f==null){out.past+=1;return}
+      const v=qpNum(raw);
+      if(v==='')  {out.blank+=1;return}
+      if(v===null){out.bad.push(tenor+' '+quoteLabel(f)+': '+String(raw).trim());return}
+      if(!qpBox(tenor,f)){out.derived.push(tenor+' '+quoteLabel(f));return}
+      out.cells.push({tenor:tenor,field:f,value:v});
+    });
+  });
+  return out;
+}
+async function quotePaste(el,text){
+  const plan=qpPlan(el,text);
+  QPASTE='';
+  if(plan.bad.length){
+    QPROB=['nothing was pasted: '+plan.bad.slice(0,3).join(' · ')+
+           (plan.bad.length>3?' · and '+(plan.bad.length-3)+' more':'')+
+           ' is not a number'];
+    paintMarks();return;
+  }
+  if(!plan.cells.length){
+    QPROB=[];
+    QPASTE='nothing in that paste landed on a quote box';
+    paintMarks();return;
+  }
+  const note=[plan.cells.length+' quote(s) pasted'];
+  if(plan.blank)note.push(plan.blank+' blank cell(s) left as they were');
+  if(plan.derived.length)note.push(plan.derived.length+' derived wing(s) skipped');
+  if(plan.unknown.length)note.push('no tenor '+plan.unknown.slice(0,3).join(', '));
+  if(plan.past)note.push(plan.past+' value(s) past the table ignored');
+  QPROB=[];
+  try{
+    const r=await post('/api/overwrite',{pair:mq().pair,kind:'quotes',cells:plan.cells});
+    QPROB=(r&&r.problems)||[];
+    QPASTE=note.join(' · ');
+  }catch(e){QPROB=[e.message]}
+  await loadMarks(); await redraw(); schedulePrice();
+}
+/* One value with no tab and no newline in it is a box being filled in, not a
+   block: the browser's own paste does that better than we would. */
+document.addEventListener('paste',e=>{
+  const el=e.target;
+  if(!el||!el.dataset||el.dataset.m!=='quote')return;
+  if(!el.closest||!el.closest('#matm'))return;
+  const text=((e.clipboardData||window.clipboardData)||{getData:()=>''}).getData('text');
+  if(!/[\t\n\r]/.test(String(text||'')))return;
+  e.preventDefault();
+  quotePaste(el,text);
+});
 $('#mclearatm').onclick=async()=>{await post('/api/overwrite',{pair:mq().pair,kind:'clear_atm'});
   await loadMarks();await redraw();schedulePrice()};
 $('#mclearsmile').onclick=async()=>{await post('/api/overwrite',{pair:mq().pair,kind:'clear_smile'});
@@ -2744,7 +3006,8 @@ function vqShow(){
      answer to "where is the 25 delta" is a strike as much as it is a
      volatility, and the desk quotes the other one back. */
   const dtxt=r.delta==null?'':(sgn(r.delta,VOLDP)+'\u0394 '+(r.delta_is_call?'call':'put')
-    +(r.premium_adjusted?' (premium adjusted)':''));
+    +' ('+(r.premium_adjusted?'premium adjusted':'unadjusted')+' '+(r.delta_kind||'forward delta')
+    +(r.atm_kind?', ATM = '+r.atm_kind:'')+')');
   o.className='out';
   o.innerHTML='<div class="v">'+vnum(r.vol)+'<span style="font-size:14px;font-weight:400"> %</span></div>'
     +'<div class="d">'+esc(r.pair+' '+r.expiry)
@@ -4423,6 +4686,7 @@ async function loadConfig(){
       'Its column and its sheet stay where they are.','Remove',
       ()=>post('/api/config/pair',{action:'remove',pair:b.dataset.pair}));});
   cfgPaintTabs();
+  loadVersions();
 }
 /* One tab's table, and the controls under it.  Painted from CFG rather than
    from the DOM so that a suggestion can be written into CFG and the table
@@ -4613,10 +4877,75 @@ function cfgConfirm(html,label,run){
       /* The book underneath every screen is a new one now: boot() re-reads
          the state and every screen with it, and the tables here are rebuilt
          from the workbook rather than from what was typed into them. */
-      await boot(); await loadConfig();
+      await boot(); await loadConfig(); await loadVersions();
       cfgShow(said,false);
     }catch(e){c.classList.add('hide');cfgShow(e.message,true)}
   };
+}
+
+/* ---- versions -----------------------------------------------------------
+   Two lists that answer two different questions, and they are deliberately
+   not the same length.  The **copies** are whole workbooks -- a couple of
+   dozen, thinned by time rather than by count, with the one that cannot be
+   rebuilt kept for good -- and putting one back is a button.  The **writes**
+   are a line each and reach back to the first one, so a write whose copy has
+   been thinned away is still on the record, and the session document beside
+   it is what those marks were.  A backup answers "give me the file back"; the
+   log answers "what did we mark on Tuesday", and one file cannot do both
+   cheaply. */
+let VERS=null;
+function vbytes(n){
+  n=+n||0;
+  return n>=1e6?(n/1e6).toFixed(2)+' MB':Math.max(1,Math.round(n/1e3))+' KB';
+}
+function vwhen(t){return String(t||'').replace('T',' ').slice(0,19)}
+async function loadVersions(){
+  if(!$('#cfgshow').checked)return;
+  try{VERS=await api('/api/workbook/versions')}
+  catch(e){VERS=null;$('#cfgversions').innerHTML=
+    '<div class="msg bad">'+esc(e.message)+'</div>';return}
+  paintVersions();
+}
+function paintVersions(){
+  const host=$('#cfgversions'); if(!VERS){host.innerHTML='';return}
+  const B=VERS.backups||[], W=VERS.writes||[], K=VERS.keep||{};
+  const rule='the newest '+(K.latest||0)+', then one an hour ('+(K.hourly||0)+
+    '), a day ('+(K.daily||0)+'), a week ('+(K.weekly||0)+') and a month ('+(K.monthly||0)+')';
+  host.innerHTML='<label>Versions<span class="meta" style="margin-left:7px;font-weight:400">'+
+    B.length+' copy(s) in '+esc(VERS.folder)+'/, '+vbytes(VERS.bytes)+'</span></label>'+
+    (B.length?'<div class="scroll"><table class="mark"><thead><tr><th>Taken</th><th>Size</th>'+
+      '<th>File</th><th></th></tr></thead><tbody>'+
+      B.map(r=>'<tr><td>'+esc(vwhen(r.when))+'</td><td>'+vbytes(r.bytes)+'</td>'+
+        '<td>'+esc(r.name)+
+        (r.origin?' <span class="pill" title="the last copy that still holds what a write cannot carry through, so it is never thinned out">kept for good</span>':'')+
+        (r.loose?' <span class="meta" title="made before there was a folder; the next write moves it in">beside the workbook</span>':'')+
+        '</td><td style="text-align:right"><button class="ghost cfgback" data-name="'+esc(r.name)+
+        '" style="width:auto;padding:3px 9px;font-size:11px">restore</button></td></tr>').join('')+
+      '</tbody></table></div>'
+     :'<div class="meta">no copies yet — one is kept the first time something writes this '+
+      'workbook</div>')+
+    '<div class="hint" style="margin-top:6px">Kept by age, not by count: '+esc(rule)+
+    '. Twenty copies of one afternoon used to push out last week, which is the one somebody '+
+    'asks for. A write that changes nothing keeps no second copy of the same bytes, and the '+
+    'copy taken before the first write that flattened the workbook is never thinned out — it '+
+    'is the only one holding anything a round trip cannot carry.</div>'+
+    (W.length?'<label style="margin-top:12px">What has written it</label>'+
+      '<div class="scroll"><table class="mark"><thead><tr><th>When</th><th>Write</th>'+
+      '<th>Pairs / tabs</th><th>Marks</th></tr></thead><tbody>'+
+      W.map(w=>'<tr><td>'+esc(vwhen(w.when))+'</td><td>'+esc(w.what||'')+
+        (w.reused?' <span class="meta">no new copy</span>':'')+'</td>'+
+        '<td>'+esc(((w.pairs||[]).concat(w.tabs||[])).join(', '))+'</td>'+
+        '<td class="meta">'+esc(w.document||'')+'</td></tr>').join('')+
+      '</tbody></table></div>'+
+      '<div class="hint" style="margin-top:6px">One line per write, kept for good — a few '+
+      'hundred bytes each. Where a write was an export of marks, the session document beside '+
+      'it in <code>'+esc(VERS.history_folder||'')+'/</code> is those marks, and loading it '+
+      'puts them back on the book without touching the workbook.</div>'
+     :'');
+  host.querySelectorAll('.cfgback').forEach(b=>{
+    b.onclick=()=>cfgConfirm('Put <b>'+esc(b.dataset.name)+'</b> back as the workbook? '+
+      'What it replaces is kept, so this can be undone the same way.','Restore',
+      ()=>post('/api/workbook/restore',{name:b.dataset.name}));});
 }
 $('#cfgshow').onchange=()=>{cfgVisible();loadConfig()};
 $('#cfgaddpair').onclick=()=>{
@@ -4786,7 +5115,52 @@ function renderTiles(){
   host.innerHTML=MO.length?MO.map(moTileShell).join(''):
     '<div class="moempty">No panels yet — <b>+ Panel</b> adds one. '+
     'A panel is one pair and two points in time.</div>';
+  moSyncAll();
   if(MOR)paintMonitor(MOR);
+}
+
+/* ---- the two ends, written across every panel at once -------------------
+   The same two choices each panel carries, hoisted into the control row so a
+   screen of pairs can be moved from one comparison to another in one gesture
+   instead of panel by panel.  They are not a separate setting: nothing is
+   posted from them and nothing is stored under them.  They write into the
+   panels and then read themselves back off the panels, so a box is only ever
+   showing what the list actually holds, and shows nothing when the list does
+   not agree -- a control that claimed 'history' while half the panels sat on
+   the surface would be the silent default this screen exists to remove. */
+function moFillAllSel(){
+  const opts='<option value="">&mdash; per panel &mdash;</option>'+
+    moKinds().map(k=>'<option value="'+esc(k.key)+'">'+esc(k.label)+'</option>').join('');
+  $('#moallwas').innerHTML=opts; $('#moallnow').innerHTML=opts;
+}
+/* What every panel agrees on, or null if they do not. */
+function moCommon(k){
+  if(!MO.length)return null;
+  const v=MO[0][k]||'';
+  return MO.every(t=>(t[k]||'')===v)?v:null;
+}
+function moSyncAll(){
+  [['#moallwas','was_kind'],['#moallnow','now_kind']].forEach(([id,k])=>{
+    const c=moCommon(k), el=$(id);
+    if(!el)return;
+    el.value=c==null?'':c; el.disabled=!MO.length;
+  });
+  [['#moallwasdate','was_date','was_kind','-1w'],
+   ['#moallnowdate','now_date','now_kind','latest']].forEach(([id,k,kk,ph])=>{
+    const el=$(id); if(!el)return;
+    const c=moCommon(k), live=MO.some(t=>t[kk]==='history');
+    el.value=c==null?'':c;
+    el.placeholder=c==null?'mixed':ph;
+    el.disabled=!live;
+  });
+}
+/* One field of every panel, overwritten.  Same path as editing the panels by
+   hand: the list is saved, redrawn and re-run, so the screen and the payload
+   `volkit monitor` would reproduce stay the one thing. */
+function moSetAll(k,v){
+  if(!MO.length){moSyncAll();return}
+  MO.forEach(t=>{t[k]=v});
+  saveMO(); renderTiles(); runMonitor();
 }
 function moCell(v,dp){return (v==null||!isFinite(v))?'—':((v*100>=0?'+':'')+(v*100).toFixed(dp==null?VOLDP:dp))}
 function paintMonitor(d){
@@ -4869,6 +5243,12 @@ $('#mobig').oninput=()=>{saveMO();scheduleMonitor()};
 $('#mobig').onchange=()=>{saveMO();runMonitor()};
 ['#mocut','#momethod'].forEach(id=>{$(id).onchange=()=>{runMonitor();scheduleCompare()}});
 $('#mopair').onchange=()=>{saveMO()};
+/* Blank is 'leave them as they are', not 'clear them all': it is what the box
+   shows when the panels disagree, so choosing it must not flatten them. */
+$('#moallwas').onchange=()=>{const v=$('#moallwas').value; v?moSetAll('was_kind',v):moSyncAll()};
+$('#moallnow').onchange=()=>{const v=$('#moallnow').value; v?moSetAll('now_kind',v):moSyncAll()};
+$('#moallwasdate').onchange=()=>moSetAll('was_date',($('#moallwasdate').value||'').trim());
+$('#moallnowdate').onchange=()=>moSetAll('now_date',($('#moallnowdate').value||'').trim());
 $('#mohistload').onclick=()=>loadHistory('#mohist','#mostatus');
 $('#molist').onclick=e=>{
   const b=e.target.closest('button'); if(!b)return;
@@ -4931,6 +5311,10 @@ const MQF=[
     as its card, so the two never disagree about what the archive holds */
  ['use_archive_width','#mqarchive'],['archive_half_life','#agenthalf'],
  ['archive_min_effective','#agentmin'],['archive_lookback_days','#agentlook'],
+ /* the printed tape: what it did, and how far it may lean the mid */
+ ['flow_weight','#mmflowwt'],['flow_scale','#mmflowscale'],
+ ['flow_half_life','#mmflowhalf'],['flow_lookback_days','#mmflowlook'],
+ ['flow_tolerance','#mmflowtol'],
 ];
 /* The marking agent's card: the fit panel's own fields, plus its own. Read by
    marking.panel_from_request, and a test pins this list against it. */
@@ -5040,15 +5424,37 @@ function renderKnobs(){
      '<code>short_decay</code> is normally left pinned: nine tenors barely see it.');
 }
 
+/* -- how long a run has been going ---------------------------------------
+ * The screens here are one book behind one lock: a fit, a quote and the
+ * marking agent are answered one at a time, and the agent card's own run can
+ * be a long one.  So a spinner alone is ambiguous -- working and waiting for
+ * a turn look identical -- and the seconds, then the note at ten of them, are
+ * what tell the desk which it is looking at.  Returns the function that stops
+ * it; call it in a `finally`, never on the success path alone. */
+function busy(sel,what){
+  const el=$(sel), t0=Date.now();
+  const paint=()=>{
+    const s=Math.round((Date.now()-t0)/1000);
+    el.innerHTML='<span class="spin"></span> '+esc(what)+
+      (s>=3?' <span class="elapsed">'+s+'s</span>':'')+
+      (s>=10?' <span class="queued">· still going — it may be waiting its turn behind '+
+        'another run (the agent card, a folder scan, a download)</span>':'');
+  };
+  paint();
+  const id=setInterval(paint,1000);
+  return ()=>clearInterval(id);
+}
+
 /* -- the two runs ------------------------------------------------------- */
 async function runMM(){
   const body=mmPayload();
   if(!(body.text||'').trim()&&body.target_source==='quotes'){
     $('#mmstatus').textContent='paste a market first';
     $('#mmsheet').innerHTML='<div class="annone">Nothing pasted yet.</div>';return}
-  $('#mmstatus').innerHTML='<span class="spin"></span> fitting…';
+  const stop=busy('#mmstatus','fitting…');
   try{
     MMR=await post('/api/mm/fit',body);
+    stop();
     holdMarks(MMR.marks,'fit');
     saveMM();
     paintMM();
@@ -5059,7 +5465,7 @@ async function runMM(){
     $('#mmstatus').innerHTML='<span style="color:var(--bad)">'+esc(e.message)+'</span>';
     $('#mmsheet').innerHTML='<div class="out err"><div class="v">'+esc(e.message)+'</div></div>';
     $('#mmcurve').innerHTML='';$('#mmwings').innerHTML='';
-  }
+  }finally{stop()}
   mqAvailable();
 }
 async function runMQ(){
@@ -5069,9 +5475,10 @@ async function runMQ(){
     $('#mqmarks').textContent='';
     $('#mqsheet').innerHTML='<div class="annone">Nothing asked for yet. Write what you are '+
       'being asked to price — one instrument a line, no prices on them.</div>';return}
-  $('#mmstatus').innerHTML='<span class="spin"></span> quoting…';
+  const stop=busy('#mmstatus','quoting…');
   try{
     MQR=await post('/api/mm/quote',body);
+    stop();
     saveMM();
     paintMQ();
     $('#mmstatus').textContent=(MQR.warnings||[]).length?
@@ -5080,7 +5487,7 @@ async function runMQ(){
     MQR=null;
     $('#mmstatus').innerHTML='<span style="color:var(--bad)">'+esc(e.message)+'</span>';
     $('#mqsheet').innerHTML='<div class="out err"><div class="v">'+esc(e.message)+'</div></div>';
-  }
+  }finally{stop()}
 }
 function scheduleMM(){if($('#mmauto').checked){clearTimeout(_mmt);_mmt=setTimeout(runMM,600)}}
 function scheduleMQ(){if($('#mmauto').checked){clearTimeout(_mqt);_mqt=setTimeout(runMQ,600)}}
@@ -5137,6 +5544,41 @@ function mmVerdictTag(r){
   const c=r.position?(MMTAG[r.position]||'none'):'none';
   return '<span class="mmtag '+c+'">'+esc(r.verdict)+'</span>';
 }
+/* Where the mark sits against the two-way the line quoted, as a class on the
+   "Now" cell and a sentence in its tooltip.  `position` is the fit's own
+   answer and is used rather than recomputed: it is the only comparison that
+   knows a premium row was never turned into a volatility, and a number in
+   pips read against a volatility bid would colour beautifully and mean
+   nothing. */
+function mmNow(r){
+  if(r.position==null||r.model_after==null)return{c:'',tip:''};
+  const b=r.market_bid,a=r.market_ask,m=r.model_after,w=a-b;
+  const widths=v=>(w>0?' ('+num(v/w,2)+' widths)':'');
+  if(r.position==='above')
+    return{c:' thru',tip:'above their offer by '+vnum(m-a)+widths(m-a)};
+  if(r.position==='below')
+    return{c:' thru',tip:'below their bid by '+vnum(b-m)+widths(b-m)};
+  if(!(w>0))return{c:'',tip:'on their choice price'};
+  const t=(m-b)/w;
+  return{c:Math.abs(t-0.5)>0.3?' edge':'',
+         tip:'inside, '+num(100*t,0)+'% of the way from their bid to their offer'};
+}
+
+/* A click pins the message open.  Delegated to the card, once, because the
+   table under it is rewritten on every run. */
+function wireWhy(host){
+  if(host.dataset.whywired)return;
+  host.dataset.whywired='1';
+  host.addEventListener('click',ev=>{
+    const tr=ev.target.closest&&ev.target.closest('tr.mmline.haswhy');
+    if(!tr||!host.contains(tr))return;
+    const why=tr.nextElementSibling;
+    if(!why||!why.classList.contains('mmwhyrow'))return;
+    why.classList.toggle('pin');
+    tr.classList.toggle('pinned',why.classList.contains('pin'));
+  });
+}
+
 function mmWhy(r,extra){
   const why=[].concat(r.warnings||[],r.width_source?['width: '+r.width_source]:[],
     (r.flags||[]).map(x=>'archive: '+x),
@@ -5165,35 +5607,43 @@ function paintMarket(d){
      newer quote is the one way this card could mislead. */
   const ag=agentRowsFor('market');
   const ncol=(timed?9:8)+(ag?2:0);
+  let withwhy=0;
   let h='<div class="mmwide"><table><thead><tr>'+
     '<th>Quote</th>'+(timed?'<th>Time</th>':'')+
     '<th>Size</th><th>Their bid</th><th>Their ask</th><th>Was</th><th>Now</th><th>Moved</th>'+
     (ag?'<th>Archive</th><th>Agent</th>':'')+
     '<th>Verdict</th></tr></thead><tbody>';
   sh.rows.forEach(r=>{
-    h+='<tr><td>'+esc(r.describe)+(r.label?' <small>'+esc(r.label)+'</small>':'')+'</td>'+
+    const suggestion=ag&&ag.has(r.line)&&['tight','wide','no rule'].indexOf(
+      ag.get(r.line).verdict)>=0?['agent: '+ag.get(r.line).note]:[];
+    const why=mmWhy(r,suggestion), nw=mmNow(r);
+    h+='<tr class="mmline'+(why?' haswhy':'')+'"><td>'+esc(r.describe)+
+       (r.label?' <small>'+esc(r.label)+'</small>':'')+'</td>'+
        (timed?'<td class="mmv">'+esc(r.timestamp||'—')+'</td>':'')+
        '<td class="mmv">'+(r.size==null?'—':num(r.size,0)+'mm')+'</td>'+
        '<td class="mmv">'+vnum(r.market_bid)+'</td><td class="mmv">'+vnum(r.market_ask)+'</td>'+
        '<td class="mmv">'+vnum(r.model_before)+'</td>'+
-       '<td class="mmv"><b>'+vnum(r.model_after)+'</b></td>'+
+       '<td class="mmv mmnow'+nw.c+'"'+(nw.tip?' title="'+esc(nw.tip)+'"':'')+
+         '><b>'+vnum(r.model_after)+'</b></td>'+
        '<td class="mmv"'+cls(r.model_move)+'>'+vsgn(r.model_move)+'</td>'+
        (ag?('<td class="mmv">'+vnum((ag.get(r.line)||{}).archive_width)+'</td>'+
             '<td>'+(ag.has(r.line)?agentTag(ag.get(r.line)):'—')+'</td>'):'')+
        '<td>'+mmVerdictTag(r)+'</td></tr>';
-    const suggestion=ag&&ag.has(r.line)&&['tight','wide','no rule'].indexOf(
-      ag.get(r.line).verdict)>=0?['agent: '+ag.get(r.line).note]:[];
-    const why=mmWhy(r,suggestion);
-    if(why)h+='<tr><td class="mmwhy" colspan="'+ncol+'">'+why+'</td></tr>';
+    if(why){withwhy++;
+      h+='<tr class="mmwhyrow"><td class="mmwhy" colspan="'+ncol+'">'+why+'</td></tr>'}
   });
   h+='</tbody></table></div>';
   if(d.marks)h+='<div class="etonote">· the fit moved '+esc(d.marks.what)+
     '; that is what the quote above stands on.</div>';
+  if(withwhy)h+='<div class="etonote">· '+withwhy+' line(s) carry a message; hover a line to '+
+    'read it, click to keep it open.</div>';
   host.innerHTML=h;
+  wireWhy(host);
 }
 
 /* -- our quote: the instruments somebody asked for ---------------------- */
 function paintQuote(d){
+  paintFlow(d);
   const sh=d.sheet, host=$('#mqsheet');
   $('#mqsheethead').textContent=sh.n_quotes+' asked for · '+sh.priced+' with a width · '+
     sh.matched+' also in the market paste';
@@ -5205,20 +5655,26 @@ function paintQuote(d){
   /* The quoting agent's two columns sit beside the requests it read, and
      only while both boxes still hold what it read. */
   const ag=agentRowsFor('request');
-  const ncol=12+(ag?2:0);
+  const ncol=13+(ag?2:0);
   let h='<div class="mmwide"><table><thead><tr>'+
     '<th>Instrument</th><th>Size</th><th>Model</th>'+
-    '<th>Fair</th><th>Axe</th><th>Bank</th><th>Skew</th>'+
+    '<th>Fair</th><th>Axe</th><th>Flow</th><th>Bank</th><th>Skew</th>'+
     '<th>Our bid</th><th>Our ask</th><th>Width</th>'+
     (ag?'<th>Archive</th><th>Agent</th>':'')+
     '<th>Their market</th><th>Verdict</th></tr></thead><tbody>';
+  let withwhy=0;
   sh.rows.forEach(r=>{
     const theirs=(r.market_bid==null)?'—':(vnum(r.market_bid)+' / '+vnum(r.market_ask));
-    h+='<tr><td>'+esc(r.describe)+(r.label?' <small>'+esc(r.label)+'</small>':'')+'</td>'+
+    const suggestion=ag&&ag.has(r.line)&&['tight','wide','no rule'].indexOf(
+      ag.get(r.line).verdict)>=0?['agent: '+ag.get(r.line).note]:[];
+    const why=mmWhy(r,suggestion);
+    h+='<tr class="mmline'+(why?' haswhy':'')+'"><td>'+esc(r.describe)+
+       (r.label?' <small>'+esc(r.label)+'</small>':'')+'</td>'+
        '<td class="mmv">'+(r.size==null?'—':num(r.size,0)+'mm')+'</td>'+
        '<td class="mmv">'+vnum(r.model)+'</td>'+
        '<td class="mmv">'+vsgn(r.skew_fair)+'</td>'+
        '<td class="mmv">'+vsgn(r.skew_axe)+'</td>'+
+       '<td class="mmv">'+vsgn(r.skew_flow)+'</td>'+
        '<td class="mmv">'+vsgn(r.skew_bank)+'</td>'+
        '<td class="mmv"'+cls(r.skew_total)+'>'+vsgn(r.skew_total)+(r.skew_capped?' *':'')+'</td>'+
        /* Asked live: the premium two-way is the answer and the volatility
@@ -5232,10 +5688,8 @@ function paintQuote(d){
             '<td>'+(ag.has(r.line)?agentTag(ag.get(r.line)):'—')+'</td>'):'')+
        '<td class="mmv">'+theirs+'</td>'+
        '<td>'+mmVerdictTag(r)+'</td></tr>';
-    const suggestion=ag&&ag.has(r.line)&&['tight','wide','no rule'].indexOf(
-      ag.get(r.line).verdict)>=0?['agent: '+ag.get(r.line).note]:[];
-    const why=mmWhy(r,suggestion);
-    if(why)h+='<tr><td class="mmwhy" colspan="'+ncol+'">'+why+'</td></tr>';
+    if(why){withwhy++;
+      h+='<tr class="mmwhyrow"><td class="mmwhy" colspan="'+ncol+'">'+why+'</td></tr>'}
   });
   h+='</tbody></table></div>';
   const capped=sh.rows.filter(r=>r.skew_capped).length;
@@ -5250,7 +5704,71 @@ function paintQuote(d){
         ' observation(s) counted'):esc(ar.reason||''))+'</div>';
     if(ar.error)h+='<div class="etowarn">! '+esc(ar.error)+'</div>';
   }
+  if(withwhy)h+='<div class="etonote">· '+withwhy+' line(s) carry a message; hover a line to '+
+    'read it, click to keep it open.</div>';
   host.innerHTML=h;
+  wireWhy(host);
+}
+
+/* -- the printed tape ---------------------------------------------------- *
+ * What the file says happened, and which side of our mark it happened on.
+ * The card stands whether or not the lean is switched on: reading the tape
+ * and leaning on it are two decisions, and the first is worth having on its
+ * own. */
+function paintFlow(d){
+  const f=(d||{}).flow, host=$('#mqflow');
+  if(!f){$('#mqflowhead').textContent='';host.innerHTML=
+    '<div class="annone">Press Quote to read the tape.</div>';return}
+  const on=f.weight>0, buckets=f.buckets||[];
+  $('#mqflowhead').textContent=(on?'leaning at weight '+num(f.weight,2):'read, leaning nothing')+
+    ' · half-life '+num(f.half_life,0)+'d · '+num(f.lookback_days,0)+'d window';
+  let h='';
+  if(!buckets.length){
+    h='<div class="annone">'+esc(f.reason||'nothing printed for this pair in the window.')+'</div>';
+  }else{
+    h='<div class="mmwide"><table><thead><tr><th>Tenor</th><th>Prints</th>'+
+      '<th>Paid</th><th>Given</th><th>Unclear</th><th>Call / put</th>'+
+      '<th>Net vega</th><th>Lean</th><th>Newest</th></tr></thead><tbody>';
+    buckets.forEach(b=>{
+      const net=b.net==null?null:b.net;
+      h+='<tr class="mmline'+(b.enough?'':' haswhy')+'"><td>'+esc(b.bucket)+'</td>'+
+         '<td class="mmv">'+b.prints+'</td>'+
+         '<td class="mmv">'+b.paid+'</td><td class="mmv">'+b.given+'</td>'+
+         '<td class="mmv">'+b.unclear+'</td>'+
+         '<td class="mmv">'+b.calls+' / '+b.puts+'</td>'+
+         '<td class="mmv"'+cls(b.net_vega)+'><b>'+num(b.net_vega/1000,0)+'k</b></td>'+
+         '<td class="mmv"'+cls(net)+'>'+(net==null?'—':num(net,2))+'</td>'+
+         '<td class="mmv">'+(b.newest_days<1?'today':num(b.newest_days,0)+'d')+'</td></tr>';
+      if(!b.enough)h+='<tr class="mmwhyrow"><td class="mmwhy" colspan="9">'+esc(b.why_not)+
+        '</td></tr>';
+    });
+    h+='</tbody></table></div>'+
+      '<div class="etonote">· net vega is paid less given, age-weighted, in the base currency '+
+      'per volatility point; a positive number is the market having <b>paid</b>.</div>';
+  }
+  if(f.reason&&buckets.length)h+='<div class="etonote">· '+esc(f.reason)+'</div>';
+  (f.notes||[]).forEach(n=>{h+='<div class="etonote">· '+esc(n)+'</div>'});
+  (f.warnings||[]).forEach(n=>{h+='<div class="etowarn">! '+esc(n)+'</div>'});
+  const prints=(f.prints||[]).slice(-12).reverse();
+  if(prints.length){
+    h+='<div class="etonote" style="margin-top:8px">· the last '+prints.length+
+       ' print(s) this build could read:</div><div class="mmwide"><table><thead><tr>'+
+       '<th>When</th><th>What</th><th>Traded</th><th>Our mark</th><th>Vega</th>'+
+       '<th>Read as</th></tr></thead><tbody>'+
+      prints.map(p=>'<tr class="mmline haswhy"><td class="mmv">'+esc(p.at.replace('T',' ').slice(0,16))+
+        '</td><td>'+esc(p.bucket)+' '+num(p.strike,4)+' '+(p.is_call?'call':'put')+'</td>'+
+        '<td class="mmv">'+vnum(p.vol)+'</td><td class="mmv">'+vnum(p.mark)+'</td>'+
+        '<td class="mmv">'+num(p.vega/1000,0)+'k</td>'+
+        /* One colour for one direction across the card: paid is what a positive
+           net vega is, so it takes the same colour the net column gives it. */
+        '<td><span class="mmtag '+(p.side==='paid'?'in':p.side==='given'?'out':'none')+'">'+
+        esc(p.side)+'</span></td></tr>'+
+        '<tr class="mmwhyrow"><td class="mmwhy" colspan="6">'+esc(p.why)+
+        ' &nbsp;·&nbsp; forward: '+esc(p.forward)+'</td></tr>').join('')+
+      '</tbody></table></div>';
+  }
+  host.innerHTML=h;
+  wireWhy(host);
 }
 
 function paintCurve(d){
@@ -5631,10 +6149,11 @@ function markTag(src){return '<span class="mmtag '+(SRC[src]||'none')+'">'+esc(s
 
 async function runMark(){
   const body=markPayload();
-  $('#markstatus').innerHTML='<span class="spin"></span> planning the fit…';
   $('#markmsg').className='msg';$('#markmsg').textContent='';
+  const stop=busy('#markstatus','planning the fit…');
   try{
     MKR=await post('/api/mm/mark',body);
+    stop();
     MKR.key=markKey(body);
     saveMM();
     paintMark();
@@ -5645,7 +6164,7 @@ async function runMark(){
     MKR=null;
     $('#markstatus').innerHTML='<span style="color:var(--bad)">'+esc(e.message)+'</span>';
     $('#markbody').innerHTML='';$('#markverdict').classList.add('hide');
-  }
+  }finally{stop()}
 }
 
 function paintMark(){
@@ -5869,7 +6388,8 @@ $('#mqarchive').onchange=()=>{saveMM();scheduleMQ()};
   if($('#mqarchive').checked)scheduleMQ()}});
 $('#mmsource').onchange=()=>{mmTargetVisible();saveMM();scheduleMM()};
 $('#mmrevshow').onchange=()=>{mmRevVisible();saveMM()};
-['#mmfallback','#mmscale','#mmfair','#mmaxe','#mmcap','#mmhorizon'].forEach(id=>{
+['#mmfallback','#mmscale','#mmfair','#mmaxe','#mmcap','#mmhorizon',
+ '#mmflowwt','#mmflowscale','#mmflowhalf','#mmflowlook','#mmflowtol'].forEach(id=>{
   $(id).oninput=()=>{saveMM();scheduleMQ()}});
 ['#mmtext'].forEach(id=>{$(id).oninput=()=>{saveMM();scheduleMM();scheduleMQ()}});
 ['#mmtarget'].forEach(id=>{$(id).oninput=()=>{saveMM();scheduleMM()}});
@@ -5970,6 +6490,7 @@ async function boot(){
        box and `volkit monitor --big` start from one number. */
     $('#mobig').value=moBigDefault();
     $('#mobig').placeholder=String(moBigDefault());
+    moFillAllSel();
     loadMO(); renderTiles();
     loadCmp(); renderCmp();
   }

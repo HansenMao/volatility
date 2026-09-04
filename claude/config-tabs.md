@@ -10,6 +10,8 @@ workbook onto a new machine gets a tool that does the same thing there.
 | `files/bands.csv` | `PEG_BANDS` tab | `banded.load_bands` -> `Book._default_bands` |
 | `files/kace_spreads.csv` | `KACE_SPREADS` tab | `kace.SpreadTable.load` |
 | `files/holiday_overrides.csv` | `HOLIDAYS` tab | `CalendarSet.load_overrides_sheet` -> `Book._default_calendars` |
+| (never a file) | `CONVENTIONS` tab | `marketdata.load_conventions` -> `ExcelSource._load_conventions` -> `PairSpec.conventions` -> `VolSurface.conv` |
+| (never a file) | `RATES` tab | `rates.RatesTable.load` -> `Book._default_rates` -> `VolSurface.discount_lookup` / `pricing._discounted` |
 
 Two more were never files. `WING_RATIOS` came off the pair sheets' own
 formulas (`volkit migrate-wings`), and `Vega Weights` was already a tab of the
@@ -75,6 +77,46 @@ this module's.
 **Adding a configuration later is a tab and a parser**: name the tab in
 `configsheets.SHEETS` so an error can say what it was for, and call
 `configsheets.read_rows` for it. No new file appears beside the exe.
+
+## CONVENTIONS (added 2026-09-04)
+
+`pair, premium, atmf beyond`, optional — a pair with no row takes the
+market's conventions from `black.DeltaConvention.for_pair`:
+
+- `premium` is the currency the option premium is paid in, one of the pair's
+  own. The quoted delta is **premium adjusted iff that is the base currency**.
+  Default: USD when it is in the pair, else the base — so EURUSD/GBPUSD/AUDUSD
+  are unadjusted, USDJPY/USDCNH adjusted, and **every cross is adjusted**
+  (the legacy `ccy[0:3] == 'USD'` rule read all crosses as unadjusted).
+- `atmf beyond` is the tenor beyond which the ATM strike is the **forward**
+  rather than the delta-neutral straddle; `never` / `always` allowed; blank is
+  `1y`. `VolSurface.__post_init__` resolves the tenor on the pair's own
+  calendar (`DeltaConvention.resolved`) so the boundary pillar itself stays on
+  the straddle side whatever the calendar makes its length.
+  `black.atm_strike` (not `dns_strike`) is what every smile anchor and
+  calibration reads; `ATM` in a strike box is the convention at that tenor,
+  `ATMF` and `DNS`/`50d` name one of the two outright.
+- `delta` is `spot` (default) or `forward`: whether the pair quotes spot
+  delta out to the boundary. Spot delta needs the base currency's discount
+  factor, which is the `RATES` tab's job (below); without a rate the slice
+  reads forward delta and says so (`DeltaConvention.at` -> `delta_note`).
+
+## RATES (added 2026-09-04)
+
+`currency, tenor, rate` in % p.a., a simple money-market rate, DF =
+`1/(1 + r t)`, interpolated linearly in years between listed tenors and flat
+outside. Optional. Read by `rates.RatesTable.load` into `Book.rates`; each
+surface gets `discount_lookup = book.discount_factor`, and
+`VolSurface.slice_conv(t)` builds the slice's `DeltaConvention` with the base
+currency's factor in `df_foreign`. `black.delta` multiplies by it and
+`black.strike_from_delta` divides the target by it, so every slice quantity
+(calibration wings, `strike_from_delta`, `smile_table`, `smile_delta`,
+`quick_vol`, the pricing rows) is a spot delta out to the boundary and a
+forward delta beyond. The quote currency's factor discounts the forward
+premium in `pricing._discounted` (`premium_pv_*`, `pv_amount`, `None` without
+a rate). A currency with no rows is never guessed: forward delta and
+undiscounted premium, with the warning `<pair>: quotes spot delta but the
+RATES tab has no <ccy> rate` at load.
 
 ## Two things that are easy to confuse
 

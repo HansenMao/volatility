@@ -125,7 +125,12 @@ llm        a local model on a short leash: prose into the house grammar, and the
            against the text it was given
 ingest     the watched folders, read once each by content
 synthesis  the archive worked out: age-weighted widths, where the market has
-           been, what became of our prices, what printed
+           been, what became of our prices, what printed, and the forward
+           curve the tape itself printed
+flow       the printed tape as market colour: each print inverted to a
+           volatility, read as paid or given against our own mark, weighted by
+           vega and by age, and netted per tenor bucket. The one inference in
+           the package -- the file publishes no buyer and no seller
 agent      request in, price out, with the ordered list of ingredients that
            sum to it
 remarks    every time somebody moved a mark, and what from: a re-mark is a diff
@@ -173,7 +178,7 @@ working in its area — not before.
 | `claude/session-files.md` (§13) | `session.py` — saving marks beside the workbook, and the one deliberate export *into* it. |
 | `claude/build-and-screens.md` (§14) | `screens.py`, `--exclude-tab` / `--only-tabs` / `--hidden-tab`, trimmed builds. |
 | `claude/feed-autoload-and-config.md` (§15–§16) | `--auto-reload`, the pricing auto-load checkbox, and `volkit.cfg` / `config.py`. |
-| `claude/agent-quoting.md` (§17) | `archive.py`, `sdr.py`, `dtcc.py`, `llm.py`, `ingest.py`, `synthesis.py`, `agent.py`. |
+| `claude/agent-quoting.md` (§17) | `archive.py`, `sdr.py`, `dtcc.py`, `llm.py`, `ingest.py`, `synthesis.py`, `flow.py`, `agent.py`. |
 | `claude/agent-marking.md` (§18) | `remarks.py`, `marking.py`, `consult.py`, `rules.py` — the marking agent and its rules of thumb. |
 | `claude/agent-ask.md` (§19) | `ask.py` — the read-only question agent. |
 | `claude/kace-feed.md` (§20) | `kace.py` — the RATE_FEED message, posting, the spread table. |
@@ -214,9 +219,29 @@ to safely amend.
 **One place reads each thing**
 
 - **A tenor is a settlement date, and the expiry comes back from it.**
-  `calendars.fx_dates` is the one construction: spot date, then the tenor added
-  and adjusted modified following with the end-of-month rule, then the expiry
-  the spot lag back. Day tenors (`O/N`, `8D`) are expiry-first.
+  `calendars.fx_dates` is the one construction: spot date (each currency
+  counted on its own calendar, USD one day short, then rolled to a day all can
+  settle -- a US holiday on T+1 delays nothing, on T+2 everything), then the
+  tenor added and adjusted modified following with the end-of-month rule, then
+  the expiry as the inverse spot of the delivery. Day tenors (`O/N`, `8D`) are
+  expiry-first. The USD calendar is the Fed's (Saturday holidays not observed).
+- **The quoting conventions are the pair's, from `DeltaConvention.for_pair`**
+  (`black.py`): premium adjusted iff the premium currency -- USD when it is in
+  the pair, else the base -- is the base currency, so every cross is adjusted;
+  ATM is the delta-neutral straddle out to the `atmf beyond` tenor (default
+  1Y, resolved on the pair's calendar by `VolSurface.__post_init__`) and the
+  forward beyond it -- `black.atm_strike`, never `dns_strike`, is what a smile
+  anchor or a calibration reads. Spot delta out to the same boundary where the
+  `RATES` tab has the base currency's rate (`rates.RatesTable`, `Book.rates`,
+  `VolSurface.discount_lookup` -> `slice_conv(t)` -> `DeltaConvention.at`,
+  which puts the foreign discount factor in `df_foreign`; `black.delta` and
+  `strike_from_delta` scale by it), forward delta with a stated reason
+  otherwise. Every delta read off a slice goes through `sl.conv`, never
+  `surface.conv`. A `CONVENTIONS` tab overrides per pair (`premium`, `atmf
+  beyond`, `delta`); `DeltaConvention.of` coerces the legacy bool and passes a
+  convention through whole. `pricing._discounted` adds the premium as paid
+  (quote-currency discount factor) beside the forward premium, `None` without
+  a rate.
 - **A quoted tenor sits on the volatility axis at its calendar expiry**
   (`calendars.expiry_years`, through `AtmCurve` / `VolSurface` / `Book
   .tenor_years`). `timeutil.tenor_to_years` is a nominal length and a sort key,

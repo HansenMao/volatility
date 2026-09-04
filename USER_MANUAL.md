@@ -67,6 +67,8 @@ settings that go with them:
 | `PEG_BANDS` | managed/pegged trading bands: `pair, lower, upper, note` |
 | `KACE_SPREADS` | the kACE feed: which tenors are posted, and the ATM width at each |
 | `HOLIDAYS` | holiday dates no rule derives: `country, date, remove` |
+| `CONVENTIONS` | a pair's quoting conventions where they differ from the market's: `pair, premium, atmf beyond, delta` |
+| `RATES` | simple deposit rates, for spot delta and the premium as paid: `currency, tenor, rate` (% p.a.) |
 
 Each is an ordinary table with a header row. A row whose first cell starts
 with `#` is a note and is skipped, wherever it sits — the tabs ship with the
@@ -177,15 +179,24 @@ level.
 second, which is the market's own construction:
 
 1. The **spot date** is the trade date plus the pair's spot lag — T+1 for
-   USDCAD, T+2 for everything else — counted on the two currencies' own
-   holiday calendars, then rolled forward to a day New York can settle on.
-   US holidays rule out a value date; they do not stop the count, so EURJPY
-   spot does not move a day every Thanksgiving.
+   USDCAD, T+2 for everything else — counted **separately for each currency
+   on its own holiday calendar**, the later landing taken, then rolled
+   forward to a day every calendar *and New York* can settle on. The dollar
+   counts one day short: it needs one clear US working day before spot where
+   every other currency needs two, so **a US holiday on T+1 delays nobody**
+   (EURUSD dealt on the Friday before Martin Luther King Day settles Tuesday,
+   not Wednesday), while a US holiday on T+2 delays everybody, EURJPY
+   included. A holiday of the other currency on T+1 does delay spot.
 2. The **settlement date** is the tenor added to the spot date, adjusted
    modified following, with the **end-of-month rule**: off a spot that is the
    last value date of its month, every month tenor settles on the last value
    date of its own month. A 1M off a 28-Feb spot settles 31-Mar, not 28-Mar.
-3. The **expiry** is the spot lag back from the settlement date.
+3. The **expiry** is the *inverse spot* of the settlement date: the latest
+   business day of the pair whose own spot date is the settlement date. Around
+   a Monday US holiday two trade dates share a spot date and the expiry is the
+   later of them. When no business day settles exactly on the settlement date
+   (the walk back lands on Thanksgiving), the expiry is the last one that
+   settles *by* it, the settlement date stays put, and the hover text says so.
 
 **Day tenors go the other way**, because that is what they mean: `O/N`
 expires on the next business day and settles from that day's own spot, and
@@ -326,7 +337,7 @@ move the screen.
   that wants the room. A tenor that *is* overwritten carries a **·** beside
   its name while the column is shut, and the heading counts them — a mark you
   cannot see would be worse than a column you did not want.
-* **The quotes, on the same rows** — `RR 25d`, `ST 25d`, `RR 10d`, `ST 10d`:
+* **The quotes, on the same rows** — `RR 25d`, `RR 10d`, `ST 25d`, `ST 10d`:
   the four numbers each tenor's smile is fitted from, as the pair's own sheet
   holds them, in volatility points. They are **editable**. Type into one and
   that tenor's smile is refitted on the spot; clear the box and the sheet's
@@ -335,6 +346,18 @@ move the screen.
   every other mark — and the row carries a **·** when a quote has been moved
   away from the sheet's. Untick **quotes** in the heading to put the columns
   away.
+
+  A whole block can be **pasted** in. Copy the columns out of a spreadsheet,
+  click the box the block starts in and paste: it fills right across the quote
+  columns and down the tenors from there, and is written and refitted as one
+  edit rather than cell by cell. A leading **tenor column** is matched by name
+  rather than by position, so a sheet whose rows are in another order still
+  lands where it should, and a **header row** is dropped. A blank cell is left
+  as it was — emptying a box is still how a quote is given back to the sheet —
+  a derived wing is skipped, and anything past the last tenor or the last
+  column is ignored; the note above the table says what happened to each. One
+  cell that is not a number refuses the whole block, because half a pasted
+  table is not a table anybody typed.
 
   A tenor the sheet does **not** quote can be created here: type into its
   blank row and it becomes quoted. It is fitted only once all four of its
@@ -459,8 +482,73 @@ move the screen.
   box's hint; type a strike and its delta appears in the delta box's hint. The
   answer line carries both either way. A hint is not an entry: nothing
   resolved is ever posted back as though you had typed it. The delta comes
-  back under the **pair's own convention** — premium adjusted for a USD-base
-  pair, which is why a premium-adjusted at-the-money reads a shade under 50.
+  back under the **pair's own convention** (below) — premium adjusted where
+  the premium is paid in the base currency, which is why a premium-adjusted
+  at-the-money reads a shade under 50 — and the answer line says which ATM
+  the pair uses at that tenor.
+
+  **The conventions the answer is in.** Three of them, all the market's
+  unless the `CONVENTIONS` tab says otherwise for a pair:
+
+  * **Premium adjustment.** The premium is paid in one of the pair's two
+    currencies, and when that is the *base* currency the premium is itself a
+    position in the underlying, so the quoted delta is net of it. The rule is
+    about the premium currency, not which currency is written first: EURUSD,
+    GBPUSD, AUDUSD and NZDUSD pay premium in USD, the quote currency, and are
+    unadjusted; USDJPY, USDCNH and USDCAD pay it in USD, now the base, and are
+    adjusted; and every cross — EURJPY, EURGBP, AUDJPY, GBPNZD, EURCNH — pays
+    it in its base currency and is adjusted too. Until 2026-09-04 the tool
+    read every cross as unadjusted, which put every cross wing at the wrong
+    strike.
+  * **Which strike is at the money.** Out to and including the **1Y pillar**
+    the ATM vol belongs to the **delta-neutral straddle** — `F·exp(+σ²t/2)`
+    unadjusted, `F·exp(−σ²t/2)` adjusted; strictly beyond it, to the
+    **forward**. The boundary is read on the pair's own calendar, so a 1Y that
+    the calendar makes 370 days long is still the straddle. `ATM` in a strike
+    box means the convention at that tenor; type `ATMF` for the forward or
+    `DNS` (or `50d`) for the straddle regardless of tenor. The smile's own ATM
+    anchor moves with it, so a 2Y ATM vol is read at the forward — the strike
+    the market quotes it for — and the ATM row of the smile table shows the
+    delta the forward actually has there rather than 50.
+  * **Spot delta out to the boundary, forward delta beyond — given a rate.**
+    The market quotes *spot* delta out to a year on the majors and their
+    crosses, and spot delta is forward delta times the **base currency's
+    discount factor** to the option's settlement: a 25-delta quote on 1Y
+    USDJPY is a 26-and-a-bit forward delta, and the strike the market means
+    is nearer the money than the forward-delta reading puts it. The `RATES`
+    tab (`currency, tenor, rate`, in % per annum, a simple money-market rate
+    so the factor is `1/(1 + r·t)`, interpolated linearly between the tenors
+    listed and held flat outside them) is where the tool gets that factor.
+    With a rate for the base currency every quoted delta on the pair — the
+    wing quotes the smile is calibrated to, the delta a strike is answered
+    with, the delta hedge on the pricing screen — is a spot delta out to the
+    boundary and a forward delta beyond it. **Without one the pair's deltas
+    are forward deltas**, the workbook says so when it loads (*quotes spot
+    delta but the RATES tab has no AUD rate…*), and every answer line and
+    every Delta row says *fwd* with the reason on hover. At a month the two
+    differ by nothing; at a year, by most of a delta in a 5% currency. A pair
+    that quotes forward delta at every tenor (many EM and non-deliverable
+    pairs) says so with `delta = forward` on the `CONVENTIONS` tab and never
+    asks for a rate.
+
+  The `CONVENTIONS` tab (`pair, premium, atmf beyond, delta`) overrides the
+  three per pair: `premium` is the currency the premium is paid in (one of
+  the pair's own), `atmf beyond` a tenor, `never` or `always`, `delta` is
+  `spot` or `forward`. A pair without a row takes the rules above, and most
+  never need one.
+
+  **Forward premium or spot premium.** Every price the model makes is a
+  forward value. The **premium toggle** on the Results bar (*premium: forward
+  | spot*) reads the three premium rows — *Price (pips)*, *Price %* and
+  *Premium amount* — and the per-pair totals either as that forward value or
+  as the premium **as paid**: the same value discounted at the **quote
+  currency's** `RATES`-tab rate from the option's settlement to the premium
+  date (the spot date, so the period is the one the forward itself covers),
+  and in the base currency the same money at today's spot. The row labels say
+  which is showing, the choice is remembered on the machine, and a quote
+  currency with no rate on the tab shows a dash under *spot* — the forward
+  value is then the only honest number, and it is one click away rather than
+  a rate the tool made up. A pair with such a leg has no spot total either.
 
   There is **no forward box**: the level is the market feed's outright to that
   expiry's **settlement date** — the answer line says which date — which is
@@ -1181,17 +1269,39 @@ says two things it takes the more exact one and tells you:
   delta is dropped and the row says so;
 * **a date beats a tenor.** `1M 30sep26 ATM` is the 30 September expiry.
   Dates can be written `30sep26`, `30-Sep-2026`, `2026-09-30` or `2026/09/30`;
+* **a weekday is an intra-week expiry.** `fri atm 8.10/8.50` is the next
+  Friday from today, `mon 1.1000 call` the next Monday — the day names in
+  full or from three letters (`thu`, `thur`, `thurs`, `thursday`). Always
+  forward and never today: `Fri` read on a Friday is the Friday coming, since
+  an option quoted this morning to expire this morning is not what a run
+  means. The row says which date it landed on. It is the weakest way to say
+  when — write a tenor or a date on the same line and that is used instead,
+  with a note — and a day name in front of a time (`mon 09:15 1M ATM ...`) is
+  the day the run was written, not an expiry;
 * **call or put matters only where it changes the number.** At an absolute
   strike the volatility is one number either way, so `6M 1.10 call` and `6M
   1.10 put` are the same quote and the later one wins. With a delta it picks
-  the wing (`25d call`, `25dp`, `-25d`). On a **premium** it is required;
-* **a premium is read as a premium.** Write `prem`, `live`, `pips`, `%` or the
-  currency after the price — `3M 1.0900 call 125/135 pips`, `1.25%/1.35%
-  prem`, `0.0125/0.0135 usd` — and the line is a price on that option, not a
-  volatility. It never takes part in the unit decision. The fit turns it into
-  the volatility two-way it implies against the feed's forward and works with
-  that; without a feed the row stays, with the reason. A premium needs a
-  strike and a side;
+  the wing (`25d call`, `25dp`, `-25d`). On a **premium** it is required —
+  unless the line says **`live`**, and then it is not (below);
+* **a premium is read as a premium.** Write `prem`, `live`, `pips`, `%`, `bp`
+  or the currency after the price — `3M 1.0900 call 125/135 pips`,
+  `1.25%/1.35% prem`, `0.0125/0.0135 usd`, `6M 1.2500 live 12/14bp` — and the
+  line is a price on that option, not a volatility. It never takes part in the
+  unit decision. The fit turns it into the volatility two-way it implies
+  against the feed's forward and works with that; without a feed the row
+  stays, with the reason. A premium needs a strike;
+* **`bp` is a basis point.** A hundredth of a per cent of the base notional,
+  so `5bp` is 0.05% and never 5 of anything. Write it glued to the number or
+  after it, on one price or both: `12bp`, `12/14bp`, `12 bp / 14 bp`. Because
+  the price named its own unit, the number beside it is the strike, so `6M
+  1.2500 live 12bp` is a choice price at the 1.25 strike;
+* **a `live` line takes its side from the moneyness.** Live is an option dealt
+  without its delta hedge, which is what makes it a low-delta option: it is
+  the out-of-the-money one. So `6M 1.2500 live 12/14bp` needs no `call` or
+  `put` — a strike above the forward is the call, one below it the put, and
+  the row says which it read and why. Write the word if you mean the other
+  side; and if the strike turns out to be near the money, the row warns that
+  a forty-delta option is not what this rule is for;
 * **another pair's lines are passed over.** `USDJPY 1M ATM 9.0/9.4` in a
   EURUSD paste, or everything under a heading that is just `GBPUSD`, is
   listed as passed over with the pair it named. It is not an error, and it
@@ -1295,6 +1405,18 @@ against the surface* table on the right: their bid and offer, where the model
 was, where it is now, and how far it moved. There is no price in it. Whether
 the fit reached the market is the fit's own question.
 
+**Now** is coloured by where the mark sits in that line's own two-way: left
+alone through the middle of it, amber in the outer quarter, and in the alert
+colour when the mark is **above their offer or below their bid** — the thing
+to see first on a sheet of twenty quotes. Hover the number and it says how
+far, in volatility points and in widths of their market.
+
+The table reads **one line per quote**. Anything a line has to say — a
+warning, where its width came from, what the agent suggested — sits under it
+and appears when you **hover** the line; click the line to pin it open, and
+click again to close it. A line with something to say is marked with an
+ellipsis after its name, so nothing is hidden that was not announced.
+
 **Stage 3 — the quote.** Write what you are being asked for into **What we are
 asked for**, one instrument a line, with **no prices on them**:
 
@@ -1322,12 +1444,59 @@ Press **Quote**, and for every line:
 | Column | What it is |
 |---|---|
 | Model | the surface's own mid, on whichever marks the price is standing on |
-| Fair / Axe / Bank | the three things shading the mid, each separately |
+| Fair / Axe / Flow / Bank | the four things shading the mid, each separately |
 | Skew | their total, capped; a `*` means the cap bound |
 | Our bid / ask | the mid plus the shading, with the bank's width round it |
 | Width | the width, and underneath, the rule that set it |
 | Their market | what the market box quoted for this same instrument, if it did |
 | Verdict | quoted; or, when the market box has it too, in line, our mid above or below theirs, or through their price |
+
+### The printed tape
+
+Under the quote sheet is a card reading the **dissemination files** you have
+fetched — what actually traded in this pair, out of the public record every
+CFTC-reportable FX option print lands in.
+
+The file publishes **what printed and never who bought.** There is no buyer,
+no seller and no aggressor flag in it, by design. So the side of a trade is
+not read, it is *inferred*: each print is turned into the volatility it
+implies — against the forward of its own date, taken from your historical
+workbook when it covers the pair and from the outrights printed in the same
+file when it does not — and then read as **paid** above your mark and
+**given** below it. Anything within the tolerance of your mark is counted as
+*unclear* rather than pushed to a side, because every market has a mid
+somebody disagrees with.
+
+Size is **vega**, in the base currency per volatility point — the same unit
+the axe scale is typed in. A hundred million of a one-week option and a
+hundred million of a two-year one are not the same amount of buying, and the
+net of a bucket is what a lean would stand on.
+
+| Column | What it is |
+|---|---|
+| Prints | what this build could read and invert in that bucket |
+| Paid / Given / Unclear | which side of your mark each print landed on |
+| Call / put | what was struck, which is published and not inferred |
+| Net vega | paid less given, age-weighted; positive is the market having **paid** |
+| Lean | that net over the flow scale, clamped to one — what the quote would use |
+| Newest | how long ago the most recent print in that bucket was |
+
+Hovering a print says what it was judged against and where its forward came
+from. Trades whose size was published as the dissemination cap are counted in
+what printed and left out of the vega, since the cap hides the size; so are
+prints the file gives no side or no premium for, and the card says how many of
+each.
+
+**Nothing here moves a price until you set `Flow wt` above zero.** With a
+weight, the tape becomes a fourth lean beside the fair value, the axe and the
+bank, on the **level** only — a risk reversal is a statement about shape, and
+what the tape paid for says nothing about where the skew belongs — and capped
+with the others so it can lean the price inside the market and never walk it
+out of one. **Paid means marked up**: customers paying means dealers are
+getting shorter and the next caller is more likely another buyer, which is the
+opposite direction to a long vega position. Set a negative weight to fade it
+instead. `Flow scale` is the net vega that counts as a full lean; calibrate it
+against the net vega column on the card itself.
 
 **If the market box quoted the same instrument, it appears beside our price**
 and the verdict compares the two, so *inside their market* still works. If it
@@ -1463,6 +1632,19 @@ bundle with `kace-ca = path.pem`, or `kace-insecure = true` to post without
 checking it. The post goes straight to the host, through no proxy, whatever
 the machine's proxy settings say — kACE is on the desk's own network.
 
+kACE's own TLS is older than the OpenSSL this tool ships with: it offers a
+1024-bit Diffie-Hellman key, which OpenSSL 3 refuses out of the box
+(`[SSL: DH_KEY_TOO_SMALL] dh key too small`). The poster web page never
+notices because a browser does not offer that kind of key exchange at all,
+so the server picks another. The Post button now does the same, in steps:
+first the ordinary handshake; then one without finite-field Diffie-Hellman,
+exactly as a browser would, which changes nothing about certificate
+checking; and only if the server has nothing else, one at OpenSSL's lowest
+security level. The step that worked is kept for the session and shown
+after the post's message, e.g. *(TLS without finite-field Diffie-Hellman, as
+a browser would)*, and recorded in `kace_posts.jsonl`. A certificate
+problem is never stepped around — that is still the `kace-ca` message.
+
 On the command line: `volkit kace USDCNH --post` (add `--dry-run` to see
 what would be sent and where without sending it). The exit code is non-zero
 when kACE did not take the message.
@@ -1530,12 +1712,38 @@ marks back on it, and write again; the button asks a second time if you want to
 overwrite anyway, and says what that costs. `volkit session ... --to-workbook
 --in-place` does the same and takes `--force`.
 
-The workbook it replaces is kept beside it, stamped with the time --
-`vol_marks.bak-20260901-142530.xlsx`, the twenty most recent kept and older
-ones pruned as they are made. Keep them: the tool rewrites the file
-through a spreadsheet library that carries formulas and their last values but
-**not images or charts**, so if the workbook has a chart in it, that backup is
-the way back. To look at the result before adopting it instead, run
+The workbook it replaces is kept, stamped with the time --
+`vol_marks.backups/vol_marks.bak-20260901-142530.xlsx`. They live in a folder
+of their own rather than beside the workbook, because the folder you open to
+find the workbook is not the place to keep thirty copies of it, and they are
+**kept by age rather than by count**: the newest five whatever their age, then
+one an hour for twelve hours, one a day for a fortnight, one a week for two
+months and one a month for half a year. Counting alone was the old rule and it
+kept twenty copies of one afternoon — twenty saves between lunch and the close
+and yesterday's file was gone, which is the one somebody asks for.
+
+Two more things the copies do. A write that changes nothing keeps **no second
+copy**; it says so instead. What counts as changed is what is *in* the file —
+every sheet, cell and formula — and not the file itself, because the library
+that writes it stamps the moment it saved into every save, so two identical
+saves are never the same bytes. And the copy taken before the
+first write that flattened the workbook is **never thinned out** — the tool
+rewrites the file through a spreadsheet library that carries formulas and their
+last values but **not images or charts**, so a workbook that had a chart in it
+is irreplaceable and every copy after it is not. That one is named
+`vol_marks.origin.xlsx` and marked *kept for good* on the screen.
+
+Beside them, `vol_marks.history/` holds the cheap half: one line per write in
+`history.jsonl`, kept for good, and — where the write was an export of marks —
+the session document that was written, a few kilobytes saying what was marked.
+So a write whose copy has been thinned away is still on the record, and the
+marks it wrote can be put back on the book without touching the workbook. The
+**Versions** block on the Workbook card lists both, with a **restore** button
+on each copy; what a restore replaces is itself kept, so an undo has an undo.
+`volkit versions` prints the same two lists, `--restore NAME` puts one back and
+`--prune` (with `--keep N` for the plain newest-N rule) thins them now.
+
+To look at the result before adopting it instead, run
 `volkit session marks.json --to-workbook` from a shell -- that writes a copy
 (`_marked` added to the name) and leaves the workbook alone. The message lists
 every pair written and anything it could not write.
@@ -1556,8 +1764,9 @@ drop.
   and it comes out of `CONFIG` only: its column and its sheet stay where they
   are, so adding it back finds what it had.
 * **The configuration tabs** — `PEG_BANDS`, `KACE_SPREADS`, `HOLIDAYS`,
-  `WING_RATIOS` and `Vega Weights` — edited as tables and written whole. The
-  prose and `#` comment lines above each header are kept.
+  `CONVENTIONS`, `RATES`, `WING_RATIOS` and `Vega Weights` — edited as tables
+  and written whole. The prose and `#` comment lines above each header are
+  kept.
 * **Vega weights, and a column per pair.** `Vega Weights` is the shape the ATM
   card's *bump* shares a move out by: a `tenor` column, a `default` column every
   pair falls back to, and one column per pair that needs its own. The fallback
@@ -1767,6 +1976,19 @@ is the range itself; the `BANDS` tab is the marking treatment applied to it.
 Lunar-calendar holidays (Chinese New Year and similar) must be listed here;
 they cannot be derived. `remove = yes` takes away a date the built-in rules
 would otherwise make a holiday.
+
+**`CONVENTIONS`** (a tab of the workbook, optional) — `pair, premium, atmf
+beyond, delta`: the currency a pair's option premium is paid in (adjusted
+delta when it is the base currency), the tenor beyond which the at-the-money
+is the forward rather than the delta-neutral straddle (`never` / `always`
+allowed), and whether the pair quotes `spot` or `forward` delta out to that
+tenor. A pair with no row takes the market's conventions; see *Pricing*.
+
+**`RATES`** (a tab of the workbook, optional) — `currency, tenor, rate`:
+simple deposit rates in % per annum. The base currency's rate turns a quoted
+spot delta into the forward delta the model works in; the quote currency's
+rate discounts a forward premium to the premium paid. A currency with no rows
+has no rate, and the tool says what that costs rather than inventing one.
 
 **`KACE_SPREADS`** (a tab of the workbook) — `pair, tenor, spread`: the
 pillars the kACE feed posts for a pair and the ATM bid/offer width at each, in
@@ -2255,6 +2477,18 @@ Then you answer it, and the answer is what it learns from:
   morning, which is the row it learns most from.
 - **Reject** -- recorded as such; nothing moves.
 
+**One thing at a time, and the screen says so.** The tool holds one book, and
+a fit, a quote and a proposal are answered one after another rather than at
+once. Most of the time that is invisible — a fit is under a second. It stops
+being invisible when the quoting agent's **Suggest**, **Scan folders** or
+**Fetch from DTCC** is still working, because those read whole folders and can
+take minutes. So a run that passes three seconds shows the seconds it has
+been going, and one that passes ten says it may be waiting its turn rather
+than working. Reading the archive no longer holds the book while it happens,
+so a scan or a download cannot freeze **Fit** on its own; a proposal *scored
+against the archive* still waits for one to finish, and now says that is what
+it is doing.
+
 The buttons disappear if you edit the paste after proposing -- a verdict on a
 proposal about a market that is no longer on the screen is not a verdict.
 Answering the same proposal twice is one line in the journal, not two. The
@@ -2468,7 +2702,11 @@ the fact list, and the first line says which it was.
 
 ## 7. Things to know before trusting a number
 
-* Premiums are undiscounted; there is no rate curve.
+* Prices are forward values; there is no rate curve. The `RATES` tab's
+  deposit rates give the two discount factors the conventions need — the base
+  currency's for **spot delta**, the quote currency's for the **premium as
+  paid** — and a currency without one is read as forward delta and
+  undiscounted, with a warning, never with a guessed rate.
 * **Every volatility on a screen is shown to two decimal places** — the marks,
   the query, the risk reversals and butterflies, the fit misses and the widths.
   What you *type* is not rounded: an overwrite box holds the mark to four

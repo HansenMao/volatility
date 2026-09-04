@@ -17,6 +17,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from volkit import archive as arch
+from volkit import flow as flow_mod
 from volkit import ingest, llm, quotes, sdr
 from volkit import synthesis as syn
 from volkit.knowledge import KnowledgeBank, PairKnowledge, Rule
@@ -185,6 +186,29 @@ Underlier ID-Leg 1,Notional amount cap indicator
 """
 
 
+#: The layout actually in circulation, taken column-for-column off a 2026
+#: CFTC FOREX file.  Three things about it are the point: ``Option Type`` is
+#: **empty in every row**, the pair is written ``HKD/USD`` for what a desk
+#: quotes as USDHKD, and the side and the strike are carried by the two legs.
+_LIVE_LAYOUT = """\
+Dissemination Identifier,Original Dissemination Identifier,Action type,Event type,\
+Event timestamp,Asset Class,Execution Timestamp,Expiration Date,Notional amount-Leg 1,\
+Notional amount-Leg 2,Notional currency-Leg 1,Notional currency-Leg 2,Call amount,\
+Call currency,Put amount,Put currency,Exchange rate,Exchange rate basis,\
+Option Premium Amount,Option Premium Currency,Strike Price,\
+Strike price currency/currency pair,Option Type,Unique Product Identifier,UPI FISN,\
+UPI Underlier Name
+700,,NEWT,TRAD,2026-09-03T07:21:28Z,FX,2026-09-03T07:21:17Z,2028-03-09,"149,840,000",\
+"1,176,262,090+",USD,HKD,149840000,USD,1176244000,HKD,7.85,HKD/USD,"106,386.4",USD,7.85,\
+HKD/USD,,QZBVMVVKXBSM,NA/O Van Put HKD USD,HKD USD
+701,,NEWT,TRAD,2026-09-03T14:59:48Z,FX,2026-09-03T14:59:40Z,2026-09-28,"16,000,000",\
+"125,379,984",USD,HKD,,,,,7.836249,HKD/USD,,,,,,QZ7T4G0X6H2P,NA/Fwd NDF HKD USD,HKD USD
+702,,NEWT,TRAD,2026-09-02T09:11:03Z,FX,2026-09-02T09:10:55Z,2026-12-02,"50,000,000",\
+"390,000,000",USD,HKD,390000000,HKD,50000000,USD,7.8,HKD/USD,"31,000",USD,7.8,HKD/USD,,\
+QZBVMVVKXBSM,NA/O Van Call HKD USD,HKD USD
+"""
+
+
 def _csv(text: str) -> str:
     path = _tmp("sdr.csv")
     Path(path).write_text(text, encoding="utf-8")
@@ -236,6 +260,74 @@ class TestSdr(unittest.TestCase):
         with self.assertRaises(sdr.SdrError) as caught:
             sdr.read_sdr(_csv("a,b,c\n1,2,3\n"))
         self.assertIn("executed", str(caught.exception))
+
+    # ---- the layout in circulation ------------------------------------
+    def test_the_side_comes_off_the_legs_because_option_type_is_empty(self):
+        """``Option Type`` is blank in every row of a 2026 file.  Read only
+        from that column no print has a side, and a trade with no side cannot
+        be inverted to a volatility -- so the whole tape is unusable.  The
+        legs carry it: a USD call against an HKD put is a call on USDHKD."""
+        read = sdr.read_sdr(_csv(_LIVE_LAYOUT), known_pairs=["USDHKD"])
+        trades = [o for o in read.records if o.kind == "trade"]
+        self.assertEqual([o.external_id for o in trades], ["700", "702"])
+        self.assertEqual([o.is_call for o in trades], [True, False])
+        self.assertTrue(any("read as a call from the legs" in n for n in trades[0].notes),
+                        trades[0].notes)
+
+    def test_the_pair_is_oriented_against_the_book_and_not_the_file(self):
+        """The file writes USDHKD as ``HKD/USD`` and AUDHKD as ``AUD/HKD``, so
+        the order in the file is not a convention anything may be read from.
+        Matched either way round, the book's spelling wins -- and without this
+        every USDHKD print is dropped as a pair the book does not build."""
+        read = sdr.read_sdr(_csv(_LIVE_LAYOUT), known_pairs=["USDHKD"])
+        self.assertTrue(read.records)
+        self.assertEqual({o.pair for o in read.records}, {"USDHKD"})
+        self.assertTrue(any("the book quotes USDHKD" in n for n in read.records[0].notes))
+        # And with no book to orient against, the file's own order stands.
+        loose = sdr.read_sdr(_csv(_LIVE_LAYOUT))
+        self.assertEqual({o.pair for o in loose.records}, {"HKDUSD"})
+
+    def test_the_legs_say_which_way_round_the_strike_is_written(self):
+        """A strike of 7.85 and one of 0.127 are the same strike written two
+        ways, and the file's own labels do not settle which.  The amounts do:
+        the quote-currency leg over the base-currency leg."""
+        flipped = _LIVE_LAYOUT.replace(",7.85,HKD/USD,,QZBVMVVKXBSM",
+                                       ",0.12738853503,HKD/USD,,QZBVMVVKXBSM")
+        read = sdr.read_sdr(_csv(flipped), known_pairs=["USDHKD"])
+        trade = [o for o in read.records if o.external_id == "700"][0]
+        self.assertAlmostEqual(trade.strike, 7.85, places=6)
+        self.assertTrue(any("published in the other direction" in n for n in trade.notes),
+                        trade.notes)
+
+    def test_a_forward_print_is_kept_as_a_forward_and_not_as_a_trade(self):
+        """Two thirds of every file is outrights, NDFs and swaps.  Filed as
+        at-the-money *trades* they are 60,000 rows a day that are not options;
+        kept as forwards they are the only forward curve there is on a pair
+        the historical workbook has never held."""
+        read = sdr.read_sdr(_csv(_LIVE_LAYOUT), known_pairs=["USDHKD"])
+        fwd = [o for o in read.records if o.kind == "forward"]
+        self.assertEqual([o.external_id for o in fwd], ["701"])
+        self.assertAlmostEqual(fwd[0].rate, 7.836249, places=6)
+        self.assertEqual(fwd[0].expiry_date, "2026-09-28")
+        self.assertEqual(fwd[0].problems(), [])
+
+    def test_the_cap_is_read_off_the_leg_the_premium_is_divided_by(self):
+        """The file caps one leg and not the other.  Reading the row's flag
+        instead of the base leg's threw away trades whose base leg was
+        published in full -- and the base leg is the only one a premium per
+        unit is divided by."""
+        read = sdr.read_sdr(_csv(_LIVE_LAYOUT), known_pairs=["USDHKD"])
+        trade = [o for o in read.records if o.external_id == "700"][0]
+        self.assertFalse(trade.notional_capped)      # the HKD leg is capped, the USD leg is not
+        self.assertEqual(trade.notional, 149_840_000.0)
+        self.assertEqual(trade.notional_ccy, "USD")
+
+    def test_the_execution_timestamp_beats_the_event_one(self):
+        """On an exercise or a correction the event timestamp is the moment of
+        that event, and reading it as the trade dates a print days late."""
+        read = sdr.read_sdr(_csv(_LIVE_LAYOUT), known_pairs=["USDHKD"])
+        trade = [o for o in read.records if o.external_id == "700"][0]
+        self.assertTrue(trade.at.startswith("2026-09-03T07:21:17"))
 
     def test_an_ambiguous_date_is_not_guessed(self):
         # 03/04/2026 is four weeks apart in the two conventions and the tenor
@@ -1480,6 +1572,128 @@ class TestAskAgent(unittest.TestCase):
         self.assertTrue(any("shown 0.400 wide" in f["text"] for f in out["facts"]), out)
         self.assertEqual(Path(self.arc_path).read_bytes(), before)
         self.assertFalse(Path(self.journal_path).exists())
+
+
+# ==========================================================================
+class TestFlow(unittest.TestCase):
+    """The tape, and the one inference in the package.
+
+    The dissemination file publishes no buyer and no seller.  Everything here
+    turns on that: a side is decided against our own mark, a print near the
+    mark is not evidence, and size is vega rather than notional.
+    """
+
+    NOW = datetime(2026, 9, 4, 12, 0, tzinfo=timezone.utc)
+
+    def archive(self, rows=()):
+        a = arch.Archive(path=_tmp("flow.jsonl"))
+        a.extend(list(rows))
+        return a
+
+    def _trade(self, *, days, strike, is_call, premium, notional=100_000_000.0,
+               ident="1", at=None):
+        when = at or (self.NOW - timedelta(days=1))
+        expiry = (when + timedelta(days=days)).date().isoformat()
+        return arch.Observation(
+            kind="trade", pair="EURUSD", at=when.isoformat(timespec="seconds"),
+            instrument="outright", tenor=expiry, expiry_date=expiry,
+            strike=strike, is_call=is_call, premium=premium, premium_ccy="USD",
+            notional=notional, notional_ccy="EUR", action="NEWT", event="TRAD",
+            external_id=ident, via="sdr", source="sdr")
+
+    def _forward(self, *, days, rate=1.10, ident="f1", at=None):
+        when = at or (self.NOW - timedelta(days=1))
+        expiry = (when + timedelta(days=days)).date().isoformat()
+        return arch.Observation(
+            kind="forward", pair="EURUSD", at=when.isoformat(timespec="seconds"),
+            instrument="atm", tenor=expiry, expiry_date=expiry, rate=rate,
+            action="NEWT", event="TRAD", external_id=ident, via="sdr", source="sdr")
+
+    def _priced(self, vol, *, days=30, strike=1.10, is_call=True, **kw):
+        """A trade whose premium is exactly what ``vol`` implies, so the test
+        knows what the inversion must give back."""
+        from volkit import black
+        years = days / 365.2425
+        px = float(black.price(1.10, strike, vol / 100.0, years, is_call))
+        return self._trade(days=days, strike=strike, is_call=is_call,
+                           premium=px * kw.pop("notional", 100_000_000.0), **kw)
+
+    def test_a_print_above_the_mark_is_paid_and_one_below_is_given(self):
+        a = self.archive([self._forward(days=30), self._forward(days=90, ident="f2"),
+                          self._priced(9.0, ident="1"),
+                          self._priced(5.0, ident="2", strike=1.1001)])
+        read = flow_mod.read_flow(a, "EURUSD", asof=self.NOW,
+                                  mark_vol=lambda days, k, c, f: 7.0, lookback_days=30)
+        sides = {p.side for p in read.prints}
+        self.assertEqual(sides, {"paid", "given"})
+        ev = read.for_days(30)
+        self.assertEqual((ev.paid, ev.given), (1, 1))
+        # Equal and opposite vega at the same strike and tenor nets to nothing.
+        self.assertAlmostEqual(ev.net_vega, 0.0, delta=abs(ev.gross_vega) * 0.02)
+
+    def test_a_print_near_the_mark_takes_no_side(self):
+        """Every market has a mid somebody disagrees with.  A print two
+        hundredths over ours is not evidence of demand."""
+        a = self.archive([self._forward(days=30), self._priced(7.02, ident="1")])
+        read = flow_mod.read_flow(a, "EURUSD", asof=self.NOW,
+                                  mark_vol=lambda days, k, c, f: 7.0, lookback_days=30)
+        self.assertEqual([p.side for p in read.prints], ["unclear"])
+        self.assertEqual(read.for_days(30).unclear, 1)
+
+    def test_size_is_vega_and_not_notional(self):
+        """A hundred million of a one-week option and a hundred million of a
+        one-year one are not the same amount of buying."""
+        a = self.archive([self._forward(days=7), self._forward(days=400, ident="f2"),
+                          self._priced(9.0, days=7, ident="1"),
+                          self._priced(9.0, days=360, ident="2")])
+        read = flow_mod.read_flow(a, "EURUSD", asof=self.NOW,
+                                  mark_vol=lambda days, k, c, f: 7.0, lookback_days=30)
+        by = {p.bucket: p for p in read.prints}
+        self.assertLess(by["out to a week"].vega, by["out to a year"].vega / 3.0)
+
+    def test_thin_evidence_leans_nothing(self):
+        a = self.archive([self._forward(days=30), self._priced(9.0, ident="1")])
+        read = flow_mod.read_flow(a, "EURUSD", asof=self.NOW, min_effective=2.0,
+                                  mark_vol=lambda days, k, c, f: 7.0, lookback_days=30)
+        ev = read.for_days(30)
+        self.assertFalse(ev.enough)
+        self.assertIsNone(ev.net(5_000_000.0))
+        self.assertIn("floor", ev.why_not)
+
+    def test_with_no_mark_nothing_takes_a_side(self):
+        """A pair whose surface is not built still gets a census of what
+        printed; what it does not get is a direction."""
+        a = self.archive([self._forward(days=30), self._priced(9.0, ident="1")])
+        read = flow_mod.read_flow(a, "EURUSD", asof=self.NOW, mark_vol=None,
+                                  lookback_days=30)
+        self.assertEqual([p.side for p in read.prints], ["unmarked"])
+        self.assertEqual(read.for_days(30).paid, 0)
+
+    def test_the_forward_comes_off_the_tape_when_no_sheet_covers_the_pair(self):
+        """The inversion needs the forward of the trade's own date.  On a pair
+        the historical workbook has never held, the outrights printed in the
+        same file are the only place that forward exists."""
+        a = self.archive([self._forward(days=30), self._priced(8.0, ident="1")])
+        read = flow_mod.read_flow(a, "EURUSD", asof=self.NOW,
+                                  mark_vol=lambda days, k, c, f: 7.0, lookback_days=30)
+        self.assertEqual(len(read.prints), 1)
+        # Not to the last decimal: the file publishes an expiry *date* and no
+        # cut, so the life is measured to midnight UTC and comes out a few
+        # hours short of the one the premium was built with.  That is the
+        # approximation the read says it makes, and this is its size.
+        self.assertAlmostEqual(read.prints[0].vol, 8.0, delta=0.15)
+        self.assertIn("tape", read.prints[0].forward)
+        self.assertTrue(any("midnight UTC" in n for n in read.notes), read.notes)
+
+    def test_a_forward_is_not_extended_beyond_what_printed(self):
+        """Holding the last rate flat would price a two-year option off a
+        two-week forward, and on a pegged pair the carry is the trade."""
+        a = self.archive([self._forward(days=20), self._forward(days=30, ident="f2"),
+                          self._priced(8.0, days=700, ident="1")])
+        read = flow_mod.read_flow(a, "EURUSD", asof=self.NOW,
+                                  mark_vol=lambda days, k, c, f: 7.0, lookback_days=30)
+        self.assertEqual(read.prints, [])
+        self.assertTrue(any("nobody quoted" in n for n in read.notes), read.notes)
 
 
 if __name__ == "__main__":

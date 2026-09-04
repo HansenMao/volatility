@@ -25,6 +25,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from . import black
+from .black import DeltaConvention
 from .cross import dollar_legs, infer_leg_signs, is_cross as pair_is_cross
 from .surface import PARAM_NAMES, TERM_COEFFS, SmileMark
 from .events import EventBook, EventRow
@@ -141,11 +143,64 @@ class PairSpec:
     #: This pair is here because that cross needs it, not because it was
     #: listed.  Empty for anything the sheet actually asked for.
     implied_by: str = ""
+    #: The ``CONVENTIONS`` tab's row for this pair, if it has one: the currency
+    #: the premium is paid in and the tenor beyond which the ATM is the forward.
+    premium_ccy: str = ""
+    atmf_beyond: str = ""
+    delta_type: str = ""
 
     def resolved_premium_adjusted(self) -> bool:
-        if self.premium_adjusted is not None:
-            return self.premium_adjusted
-        return self.name[:3].upper() == "USD"
+        return self.conventions().premium_adjusted
+
+    def conventions(self) -> DeltaConvention:
+        """The pair's quoting conventions: the tab's where it has a row, else the market's."""
+        if self.premium_adjusted is not None and not self.premium_ccy:
+            ccy = self.name[:3] if self.premium_adjusted else self.name[3:6]
+        else:
+            ccy = self.premium_ccy or None
+        return DeltaConvention.for_pair(self.name, ccy, self.atmf_beyond or None,
+                                        self.delta_type or None)
+
+
+#: The workbook tab a desk states a pair's conventions on.
+CONVENTIONS_SHEET = "CONVENTIONS"
+
+
+def load_conventions(path: str | Path) -> dict[str, dict] | None:
+    """The ``CONVENTIONS`` tab, by pair: ``{"premium": ccy, "atmf_beyond": text}``.
+
+    ``None`` when the workbook has no such tab, which is the ordinary case:
+    every pair then takes the market's conventions.  A row that cannot be
+    read is an error, because a desk that wrote one meant it.
+    """
+    from . import configsheets
+
+    rows = configsheets.read_rows(path, CONVENTIONS_SHEET, required=("pair",))
+    if rows is None:
+        return None
+    out: dict[str, dict] = {}
+    for row in rows:
+        pair = row.text("pair").upper().replace("/", "")
+        if not pair:
+            continue
+        if len(pair) != 6 or not pair.isalpha():
+            raise ValueError(f"{CONVENTIONS_SHEET} row {row.number}: {pair!r} is not a "
+                             f"six-letter currency pair")
+        premium = row.text("premium").upper()
+        if premium and premium not in (pair[:3], pair[3:6]):
+            raise ValueError(f"{CONVENTIONS_SHEET} row {row.number}: the premium currency "
+                             f"{premium} is not one of {pair}'s")
+        beyond = row.text("atmf beyond")
+        try:
+            black.atmf_beyond_years(beyond)
+        except ValueError as exc:
+            raise ValueError(f"{CONVENTIONS_SHEET} row {row.number}: {exc}") from None
+        kind = row.text("delta").lower()
+        if kind and kind not in ("spot", "forward"):
+            raise ValueError(f"{CONVENTIONS_SHEET} row {row.number}: delta must be 'spot' or "
+                             f"'forward', not {kind!r}")
+        out[pair] = {"premium": premium, "atmf_beyond": beyond, "delta": kind}
+    return out
 
 
 @dataclass
@@ -250,6 +305,7 @@ class ExcelSource:
                     )
 
             self._load_config(xls, data)
+            self._load_conventions(data)
             if EVENTS_SHEET in sheets:
                 self._load_events_sheet(xls, data)
             self._load_params(xls, data)
@@ -257,6 +313,35 @@ class ExcelSource:
             if BANDS_SHEET in sheets:
                 self._load_bands_sheet(xls, data)
         return data
+
+    # -- CONVENTIONS ------------------------------------------------------
+    def _load_conventions(self, data: MarketData) -> None:
+        """Put the ``CONVENTIONS`` tab's rows on the pairs they name.
+
+        A pair with no row takes the market's conventions; a row for a pair
+        the workbook does not build is a note, not a problem, because a pair
+        taken out of CONFIG keeps its other rows the same way it keeps its
+        sheet.
+        """
+        try:
+            found = load_conventions(self.path)
+        except (OSError, ValueError) as exc:
+            data.problems.append(str(exc))
+            return
+        if found is None:
+            return
+        for pair, cells in found.items():
+            spec = data.pairs.get(pair)
+            if spec is None:
+                data.notes.append(f"{CONVENTIONS_SHEET}: {pair} has a row but CONFIG does not "
+                                  f"list it, so nothing reads it")
+                continue
+            spec.premium_ccy = cells["premium"]
+            spec.atmf_beyond = cells["atmf_beyond"]
+            spec.delta_type = cells["delta"]
+        stated = [p for p in found if p in data.pairs]
+        if stated:
+            data.notes.append(f"{CONVENTIONS_SHEET}: {len(stated)} pair(s) read from the workbook")
 
     # -- CONFIG -----------------------------------------------------------
     def _load_config(self, xls, data: MarketData) -> None:

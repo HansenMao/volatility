@@ -23,6 +23,12 @@ one, because they are evidence of different things:
     What happened to a price we made -- traded, passed, done away at a level.
     Evidence of **whether our market was right**, and the only kind that can
     tell us we were systematically too tight on one side.
+``forward``
+    An outright or an NDF that printed, out of the same dissemination file.
+    Evidence of **nothing about volatility at all** -- it is here because a
+    premium cannot be turned into a volatility without the forward of the
+    trade's own date, and on a pair the historical workbook does not cover
+    this tape is the only place that forward exists.
 
 Three rules govern the file, and all three exist because the alternative has a
 known failure:
@@ -71,7 +77,7 @@ ARCHIVE_FILENAME = "mm_archive.jsonl"
 ARCHIVE_VERSION = 1
 
 #: What a record can be.  Adding one means deciding what it is evidence *of*.
-KINDS = ("quote", "trade", "shown", "outcome")
+KINDS = ("quote", "trade", "shown", "outcome", "forward")
 
 #: What happened to a price we made.  ``done_away`` carries the level it went
 #: at when we know it, which is the only one of these that is itself a market
@@ -172,6 +178,12 @@ class Observation:
     #: two differ by the forward.
     notional_ccy: str = ""
     notional_capped: bool = False   # the SDR published a cap, not the size
+    #: A ``forward`` record's traded outright, in the pair's own convention.
+    #: Never a volatility and never a premium, so it has a field of its own.
+    rate: float | None = None
+    #: The publisher's event type -- TRAD, EXER, NOVA, ETRM.  An exercise is
+    #: not a trade and the action column alone does not separate them.
+    event: str = ""
     expiry_date: str = ""
     action: str = ""                # NEWT / CANC / CORR, as disseminated
     #: The publisher's own identifier -- an SDR dissemination id.  Kept so a
@@ -239,7 +251,7 @@ class Observation:
                  self.fly_kind or "", self.leg or "",
                  _num(self.bid), _num(self.ask), _num(self.size), self.size_basis,
                  _num(self.premium), _num(self.notional), self.notional_ccy,
-                 self.expiry_date,
+                 _num(self.rate), self.event, self.expiry_date,
                  self.action, self.external_id, self.ref, self.result, _num(self.away_level),
                  self.counterparty, self.raw.strip()]
         return "|".join(parts)
@@ -306,6 +318,11 @@ class Observation:
                 bad.append(f"{name} {v!r} is not a volatility in points")
         if self.kind in ("quote", "shown") and self.bid is None and self.ask is None:
             bad.append("a quote with neither a bid nor an offer is not an observation")
+        if self.kind == "forward":
+            if self.rate is None or not (self.rate > 0):
+                bad.append("a forward print with no rate is not an observation")
+            if not self.expiry_date:
+                bad.append("a forward print names no date, so it fixes no point on the curve")
         if self.at and parse_time(self.at) is None:
             bad.append(f"timestamp {self.at!r} cannot be read")
         return bad

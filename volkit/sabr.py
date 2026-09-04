@@ -224,7 +224,7 @@ def smile_strike_and_vol(p: SabrParams, target_delta: float, t: float, is_call: 
     iterates to a tolerance, damps if it starts to oscillate, and raises if it
     cannot converge.
     """
-    vol = float(lognormal_vol(black.dns_strike(p.f, atm_vol(p), t, conv), p))
+    vol = float(lognormal_vol(black.atm_strike(p.f, atm_vol(p), t, conv), p))
     prev_step = None
     damping = 1.0
     for _ in range(max_iter):
@@ -264,7 +264,9 @@ def calibrate(
 
     Conventions, all in decimals:
 
-    * ``atm_volatility`` is the delta-neutral-straddle volatility.
+    * ``atm_volatility`` is the volatility at the pair's at-the-money strike
+      for this tenor -- the delta-neutral straddle or the forward, as
+      ``conv`` says (``black.atm_strike``).
     * ``risk_reversal`` is call vol minus put vol at ``delta``.
     * ``strangle`` is the *market* strangle: the single volatility
       ``atm + strangle`` at which both wings are struck, quoted so that the
@@ -300,7 +302,7 @@ def calibrate(
     if not 0.0 < delta < 0.5:
         raise ValueError(f"delta must lie in (0, 0.5), got {delta!r}")
 
-    K_atm = black.dns_strike(f, atm_volatility, t, conv)
+    K_atm = black.atm_strike(f, atm_volatility, t, conv)
     ms_vol = atm_volatility + strangle
     if ms_vol <= 0:
         raise ValueError(
@@ -540,7 +542,7 @@ def fit_smile_shape(
     if not 0.0 < delta < 0.5:
         raise ValueError(f"delta must lie in (0, 0.5), got {delta!r}")
 
-    K_atm = black.dns_strike(f, atm_volatility, t, conv)
+    K_atm = black.atm_strike(f, atm_volatility, t, conv)
     sqt = math.sqrt(t)
 
     def wings(rho: float, nu: float) -> tuple[float, float, float]:

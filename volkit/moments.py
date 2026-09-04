@@ -336,7 +336,7 @@ class Combined:
 
     def table(self, deltas=(0.10, 0.25)) -> dict:
         """ATM, risk reversals and butterflies, in the book's own convention."""
-        atm_k = black.dns_strike(1.0, self.implied_vol(1.0), self.t, self.conv)
+        atm_k = black.atm_strike(1.0, self.implied_vol(1.0), self.t, self.conv)
         # One pass of the delta-neutral strike is enough: it moves the ATM by
         # far less than the grid error, and iterating it would hide that.
         atm = self.implied_vol(atm_k)
@@ -427,8 +427,7 @@ def combine(dist_a: Distribution, dist_b: Distribution, coefficients: tuple[int,
             f"left over is grid truncation or the change of measure between the legs' domestic "
             f"currencies and the cross's, neither of which this method corrects for"
         )
-    if not isinstance(conv, DeltaConvention):
-        conv = DeltaConvention(bool(conv))
+    conv = DeltaConvention.of(conv)
     return Combined(xc=xc, weight=weight, t=dist_a.t, rho=float(rho),
                     coefficients=(ca, cb), conv=conv, clamped=clamped,
                     shift=shift, convexity=convexity, warnings=tuple(warnings))
