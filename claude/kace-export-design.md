@@ -133,9 +133,9 @@ Verified: `TestKaceFeed` (14 tests) pins the sheet's own recalculated strings --
 The capture was not needed: the desk's own VBA for the pricer showed the wire, and the poster page is the same thing. An HTTP `POST` to the kACE server, body `xml=<url-encoded message>`, `Content-Type: application/x-www-form-urlencoded`, reply the platform's `gfi_message` (the one with `processingTime` in the header and a `<response>` for the action).
 
 ```bash
-volkit kace USDCNH --post --kace-url https://pfcshkwapp01:8500/pricing   # send, record, exit 1 if not taken
+volkit kace USDCNH --post --kace-url https://pfcshkwapp01:8500/xmlposter   # send, record, exit 1 if not taken
 volkit kace USDCNH --post --dry-run                                  # what would go, and where
-volkit serve --kace-url https://pfcshkwapp01:8500/pricing --kace-ca desk.pem   # the buttons on the tab
+volkit serve --kace-url https://pfcshkwapp01:8500/xmlposter --kace-ca desk.pem   # the buttons on the tab
 ```
 
 - **Post feed** / **Post clear** on the tab, shown only when a URL is set; one inline confirmation naming the pair, node count, scenario and address (the clear styled as the destructive one); the outcome under it, in red with the first line of the reply when it is not the one shape that means success. The last ten posts are listed under the pillar table from the log.
@@ -145,4 +145,4 @@ volkit serve --kace-url https://pfcshkwapp01:8500/pricing --kace-ca desk.pem   #
 - **`kace_posts.jsonl`** beside the workbook: every post, sent or refused, with the book's time, pair, scenario, feed/clear, nodes, a hash of the message, bytes, URL and outcome. A dry run writes nothing.
 - The network is injected, like `dtcc.py`'s: six more tests (`read_reply` on the poster page's own reply and on four kinds of not-success, the form body, `post_message` through a fake, the log and a refused post, the route sending exactly the table's message and the clear, the options). 845 in the suite. A live run against a stub kACE on the Mac received 413 nodes form-encoded and was logged.
 
-Still open: one live day of RR and butterfly compared side by side with the kACE page before the first real post into the live scenario, since the sign and the strangle-versus-butterfly reading were confirmed in words and not yet against the platform -- post into a test scenario first, which is what the scenario box is for. The address is confirmed by the desk as `https://pfcshkwapp01:8500/pricing`, and the shipped `files/volkit.cfg` now carries it.
+Still open: one live day of RR and butterfly compared side by side with the kACE page before the first real post into the live scenario, since the sign and the strangle-versus-butterfly reading were confirmed in words and not yet against the platform -- post into a test scenario first, which is what the scenario box is for. The address is confirmed by the desk as `https://pfcshkwapp01:8500/xmlposter`, and the shipped `files/volkit.cfg` now carries it.

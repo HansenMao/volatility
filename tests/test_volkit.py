@@ -11084,7 +11084,7 @@ class TestStartupConfig(unittest.TestCase):
         # The one live setting it ships with is where the kACE feed posts --
         # the desk's own address, confirmed 2026-09-01 -- so a double-click
         # gets the Post buttons without anybody editing the file.
-        self.assertEqual(cfg.argv, ["serve", "--kace-url", "https://pfcshkwapp01:8500/pricing"])
+        self.assertEqual(cfg.argv, ["serve", "--kace-url", "https://pfcshkwapp01:8500/xmlposter"])
 
 
 # ===========================================================================
@@ -13176,7 +13176,10 @@ class TestKaceFeed(unittest.TestCase):
         self.assertIn("0.298", msg)
         ok, _, msg = kace.read_reply("<html><body>Please log in</body></html>")
         self.assertFalse(ok)
-        self.assertIn("not a gfi_message", msg)
+        # A page is named as a page, with its title -- see
+        # test_an_html_reply_is_named_by_its_title.  "not a gfi_message" is
+        # what an XML reply with some *other* root tag says, and only that.
+        self.assertIn("not a kACE message", msg)
         ok, _, msg = kace.read_reply("502 Bad Gateway\nnginx")
         self.assertFalse(ok)
         self.assertIn("not XML", msg)
@@ -13402,7 +13405,7 @@ class TestKaceFeed(unittest.TestCase):
             service.kace_opener = lambda *a, **k: (200, b"<html>Session expired</html>")
             r = service.kace_post({"pair": "USDCNH"})
             self.assertFalse(r["ok"])
-            self.assertIn("not a gfi_message", r["message"])
+            self.assertIn("not a kACE message", r["message"])
             self.assertIn("Session expired", r["reply"])
             # No address: refused by name, and recorded as refused.
             bare = BookService(str(WORKBOOK), ASOF, kace_spreads_path=str(self.SPREADS),

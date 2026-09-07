@@ -43,7 +43,7 @@ HIDDEN_SET=""
 EXCLUDE=""
 BRANCH=""
 OUT=""
-WAIT_SECONDS=3600
+WAIT_SECONDS=7200
 POLL=15
 EXPLAIN_ONLY=""
 NO_WAIT=""
@@ -372,8 +372,9 @@ fi
 
 # -------------------------------------------------------------------- wait
 step "Waiting"
-say "  the runner installs dependencies, runs 344 tests, builds, stages the data"
-say "  files and smoke-tests the exe. Around fifteen minutes."
+say "  the runner installs dependencies, runs the suite, builds, stages the data"
+say "  files and smoke-tests the exe. The suite is the long part -- around an"
+say "  hour on the hosted Windows runner, so allow ninety minutes overall."
 START=$(date -u +%s)
 STATUS=""; CONCLUSION=""
 while :; do

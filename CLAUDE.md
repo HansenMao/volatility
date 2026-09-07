@@ -32,7 +32,7 @@ sheet it was written against is kept as `files/vol_marks_legacy_format.xlsx`
 against it -- and the comparison still runs from `legacy/`. volkit reads
 either (§4).
 
-- ~35,000 lines across 50 modules, 845 tests, `unittest` only (no pytest).
+- ~35,000 lines across 50 modules, 1035 tests, `unittest` only (no pytest).
   Tests live in `tests/test_volkit.py`, `tests/test_agent.py` (the desk
   agent, §17) and `tests/test_marking.py` (the marking agent, §18).
 - Runtime deps: numpy, scipy, pandas, openpyxl. Plus `tzdata` on Windows.
@@ -451,7 +451,7 @@ and what is reported instead** — read it before "fixing" one.
 rules.** The essentials:
 
 ```
-python -m unittest discover -s tests        # 845 tests, ~10m
+python -m unittest discover -s tests        # 1035 tests, ~20m
 PYTHONUTF8=0 LC_ALL=C python -m unittest discover -s tests   # as a cp1252 box
 python -m volkit check                      # validate the workbook
 python -m volkit serve --feed files/market_feed.csv --history vol_history.xlsx
