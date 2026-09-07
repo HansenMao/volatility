@@ -53,6 +53,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from math import isfinite
 
+from .atm import CUTS
 from .curves import (CURVE_FIELDS, CURVE_KINDS, FIELD_LABELS, KIND_LABELS,
                      CurveError, CurveRequest, build_curve)
 from .timeutil import tenor_to_years
@@ -101,15 +102,19 @@ def move_grade(change, big: float) -> int:
 
 @dataclass(frozen=True)
 class Tile:
-    """One small panel: a pair, and the two ends of a comparison.
+    """One small panel: a pair, a cut, and the two ends of a comparison.
 
     ``now`` and ``was`` are named for what they usually are rather than for
     what they must be -- nothing stops the "was" end being the later of the
     two, and a tile that is asked for one reports the dates it landed on so
-    the reader can see which way round it came out.
+    the reader can see which way round it came out.  ``cut`` is the tile's
+    own: a screen of pairs is not one desk's cut, and a panel comparing
+    Tokyo's USDJPY against New York's EURUSD is two ordinary tiles, not one
+    malformed one.
     """
 
     pair: str = ""
+    cut: str = "NY"
     now_kind: str = DEFAULT_NOW_KIND
     now_date: str = ""
     was_kind: str = DEFAULT_WAS_KIND
@@ -125,6 +130,9 @@ class Tile:
                     f"one of {', '.join(k for k in CURVE_KINDS if k != 'paste')}")
         if not self.pair.strip():
             raise CurveError("a monitor tile needs a currency pair")
+        if self.cut not in CUTS:
+            raise CurveError(
+                f"unknown cut {self.cut!r}; expected one of {', '.join(sorted(CUTS))}")
 
     def requests(self) -> tuple[CurveRequest, CurveRequest]:
         return (CurveRequest(kind=self.was_kind, pair=self.pair, date=self.was_date),
@@ -174,18 +182,21 @@ def _end(curve) -> dict:
             "message": curve.message}
 
 
-def run_tile(tile: Tile, book, history=None, *, cut: str = "NY",
+def run_tile(tile: Tile, book, history=None, *,
              method: str = "SVI", big: float = DEFAULT_BIG_MOVE / 100.0) -> TileResult:
     """Build both ends of one tile, difference them, and grade the differences.
 
-    ``big`` is in decimals, like every other number here; the volatility
-    points somebody types are converted at the edge that read them.
+    The cut is the tile's own (``tile.cut``), not a parameter here -- a
+    screen holding tiles on different cuts builds each one at the cut it
+    asked for.  ``big`` is in decimals, like every other number here; the
+    volatility points somebody types are converted at the edge that read
+    them.
     """
     was_req, now_req = tile.requests()
     built = []
     for req in (was_req, now_req):
         try:
-            built.append(build_curve(req, book, history, cut=cut, method=method))
+            built.append(build_curve(req, book, history, cut=tile.cut, method=method))
         except Exception as exc:  # noqa: BLE001 - one end, not the tile
             from .curves import Curve
             built.append(Curve(label="", kind=req.kind, pair=req.pair, ok=False,
@@ -265,10 +276,15 @@ def run_tile(tile: Tile, book, history=None, *, cut: str = "NY",
 
 @dataclass(frozen=True)
 class MonitorPanel:
-    """Every tile on the screen, exactly as the browser posts it."""
+    """Every tile on the screen, exactly as the browser posts it.
+
+    The cut lives on each tile now, not here -- see ``Tile.cut``.  ``method``
+    stays one setting for the whole screen: the interpolation is a reading of
+    the surface, not a market convention a tile might reasonably disagree
+    with pair to pair.
+    """
 
     tiles: tuple[Tile, ...] = ()
-    cut: str = "NY"
     method: str = "SVI"
     field: str = "atm"
     #: The big-move threshold, in decimals.  Zero turns the grading off.
@@ -296,7 +312,7 @@ class MonitorPanel:
             if not tile.on:
                 continue
             try:
-                results.append(run_tile(tile, book, history, cut=self.cut,
+                results.append(run_tile(tile, book, history,
                                         method=self.method, big=self.big))
             except Exception as exc:  # noqa: BLE001 - one tile keeps its place
                 results.append(TileResult(
@@ -304,7 +320,7 @@ class MonitorPanel:
                     message=str(exc) if isinstance(exc, CurveError)
                     else f"{type(exc).__name__}: {exc}"))
         return {
-            "cut": self.cut, "method": self.method, "field": self.field,
+            "method": self.method, "field": self.field,
             # Volatility points at the edge: `big` is decimals in here and
             # what the screen and the command line print is what was typed.
             "big": self.big * 100.0, "big_step": BIG_MOVE_STEP,
@@ -325,6 +341,7 @@ def tile_from_request(item: dict) -> Tile:
         raise CurveError("a monitor tile must be an object")
     return Tile(
         pair=str(item.get("pair") or "").strip().upper(),
+        cut=str(item.get("cut") or "NY").strip().upper(),
         now_kind=str(item.get("now_kind") or DEFAULT_NOW_KIND).strip().lower(),
         now_date=str(item.get("now_date") or "").strip(),
         was_kind=str(item.get("was_kind") or DEFAULT_WAS_KIND).strip().lower(),
@@ -350,7 +367,6 @@ def panel_from_request(payload: dict | None) -> MonitorPanel:
                          f"got {payload.get('big')!r}") from None
     return MonitorPanel(
         tiles=tuple(tile_from_request(item) for item in raw),
-        cut=str(payload.get("cut") or "NY"),
         method=str(payload.get("method") or "SVI"),
         field=str(payload.get("field") or "atm").strip().lower(),
         # The one conversion: volatility points at this edge, decimals inside.

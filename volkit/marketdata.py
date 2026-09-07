@@ -30,7 +30,7 @@ from .black import DeltaConvention
 from .cross import dollar_legs, infer_leg_signs, is_cross as pair_is_cross
 from .surface import PARAM_NAMES, TERM_COEFFS, SmileMark
 from .events import EventBook, EventRow
-from .timeutil import UTC, parse_datetime
+from .timeutil import UTC, parse_datetime, tenor_key
 
 # Row labels in the PARAMS sheet, matched case- and space-insensitively.
 PARAM_ROWS = {
@@ -225,6 +225,13 @@ class MarketData:
     params: dict[str, PairParams] = field(default_factory=dict)
     marks: dict[str, list[SmileMark]] = field(default_factory=dict)
     tenor_points: tuple[str, ...] = ("1w", "2w", "3w", "1m", "2m", "3m", "6m", "9m", "1y")
+    #: Whether CONFIG actually *stated* that list.  An absent ``TENORS``
+    #: column is not an empty one: a workbook that says nothing about tenors
+    #: governs nothing, and ``tenor_points`` is then only a default order to
+    #: show things in.  Stated, it is the **pillar set** -- the tenors that
+    #: are shown, fitted and marked -- and a pair sheet's quotes are cut down
+    #: to it (:meth:`ExcelSource._config_tenors_only`).
+    tenors_stated: bool = False
     #: The EVENTS sheet: one row per release, weights per currency, an
     #: adjustment per pair.  A pair's schedule is derived from it and never
     #: stored beside it (``EventBook.for_pair``).
@@ -440,6 +447,7 @@ class ExcelSource:
             tenors = tuple(str(x).strip().lower() for x in cfg[cols["tenors"]].dropna())
             if tenors:
                 data.tenor_points = tenors
+                data.tenors_stated = True
 
     def _pair_spec(self, name: str, cfg, cols: dict, data: MarketData,
                    implied_by: str = "") -> PairSpec | None:
@@ -756,6 +764,42 @@ class ExcelSource:
             return None
 
     # -- per-pair smile sheets --------------------------------------------
+    @staticmethod
+    def _config_tenors_only(name: str, marks: list[SmileMark],
+                            data: MarketData) -> list[SmileMark]:
+        """The sheet's quotes cut down to the tenors CONFIG lists.
+
+        CONFIG's ``TENORS`` column is the **pillar set**: the tenors the
+        marking screen shows, the tenors the smile is fitted at, and the
+        tenors a mark can be made on.  A pair sheet that quotes one outside it
+        -- the 2Y every sheet in this workbook carries while CONFIG stops at
+        1Y -- is not marked and is not fitted either.  The two go together on
+        purpose: a quote kept in the fit but off the screen still shapes every
+        smile while nobody can see or change it, which is exactly the silent
+        mark this project exists to remove.  The row stays in the workbook
+        untouched; putting the tenor back in CONFIG brings it back.
+
+        A workbook with **no** ``TENORS`` column governs nothing and keeps
+        every quote (``data.tenors_stated``): the default nine points are an
+        order to show things in, not a desk's decision, and cutting a sheet
+        down to a list nobody wrote would be this tool inventing the policy.
+
+        Matched by :func:`timeutil.tenor_key`, because CONFIG is maintained in
+        lower case and the sheets in upper.
+        """
+        if not data.tenors_stated:
+            return marks
+        wanted = {tenor_key(t) for t in data.tenor_points}
+        keep = [m for m in marks if tenor_key(m.tenor) in wanted]
+        dropped = [m.tenor for m in marks if tenor_key(m.tenor) not in wanted]
+        if dropped:
+            data.notes.append(
+                f"sheet {name!r} quotes {', '.join(dropped)}, which CONFIG's TENORS column "
+                f"does not list, so {'it is' if len(dropped) == 1 else 'they are'} neither "
+                f"shown nor fitted; the row(s) are still in the workbook"
+            )
+        return keep
+
     def _load_marks(self, xls, data: MarketData, sheets: set[str]) -> None:
         for name in data.pairs:
             if name not in sheets:
@@ -801,6 +845,8 @@ class ExcelSource:
                         f"25d={values['st_25'] * VOL_POINT:.4g}, 10d={values['st_10'] * VOL_POINT:.4g}"
                     )
                 marks.append(SmileMark(tenor=str(tenor).strip(), **values))
+            quoted = len(marks)
+            marks = self._config_tenors_only(name, marks, data)
             if marks:
                 data.marks[name] = marks
             elif len(df.index) == 0:
@@ -814,6 +860,16 @@ class ExcelSource:
                 data.notes.append(
                     f"sheet {name!r} has its columns and no quotes yet, so {name} has no "
                     f"smile until one is marked on it"
+                )
+            elif quoted:
+                # Every row read fine and CONFIG lists none of their tenors.
+                # Not a bad sheet -- a TENORS column and an ``expiry`` column
+                # with nothing in common, which is a configuration mistake and
+                # says so in those words rather than as "no readable quotes".
+                data.problems.append(
+                    f"sheet {name!r} quotes {quoted} tenor(s) and CONFIG's TENORS column "
+                    f"lists none of them, so {name} has no smile; the two lists have to "
+                    f"overlap"
                 )
             else:
                 # Rows that are there and cannot be read is the same failure

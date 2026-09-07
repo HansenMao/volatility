@@ -9,6 +9,7 @@ workbook without building anything.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import math
 import sys
@@ -158,6 +159,11 @@ def _feed(book, path):
         print(f"  ! forward feed: {line}", file=sys.stderr)
     for line in book.feed.notes:
         print(f"  · forward feed: {line}", file=sys.stderr)
+    # The discount curves are the same file's other half, and what they cannot
+    # reach is a fact about this feed rather than about the workbook -- so it
+    # is said here, once the feed is on, and not at a build that had none.
+    for line in book.discount_warnings():
+        print(f"  ! discount: {line}", file=sys.stderr)
 
 
 def _apply_band(args, book) -> None:
@@ -998,6 +1004,9 @@ def cmd_monitor(args) -> int:
             raise ValueError("nothing to watch: give a pair, or --watch PAIR[:was[:now]]")
         specs = [args.pair]
     tiles = [monitor_mod.parse_spec(x) for x in specs]
+    # The command's one --cut flag is every tile's cut, the same as a panel
+    # built in the browser with one screen-wide choice never touched per row.
+    tiles = [dataclasses.replace(t, cut=args.cut) for t in tiles]
 
     pairs = sorted({t.pair for t in tiles}
                    | ({args.pair} if args.pair else set())
@@ -1011,7 +1020,7 @@ def cmd_monitor(args) -> int:
         for p in list(history.problems) + list(history.skipped_sheets):
             print(f"  . {p}", file=sys.stderr)
 
-    panel = monitor_mod.MonitorPanel(tiles=tuple(tiles), cut=args.cut, method=args.method,
+    panel = monitor_mod.MonitorPanel(tiles=tuple(tiles), method=args.method,
                                      field=args.field, big=args.big / 100.0)
     r = panel.run(book, history)
     from .curves import CURVE_FIELDS, FIELD_LABELS

@@ -68,7 +68,6 @@ settings that go with them:
 | `KACE_SPREADS` | the kACE feed: which tenors are posted, and the ATM width at each |
 | `HOLIDAYS` | holiday dates no rule derives: `country, date, remove` |
 | `CONVENTIONS` | a pair's quoting conventions where they differ from the market's: `pair, premium, atmf beyond, delta` |
-| `RATES` | simple deposit rates, for spot delta and the premium as paid: `currency, tenor, rate` (% p.a.) |
 
 Each is an ordinary table with a header row. A row whose first cell starts
 with `#` is a note and is skipped, wherever it sits — the tabs ship with the
@@ -515,16 +514,19 @@ move the screen.
     crosses, and spot delta is forward delta times the **base currency's
     discount factor** to the option's settlement: a 25-delta quote on 1Y
     USDJPY is a 26-and-a-bit forward delta, and the strike the market means
-    is nearer the money than the forward-delta reading puts it. The `RATES`
-    tab (`currency, tenor, rate`, in % per annum, a simple money-market rate
-    so the factor is `1/(1 + r·t)`, interpolated linearly between the tenors
-    listed and held flat outside them) is where the tool gets that factor.
-    With a rate for the base currency every quoted delta on the pair — the
+    is nearer the money than the forward-delta reading puts it. The **market
+    feed** is where the tool gets that factor: `USDOIS,1Y,4.00` rows state the
+    dollar curve (% per annum, annually compounded so the factor is
+    `(1+r)^-t`, interpolated linearly between the tenors listed and held flat
+    outside them), and every other currency is implied from it through that
+    currency's own FX forward — `DF_JPY = DF_USD × S/F` on USDJPY, so the
+    discount rate carries the basis and agrees with the forward on the same
+    screen. With a factor for the base currency every quoted delta on the pair — the
     wing quotes the smile is calibrated to, the delta a strike is answered
     with, the delta hedge on the pricing screen — is a spot delta out to the
     boundary and a forward delta beyond it. **Without one the pair's deltas
-    are forward deltas**, the workbook says so when it loads (*quotes spot
-    delta but the RATES tab has no AUD rate…*), and every answer line and
+    are forward deltas**, the book says so when it loads (*quotes spot delta
+    but the feed cannot discount AUD…*), and every answer line and
     every Delta row says *fwd* with the reason on hover. At a month the two
     differ by nothing; at a year, by most of a delta in a 5% currency. A pair
     that quotes forward delta at every tenor (many EM and non-deliverable
@@ -541,14 +543,32 @@ move the screen.
   forward value. The **premium toggle** on the Results bar (*premium: forward
   | spot*) reads the three premium rows — *Price (pips)*, *Price %* and
   *Premium amount* — and the per-pair totals either as that forward value or
-  as the premium **as paid**: the same value discounted at the **quote
-  currency's** `RATES`-tab rate from the option's settlement to the premium
+  as the premium **as paid**: the same value discounted on the **quote
+  currency's** feed discount curve from the option's settlement to the premium
   date (the spot date, so the period is the one the forward itself covers),
   and in the base currency the same money at today's spot. The row labels say
   which is showing, the choice is remembered on the machine, and a quote
-  currency with no rate on the tab shows a dash under *spot* — the forward
+  currency the feed cannot discount shows a dash under *spot* — the forward
   value is then the only honest number, and it is one click away rather than
   a rate the tool made up. A pair with such a leg has no spot total either.
+
+  **Which CSA it is paid under.** Discounting a JPY premium at the factor
+  implied from USD OIS and the USDJPY forward *is* a **USD CSA** — convert at
+  the forward, discount at USD OIS, convert back at spot — which is what most
+  interbank option business runs under, so it is the default and needs no
+  setting. A trade collateralised in another currency discounts on **that
+  currency's own OIS curve** instead, and the two differ by exactly the
+  cross-currency basis (≈7bp of premium on a 1y yen option at the sample
+  curves; more further out). The **CSA** row on the pricing grid says which,
+  **per leg** — a CSA belongs to the agreement, not to the pair, so two legs
+  in one strip can sit under different ones. The row is **hidden by default**
+  (*CSA row: hidden | shown* on the Inputs bar), because a desk on one house
+  CSA should not have to look past a row it never changes. Choosing a currency
+  the feed states no OIS rows for falls back to USD, and the premium cell's
+  hover names the curve that answered either way. **Nothing else moves**: the
+  volatility, the strike and the delta are the same numbers under every CSA,
+  because a delta is a hedge ratio rather than a discounted cashflow and the
+  spot delta the market quotes is defined off the *forward's* factors.
 
   There is **no forward box**: the level is the market feed's outright to that
   expiry's **settlement date** — the answer line says which date — which is
@@ -1607,7 +1627,7 @@ vol** (kACE's *$ call* column for a USD pair), `S` is the **butterfly**, and
 **O/N** is the one-day option, expiring on the next business day.
 
 **Posting from the tab.** Set the address the poster page itself posts to —
-`kace-url = https://pfcshkwapp01:8500/pricing` in `volkit.cfg` (or
+`kace-url = https://pfcshkwapp01:8500/xmlposter` in `volkit.cfg` (or
 `VOLKIT_KACE_URL`); the shipped `volkit.cfg` already says so — and two more
 buttons appear: **Post feed** and **Post clear**. Each asks
 once, on the tab, what it is about to do (*Post 413 nodes for USDCNH into
@@ -1764,7 +1784,7 @@ drop.
   and it comes out of `CONFIG` only: its column and its sheet stay where they
   are, so adding it back finds what it had.
 * **The configuration tabs** — `PEG_BANDS`, `KACE_SPREADS`, `HOLIDAYS`,
-  `CONVENTIONS`, `RATES`, `WING_RATIOS` and `Vega Weights` — edited as tables
+  `CONVENTIONS`, `WING_RATIOS` and `Vega Weights` — edited as tables
   and written whole. The prose and `#` comment lines above each header are
   kept.
 * **Vega weights, and a column per pair.** `Vega Weights` is the shape the ATM
@@ -1859,6 +1879,25 @@ EURUSD   2w
 EURJPY   1m
 EURGBP   3m
 ```
+
+**`TENORS` is the tenor set the desk marks**, and it decides the rows on the
+vol marking screen in both directions.
+
+- A tenor a pair sheet quotes that `TENORS` does **not** list is not read at
+  all: not shown, not fitted, and not markable. The row stays in the workbook
+  untouched and comes back the moment the tenor goes into `TENORS`. This is
+  why the shipped sheets' `2Y` rows do not appear: the column stops at `1Y`.
+  A quote kept in the fit but off the screen would shape every smile while
+  nobody could see it or take it off, so the two go together.
+- A tenor `TENORS` lists that a pair sheet does **not** quote — `3W` on the
+  CNH sheets, which are quoted `2W` then `1M` — is on the screen marked
+  `smile`, with its four numbers read off the **fitted smile** at that expiry:
+  the same interpolation every price at that date already uses. The boxes are
+  empty and the readings sit under them in italics. Type one and the other
+  three are taken from those readings, so the tenor becomes a quoted pillar
+  like any other; empty the row again and it goes back to being a reading.
+- A workbook with **no** `TENORS` column governs nothing: every quote on every
+  sheet is read, as before. An absent column is not an empty one.
 
 A pair with the dollar on one side is marked on its own backbone. A pair
 without one is a **cross**, and a cross is never marked directly: it is broken
@@ -1984,11 +2023,25 @@ is the forward rather than the delta-neutral straddle (`never` / `always`
 allowed), and whether the pair quotes `spot` or `forward` delta out to that
 tenor. A pair with no row takes the market's conventions; see *Pricing*.
 
-**`RATES`** (a tab of the workbook, optional) — `currency, tenor, rate`:
-simple deposit rates in % per annum. The base currency's rate turns a quoted
-spot delta into the forward delta the model works in; the quote currency's
-rate discounts a forward premium to the premium paid. A currency with no rows
-has no rate, and the tool says what that costs rather than inventing one.
+**`<CCY>OIS`** (rows of the market feed, optional) — `USDOIS,1Y,4.00`: a
+currency's OIS rate at a tenor, in % per annum, annually compounded. `USDOIS`
+is the **anchor** and the only curve that discounts in its own right; every
+other currency's discount factor is implied from it through that currency's
+own FX forward in the same file, so the rate carries the cross-currency basis
+and `DF_base/DF_term` reproduces the forward exactly. A curve stated for
+another currency is read only to report that basis against the forwards. With
+no `USDOIS` rows nothing is discounted through the forwards, and a currency
+that states its own curve falls back to it. The base currency's factor turns a
+quoted spot delta into the forward delta the model works in; the term
+currency's discounts a forward premium to the premium paid. A currency the
+feed cannot reach has no factor, and the tool says what that costs rather than
+inventing one.
+
+A stated non-anchor curve *is* used to discount in one case: a **CSA
+collateralised in that currency**. The premium is then discounted on that
+curve directly rather than on the implied factor, which is the same statement
+as "the default is a USD CSA" made the other way round. See the **CSA** row
+under *Pricing*; it reaches the premium and nothing else.
 
 **`KACE_SPREADS`** (a tab of the workbook) — `pair, tenor, spread`: the
 pillars the kACE feed posts for a pair and the ATM bid/offer width at each, in
@@ -2030,7 +2083,7 @@ volkit vega   EURUSD --realized --history vol_history.xlsx --lookback 180
 volkit kace   USDCNH --out usdcnh_kace.xml   the kACE RATE_FEED message, to paste into the poster
 volkit kace   USDCNH --clear --out clear.xml the clearRate message for the pair
 volkit kace   USDCNH --source fitted         wings off the fitted surface instead of the marks
-volkit kace   USDCNH --post --kace-url https://pfcshkwapp01:8500/pricing   send it the way the poster page does
+volkit kace   USDCNH --post --kace-url https://pfcshkwapp01:8500/xmlposter   send it the way the poster page does
 volkit kace   USDCNH --post --dry-run        what would be sent, and where, sending nothing
 volkit events USDJPY                      the EVENTS sheet, through one pair's legs
 volkit events USDJPY --weights            ... and every event's weight on every currency
@@ -2702,10 +2755,10 @@ the fact list, and the first line says which it was.
 
 ## 7. Things to know before trusting a number
 
-* Prices are forward values; there is no rate curve. The `RATES` tab's
-  deposit rates give the two discount factors the conventions need — the base
-  currency's for **spot delta**, the quote currency's for the **premium as
-  paid** — and a currency without one is read as forward delta and
+* Prices are forward values; there is no rate curve. The feed's `USDOIS` rows
+  and its forwards give the two discount factors the conventions need — the
+  base currency's for **spot delta**, the term currency's for the **premium as
+  paid** — and a currency the feed cannot reach is read as forward delta and
   undiscounted, with a warning, never with a guessed rate.
 * **Every volatility on a screen is shown to two decimal places** — the marks,
   the query, the risk reversals and butterflies, the fit misses and the widths.

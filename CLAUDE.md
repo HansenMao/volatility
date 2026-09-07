@@ -91,9 +91,14 @@ configsheets the workbook's settings tabs -- PEG_BANDS, KACE_SPREADS,
            comment rows and a header found rather than assumed. A new setting
            is a tab here, not a new file
 marketdata validated Excel reader; CONFIG is two columns and a cross
-           names its own dollar legs; EVENTS is a row per release, a column
-           per currency and per pair
-feed       spot / forward points from file, by tenor or by date, interpolated
+           names its own dollar legs, and its TENORS column is the pillar
+           set -- a pair sheet's quotes are cut down to it; EVENTS is a row
+           per release, a column per currency and per pair
+feed       spot / forward points from file, by tenor or by date, interpolated;
+           and the file's <CCY>OIS rows, which are the discount curves
+discount   discount factors: USDOIS anchors, every other currency implied
+           from it through that currency's own forward (so the basis is in
+           the rate and DF_base/DF_term reproduces the feed's forward)
 book       all pairs, built in dependency order
 listed     exchange traded options: paste parsing, least-squares SABR fit,
            comparison against the marked FX surface, and a position book with
@@ -183,7 +188,7 @@ working in its area — not before.
 | `claude/agent-ask.md` (§19) | `ask.py` — the read-only question agent. |
 | `claude/kace-feed.md` (§20) | `kace.py` — the RATE_FEED message, posting, the spread table. |
 | `claude/vega-weights.md` (§21) | `vegaweights.py`, the workbook's `Vega Weights` tab, the ATM card's **bump**, and the realized weighting suggested on the Workbook card. |
-| `claude/config-tabs.md` | **Before adding a setting**, or anything about `PEG_BANDS`, `KACE_SPREADS`, `HOLIDAYS` or `configsheets.py`. |
+| `claude/config-tabs.md` | **Before adding a setting**, or anything about `PEG_BANDS`, `KACE_SPREADS`, `HOLIDAYS`, `configsheets.py`, or where the discount curves come from (`discount.py`, the feed's `<CCY>OIS` rows). |
 
 Design notes that are not standing context: `claude/kace-export-design.md`,
 `claude/marking-agent-design.md`.
@@ -225,6 +230,17 @@ to safely amend.
   tenor added and adjusted modified following with the end-of-month rule, then
   the expiry as the inverse spot of the delivery. Day tenors (`O/N`, `8D`) are
   expiry-first. The USD calendar is the Fed's (Saturday holidays not observed).
+- **`CONFIG`'s `TENORS` column is the pillar set.** It decides which tenors
+  are shown on the marking screen, which are fitted, and which can be marked,
+  and the three are one decision. A tenor a pair sheet quotes that `TENORS`
+  does not list is not read (`ExcelSource._config_tenors_only`) -- a quote kept
+  in the fit but off the screen is a mark nobody can see. A tenor `TENORS`
+  lists that a sheet does not quote carries the four numbers read back off the
+  fitted smile (`VolSurface.implied_marks`), which are display only and are
+  **never** fitted, because they came out of the fit. Typing into one
+  materialises the row (`VolSurface._materialise`); a tenor `TENORS` does not
+  list is refused by `overwrite_quote`. A workbook with no `TENORS` column
+  governs nothing (`MarketData.tenors_stated`). MIGRATION.md 4b-iv.
 - **The quoting conventions are the pair's, from `DeltaConvention.for_pair`**
   (`black.py`): premium adjusted iff the premium currency -- USD when it is in
   the pair, else the base -- is the base currency, so every cross is adjusted;
@@ -232,8 +248,9 @@ to safely amend.
   1Y, resolved on the pair's calendar by `VolSurface.__post_init__`) and the
   forward beyond it -- `black.atm_strike`, never `dns_strike`, is what a smile
   anchor or a calibration reads. Spot delta out to the same boundary where the
-  `RATES` tab has the base currency's rate (`rates.RatesTable`, `Book.rates`,
-  `VolSurface.discount_lookup` -> `slice_conv(t)` -> `DeltaConvention.at`,
+  feed can discount the base currency (`discount.DiscountCurves`,
+  `Book.discount`, `VolSurface.discount_lookup` -> `slice_conv(t)` ->
+  `DeltaConvention.at`,
   which puts the foreign discount factor in `df_foreign`; `black.delta` and
   `strike_from_delta` scale by it), forward delta with a stated reason
   otherwise. Every delta read off a slice goes through `sl.conv`, never
@@ -258,6 +275,20 @@ to safely amend.
 - **A feed pillar named by a tenor and one named by a date land on one axis**:
   years from the spot date -- a tenor pillar at its own delivery date. The
   valuation date comes from the book's clock, never the machine.
+- **Discounting is the feed's other half, and only USD is stated.** `<CCY>OIS`
+  rows give the anchor; every other currency's factor is implied through its
+  own dollar pair, so `F = S x DF_base/DF_term` holds exactly on a quoted pair
+  and on a composed cross. A stated non-USD curve is read for the basis and
+  never to discount -- using it would break that identity. `Book.discount` is
+  rebuilt on every ask so a feed loaded after the book is picked up. No feed,
+  no factor: forward delta and an undiscounted premium, both said.
+- **A CSA reaches the premium and nothing else.** The implied factor already
+  *is* a USD CSA; `DiscountCurves.csa_df(ccy, t, collateral)` is the same
+  formula with another collateral currency, and `collateral == ccy` is that
+  currency's own OIS curve -- the one place a stated non-anchor curve
+  discounts. `pricing._discounted` is the only caller (`OptionLeg.csa`).
+  Never put it in `df_foreign`: a delta is a hedge ratio, defined off the
+  forward's factors whatever the collateral.
 - **The workbook's CONFIG sheet is two columns**: the pairs and the tenors. A
   cross's legs come from `cross.dollar_legs`; explicitly named legs win. A pair
   CONFIG names must have a sheet behind it, and the reader says so.
@@ -342,6 +373,16 @@ to safely amend.
 - **A fit and a quote are two calls, and the marks travel between them** in the
   browser (`capture_marks` / `applied_marks`). The book holds exactly what the
   panel shows — one number, one spelling.
+- **A held fit is only good for the book it was fitted on.** `Panel.run` stamps
+  `marketmaker.mark_fingerprint` (a hash per part of `session.capture_pair`,
+  plus the sheet's own quotes) onto the marks it hands back, and `QuotePanel`
+  **drops** marks whose stamp no longer matches, prices off the book and names
+  what moved. The browser's half is one hook in `post()`
+  (`MARKING_ROUTES` → `bookMoved`), which flags the fit card and re-runs the
+  quote; it never re-runs the fit, because `keep the marks` writes. Nothing
+  else may POST — `api()` direct, a route added outside the list — and a test
+  pins the list against every route that touches `self.dirty` or rebuilds the
+  book.
 
 ## 5. Things that moved marks vs the legacy tool
 
@@ -364,7 +405,12 @@ All documented in `MIGRATION.md`. In rough order of impact:
    read on the option's settlement date. Under 0.05 vol points at any tenor,
    under a pip of forward, and at a quoted pillar the forward is now exactly
    the published swap points. No switch. MIGRATION.md 1.6.
-6. **Joint event calibration**, modified-following expiry rolls, UK holiday
+6. **`TENORS` is the pillar set.** Every shipped pair sheet quotes a `2Y` that
+   `CONFIG` does not list, so it is no longer fitted and the parameter term
+   structure loses its longest pillar -- smiles at and beyond `1Y` move on
+   every pair. Putting `2y` in the `TENORS` column restores them exactly; the
+   row was never taken out of the sheet. MIGRATION.md 4b-iv.
+7. **Joint event calibration**, modified-following expiry rolls, UK holiday
    observation rule.
 
 ## 6. Managed / pegged currencies

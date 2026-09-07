@@ -57,8 +57,6 @@ SHEETS: dict[str, str] = {
     "CONVENTIONS": "a pair's quoting conventions where they differ from the market's: "
                    "pair, premium (the currency it is paid in), atmf beyond (a tenor, "
                    "never, or always), delta (spot or forward)",
-    "RATES": "simple deposit rates for the discount factors a spot delta and a paid "
-             "premium need: currency, tenor, rate (% p.a.)",
     "WING_RATIOS": "how each tenor's 10-delta wings follow its 25-delta ones: "
                    "pair, tenor, st, rr",
     "Vega Weights": "how far each tenor moves when the anchor moves one vol point: "
@@ -77,9 +75,18 @@ EDITABLE: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "KACE_SPREADS": (("pair", "tenor", "spread"), ("pair", "tenor")),
     "HOLIDAYS": (("country", "date", "remove"), ("country", "date")),
     "CONVENTIONS": (("pair", "premium", "atmf beyond", "delta"), ("pair",)),
-    "RATES": (("currency", "tenor", "rate"), ("currency", "tenor", "rate")),
     "WING_RATIOS": (("pair", "tenor", "st", "rr"), ("pair", "tenor")),
     "Vega Weights": (("tenor", "default", "note"), ("tenor", "default")),
+}
+
+#: Tabs that were configuration here and are not any more, and where the
+#: thing they held has gone.  A workbook keeps its old tabs -- deleting a
+#: desk's sheet to make a point is not this tool's business -- so the tab sits
+#: there reading like a setting long after anything stopped reading it, which
+#: is the worst of both.  Named here, ``Book`` says so once at load.
+RETIRED: dict[str, str] = {
+    "RATES": "discount rates come from the market feed's <CCY>OIS rows now, so that "
+             "one curve and the forwards beside it agree; the tab is no longer read",
 }
 
 #: Tabs whose columns are not the whole list.  ``Vega Weights`` carries a
@@ -287,6 +294,16 @@ def present(path: str | Path) -> list[str]:
     """Which of the known configuration tabs this workbook actually has."""
     names = sheet_names(path)
     return [s for s in SHEETS if match_sheet(names, s) is not None]
+
+
+def retired(path: str | Path) -> list[str]:
+    """Retired tabs this workbook still carries, as a line each saying so."""
+    try:
+        names = sheet_names(path)
+    except (OSError, ValueError):
+        return []
+    return [f"{sheet}: {why}" for sheet, why in RETIRED.items()
+            if match_sheet(names, sheet) is not None]
 
 
 def match_sheet(names, sheet: str) -> str | None:

@@ -77,7 +77,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import http.cookiejar
 import os
+import re
 import ssl
 import urllib.error
 import urllib.parse
@@ -377,7 +379,9 @@ def build(book, pair: str, spreads: SpreadTable, *, cut: str = "NY", source: str
     if unmarked:
         raise KaceError(f"{spreads.path} lists {', '.join(unmarked)} for {pair}, but the workbook "
                         f"quotes no wings there (it has {', '.join(sorted(marks, key=pillar_years))}); "
-                        f"a pillar with no mark behind it cannot be posted")
+                        f"a pillar with no mark behind it cannot be posted. A tenor the pair sheet "
+                        f"quotes and CONFIG's TENORS column does not list is not read, so check "
+                        f"that too; --wings fitted posts the smile's own wings at any pillar")
     quoted = [t for t in tenors if t != OVERNIGHT]
     if not quoted:
         raise KaceError(f"{spreads.path} lists only O/N for {pair}; at least one quoted tenor "
@@ -534,8 +538,14 @@ class PostResult:
 
 
 def form_body(xml_text: str) -> bytes:
-    """``xml=<url-encoded message>``, as the poster page and the desk's VBA send it."""
-    return urllib.parse.urlencode({"xml": xml_text}).encode("ascii")
+    """``xml=<url-encoded message>``, as the poster page and the desk's VBA send it.
+
+    Percent-encoded throughout -- a space is ``%20``, never ``+``.  That is
+    what the VBA's ``URLEncode`` produces and therefore the only spelling the
+    platform is known to accept; ``urlencode`` would send ``+``, which is
+    correct form encoding but not what has ever been shown to work here.
+    """
+    return ("xml=" + urllib.parse.quote(xml_text, safe="")).encode("ascii")
 
 
 def message_hash(xml_text: str) -> str:
@@ -563,8 +573,23 @@ def read_reply(text: str) -> tuple[bool, float | None, str]:
     try:
         root = ET.fromstring(text.strip().encode("utf-8"))
     except ET.ParseError:
+        head = text[:2000].lstrip().lower()
+        if head.startswith("<!doctype html") or "<html" in head:
+            title = _page_title(text)
+            return False, None, (
+                "the reply is a web page, not a kACE message"
+                + (f': "{title}"' if title else "")
+                + " -- that address served the site rather than the feed gateway, or "
+                  "sent us to its login page")
         return False, None, f"the reply is not XML: {first[:160] or '(empty)'}"
     if root.tag != "gfi_message":
+        if root.tag.lower() == "html":   # well-formed enough to parse, still a page
+            title = _page_title(text)
+            return False, None, (
+                "the reply is a web page, not a kACE message"
+                + (f': "{title}"' if title else "")
+                + " -- that address served the site rather than the feed gateway, or "
+                  "sent us to its login page")
         return False, None, f"the reply is not a gfi_message: <{root.tag}>"
     took = None
     header = root.find("header")
@@ -589,6 +614,12 @@ def read_reply(text: str) -> tuple[bool, float | None, str]:
         return False, took, f"the reply carries no <response>: {first[:160]}"
     return True, took, (f"kACE took the message in {took:.3f}s" if took is not None
                         else "kACE took the message")
+
+
+def _page_title(text: str) -> str:
+    """The ``<title>`` of an HTML reply, collapsed to one line, or ``''``."""
+    m = re.search(r"<title[^>]*>(.*?)</title>", text, re.IGNORECASE | re.DOTALL)
+    return " ".join(m.group(1).split())[:120] if m else ""
 
 
 def _https_context(ca: str | None, insecure: bool) -> ssl.SSLContext:
@@ -659,10 +690,29 @@ def tls_note(url: str) -> str:
     return _TLS_NOTE_BY_HOST.get(urllib.parse.urlsplit(url).netloc.lower(), "")
 
 
+#: Cookies the platform sets, kept for the life of the process so a session
+#: picked up on one post is carried by the next.
+_COOKIES = http.cookiejar.CookieJar()
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Never follow a redirect on a post.
+
+    urllib's default handler follows a 302 and re-issues it as a GET, so a
+    platform that answers "log in first" arrives here as a clean 200 carrying
+    a login page and the redirect is invisible.  Refusing to follow turns that
+    back into what it is: a 302, and the address it pointed at.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 def _post_once(url: str, body: bytes, headers: dict, *, timeout: float,
                context: ssl.SSLContext | None) -> tuple[int, bytes]:
     """One POST through urllib; the bit the fallback loop below wraps."""
-    handlers = [urllib.request.ProxyHandler({})]
+    handlers = [urllib.request.ProxyHandler({}), _NoRedirect(),
+                urllib.request.HTTPCookieProcessor(_COOKIES)]
     if context is not None:
         handlers.append(urllib.request.HTTPSHandler(context=context))
     opener = urllib.request.build_opener(*handlers)
@@ -671,6 +721,13 @@ def _post_once(url: str, body: bytes, headers: dict, *, timeout: float,
         with opener.open(request, timeout=timeout) as reply:
             return getattr(reply, "status", 200), reply.read()
     except urllib.error.HTTPError as exc:
+        if exc.code in (301, 302, 303, 307, 308):
+            where = exc.headers.get("Location", "(no Location header)")
+            return exc.code, (
+                f"the server did not answer the post: it redirected to {where}. "
+                f"That is the platform asking for a session this post does not carry -- "
+                f"the page login puts a cookie in the browser and the post needs the same one."
+            ).encode("utf-8")
         return exc.code, exc.read()[:8192]
 
 
@@ -811,7 +868,7 @@ def post_feed(xml_text: str, *, pair: str, scenario: str, clear: bool, hor_date:
     try:
         result = post_message(xml_text, url, opener=opener, ca=ca, insecure=insecure)
         entry.update({"ok": result.ok, "status": result.status, "message": result.message,
-                      "processing_time": result.processing_time, "reply": result.reply[:1000]})
+                      "processing_time": result.processing_time, "reply": result.reply[:4000]})
     except KacePostError as exc:
         entry.update({"ok": False, "status": None, "message": str(exc)})
     if log is not None:

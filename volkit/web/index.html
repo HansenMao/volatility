@@ -144,6 +144,10 @@ table.mark tr.key td{background:var(--head);font-weight:650;color:var(--ink)}
 /* A quote a ratio derives: shown, not typed, with the multiple that made it. */
 table.mark td.derived{color:var(--muted);text-align:right}
 table.mark td.derived .x{margin-left:6px;font-size:10px;opacity:.75}
+/* A tenor CONFIG lists that the sheet does not quote: the box is empty and
+   real, and the number under it is what the fitted smile reads there.  Slanted
+   so a reading cannot be mistaken for a quote at a glance. */
+table.mark input.implied::placeholder{font-style:italic;opacity:.85}
 table.mark tr.key td:first-child::before{content:'▸ ';color:var(--accent)}
 .chart{width:100%;height:322px;display:block}
 .chart text{fill:var(--muted);font-size:10px}
@@ -509,10 +513,12 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
     solve the strike afresh against the marks as they now stand.
     <b>Price (pips)</b> is the vanilla premium the way it is quoted: the term currency per
     unit of base through the pair's own pip — 10,000 on most pairs, 100 on a yen pair.
-    The <b>premium toggle</b> on the Results bar reads the three premium rows and the totals
-    either as the <i>forward</i> (undiscounted) value the model makes or as <i>spot</i>, the
-    premium as paid: the same value discounted at the term currency's <code>RATES</code>-tab
-    rate to the premium date. A dash under spot is a term currency with no rate on the tab.
+    <b>Premium</b>, one of the advanced rows, is per leg: it reads that leg's premium rows
+    and its slice of the totals either as the <i>forward</i> (undiscounted) value the model
+    makes or as <i>spot</i>, the premium as paid, discounted on the term currency's
+    <code>OIS</code> feed rate to the premium date. A dash under spot is a term currency with
+    no rate on the tab, and a small <code>fwd</code> / <code>spot</code> tag beside each cell
+    says which of the two it is.
     An exotic's price is a fraction of its
     payout rather than a price per unit of base, so it is shown as a percentage instead.
     <b>Smile cash gamma</b> is the base, in millions, the delta hedge moves by for a one per
@@ -679,6 +685,14 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
           <span class="meta" id="mquotenote" style="margin-left:9px"
             title="a quote typed here replaces the pair sheet's for this session and refits that tenor; it is saved with the session and written into the sheet's own cell when the session is put back into the workbook"></span></h2>
         <div class="scroll"><table class="mark" id="matm"></table></div>
+        <div class="hint" style="margin-top:7px">The tenors on this table are the ones
+          <b>CONFIG</b> lists. A tenor the pair's sheet quotes and CONFIG does not is not shown,
+          not fitted and not marked &mdash; its row stays in the workbook and putting the tenor
+          back in <code>TENORS</code> brings it back. A tenor CONFIG lists that the sheet does not
+          quote is marked <span class="pill">smile</span>: its boxes are empty and the slanted
+          numbers under them are what the <i>fitted smile</i> reads there, interpolated from the
+          tenors either side. Type into one and the rest of the row is taken from those readings,
+          so the tenor becomes a quoted pillar of the fit like any other.</div>
         <div class="hint hide" id="mqpastehint" style="margin-top:7px">Quotes take a
           <b>block paste</b>. Copy the columns out of a spreadsheet, click the box the block
           starts in and paste: it fills right across the quote columns and down the tenors from
@@ -999,7 +1013,7 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
     <div class="f"><label>Pair</label><select id="anpair" style="width:120px"></select></div>
     <div class="f"><label>Cut</label><select id="ancut" style="width:74px"></select></div>
     <div class="f"><label>Interp</label><select id="anmethod" style="width:94px"></select></div>
-    <div class="f"><label>Roll target</label><select id="antarget" style="width:170px"></select></div>
+    <div class="f hide"><label>Roll target</label><select id="antarget" style="width:170px"></select></div>
     <div class="f"><label>Horizon (days)</label><input id="anhorizon" value="30" style="width:96px"></div>
     <div class="f"><label>Lookback (days)</label><input id="anlookback" value="match" style="width:104px"
       title="The window realized volatility is measured over, and so what the relative-value grid's 'level' signal compares against. 'match' gives each tenor its own length — a 1M mark against one month of realized. Type a number instead and every tenor is compared against that one window, so 1M and 2M read off the same realized volatility."></div>
@@ -1205,8 +1219,7 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
 <div class="wrap hide" id="p-monitor">
   <div class="anbar">
     <div class="f"><label>Pair</label><select id="mopair" style="width:120px"></select></div>
-    <div class="f"><label>Cut</label><select id="mocut" style="width:74px"></select></div>
-    <div class="f"><label>Interp</label><select id="momethod" style="width:94px"></select></div>
+    <div class="f hide"><label>Interp</label><select id="momethod" style="width:94px"></select></div>
     <div class="f"><label>Highlight</label><select id="mofield" style="width:150px"></select></div>
     <div class="f"><label>Big move (vol pts)</label>
       <input id="mobig" style="width:96px" placeholder="0.25" title="Every change at or over this is shaded, in all five columns; twice it is shaded harder. 0 turns it off."></div>
@@ -1220,7 +1233,7 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
       <input id="moallnowdate" style="width:104px" placeholder="mixed" title="Sets the &ldquo;now&rdquo; date of every panel at once. Only live while some panel reads the historical workbook."></div>
     <div class="acts">
       <button id="moadd">+ Panel</button>
-      <button class="ghost" id="modup">Duplicate last</button>
+      <button class="ghost hide" id="modup">Duplicate last</button>
       <button class="ghost" id="morun">Refresh</button>
       <label style="margin:0;display:flex;align-items:center;gap:6px;width:auto;color:var(--muted);font-size:11px">
         <input type="checkbox" id="moauto" checked style="width:auto"> auto</label>
@@ -1240,6 +1253,8 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
       <button id="cmpadd">+ Curve</button>
       <button class="ghost" id="cmpdup">Duplicate last</button>
       <button class="ghost" id="cmprun">Compare</button>
+      <div class="f"><label>Cut</label><select id="cmpcut" style="width:74px"></select></div>
+      <div class="f"><label>Interp</label><select id="cmpmethod" style="width:94px"></select></div>
       <div class="f"><label>Show</label><select id="cmpfield" style="width:150px"></select></div>
       <label style="margin:0;display:flex;align-items:center;gap:6px;width:auto;color:var(--muted);font-size:11px">
         <input type="checkbox" id="cmpauto" checked style="width:auto"> auto</label>
@@ -1591,6 +1606,12 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
     <br><b>Nothing here touches the workbook.</b> The fit reports and then puts the marks back,
     and so does a quote made on them. Tick <b>keep the marks</b> to leave the fit on the loaded
     book &mdash; still in memory only, and a reload discards them.
+    <br><b>A fit is only good for the book it was fitted on.</b> Re-mark the pair on the
+    <b>Vol marking</b> screen &mdash; a curve applied, a tenor pinned, a wing re-quoted, a band,
+    an event &mdash; and the quote here re-runs on the new marks, while this card says the fit
+    above it is of the book as it was. <b>Quote on the fit</b> then prices off the marks as they
+    now stand and says so on the sheet, rather than quietly putting the fitted curve back over
+    what you have just marked. Fit again to price on the fit.
   </details>
 </div>
 
@@ -1598,7 +1619,33 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
 const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
 const api=async(p,o)=>{const r=await fetch(p,o);const j=await r.json();
   if(j.error)throw new Error(j.error);return j;};
-const post=(p,b)=>api(p,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});
+/* Every POST that can move the marks on the loaded book, in one list.  The
+   market-maker screen holds a fit in the browser and prices off it, so a
+   re-mark made on the marking screen has to reach it -- and it used to reach
+   nothing: every marking route ended with `schedulePrice()`, which is the
+   *pricing* screen, and the fit and quote tables sat there showing the last
+   run's numbers. Hooked into `post` rather than added to each route, because
+   the seven that mark today are not the seven there will be. The server does
+   not trust this list: a held fit is stamped with a fingerprint of the pair's
+   marks and the quote refuses a stale one whatever the browser believed. */
+const MARKING_ROUTES=['/api/overwrite','/api/curve','/api/events','/api/events/weights',
+  '/api/band','/api/atm/bump','/api/reload','/api/session/load','/api/config/save',
+  '/api/config/pair','/api/workbook/restore','/api/mm/fit','/api/mm/mark/record'];
+const post=async(p,b)=>{
+  const j=await api(p,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});
+  if(MARKING_ROUTES.indexOf(String(p).split('?')[0])>=0)bookMoved();
+  return j;
+};
+/* The book has been re-marked.  The fit the quote is standing on was made on
+   the book as it was, so it is flagged rather than quietly reused, and the
+   quote is re-run so the prices follow the marks.  The fit is deliberately
+   *not* re-run: with `keep the marks` ticked a fit writes its answer onto the
+   book, and a refit firing on every keystroke in the marking table would have
+   the two screens marking each other. */
+function bookMoved(){
+  if(HELD)HELD.stale=true;
+  mqAvailable(); paintMM(); scheduleMQ();
+}
 const qs=o=>new URLSearchParams(o).toString();
 const esc=s=>String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');
 const num=(v,d=4)=>(v==null||!isFinite(v))?'—':v.toLocaleString(undefined,{minimumFractionDigits:d,maximumFractionDigits:d});
@@ -1736,7 +1783,7 @@ function defaultLeg(from){
     method:methodFor(pair,(STATE.methods||['SVI'])[0]),type:'C',strike:'ATM',barrier:'',
     settle:'',settlesrc:'calc',
     spot:'',swap:'',forward:'',pip:'',spotsrc:'feed',fwdsrc:'feed',strikeask:'',
-    notional:'100',side:'buy',ramp:'0',overhedge:'none',buffer:'0'};
+    notional:'100',side:'buy',ramp:'0',overhedge:'none',buffer:'0',csa:'',prem:'forward'};
 }
 function pipFor(leg){
   const p=parseFloat(leg.pip);
@@ -1783,25 +1830,62 @@ const IN=[
  ['notional','Notional (m)','text'],['side','Side','side'],['method','Interp','method'],
  ['ramp','Digital ramp %','text',['digital']],['overhedge','Overhedge','overhedge',TOUCH],
  ['buffer','Barrier buffer %','text',TOUCH],
+ /* The collateral currency, and the one input on this grid that changes no
+    price but the premium as paid -- so it is off by default rather than a
+    row every desk has to look past.  A CSA is a property of the agreement,
+    not of the pair, which is why it is per leg and not a setting. */
+ ['csa','CSA','csa',undefined,true],
+ /* Forward (the undiscounted value the model makes) or spot (the premium as
+    paid, discounted on the term currency's feed curve).  Reads a number the
+    pricer already returns for every leg either way, so it is never sent to
+    the pricer itself -- the same reason spotsrc/fwdsrc are screen state and
+    not a price input.  Per leg for the same reason CSA is: a strip is not
+    one desk's answer to "as paid or not", leg by leg, and a switch that
+    moved every column at once hid that a forward on one leg and a spot
+    amount on another are not the same kind of number lined up in a row. */
+ ['prem','Premium','premswitch',undefined,true],
 ];
+/* Whether the rows marked advanced are on the grid.  Remembered on the
+   machine like the premium toggle, and off to start: a desk on one house CSA
+   should not have to look past a row it never changes. */
+let ADV=false;
+try{ADV=localStorage.getItem('volkit.advrows')==='1'}catch(e){}
+function setAdv(on){ADV=!!on;
+  try{localStorage.setItem('volkit.advrows',ADV?'1':'0')}catch(e){}
+  renderGrid();}
 const dash=v=>(v===0||v==null||!isFinite(v))?'—':null;
 /* Which premium the Results rows show: 'forward' (the undiscounted value the
    model makes, what every price on this screen always was) or 'spot' (the
-   same value discounted at the term currency's RATES-tab rate to the premium
+   same value discounted on the term currency's feed discount curve to the premium
    date -- what is paid).  One switch for the three premium rows and the
    totals, so a screen never shows a forward price above a spot amount. */
-let PREM='forward';
-try{PREM=localStorage.getItem('volkit.premium')==='spot'?'spot':'forward'}catch(e){}
-const premWord=()=>PREM==='spot'?'spot (as paid)':'forward';
-const prem=(fwd,pv)=>r=>PREM==='spot'?r[pv]:r[fwd];
-function premCell(v,r,fmt){
-  if(PREM==='spot'&&v==null)return '<span title="no '+esc(String(r.pair||'').slice(3,6))
-    +' rate on the RATES tab, so the premium cannot be discounted; forward is the only value">\u2014</span>';
-  return fmt(v);
+/* Which premium a leg's rows and its slice of the totals show: 'forward'
+   (the undiscounted value the model makes, what every price on this screen
+   always was) or 'spot' (the same value discounted on the term currency's
+   feed discount curve to the premium date -- what is paid).  A property of
+   the leg, the same as CSA: a strip is not one desk's answer to "as paid or
+   not", leg by leg, so this reads the leg's own Premium box rather than one
+   screen-wide switch. */
+const legPrem=L=>((L&&L.prem)==='spot'?'spot':'forward');
+const prem=(fwd,pv)=>(r,L)=>legPrem(L)==='spot'?r[pv]:r[fwd];
+/* The small tag beside a premium cell saying which of the two it is -- the
+   same pattern the spot/forward delta row already carries.  Needed now that
+   one row can be forward in one column and spot in the next. */
+const premTag=L=>' <span style="color:var(--muted);font-size:11px" title="'+
+  (legPrem(L)==='spot'?'the premium as paid, discounted to the premium date':
+   'the forward (undiscounted) value the model makes')+'">'+
+  (legPrem(L)==='spot'?'spot':'fwd')+'</span>';
+function premCell(v,r,L,fmt){
+  if(legPrem(L)==='spot'&&v==null)return '<span title="no '+esc(String(r.pair||'').slice(3,6))
+    +' discount curve from the feed, so the premium cannot be discounted; forward is the only value">\u2014</span>'+premTag(L);
+  /* Which curve discounted it.  A premium under a USD CSA and the same
+     premium under a JPY one differ by the basis and must not read the same,
+     so the row carries where the factor came from -- including a CSA that
+     could not be honoured and fell back. */
+  if(legPrem(L)==='spot'&&r&&r.csa_source)
+    return '<span title="'+esc(r.csa_source)+'">'+fmt(v)+'</span>'+premTag(L);
+  return fmt(v)+premTag(L);
 }
-function setPrem(mode){PREM=mode==='spot'?'spot':'forward';
-  try{localStorage.setItem('volkit.premium',PREM)}catch(e){}
-  renderGrid();}
 /* What the model worked out, and nothing an input box above already holds.
    The expiry, the strike and the option type are *resolved into the boxes*
    -- a tenor comes back the one standard date, `ATM` / `25d` comes back the
@@ -1832,13 +1916,14 @@ const OUT=[
     next row already is. */
  /* One row each, read in the premium the toggle on the Results bar says:
     the forward (undiscounted) value the model makes, or the premium as paid
-    -- the same value discounted at the term currency's RATES-tab rate to the
-    premium date.  A dash under "spot" is a term currency with no rate on the
-    tab; the forward value is then the only honest number, one click away. */
- [prem('premium_dom','premium_pv_dom'),()=>'Price (pips), '+premWord(),(v,r,L)=>premCell(v,r,x=>num(x*pipFor(L),2)),'',VANILLA],
- [prem('premium_pct_base','premium_pv_pct_base'),()=>'Price % (of base / payout), '+premWord(),(v,r)=>premCell(v,r,x=>num(x,4))],
+    -- the same value discounted on the term currency's feed discount curve to the
+    premium date -- whichever that leg's own Premium box says.  A dash under
+    "spot" is a term currency with no rate on the tab; the forward value is
+    then the only honest number, one box away. */
+ [prem('premium_dom','premium_pv_dom'),'Price (pips)',(v,r,L)=>premCell(v,r,L,x=>num(x*pipFor(L),2)),'',VANILLA],
+ [prem('premium_pct_base','premium_pv_pct_base'),'Price % (of base / payout)',(v,r,L)=>premCell(v,r,L,x=>num(x,4))],
  ['overhedge_cost','Overhedge cost',v=>dash(v)??num(v,6),'sign',['digital','one_touch','no_touch']],
- /* Spot delta where the pair quotes one and the RATES tab can price it,
+ /* Spot delta where the pair quotes one and the feed can discount it,
     forward delta otherwise; the small word says which and the hover says why. */
  ['delta_pct','Delta %',(v,r)=>num(v,2)+(r&&r.delta_kind?' <span style="color:var(--muted);font-size:11px" title="'+esc(r.delta_kind)+'">'+(r.delta_kind.indexOf('spot')===0?'spot':'fwd')+'</span>':'')],
  ['smile_delta_pct','Smile delta %',v=>num(v,2),'',VANILLA],
@@ -1848,7 +1933,7 @@ const OUT=[
     the row above it and not of the Black gamma. */
  ['smile_cash_gamma','Smile cash gamma (m base / 1%)',v=>num(v,4),'sign',VANILLA],
  ['vega_dom','Vega per vol pt',v=>num(v,6)],
- [prem('premium_amount','pv_amount'),()=>'Premium amount, '+premWord(),(v,r)=>premCell(v,r,x=>num(x,4)),'big sign'],
+ [prem('premium_amount','pv_amount'),'Premium amount',(v,r,L)=>premCell(v,r,L,x=>num(x,4)),'big sign'],
  ['vega_amount','Vega amount / vol pt',v=>num(v,4),'sign'],
  ['delta_amount','Delta hedge (m base)',v=>num(v,4),'sign'],
  ['pricing_method','Method',v=>esc(v),'',['digital','one_touch','no_touch']],
@@ -1870,6 +1955,24 @@ function ctl(kind,i,key,val){
   if(kind==='product')return `<select ${a}>${opts(STATE.products||['vanilla'],val)}</select>`;
   if(kind==='overhedge')return `<select ${a}>${opts(STATE.overhedges||['none'],val)}</select>`;
   if(kind==='side')  return `<select ${a}>${opts(['buy','sell'],val)}</select>`;
+  if(kind==='premswitch')return `<select ${a}>${opts(['forward','spot'],val||'forward')}</select>`;
+  if(kind==='csa'){
+    /* The collateral currency of the agreement this leg trades under.  The
+       choices are USD -- which is what the feed's implied factors already
+       are, so it is the default and the number does not move -- and the
+       pair's own two currencies, which is every CSA a single-pair option is
+       realistically under.  A currency the feed states no OIS curve for is
+       offered and marked: choosing it falls back to USD and the premium row
+       says so, which is more use than a missing option nobody can ask about. */
+    const P=String((LEGS[i]||{}).pair||'').toUpperCase();
+    const rates=(STATE.feed&&STATE.feed.rates)||null;
+    const have=rates?new Set(rates.map(r=>r.currency)):null;
+    let o=`<option value=""${val?'':' selected'}>USD (default)</option>`;
+    [...new Set([P.slice(0,3),P.slice(3,6)])].filter(c=>c&&c!=='USD').forEach(c=>{
+      o+=`<option value="${esc(c)}"${String(val)===c?' selected':''}>${esc(c)}`
+        +(have&&!have.has(c)?' \u2014 no curve':'')+`</option>`});
+    return `<select ${a}>${o}</select>`;
+  }
   const L=LEGS[i]||{};
   const c=boxClass(L,key);
   return `<input ${a}${c?` class="${c[0]}" title="${c[1]}"`:''} value="${esc(val)}">`;
@@ -1925,16 +2028,18 @@ function renderGrid(){
   LEGS.forEach((L,i)=>{h+=`<th class="colhead"><div><span>${esc(L.label||('#'+(i+1)))}</span>
       <span class="x" data-del="${i}" title="remove this option">✕</span></div></th>`;});
   h+='<th class="spacer"></th></tr></thead><tbody>';
-  h+=`<tr class="sec"><td colspan="${span}">Inputs</td></tr>`;
-  IN.forEach(([k,lab,kind,only])=>{
+  h+=`<tr class="sec"><td colspan="${span}">Inputs
+      <span class="premtog" title="the CSA row: the collateral currency each leg is discounted under. USD is what the feed's implied factors already are, so the default changes nothing; another currency discounts the premium on that currency's own OIS curve instead, and the two differ by the basis">CSA row:
+      <button class="ghost${ADV?'':' on'}" data-adv="0">hidden</button><button class="ghost${ADV?' on':''}" data-adv="1">shown</button></span></td></tr>`;
+  IN.forEach(([k,lab,kind,only,adv])=>{
+    if(adv&&!ADV)return;
     if(!anyApplies(only))return;
     h+=`<tr><td class="rh">${lab}</td>`;
     LEGS.forEach((L,i)=>{h+=applies(only,L)?`<td class="cell">${ctl(kind,i,k,L[k]??'')}</td>`
       :`<td class="na" title="${esc(prodOf(L))} does not use this">·</td>`;});
     h+='<td class="spacer"></td></tr>';});
   h+=`<tr class="sec"><td colspan="${span}">Results
-      <span class="premtog" title="the premium rows and the totals: the forward (undiscounted) value the model makes, or the premium as paid -- discounted at the term currency's RATES-tab rate to the premium date">premium:
-      <button class="ghost${PREM==='forward'?' on':''}" data-prem="forward">forward</button><button class="ghost${PREM==='spot'?' on':''}" data-prem="spot">spot</button></span></td></tr>`;
+      <span class="premtog" title="forward or spot (as paid) -- set per leg in the Premium row above, once the advanced rows are shown">premium: per leg</span></td></tr>`;
   const res=RESULT?RESULT.legs:[];
   // A leg that failed says so once, in the first result row that is on the
   // screen.  Anchoring that to a row by name meant removing the row took the
@@ -1949,7 +2054,7 @@ function renderGrid(){
       if(!r){h+=`<td class="o">—</td>`;return}
       if(!r.ok){h+=`<td class="err" title="${esc(r.error)}">${k===firstrow?esc(r.error):''}</td>`;return}
       if(!applies(only,L)){h+=`<td class="na" title="${esc(prodOf(L))} does not use this">·</td>`;return}
-      const v=typeof k==='function'?k(r):r[k]; let c='o '+(cls||'');
+      const v=typeof k==='function'?k(r,L):r[k]; let c='o '+(cls||'');
       if((cls||'').includes('sign')&&typeof v==='number')c+=v>0?' pos':(v<0?' neg':'');
       h+=`<td class="${c}">${fmt(v,r,L)}</td>`;});
     h+='<td class="spacer"></td></tr>';});
@@ -1959,10 +2064,21 @@ function renderGrid(){
   $('#ptotals').innerHTML=Object.keys(t).length?Object.entries(t).map(([p,v])=>{
     // The total follows the toggle; a pair with a leg that could not be
     // discounted has no spot total, and says so rather than mixing the two.
-    const pv=PREM==='spot'?v.pv_premium:v.premium;
-    const ptxt=pv==null?'<span title="a leg on this pair has no term-currency rate on the RATES tab">—</span>':num(pv,4);
+    let pv=0, any=false, blocked=false;
+    LEGS.forEach((L,i)=>{
+      if((L.pair||'')!==p)return;
+      const r=res[i];
+      if(!r||!r.ok)return;
+      any=true;
+      if(legPrem(L)==='spot'){
+        if(r.pv_amount==null){blocked=true;return}
+        pv+=r.pv_amount;
+      }else{pv+=r.premium_amount;}
+    });
+    if(!any||blocked)pv=null;
+    const ptxt=pv==null?'<span title="a leg on this pair wants the premium as paid but has no term-currency discount curve from the feed">—</span>':num(pv,4);
     return `<div class="tot"><b>${esc(p)}</b>
-      <div><span>premium, ${PREM==='spot'?'spot':'fwd'}</span><span class="${pv>0?'pos':(pv<0?'neg':'')}">${ptxt}</span></div>
+      <div><span>premium</span><span class="${pv>0?'pos':(pv<0?'neg':'')}">${ptxt}</span></div>
       <div><span>vega / vol pt</span><span>${num(v.vega,4)}</span></div>
       <div><span>delta (m base)</span><span>${num(v.delta,4)}</span></div></div>`}).join(''):'';
 }
@@ -1992,6 +2108,12 @@ function loadLegs(){
     // the swap is read with -- and `points` is dropped, because the server
     // reads that name and a stored zero would pin every forward to spot.
     if(L.strikeask===undefined)L.strikeask='';
+    /* A leg saved before the CSA row existed is a USD CSA, which is what it
+       was priced under: blank, and the same number. */
+    if(L.csa===undefined)L.csa='';
+    /* A leg saved before the Premium row existed was reading the one
+       screen-wide switch, and that switch defaulted to forward. */
+    if(L.prem===undefined)L.prem='forward';
     /* A leg saved before the settlement date was a box has neither the date
        nor the flag.  Both start on the calendar's side: the next resolve
        fills the box, and a stored leg must never come back claiming a broken
@@ -2183,6 +2305,9 @@ $('#pgrid').addEventListener('change',async e=>{
     // agreed for a trade in it -- and USDCAD settles a day before USDJPY
     // does off the same expiry.  Back to the new pair's own.
     L.settle='';L.settle_default='';L.settlesrc='calc';
+    // A CSA in the old pair's currency is not a currency of the new one, so
+    // it goes back to the default rather than travelling as a dead string.
+    L.csa='';
     // And a strike this screen solved belongs to the pair it solved it on --
     // 150.446 is a considered strike on USDJPY and nonsense on EURUSD, the
     // same trap the two level boxes are cleared for.  The *request* goes
@@ -2202,8 +2327,8 @@ $('#pgrid').addEventListener('change',async e=>{
   schedulePrice();
 });
 $('#pgrid').addEventListener('click',e=>{
-  const tog=e.target.closest('[data-prem]');
-  if(tog){setPrem(tog.dataset.prem);return}
+  const av=e.target.closest('[data-adv]');
+  if(av){setAdv(av.dataset.adv==='1');return}
   const el=e.target.closest('[data-del]'); if(!el)return;
   LEGS.splice(+el.dataset.del,1); saveLegs(); RESULT=null; renderGrid(); schedulePrice();
 });
@@ -2215,6 +2340,19 @@ $('#dupleg').onclick=async()=>{if(!LEGS.length)return;
 $('#delleg').onclick=()=>{if(LEGS.length){LEGS.pop();saveLegs();RESULT=null;renderGrid();schedulePrice()}};
 $('#clearlegs').onclick=()=>{LEGS=[];RESULT=null;saveLegs();renderGrid();$('#pstatus').textContent=''};
 $('#priceall').onclick=priceAll;
+function rateTitle(f){
+  /* One tooltip for both halves of what the OIS rows say: the curves the file
+     states, and -- for a currency that states its own curve as well as being
+     implied -- what the forwards say against it.  A basis that has moved is a
+     forward worth looking at, and it is the only thing a non-anchor curve is
+     read for. */
+  const lines=(f.rates||[]).map(r=>r.currency+'OIS: '+r.tenors+' tenor'+(r.tenors>1?'s':'')+
+    (r.one_year!=null?', '+(r.one_year*100).toFixed(3)+'% at 1y':''));
+  (f.basis||[]).forEach(b=>lines.push(b.currency+' basis vs the forwards at 1y: '+
+    (b.basis*10000).toFixed(1)+'bp (stated, not used to discount)'));
+  lines.push('USDOIS anchors; every other currency is implied through its own forward');
+  return lines.join('\n');
+}
 function showFeed(f){
   const el=$('#feedstatus');
   if(!f||!f.loaded){el.innerHTML='<span class="pill warn">no feed</span>';return}
@@ -2232,7 +2370,19 @@ function showFeed(f){
        the file stated, a dated row passed over as history.  Counted apart and
        readable in the tooltip, because a near side placed against a date
        nobody stated must not read like one that was published. */
-    (note?` <span class="pill" title="${esc((f.notes||[]).join('\n'))}">${note} note${note>1?'s':''}</span>`:'');
+    (note?` <span class="pill" title="${esc((f.notes||[]).join('\n'))}">${note} note${note>1?'s':''}</span>`:'')+
+    /* The file's other half.  The OIS rows are what every discount factor is
+       built from, and USDOIS is the only curve that discounts in its own
+       right: everything else is implied from it through that currency's own
+       forward above, so the rate carries the basis and DF_base/DF_term is the
+       forward on this same screen.  Without USDOIS nothing discounts through
+       the forwards, and that is a warning rather than a silence -- it is the
+       difference between a spot delta and a forward one on every major. */
+    (f.anchored
+      ? ` <span class="pill ok" title="${esc(rateTitle(f))}">OIS: ${(f.rates||[]).length} curve${(f.rates||[]).length>1?'s':''}</span>`
+      : ((f.rates||[]).length
+          ? ` <span class="pill warn" title="no USDOIS rows, so no currency is implied through the forwards">OIS: no USD anchor</span>`
+          : ` <span class="pill warn" title="no &lt;CCY&gt;OIS rows in the file: every delta is a forward delta and no premium is discounted">no OIS rows</span>`));
   el.title=(f.problems||[]).concat(f.notes||[]).join('\n')||
     (f.source+(f.written?('\nread from the file written '+f.written.replace('T',' ')):''));
 }
@@ -2444,7 +2594,11 @@ function paintMarks(){
          quoted at all, quoted but not fitted (a tenor part-typed, which the
          server refuses to fit), and re-quoted away from the sheet. */
       const any=QF.some(f=>q[f]!=null);
-      const tag=(!any)?'':(r.fitted?(r.quotes_marked?
+      /* A fourth: CONFIG lists the tenor and the sheet does not quote it, so
+         the four numbers on the row are read off the fitted smile.  Not a
+         warning -- the row is doing what it should -- so a plain pill. */
+      const tag=r.implied?' <span class="pill" title="CONFIG lists this tenor and the sheet does not quote it, so its quotes are read off the fitted smile; type one and the whole row is marked">smile</span>'
+        :(!any)?'':(r.fitted?(r.quotes_marked?
           ' <span class="owdot" title="re-quoted away from the sheet">&bull;</span>':'')
         :' <span class="pill bad" title="a tenor is quoted by all four of its numbers or by none, so this one is not fitted">part</span>');
       return `<tr${isKeyTenor(r.tenor)?' class="key"':''}><td>${esc(r.tenor)}`+
@@ -2462,9 +2616,16 @@ function paintMarks(){
         if(d!=null)return '<td class="derived" title="derived: '+esc(f.slice(0,2).toUpperCase())+
           ' 25d &times; '+num(d,4)+' — clear the ratio below to quote it here">'+
           (q[f]==null?'—':num(q[f],4))+'<span class="x">&times;'+num(d,3)+'</span></td>';
+        /* The placeholder is what the box would hold if it were empty: the
+           sheet's own number where there is one, and where there is not --
+           a tenor CONFIG lists and the sheet does not quote -- what the
+           fitted smile reads there. */
+        const imp=(r.quotes_implied||{})[f];
+        const ph=sheet[f]!=null?sheet[f].toFixed(4):(imp!=null?imp.toFixed(4):'—');
         return `<td><input data-m="quote" data-field="${esc(f)}" data-tenor="${esc(r.tenor)}"
+        ${sheet[f]==null&&imp!=null?'class="implied"':''}
         value="${q[f]==null?'':q[f].toFixed(4)}"
-        placeholder="${sheet[f]==null?'—':sheet[f].toFixed(4)}"></td>`;}).join('')+
+        placeholder="${ph}"></td>`;}).join('')+
       '</tr>';}).join('')+'</tbody>';
   paintRatios();
   /* The anchor is one of the tenors on the table above it, and keeps what was
@@ -4517,7 +4678,7 @@ function cmpDefault(from){
 }
 function cmpPayload(){return{
   curves:CMP.map(c=>({kind:c.kind,pair:c.pair,date:c.date,label:c.label,text:c.text,on:!!c.on})),
-  cut:$('#mocut').value, method:$('#momethod').value,
+  cut:$('#cmpcut').value, method:$('#cmpmethod').value,
   field:$('#cmpfield').value||'atm', base:CMPBASE};}
 function saveCmp(){try{localStorage.setItem('volkit.compare',
   JSON.stringify({curves:CMP,base:CMPBASE,field:$('#cmpfield').value}))}catch(e){}}
@@ -5040,6 +5201,7 @@ let MO=[], MOR=null, _mot=null;
 /* Every field here has to be one monitor.tile_from_request reads; a test pins it. */
 const MOF=[
  ['pair','Pair'],
+ ['cut','Cut'],
  ['was_kind','Was'],
  ['was_date','Was date'],
  ['now_kind','Now'],
@@ -5050,13 +5212,14 @@ const MOF=[
 function moDefault(from){
   const d=(STATE.monitor||{});
   return Object.assign({pair:$('#mopair').value||(STATE.pairs||[''])[0],
+    cut:'NY',
     was_kind:d.was_kind||'history', was_date:d.was_date||'-1w',
     now_kind:'surface', now_date:'', label:'', on:true},from||{});
 }
 function moPayload(){return{
-  tiles:MO.map(t=>({pair:t.pair,was_kind:t.was_kind,was_date:t.was_date,
+  tiles:MO.map(t=>({pair:t.pair,cut:t.cut,was_kind:t.was_kind,was_date:t.was_date,
                     now_kind:t.now_kind,now_date:t.now_date,label:t.label,on:!!t.on})),
-  cut:$('#mocut').value, method:$('#momethod').value,
+  method:$('#momethod').value,
   field:$('#mofield').value||'atm', big:moBig()};}
 /* What counts as a big move, in volatility points.  An empty box is the
    server's own default rather than nothing: a threshold that had quietly
@@ -5086,6 +5249,8 @@ function moHead(t,i){
   let f='<div class="mohead">'+
     '<div class="f"><label>Pair</label><select '+a('pair')+' style="width:104px">'+
       optlist(moPairs().map(x=>[x,x]),t.pair)+'</select></div>'+
+    '<div class="f"><label>Cut</label><select '+a('cut')+' style="width:64px">'+
+      optlist(cutList().map(x=>[x,x]),t.cut)+'</select></div>'+
     '<div class="f"><label>Was</label><select '+a('was_kind')+' style="width:130px">'+
       optlist(moKinds().map(k=>[k.key,k.label]),t.was_kind)+'</select></div>';
   if(t.was_kind==='history')
@@ -5220,7 +5385,7 @@ async function runMonitor(){
     MOR=await post('/api/monitor',moPayload());
     paintMonitor(MOR);
     const h=STATE.history||{};
-    $('#mostatus').textContent=MOR.tiles.length+' panel(s) · cut '+MOR.cut+' · '+MOR.method+
+    $('#mostatus').textContent=MOR.tiles.length+' panel(s) · '+MOR.method+
       (MOR.big>0?' · '+MOR.moved+' change(s) of '+num(MOR.big,2)+' vol points or more'+
         (MOR.moved_hard?', '+MOR.moved_hard+' of '+num(MOR.big*MOR.big_step,2)+' or more':'')
         :' · big moves not marked')+
@@ -5241,7 +5406,8 @@ $('#mofield').onchange=()=>{saveMO();if(MOR)paintMonitor(MOR);else runMonitor()}
    repaint of the one already on the screen. */
 $('#mobig').oninput=()=>{saveMO();scheduleMonitor()};
 $('#mobig').onchange=()=>{saveMO();runMonitor()};
-['#mocut','#momethod'].forEach(id=>{$(id).onchange=()=>{runMonitor();scheduleCompare()}});
+$('#momethod').onchange=()=>{runMonitor()};
+['#cmpcut','#cmpmethod'].forEach(id=>{$(id).onchange=()=>runCompare()});
 $('#mopair').onchange=()=>{saveMO()};
 /* Blank is 'leave them as they are', not 'clear them all': it is what the box
    shows when the panels disagree, so choosing it must not flatten them. */
@@ -5351,7 +5517,7 @@ function mqMarks(){
   if(HELD.marks.pair!==$('#mmpair').value)return null;
   return HELD.marks;
 }
-function holdMarks(marks,from){HELD=marks?{marks:marks,from:from}:null;mqAvailable()}
+function holdMarks(marks,from){HELD=marks?{marks:marks,from:from,stale:false}:null;mqAvailable()}
 function mqPayload(){
   const out=readFields(MQF);
   const m=mqMarks();
@@ -5362,9 +5528,11 @@ function mqAvailable(){
   /* A checkbox that can be ticked and then quietly does nothing is the same
      failure as a box that is filled in and ignored. */
   const ok=!!(HELD&&HELD.marks&&HELD.marks.pair===$('#mmpair').value);
+  const stale=ok&&!!HELD.stale;
   $('#mqonfit').disabled=!ok;
-  $('#mqonfit').title=ok?('standing on '+(HELD.from==='agent'?"the marking agent's accepted proposal":'the last fit')):
-    'no fit of this pair yet — the quote stands on the marks as they are';
+  $('#mqonfit').title=!ok?'no fit of this pair yet — the quote stands on the marks as they are'
+    :stale?'the book has been re-marked since this fit — the quote will stand on the marks as they are now and say so; run the fit again to price on it'
+    :('standing on '+(HELD.from==='agent'?"the marking agent's accepted proposal":'the last fit'));
 }
 function saveMM(){try{localStorage.setItem('volkit.mm',
   JSON.stringify(Object.assign({},mmPayload(),readFields(MQF),readFields(MKF),
@@ -5496,7 +5664,17 @@ function paintMM(){
   const d=MMR; if(!d)return;
   paintMarket(d); paintCurve(d); paintWings(d);
   const sh=d.market||{};
-  $('#mmparse').innerHTML=(sh.notes||[]).map(n=>'<div class="etonote">· '+esc(n)+'</div>').join('')+
+  /* The one thing on this card that is about the book rather than the fit: a
+     fit is a photograph of a curve, and once the curve has been re-marked the
+     numbers below are of a book nobody is on any more. Flagged and left on
+     screen rather than cleared -- what was fitted is still what was fitted,
+     and a card that emptied itself when somebody typed on another screen
+     would be worse than one that says why. */
+  const moved=!!(HELD&&HELD.stale&&HELD.from==='fit'&&HELD.marks&&
+                 HELD.marks.pair===$('#mmpair').value);
+  $('#mmparse').innerHTML=(moved?'<div class="etowarn">! '+esc($('#mmpair').value)+
+      ' has been re-marked since this fit was run, so the numbers below are of the book as it '+
+      'was. Fit again to bring them up to date.</div>':'')+(sh.notes||[]).map(n=>'<div class="etonote">· '+esc(n)+'</div>').join('')+
     (sh.skipped||[]).map(x=>'<div class="etowarn">! line '+x.line+' skipped ('+esc(x.why)+'): '+
       esc(String(x.text).slice(0,70))+'</div>').join('')+
     /* Another pair's lines: not wrong, just not this pair's.  Said, so a
@@ -5648,8 +5826,15 @@ function paintQuote(d){
   $('#mqsheethead').textContent=sh.n_quotes+' asked for · '+sh.priced+' with a width · '+
     sh.matched+' also in the market paste';
   const m=d.marks||{};
-  $('#mqmarks').innerHTML='<span class="etonote">· '+esc(m.note||'')+
-    (m.stamp?' ('+esc(m.stamp.replace('T',' ').slice(0,16))+')':'')+'</span>';
+  /* Three things this line can say, and they are not the same: quoted on the
+     fit, quoted on the book because no fit was handed over, and quoted on the
+     book because the fit that *was* handed over is of a curve since re-marked.
+     The third used to be the first, silently, and only for the two things
+     `capture_marks` holds -- the backbone knobs and the smile shifts -- so a
+     re-marked curve was thrown away while a pinned tenor went through. */
+  const stale=(m.stale||[]).length?m.stale:null;
+  $('#mqmarks').innerHTML='<span class="'+(stale?'etowarn':'etonote')+'">'+(stale?'! ':'· ')+
+    esc(m.note||'')+(m.stamp?' ('+esc(m.stamp.replace('T',' ').slice(0,16))+')':'')+'</span>';
   if(!sh.rows.length){host.innerHTML='<div class="annone">Nothing could be read from the '+
     'request box.</div>';return}
   /* The quoting agent's two columns sit beside the requests it read, and
@@ -6479,8 +6664,9 @@ async function boot(){
   if(has('monitor')){
     const MOS=STATE.monitor||{};
     fillSel('#mopair',STATE.pairs||[]);
-    fillSel('#mocut',cutList(),'NY');
     setMethodSel('#momethod',null);
+    fillSel('#cmpcut',cutList(),'NY');
+    setMethodSel('#cmpmethod',null);
     const flds=(MOS.fields||[{key:'atm',label:'at-the-money'}]).map(x=>
       '<option value="'+esc(x.key)+'">'+esc(x.label)+'</option>').join('');
     $('#mofield').innerHTML=flds;

@@ -79,6 +79,8 @@ panel boundary, the same split :mod:`volkit.listed` uses.
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 import math
 import time
 from contextlib import contextmanager
@@ -1324,6 +1326,76 @@ def apply_marks(surface, marks: dict) -> list[str]:
     return problems
 
 
+#: What each part of a pair's marked state is called where a person reads it.
+#: The keys are ``session.capture_pair``'s, plus the two things a session does
+#: not capture because they belong to the workbook rather than to a marker.
+FINGERPRINT_LABELS = {
+    "curve": "the curve parameters",
+    "events": "the event table",
+    "atm_overwrites": "the pinned at-the-money tenors",
+    "quote_overwrites": "the re-quoted wings",
+    "wing_ratios": "the wing ratios",
+    "smile_overwrites": "the smile parameter overwrites",
+    "smile_term": "a marked smile term structure",
+    "param_shifts": "the smile shifts",
+    "anchor_tenors": "the smile anchor",
+    "band": "the band treatment",
+    "sheet_quotes": "the pair sheet's own quotes",
+    "sheet_ratios": "the WING_RATIOS tab",
+}
+
+
+def mark_fingerprint(book, pair: str) -> dict[str, str]:
+    """One short hash per part of a pair's marked state, as it stands now.
+
+    A fit's answer is a set of numbers the browser holds and posts back to the
+    quote, and the book underneath it can be re-marked in between -- that is
+    the whole of the marking screen.  Stamped with this, a held fit is stale
+    exactly when the pair has been re-marked, and the quote can say **which
+    part** moved rather than pricing off a curve nobody is marked on any more.
+
+    It is a photograph rather than a counter on purpose.  ``capture_pair`` is
+    already the snapshot a re-marking instance is diffed from
+    (``remarks.diff_snapshots``), so every route that marks anything is
+    covered the day it is written and there is no bump for a future one to
+    forget -- which is the failure this replaces: ``applied_marks`` put the
+    fit's backbone knobs and smile shifts back over whatever the marking
+    screen had done to them, silently, while an at-the-money pin or a
+    re-quoted wing went through untouched.
+
+    The sheet's own quotes and wing ratios are hashed beside the session's
+    marks because a workbook reloaded from an edited file moves those and
+    nothing a session captured.
+    """
+    from . import session
+
+    surface = book[pair]
+    block = dict(session.capture_pair(book, pair))
+    block["sheet_quotes"] = [[m.tenor, m.rr_25, m.rr_10, m.st_25, m.st_10]
+                             for m in surface.marks]
+    block["sheet_ratios"] = {t: [r.st, r.rr] for t, r in sorted(surface.wing_ratios.items())}
+    return {
+        key: hashlib.sha256(
+            json.dumps(value, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()[:12]
+        for key, value in sorted(block.items())
+    }
+
+
+def fingerprint_moved(stamped: dict | None, now: dict) -> list[str]:
+    """Which parts of the marks have moved since a fit stamped them.
+
+    An empty list for a fit that carries no stamp: a payload from a client
+    that predates this is quoted off as it always was rather than refused,
+    because refusing on a *missing* field would break every saved panel the
+    day it shipped.
+    """
+    if not stamped:
+        return []
+    return sorted(FINGERPRINT_LABELS.get(k, k) for k in set(stamped) | set(now)
+                  if stamped.get(k) != now.get(k))
+
+
 @contextmanager
 def applied_marks(surface, marks: dict | None, warnings: list[str]):
     """Quote off a set of marks, then put back exactly what was there.
@@ -1660,6 +1732,12 @@ class Panel:
             out["warnings"].append(
                 f"the fitted marks were written into the loaded book for {self.pair}. They are "
                 f"in memory only -- the workbook on disk is unchanged, and a reload discards them")
+        # The book as the quote will find it, stamped onto the marks the
+        # browser is about to hold.  Taken *after* the restore (or the apply),
+        # because that is the state a quote standing on these marks is
+        # entitled to assume, and a re-mark made on the marking screen between
+        # here and there is exactly what the quote has to notice.
+        out["marks"]["book"] = mark_fingerprint(book, self.pair)
         out["warnings"].extend(surface.warnings[-6:])
         return out
 
@@ -1892,12 +1970,31 @@ class QuotePanel:
             "problems": list(bank.problems),
         }
 
+        # A held fit is only good for the book it was fitted on.  The marks
+        # come from the browser, which keeps them across a trip to the marking
+        # screen, and ``applied_marks`` would put the fit's backbone knobs and
+        # smile shifts back over whatever was marked there -- silently, and
+        # only over *those two*, so a pinned tenor or a re-quoted wing went
+        # through while a re-marked curve did not.  A price that is half this
+        # morning's marks and half a fit of the curve they replaced is a wrong
+        # answer that reads perfectly well, so the stale marks are dropped and
+        # the quote stands on the book, saying which part moved.
+        marks = self.marks
+        moved = fingerprint_moved((marks or {}).get("book"),
+                                  mark_fingerprint(book, self.pair))
+        if moved:
+            out["warnings"].append(
+                f"{self.pair} has been re-marked since this fit was made ({', '.join(moved)} "
+                f"moved), so these prices stand on the marks as they are now rather than on "
+                f"the fit. Run the fit again to price on it")
+            marks = None
+
         # Everything that reads the surface happens inside the marks, and the
         # fair value with it: richness is the mark against realized, and the
         # mark being shaded is the one being quoted.  Measured outside, a fit
         # that moved the at-the-money half a point would be shaded by the
         # richness of the level it had just left.
-        with applied_marks(surface, self.marks, out["warnings"]):
+        with applied_marks(surface, marks, out["warnings"]):
             rich_at, fair_block = self._fair(book, hist, method)
             out["fair"] = fair_block
             ev = Evaluator(surface, method, self.cut)
@@ -1907,16 +2004,23 @@ class QuotePanel:
                               market, synthesis)
                     for q in requests]
 
-        stood = dict(self.marks or {})
+        stood = dict(marks or self.marks or {})
         out["marks"] = {
-            "on_the_fit": bool(self.marks),
+            "on_the_fit": bool(marks),
             "fitted": bool(stood.get("fitted")),
             "what": stood.get("what") or "",
             "stamp": stood.get("stamp") or "",
+            # Which parts of the pair's marks moved after the fit was made.
+            # Empty for a fit that is still good, and for a panel that was
+            # handed no fit at all: the two are told apart by ``on_the_fit``.
+            "stale": moved,
             "note": (f"quoted off the marks this panel was handed: "
-                     f"{stood.get('what') or 'unnamed'}" if self.marks else
-                     "quoted off the marks as they stand on the book; run the fit and hand its "
-                     "answer over to price on that instead"),
+                     f"{stood.get('what') or 'unnamed'}" if marks else
+                     (f"the fit this panel was handed is out of date -- {', '.join(moved)} "
+                      f"moved since it was made -- so this is quoted off the marks as they "
+                      f"stand on the book" if moved else
+                      "quoted off the marks as they stand on the book; run the fit and hand its "
+                      "answer over to price on that instead")),
         }
         out["sheet"] = {
             "rows": rows,

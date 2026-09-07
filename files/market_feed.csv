@@ -33,3 +33,17 @@ USDCNH,1M,-42.0
 USDCNH,3M,-128.0
 USDCNH,6M,-255.0
 USDCNH,1Y,-505.0
+# Discount curves.  A row whose first column is <CCY>OIS is that currency's
+# overnight-index rate at the tenor, in % p.a.  USDOIS anchors: every other
+# currency is discounted through its own FX forward above, so the basis is in
+# the discount rate and DF_base/DF_term reproduces the forward exactly.  A
+# curve stated for another currency is read only to report that basis.
+USDOIS,1W,4.32
+USDOIS,1M,4.30
+USDOIS,3M,4.25
+USDOIS,6M,4.15
+USDOIS,9M,4.08
+USDOIS,1Y,4.00
+USDOIS,2Y,3.80
+JPYOIS,3M,3.22
+JPYOIS,1Y,2.92

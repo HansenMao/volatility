@@ -39,6 +39,14 @@ three it refuses the dated rows and says so, rather than guessing a date that
 would move every point on the near side.  The clock is injected here as it is
 everywhere else in this package.
 
+A row whose first column is a currency followed by ``OIS`` -- ``USDOIS,1W,
+2.2`` -- is not a level at all but that currency's overnight-index rate at
+that tenor, in per cent per annum.  They are the file's other half: the
+levels say where a forward is and the OIS rows say what a discount factor
+is, and the two are read together because they are not independent (see the
+``discount`` module).  Nothing else in this module reads them -- they are
+parsed here because this is the file's reader, and handed on whole.
+
 One axis, and it is the one every expiry in this package is measured on: ``t``
 years, zero at the spot date.  A tenor pillar sits at ``tenor_to_years`` and a
 dated pillar at the days from spot over 365.2425, which is the same number for
@@ -58,6 +66,7 @@ import numpy as np
 from . import paths
 from .calendars import DEFAULT_CALENDARS, CalendarSet
 from .cross import dollar_legs, infer_leg_signs
+from .discount import OISCurve, ois_currency, ois_key
 from .timeutil import DAYS_IN_YEAR, TenorError, parse_datetime, parse_tenor, tenor_to_years
 
 # Term-currency pip divisor: JPY-quoted pairs move in 0.01, most others 0.0001.
@@ -258,6 +267,9 @@ class MarketFeed:
     """Spot and forward points for every pair in a feed file."""
 
     pairs: dict[str, PairFeed] = field(default_factory=dict)
+    #: ``<CCY>OIS`` rows, by currency: the rates the discount factors are
+    #: built from.  Read here, used by ``discount.DiscountCurves``.
+    ois: dict[str, OISCurve] = field(default_factory=dict)
     source: str = ""
     asof: str = ""
     problems: list[str] = field(default_factory=list)
@@ -278,6 +290,9 @@ class MarketFeed:
         the spot date and as that single day's points when it falls on or
         before it.  See the module docstring.
 
+        A first column of ``<CCY>OIS`` makes the row a rate instead: the
+        tenor, and the rate at it in per cent per annum.
+
         ``today`` is the valuation date the dated rows are placed against; it
         comes from the caller's clock and is never taken from the machine.
         """
@@ -288,6 +303,7 @@ class MarketFeed:
         cal = calendars if calendars is not None else DEFAULT_CALENDARS
         spots: dict[str, float] = {}
         stated: dict[str, date] = {}
+        ois: dict[str, dict[float, tuple[str, float]]] = {}
         pillars: dict[str, list[tuple[str, float]]] = {}
         dated: dict[str, list[tuple[date, float]]] = {}
         # Read whole, and closed: this file is published onto a desk share
@@ -305,6 +321,12 @@ class MarketFeed:
                 continue
             pair, label, raw = row[0].strip().upper(), row[1].strip(), row[2].strip()
             key = label.lower()
+            ccy = ois_currency(pair)
+            if ccy is not None:
+                # A rate, not a level: dispatched before anything reads the
+                # label as a pillar or the value as points.
+                feed._read_ois(lineno, ccy, label, raw, ois)
+                continue
             if key in SPOT_DATE_KEYS:
                 # This one's value is a date and not a number, so it is
                 # dispatched before anything tries to read it as one.
@@ -355,7 +377,46 @@ class MarketFeed:
             feed.notes.insert(0, stamp_note)
         for pair in sorted(set(pillars) | set(dated)):
             feed.problems.append(f"{pair}: forward points supplied but no SPOT row")
+        for ccy in sorted(ois):
+            curve = OISCurve(ccy)
+            for t, (_, rate) in sorted(ois[ccy].items()):
+                curve.add(t, rate / 100.0)
+            feed.ois[ccy] = curve
         return feed
+
+    def _read_ois(self, lineno: int, ccy: str, label: str, raw: str,
+                  into: dict[str, dict[float, tuple[str, float]]]) -> None:
+        """One ``<CCY>OIS,<tenor>,<rate>`` row, validated where a desk can fix it.
+
+        Kept beside the level rows rather than in ``discount`` because this is
+        the file's reader and a row that cannot be read is reported by its
+        line number.  A tenor quoted twice is a problem and not a last-one-wins:
+        a desk that wrote two 1W rates meant one of them, and the file does not
+        say which.
+        """
+        try:
+            t = float(tenor_to_years(label))
+        except (TenorError, ValueError):
+            self.problems.append(f"line {lineno}: {ois_key(ccy)} {label!r} is not a tenor")
+            return
+        try:
+            rate = float(raw)
+        except ValueError:
+            self.problems.append(
+                f"line {lineno}: {ois_key(ccy)} {label} rate {raw!r} is not a number")
+            return
+        if not -5.0 < rate < 100.0:
+            self.problems.append(
+                f"line {lineno}: {ois_key(ccy)} {label} rate {rate!r} is not a "
+                f"percentage per annum")
+            return
+        curve = into.setdefault(ccy, {})
+        if t in curve:
+            self.problems.append(
+                f"line {lineno}: {ois_key(ccy)} quotes {curve[t][0]} and {label}, "
+                f"which are the same tenor")
+            return
+        curve[t] = (label, rate)
 
     @staticmethod
     def _valuation_date(feed: "MarketFeed", today) -> tuple[date | None, str]:
@@ -598,6 +659,11 @@ class MarketFeed:
                  "days": len(p.daily),
                  "spot_date": p.spot_date.isoformat() if p.spot_date else ""}
                 for p in self.pairs.values()]
+
+    def rate_summary(self) -> list[dict]:
+        """The OIS curves the file states: currency, pillars, and the 1y rate."""
+        return [{"currency": c, "tenors": self.ois[c].tenors,
+                 "one_year": self.ois[c].rate(1.0)} for c in sorted(self.ois)]
 
 
 def load_for(book, path: str | Path) -> MarketFeed:

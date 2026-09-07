@@ -274,27 +274,65 @@ outright; the smile table's ATM row reads its delta rather than assuming 50.
 The shipped workbook's pillars stop at 1Y, so nothing marked moves from this
 -- typed expiries beyond a year do.
 
-**Spot delta, from a `RATES` tab.** The market quotes spot delta out to a
-year on the majors and their crosses, and spot delta is forward delta times
+**Spot delta, from the feed's OIS rows.** The market quotes spot delta out to
+a year on the majors and their crosses, and spot delta is forward delta times
 the base currency's discount factor to settlement -- a 25-delta quote on 1Y
 USDJPY is a 26-and-a-bit forward delta, so reading it as a forward delta put
 the strike about a quarter of a per cent too far from the money at 1Y (and
-nothing at 1M). A `RATES` tab (`currency, tenor, rate` in % p.a., simple, so
-the factor is `1/(1 + r t)`) now supplies the factor: `Book.rates` hands each
-surface a `discount_lookup`, `VolSurface.slice_conv(t)` puts the factor into
-the slice's convention (`DeltaConvention.at`), and `black.delta` /
-`strike_from_delta` scale by it -- so the wing quotes are calibrated at the
-strikes the market means, and every delta a screen shows is a spot delta out
-to the boundary and a forward delta beyond it, labelled either way. A base
-currency with no rate stays forward delta with a warning at load and a note
-on every row (*forward delta (no AUD rate on the RATES tab)*); `delta =
-forward` on the `CONVENTIONS` tab is a pair that never wants one. The same
-tab's quote-currency rate discounts the forward premium to the premium date;
+nothing at 1M). The **market feed** now supplies the factor. It began as a
+`RATES` tab of the workbook (`currency, tenor, rate`, simple) and that tab is
+retired, for a reason worth stating: the two factors a pair is priced with are
+not independent. `F = S x DF_base / DF_term` is an identity, and two deposit
+curves typed into a spreadsheet do not satisfy it -- the gap between them is
+the cross-currency basis, and discounting off curves that disagree with the
+forward on the same screen is how an option and its hedge come out of one tool
+at two prices. So there is **one stated curve and the rest are implied**:
+`USDOIS,1Y,4.00` rows in the feed anchor the dollar (annually compounded, `DF
+= (1+r)^-t`), and every other currency's factor is implied from it through
+that currency's own FX forward in the same file -- `DF_JPY = DF_USD x S/F` on
+USDJPY. A cross needs no special case: `EURJPY` discounts off EUR and JPY,
+each implied through its own dollar leg, and their ratio is the composed cross
+outright exactly. A currency that states its own curve as well is read for the
+**basis** and never to discount (`DiscountCurves.basis`), because using it
+would break the identity for every pair it appears in.
+
+`Book.discount` (`discount.DiscountCurves`, built on every ask so a feed
+loaded after the book is picked up) hands each surface a `discount_lookup`,
+`VolSurface.slice_conv(t)` puts the factor into the slice's convention
+(`DeltaConvention.at`), and `black.delta` / `strike_from_delta` scale by it --
+so the wing quotes are calibrated at the strikes the market means, and every
+delta a screen shows is a spot delta out to the boundary and a forward delta
+beyond it, labelled either way. A base currency the feed cannot reach stays
+forward delta with a warning at load and a note on every row (*forward delta
+(no AUD discount factor from the feed)*); `delta = forward` on the
+`CONVENTIONS` tab is a pair that never wants one. The term currency's factor
+discounts the forward premium to the premium date;
 the pricing screen's premium rows and totals read either that or the forward
 value under a *premium: forward | spot* toggle on the Results bar (the result
 carries both: `premium_*` and `premium_pv_*` / `pv_amount`, the latter `None`
-without a rate, and a `pv_premium` total that is `None` if any leg on the
-pair lacks one); no rate is a dash, not a guess. The delta-neutral straddle
+without a factor, and a `pv_premium` total that is `None` if any leg on the
+pair lacks one); no factor is a dash, not a guess.
+
+**The premium's CSA.** Discounting the term-currency premium at the implied
+factor *is* a USD-collateralised CSA -- convert at the forward, discount at
+USD OIS, convert back at spot -- so the default has a name and is the one most
+interbank business runs under. `OptionLeg.csa` names another collateral
+currency; `collateral == the premium currency` discounts on that currency's
+own OIS curve, which is the one place a stated non-anchor curve is used, and
+the two readings differ by exactly the basis. `pricing._discounted` is the
+only caller, deliberately: a delta is a hedge ratio and is defined off the
+forward's factors whatever the collateral, so no volatility, strike, delta or
+forward premium moves with a CSA -- only `premium_pv_*` / `pv_amount`. On the
+pricing grid it is a per-leg `CSA` row, hidden by default.
+
+**What moves.** A workbook that carried a `RATES` tab keeps it -- deleting a
+desk's sheet is not this tool's business -- and is told once at load that it
+is no longer read. A feed with no `<CCY>OIS` rows discounts nothing, which is
+exactly what a book with no `RATES` tab did. A feed that has them changes two
+things at once, and both are the point: the deltas on every dollar-base pair
+become spot deltas, so the strikes a smile is fitted at move by a fraction of
+a per cent, and the premium rows gain a *spot* reading. The vols themselves
+are quotes and move for none of it. The delta-neutral straddle
 strike is unchanged by any of this (it is delta neutral under either
 reading), as is every price.
 
@@ -479,6 +517,58 @@ twice built `EURJPY` out of nothing and said so nowhere. Each side of the pair
 now has to come from a different leg, and a column that cannot build its cross
 is reported by name with the rest of the workbook's problems rather than
 raising on the first bad cell.
+
+## 4b-iv. `TENORS` is now the pillar set, and this moves marks
+
+**This changes numbers on the shipped workbook. Read it before comparing.**
+
+`CONFIG`'s `TENORS` column used to be the order the ATM table was drawn in and
+nothing more. The tenors that were actually *fitted* came from each pair
+sheet's own `expiry` column, and the marking screen showed the union of the
+two. `TENORS` is now the **pillar set**: the tenors shown, the tenors fitted,
+and the tenors a mark can be made on.
+
+**What moves.** Every pair sheet in `vol_marks.xlsx` quotes a `2Y` and the
+`TENORS` column stops at `1y`. That `2Y` was previously the longest pillar of
+every smile's parameter term structure; it is now not read
+(`ExcelSource._config_tenors_only`), which moves `slog25` / `slog10` / `rho25`
+/ `rho10` at and beyond `1Y` on every pair, and with them every smile point
+priced there. Nothing at or inside `1Y` between two remaining pillars moves by
+more than the term-structure fit's own reaction to losing a far point.
+
+Not all of it is a loss. The parameter term structure is a three-coefficient
+curve through the fitted tenors, and the `2Y` was the point furthest from the
+rest of them; without it the curve passes closer to the tenors that are marked.
+Measured on `USDJPY`'s 25-delta risk reversal at each pillar's own calendar
+expiry, the unanchored surface reproduces its quotes to a mean of 1.0e-4 in
+vol, against 1.8e-5 anchored -- and at the `3M` the smoothed curve now lands
+*closer* than the anchored one does, which is what
+`TestImpliedRRFly.test_anchoring_makes_the_surface_reproduce_its_quotes` had to
+be rewritten to say. It reads every pillar rather than one, because anchoring
+tightens the surface as a whole and at any single tenor the smoothed curve can
+happen to pass closer.
+
+**To restore the old figure**, put `2y` in `CONFIG`'s `TENORS` column. That is
+the whole switch: the row was never removed from the sheet, and the tool reads
+it again the moment the column names it.
+
+**Why it is not a flag.** Keeping a quote in the fit while hiding it from the
+screen leaves a number shaping every smile that nobody can see, mark or take
+off — the silent state this rebuild exists to remove (§ *Nothing fails
+silently*). Shown and marked are one decision, and `TENORS` is where it is
+made.
+
+**The other direction.** A tenor `TENORS` lists that a sheet does not quote —
+`3W` on `USDCNH`, `USDCNY`, `EURCNH` and `USDHKD` — used to be a blank row.
+It now carries the four quotes read back off the fitted smile at that expiry
+(`VolSurface.implied_marks`), shown as readings rather than as quotes and
+never fed back into the fit they came out of. That adds no pillar and moves no
+number; typing into one does, and says so, because the three quotes not typed
+are taken from those readings so that one box makes a whole mark rather than
+one number and three blanks.
+
+A workbook with no `TENORS` column is unaffected: it governs nothing and every
+sheet is read whole, exactly as before (`MarketData.tenors_stated`).
 
 ## 4c. Analysis — new; two of its columns moved when the forward curve went in
 

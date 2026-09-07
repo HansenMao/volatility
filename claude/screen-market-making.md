@@ -31,6 +31,43 @@ does stage 3. The fit puts a price on nothing and the quote fits nothing.
   a price made on this morning's fit and one made on last night's marks must
   never read the same. Marks naming another pair are refused: the browser
   holds the fit and the pair selector apart and they can be moved apart.
+- **A held fit is only good for the book it was fitted on.** The other screen
+  between the two calls is the marking one, and the browser keeps the fit
+  across a trip to it. `applied_marks` then put the fit's backbone knobs and
+  smile shifts back over whatever had been marked there -- silently, and only
+  over *those two*, because they are all `capture_marks` holds. A curve
+  re-marked and applied went back to the fit's; a pinned tenor, a re-quoted
+  wing, a marked term structure and a band all went through. Half a screen
+  agreed with itself, which is worse than none of it doing so.
+
+  `Panel.run` now stamps `mark_fingerprint(book, pair)` onto the marks it
+  hands back: one short hash per part of `session.capture_pair`, plus the
+  sheet's own quotes and wing ratios, which a session does not capture but a
+  reloaded workbook moves. `QuotePanel.run` recomputes it, and where it
+  differs the marks are **dropped** -- the quote prices off the book as it
+  stands, names which part moved in `marks.stale` and in a warning, and the
+  note on the sheet says which of the three it was.
+
+  A photograph rather than a counter, deliberately: `capture_pair` is already
+  what a re-marking instance is diffed from (§18), so a marking route written
+  next year is covered on the day it is written and there is no bump for it to
+  forget. Marks carrying *no* stamp are quoted off as they always were -- a
+  payload from an older client is not a stale one, and refusing on a missing
+  field would have broken every saved panel the day it shipped. The stamp is
+  taken **after** the fit's restore-or-apply, so a fit that kept its marks is
+  not immediately out of date with the book it just wrote.
+- **The browser's half is one hook, in `post`.** `MARKING_ROUTES` names every
+  POST route that can put a mark on the loaded book or replace it, and
+  `bookMoved()` flags the held fit, repaints the fit card with a banner over
+  it, and re-runs the **quote**. Not the fit: with `keep the marks` ticked a
+  fit writes its answer onto the book, and a refit firing on every keystroke
+  in the marking table would have the two screens marking each other. Hooked
+  into `post` rather than added to each route because the routes that mark
+  today are not the routes there will be -- and every marking route used to
+  end with `schedulePrice()`, which is the *pricing* screen, so the
+  market-maker tab showed the last run's numbers however much was re-marked.
+  A test pins the list against every `BookService` method that touches
+  `self.dirty` or rebuilds the book, in both directions.
 - **The request box takes no prices** (`quotes.parse_requests`). One number on
   a line that has not already said what it is struck at is a strike; anything
   else is refused with the line. A broker run pasted into the wrong box would

@@ -124,6 +124,21 @@ def normalise_tenor(tenor: str) -> str:
     return f"{n:g}{unit.upper()}"
 
 
+def tenor_key(tenor) -> str:
+    """One tenor as a dictionary key, however the thing that wrote it spelled it.
+
+    :func:`normalise_tenor` with the raise taken off.  Two lists of tenors that
+    were maintained by different hands -- CONFIG's ``TENORS`` column in lower
+    case and a pair sheet's ``expiry`` column in upper -- are compared by this,
+    and a spelling neither parser can place ("FRONT", a typo) must still match
+    *itself* rather than dropping out of both sides and being read as absent.
+    """
+    try:
+        return normalise_tenor(tenor)
+    except TenorError:
+        return re.sub(r"\s+", "", str(tenor)).upper()
+
+
 def tenor_to_years(tenor: str) -> float:
     """Approximate year fraction for a tenor string, with no reference date."""
     n, unit = parse_tenor(tenor)

@@ -29,7 +29,12 @@ built-in rules are used when it is absent.
 ## The workbook
 
 `vol_marks.xlsx` is what the tool starts from, and its `CONFIG` sheet is **two
-columns**: the pairs to build, and the tenor points.
+columns**: the pairs to build, and the tenor points. `TENORS` is the **pillar
+set** -- the tenors that are shown, fitted and markable. A tenor a pair sheet
+quotes that it does not list is not read; a tenor it lists that a sheet does
+not quote is shown with its quotes read off the fitted smile, and typing into
+one turns the reading into a mark. A workbook with no `TENORS` column governs
+nothing and every sheet is read whole.
 
 ```
 PAIRS    TENORS
@@ -1352,7 +1357,7 @@ python3 -m volkit vol    USDJPY 5m --strike 25dp -v --feed files/market_feed.csv
 python3 -m volkit daily  USDJPY --horizon 1 --cut NY --out USDJPY_daily_vol
 python3 -m volkit kace   USDCNH --kace-user feeuser --out usdcnh_kace.xml   # the kACE feed message
 python3 -m volkit kace   USDCNH --clear --kace-user feeuser                # the clearRate message
-python3 -m volkit kace   USDCNH --post --kace-url https://pfcshkwapp01:8500/pricing  # send it, and record the outcome
+python3 -m volkit kace   USDCNH --post --kace-url https://pfcshkwapp01:8500/xmlposter  # send it, and record the outcome
 
 python3 -m volkit band   USDHKD --feed files/market_feed.csv --hazard 3
 

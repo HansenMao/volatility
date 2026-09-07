@@ -67,7 +67,7 @@ from . import remarks, screens, session
 from .marking import MIN_INSTANCES as MARK_MIN_INSTANCES
 from .marking import SCREEN_VERDICTS as MARK_VERDICTS
 from .smile import INTERPOLATORS
-from .timeutil import UTC, Clock, parse_datetime
+from .timeutil import UTC, Clock, parse_datetime, tenor_to_years
 from . import kace as kace_mod
 
 STATIC_DIR = Path(__file__).parent / "web"
@@ -585,6 +585,14 @@ class BookService:
             on_disk = self._feed_mtime()
             out = {"loaded": True, "source": feed.source, "asof": feed.asof,
                    "problems": feed.problems, "pairs": feed.summary(),
+                   # The other half of the file: the OIS rows the discount
+                   # factors are built from, and -- for a currency that states
+                   # its own curve as well -- what the forwards say against it.
+                   # A basis that has moved is a forward worth looking at, and
+                   # it is the only thing a non-anchor curve is read for.
+                   "rates": feed.rate_summary(),
+                   "anchored": self.book.discount.anchored,
+                   "basis": self.book.discount.basis_report(1.0),
                    # What was read that was neither wrong nor obvious: a spot
                    # date derived rather than stated, a dated row passed over
                    # as history.  A feed whose near side was placed against a
@@ -919,6 +927,10 @@ class BookService:
                 # is not evidence anybody chose it.
                 settle=(str(row.get("settle") or "")
                         if str(row.get("settlesrc") or "typed").lower() == "typed" else ""),
+                # The collateral currency of this leg's CSA.  Blank is the
+                # anchor, which is what the FX-implied factor already is, so a
+                # screen that never sends it prices exactly as it did.
+                csa=str(row.get("csa") or ""),
                 # Which of the market boxes are still the feed's.  Only the
                 # screen knows -- it fills them and then posts what is in
                 # them -- and without it every leg reported its market as
@@ -963,6 +975,14 @@ class BookService:
                                             else qr[f + "_sheet"] * 100)
                                         for f in QUOTE_FIELDS} if qr else
                                        {f: None for f in QUOTE_FIELDS})
+                # What the fitted smile reads at a tenor CONFIG lists and the
+                # sheet does not quote.  Sent beside the sheet's numbers and
+                # not in place of them: the row is empty, these sit under it
+                # as the placeholder, and typing one marks the tenor.
+                row["quotes_implied"] = ({f: (None if qr[f + "_implied"] is None
+                                              else qr[f + "_implied"] * 100)
+                                          for f in QUOTE_FIELDS} if qr else
+                                         {f: None for f in QUOTE_FIELDS})
                 # Marked = different from the sheet, and fitted = this tenor
                 # actually has a smile behind it.  A tenor being quoted and a
                 # tenor being fitted are two different facts and the screen
@@ -977,6 +997,7 @@ class BookService:
                 row["quotes_marked"] = bool(qr and qr["marked"])
                 row["quoted"] = bool(qr and qr["quoted"])
                 row["fitted"] = bool(qr and qr["fitted"])
+                row["implied"] = bool(qr and qr.get("implied"))
                 atm_rows.append(row)
             smile_rows = []
             for fit in surface.fits:
@@ -1282,16 +1303,21 @@ class BookService:
     def _atm_tenors(self, surface) -> list[str]:
         """Every tenor the ATM table shows, in the order it shows them.
 
-        The book's own tenor points, plus any the quotes reach that it does
-        not: a tenor typed into the sheet (or into this screen) and then not
-        shown is a mark nobody can see.  Shared with the bump so the two
-        tables cannot end up listing different curves.
+        **CONFIG's own list**, which is the pillar set: a tenor the sheet
+        quotes and CONFIG does not list is not read at all
+        (``marketdata.ExcelSource._config_tenors_only``), and one CONFIG lists
+        and the sheet does not quote is on the table with its quotes read off
+        the fitted smile (``VolSurface.implied_marks``).
+
+        The union with the quotes underneath it is what a workbook that lists
+        *no* tenors falls back to -- there the sheets are read whole and this
+        is the only thing that knows their tenors.  Shared with the bump so
+        the two tables cannot end up listing different curves.
         """
         names = list(self.book.data.tenor_points)
         seen = {t.upper() for t in names}
-        names += [r["tenor"] for t, r in
-                  sorted({q["tenor"].upper(): q for q in surface.quote_rows()}.items())
-                  if t not in seen]
+        extra = {m.tenor.upper() for m in surface.marks} | set(surface.quote_overwrites)
+        names += sorted((t for t in extra if t not in seen), key=tenor_to_years)
         return names
 
     def vega_weights(self, q: dict | None = None) -> dict:

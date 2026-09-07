@@ -198,6 +198,33 @@ for the reasoning behind it. Read this file when working in the area above.
   name** with no quotes; a leg swept up on the way to a cross is not, because
   `load_all` builds those on purpose and the reader has already reported any
   sheet that is missing.
+- **CONFIG's `TENORS` column is the pillar set, and shown / fitted / markable
+  are one decision.** It used to be the order the ATM table was drawn in, while
+  the tenors actually fitted came from each pair sheet's own `expiry` column
+  and the screen showed the union of the two. Both halves of that were wrong in
+  the same way. A tenor a sheet quotes and CONFIG does not list -- the `2Y` on
+  every sheet of the shipped workbook -- shaped the parameter term structure of
+  every smile from a row nobody could see on the screen, mark, or take off,
+  which is the silent state this rebuild exists to remove; it is now not read
+  (`ExcelSource._config_tenors_only`), and MIGRATION.md 4b-iv gives the numbers
+  that moved and the one-cell edit that restores them. A tenor CONFIG lists and
+  a sheet does not quote -- `3W` on the CNH sheets -- was a blank row on a
+  table of the tenors the desk marks; it now carries the four quotes read back
+  off the fitted smile at that expiry (`VolSurface.implied_marks`), which is
+  the same interpolation every price at that date already uses. Those readings
+  are **display only and never fitted**: they came out of the fit, and feeding
+  them back in would make the surface a function of its own output. Typing into
+  one *materialises* the row (`VolSurface._materialise`) -- the three quotes not
+  typed are taken from the readings already on it, because one typed number and
+  three blanks is half a smile that quietly does not fit -- and the tenor
+  becomes a pillar like any other, with a warning saying where the other three
+  came from. `overwrite_quote` refuses a tenor CONFIG does not list, for the
+  same reason the sheet's own such rows are dropped. A workbook with **no**
+  `TENORS` column governs nothing and every sheet is read whole
+  (`MarketData.tenors_stated`): an absent column is not an empty one, the nine
+  default points are an order to show things in rather than a desk's decision,
+  and cutting a sheet down to a list nobody wrote would be this tool inventing
+  the policy.
 - **The server holds no screen state.** The browser owns the pricing legs, the
   listed panels and the analysis query, and posts each one whole. That is what
   makes `volkit listed` and `volkit analysis` reproduce a screen exactly, and

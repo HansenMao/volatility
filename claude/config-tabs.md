@@ -11,7 +11,6 @@ workbook onto a new machine gets a tool that does the same thing there.
 | `files/kace_spreads.csv` | `KACE_SPREADS` tab | `kace.SpreadTable.load` |
 | `files/holiday_overrides.csv` | `HOLIDAYS` tab | `CalendarSet.load_overrides_sheet` -> `Book._default_calendars` |
 | (never a file) | `CONVENTIONS` tab | `marketdata.load_conventions` -> `ExcelSource._load_conventions` -> `PairSpec.conventions` -> `VolSurface.conv` |
-| (never a file) | `RATES` tab | `rates.RatesTable.load` -> `Book._default_rates` -> `VolSurface.discount_lookup` / `pricing._discounted` |
 
 Two more were never files. `WING_RATIOS` came off the pair sheets' own
 formulas (`volkit migrate-wings`), and `Vega Weights` was already a tab of the
@@ -20,7 +19,9 @@ read -- until `vegaweights.load_vega_weights` was written for it.
 
 `market_feed.csv` stays a file on purpose: it is market data with an `asof`,
 overwritten daily, and a file is easier to overwrite than a tab in a workbook
-Excel may have open.
+Excel may have open. It has since taken the **discount curves** as well (the
+`<CCY>OIS` rows, below), which is the same argument the other way round: a
+rate that has to agree with a forward belongs in the file the forward is in.
 
 ## The reader
 
@@ -98,25 +99,103 @@ market's conventions from `black.DeltaConvention.for_pair`:
   `ATMF` and `DNS`/`50d` name one of the two outright.
 - `delta` is `spot` (default) or `forward`: whether the pair quotes spot
   delta out to the boundary. Spot delta needs the base currency's discount
-  factor, which is the `RATES` tab's job (below); without a rate the slice
+  factor, which comes off the **market feed** (below); without one the slice
   reads forward delta and says so (`DeltaConvention.at` -> `delta_note`).
 
-## RATES (added 2026-09-04)
+## Discounting: the feed's OIS rows (was the RATES tab, moved 2026-09-07)
 
-`currency, tenor, rate` in % p.a., a simple money-market rate, DF =
-`1/(1 + r t)`, interpolated linearly in years between listed tenors and flat
-outside. Optional. Read by `rates.RatesTable.load` into `Book.rates`; each
-surface gets `discount_lookup = book.discount_factor`, and
-`VolSurface.slice_conv(t)` builds the slice's `DeltaConvention` with the base
-currency's factor in `df_foreign`. `black.delta` multiplies by it and
-`black.strike_from_delta` divides the target by it, so every slice quantity
-(calibration wings, `strike_from_delta`, `smile_table`, `smile_delta`,
-`quick_vol`, the pricing rows) is a spot delta out to the boundary and a
-forward delta beyond. The quote currency's factor discounts the forward
-premium in `pricing._discounted` (`premium_pv_*`, `pv_amount`, `None` without
-a rate). A currency with no rows is never guessed: forward delta and
-undiscounted premium, with the warning `<pair>: quotes spot delta but the
-RATES tab has no <ccy> rate` at load.
+`RATES` was a tab of the workbook -- `currency, tenor, rate`, simple, DF =
+`1/(1+r t)` -- and it is **retired** (`configsheets.RETIRED`; a workbook that
+still carries it is told once at load, from `Book._retired_tabs`). It was the
+wrong place, for one reason: the two factors a pair is priced with are not
+independent. `F = S x DF_base / DF_term` is an identity, and two deposit
+curves typed into a spreadsheet do not satisfy it -- the gap is the
+cross-currency basis. Discounting off curves that disagree with the forward on
+the same screen is how an option and its hedge come out of one tool at two
+prices.
+
+So the rates live in the **market feed**, beside the forwards they have to
+agree with. A row whose first column is `<CCY>OIS` is a rate and not a level:
+`USDOIS,1W,4.32`, in % p.a., **annually compounded** (`DF = (1+r)^-t`),
+interpolated linearly in years between listed tenors and flat outside. Read by
+`feed.MarketFeed._read_ois` into `MarketFeed.ois` (a `discount.OISCurve` per
+currency); a row that cannot be read is a feed *problem* named by its line
+number, and does not take the rest of the file with it.
+
+**One stated curve and the rest implied.** `discount.DiscountCurves`:
+
+- `USD` is the anchor and the only currency that discounts off its own rows.
+- Every other currency's factor is implied from the anchor through that
+  currency's own dollar pair (`cross.usd_leg`): `DF_JPY = DF_USD x S/F` on
+  `USDJPY`, `DF_EUR = DF_USD x F/S` on `EURUSD`. That is the discount rate
+  *including* basis, because the basis is in the forward.
+- A cross needs no special case. `EURJPY` discounts off EUR and JPY, each
+  implied through its own dollar leg, and their ratio is the composed cross
+  outright **exactly** -- the feed builds a cross the same way
+  (`feed.compose_level`), so the identity closes. There is a test on this.
+- A currency the feed also states a curve for **still discounts off the
+  implied factor**. Its own curve is read by `DiscountCurves.basis` /
+  `basis_report` and nowhere else: using it would break the identity for every
+  pair it appears in. The one exception is a feed with no `USDOIS` at all --
+  there is then no anchor to be inconsistent with, and a stated curve answers
+  rather than nothing.
+- `DiscountCurves.factor(ccy, t)` returns the factor **and how it was got**,
+  which is what the pills and the notes say; `df` is the factor alone.
+
+`Book.discount` builds the object on every ask (two references and a string)
+rather than holding it as a field, and for the same reason the band's forward
+lookup is a closure: `serve` and the analysis CLI both load the feed *after*
+the book, and a captured one would leave every delta a forward delta for the
+life of the process. Each surface gets `discount_lookup =
+book.discount_factor`, `VolSurface.slice_conv(t)` builds the slice's
+`DeltaConvention` with the base currency's factor in `df_foreign`,
+`black.delta` multiplies by it and `black.strike_from_delta` divides the
+target by it -- so every slice quantity (calibration wings,
+`strike_from_delta`, `smile_table`, `smile_delta`, `quick_vol`, the pricing
+rows) is a spot delta out to the boundary and a forward delta beyond. The term
+currency's factor discounts the forward premium in `pricing._discounted`
+(`premium_pv_*`, `pv_amount`, `None` without one). A currency the feed cannot
+reach is never guessed: forward delta and undiscounted premium, with the
+warning `<pair>: quotes spot delta but the feed cannot discount <ccy>` at
+load, and the reason on the row (*forward delta (no AUD discount factor from
+the feed)*).
+
+**Collateral (CSA).** Discounting a Y cashflow at the FX-implied Y factor is
+exactly a **USD-collateralised CSA** -- convert at the forward, discount at
+USD OIS, convert back at spot, and `DF_USD x S/F` is what falls out. So the
+default above has a name, and it is the one most interbank option business
+runs under. `DiscountCurves.csa_df(ccy, t, collateral)` is the general
+formula:
+
+    PV_Y = A x DF_C(T) x F(Y->C at T) / S(Y->C)
+
+`C = USD` returns `factor()` unchanged -- one arithmetic, not two. `C = Y`
+makes the FX leg 1 and leaves `DF_Y`, that currency's **own** OIS curve used
+directly, which is the only place a stated non-anchor curve discounts
+anything. A third currency reaches the pair through the cross the feed
+composes. A collateral currency with no stated rows falls back to the anchor
+and the source string says so. Both go through the one `_fx_ratio`, read off
+the pair's own spelling, because a reciprocal discount factor looks plausible.
+
+`OptionLeg.csa` carries it, `pricing._discounted` is the **only** caller
+(`Book.csa_discount_factor`), and `LegResult.csa` / `csa_source` come back so
+a premium discounted two ways cannot read the same. **It must not reach
+`df_foreign`**: a delta is a hedge ratio, not a discounted cashflow, and the
+spot delta the market quotes is defined off `F = S x DF_base/DF_term` -- the
+forward's factors, whatever the collateral. There is a test that the vol, the
+strike, the delta and the forward premium are identical under every CSA and
+only `pv_amount` follows. On the screen it is a `CSA` row of the pricing grid,
+per leg (a CSA is a property of the agreement, not of the pair), hidden by
+default behind *CSA row: hidden | shown* on the Inputs bar; `IN` rows carry a
+fifth `adv` element and `ADV` is remembered in `localStorage`.
+
+**What this moved.** Loading a feed now changes deltas as well as levels: on a
+dollar-base pair the 25-delta quotes become spot deltas, so the strikes a
+smile is fitted at move by a fraction of a per cent. The vols are quotes and
+move for none of it. `/api/feed` carries `rates`, `anchored` and `basis`, and
+the feed pill has an **OIS** pill beside it -- a warning when the file has no
+`USDOIS`, because that is the difference between a spot delta and a forward
+one on every major.
 
 ## Two things that are easy to confuse
 

@@ -26,7 +26,7 @@ from .cross import CorrelationCurve, CrossAtmCurve, infer_leg_signs
 from .events import EventBook, EventSchedule
 from .feed import MarketFeed
 from .marketdata import ExcelSource, MarketData, MarketDataError
-from .rates import RatesTable
+from .discount import DiscountCurves
 from .surface import VolSurface, WingRatio, load_wing_ratios
 from .vegaweights import VegaWeights, load_vega_weights
 from .timeutil import DAYS_IN_YEAR, Clock, parse_datetime
@@ -67,11 +67,6 @@ class Book:
     #: differently for it -- but read with the book so the marking screen and
     #: the command line share one answer about what a workbook says.
     vega_weights: VegaWeights = field(default_factory=VegaWeights)
-    #: The ``RATES`` tab: simple deposit rates by currency and tenor, for the
-    #: foreign discount factor a spot delta needs and the domestic one a
-    #: premium is paid at.  Absent, every delta is a forward delta and every
-    #: premium undiscounted -- and each says so.
-    rates: RatesTable = field(default_factory=RatesTable)
 
     @classmethod
     def from_excel(cls, path: str | Path, clock: Clock | None = None, *,
@@ -83,9 +78,23 @@ class Book:
         book.bands = book._default_bands(bands or path)
         book.wing_ratios = book._default_wing_ratios(path)
         book.vega_weights = book._default_vega_weights(path)
-        book.rates = book._default_rates(path)
         book.calendars = calendars if calendars is not None else book._default_calendars(path)
+        book._retired_tabs(path)
         return book
+
+    def _retired_tabs(self, path: str | Path | None) -> None:
+        """Say once that a tab the workbook still carries is no longer read.
+
+        A setting that has moved leaves its tab behind -- deleting a desk's
+        sheet is not this tool's business -- and a tab full of numbers that
+        nothing reads is worse than no tab at all, because it looks like it is
+        working.  Said at load, where somebody is watching, and not on every
+        price.
+        """
+        if path is None:
+            return
+        from . import configsheets
+        self.warnings.extend(f"workbook: {line}" for line in configsheets.retired(path))
 
     def _default_bands(self, path: str | Path | None) -> dict[str, Band]:
         """The managed bands to hand the surfaces, from the ``PEG_BANDS`` tab.
@@ -123,30 +132,62 @@ class Book:
             self.warnings.append(f"wing ratios: {exc}")
             return {}
 
-    def _default_rates(self, path: str | Path | None) -> RatesTable:
-        """The ``RATES`` tab, or an empty table.
+    @property
+    def discount(self) -> DiscountCurves:
+        """The discount curves: the feed's ``USDOIS`` rows and its forwards.
 
-        A workbook without it is the ordinary case for one that predates the
-        tab: deltas are then forward deltas, as they always were, and the
-        surfaces say so.  A tab that cannot be read is a warning, because a
-        desk that wrote one meant its rates to apply.
+        Built on every ask rather than held as a field, and for the same
+        reason the band's forward lookup is a closure: a feed is loaded
+        *after* the book is built by both ``serve`` and the analysis CLI, and
+        a captured one would leave every delta a forward delta for the life
+        of the process.  The object is two references and a string.
         """
-        if path is None:
-            return RatesTable()
-        try:
-            table = RatesTable.load(path)
-        except (OSError, ValueError) as exc:
-            self.warnings.append(f"rates: {exc}")
-            return RatesTable()
-        if table is None:
-            return RatesTable()
-        if table.currencies:
-            self.data.notes.append(f"RATES: {table.describe()} read from the workbook")
-        return table
+        return DiscountCurves(ois=dict(self.feed.ois) if self.feed is not None else {},
+                              level=self._feed_level)
 
     def discount_factor(self, ccy: str, t: float) -> float | None:
-        """The ``RATES`` tab's discount factor for ``ccy`` at ``t`` years, or None."""
-        return self.rates.df(ccy, t)
+        """The discount factor for ``ccy`` at ``t`` years, or None with no feed."""
+        return self.discount.df(ccy, t)
+
+    def csa_discount_factor(self, ccy: str, t: float,
+                            collateral: str = "") -> tuple[float | None, str]:
+        """The factor a cashflow in ``ccy`` is paid at, and the curve that said so.
+
+        Only the premium goes through here: ``discount_factor`` is what every
+        delta and every strike reads, and the two must not be swapped (see
+        ``discount``).
+        """
+        return self.discount.csa_df(ccy, t, collateral)
+
+    def discount_source(self, ccy: str, t: float) -> str:
+        """How that factor was got -- stated, implied through a pair, or why not."""
+        return self.discount.factor(ccy, t)[1]
+
+    def discount_warnings(self) -> list[str]:
+        """Pairs already built that quote spot delta and cannot be discounted.
+
+        The same thing ``_build_surface`` says at load, asked again -- because
+        the feed is loaded *after* the build by every command that takes
+        ``--feed`` and by ``serve``, and a warning about a feed cannot be
+        written before there is one.  One line per currency rather than per
+        pair: a missing NZD factor is one fact about the file, and saying it
+        four times is how a desk stops reading the warnings.
+        """
+        if self.feed is None:
+            # No feed is not a feed that cannot answer: a book that was never
+            # given one is the ordinary case and has nothing to be warned
+            # about.  The rows still say *forward delta* one at a time.
+            return []
+        disc = self.discount
+        said: dict[str, list[str]] = {}
+        for name, surface in self.surfaces.items():
+            ccy = name[:3].upper()
+            if not surface.conv.spot_delta or disc.has(ccy):
+                continue
+            said.setdefault(ccy, []).append(name)
+        return [f"{ccy}: {disc.factor(ccy, 0.25)[1]}, so the quoted deltas on "
+                f"{', '.join(pairs)} are read as forward deltas"
+                for ccy, pairs in sorted(said.items())]
 
     def _default_vega_weights(self, path: str | Path | None) -> VegaWeights:
         """The ``Vega Weights`` tab, or an absent one.
@@ -491,14 +532,15 @@ class Book:
             conv=spec.conventions(),
             wing_ratios=dict(self.wing_ratios.get(name, {})),
         )
-        # A closure over the book, like the forward lookup: a RATES tab
-        # written after the build is picked up by the next slice.
+        # A closure over the book, like the forward lookup: a feed loaded
+        # after the build is picked up by the next slice.
         surface.discount_lookup = lambda ccy, t: self.discount_factor(ccy, t)
-        if surface.conv.spot_delta and not self.rates.has(name[:3]):
+        if surface.conv.spot_delta and self.feed is not None and not self.discount.has(name[:3]):
             self.warnings.append(
-                f"{name}: quotes spot delta but the RATES tab has no {name[:3]} rate, so "
-                f"its deltas are read as forward deltas -- a 25-delta wing sits a "
-                f"fraction of a delta off where the market means it, most at 1Y")
+                f"{name}: quotes spot delta but the feed cannot discount {name[:3]} "
+                f"({self.discount_source(name[:3], 0.25)}), so its deltas are read as "
+                f"forward deltas -- a 25-delta wing sits a fraction of a delta off "
+                f"where the market means it, most at 1Y")
         self._attach_band(name, surface)
         # The marks a session wrote into the workbook (the ``atm 1m`` /
         # ``shift rho25`` rows and the BANDS sheet) go on through the same

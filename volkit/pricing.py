@@ -474,6 +474,11 @@ class OptionLeg:
     #: was the feed's, a box with something in it was somebody's.
     spot_source: str = ""
     forward_source: str = ""
+    #: The collateral currency of the CSA this leg is discounted under.  Blank
+    #: is the anchor (USD), which is what an FX-implied factor already is --
+    #: see ``discount``.  It reaches the premium as paid and nothing else: a
+    #: delta is a hedge ratio, not a discounted cashflow.
+    csa: str = ""
 
 
 @dataclass
@@ -502,13 +507,19 @@ class LegResult:
     premium_dom: float = 0.0        # domestic per 1 unit of base, undiscounted
     premium_pct_base: float = 0.0   # % of base notional
     # The premium as paid: the forward premium discounted at the domestic
-    # (quote) currency's RATES-tab rate to the premium date.  ``None`` when
-    # the tab has no rate for the currency, and ``discounted`` says which.
+    # (quote) currency's feed discount curve to the premium date.  ``None``
+    # when the feed cannot discount that currency, and ``discounted`` says
+    # which.
     premium_pv_dom: float | None = None
     premium_pv_pct_base: float | None = None
     pv_amount: float | None = None
     discounted: bool = False
     df_domestic: float | None = None
+    #: The CSA asked for (blank is the anchor) and the curve that answered --
+    #: a stated one, one implied through a forward, or a fallback saying why.
+    #: Carried because a premium discounted two ways must not read the same.
+    csa: str = ""
+    csa_source: str = ""
     delta_pct: float = 0.0          # in the pair's quoted convention
     delta_kind: str = "forward delta"   # spot or forward, and why
     smile_delta_pct: float = 0.0
@@ -534,28 +545,37 @@ class LegResult:
 def price_leg(book, leg: OptionLeg) -> LegResult:
     """Price one leg, converting any failure into a reported error."""
     try:
-        return _discounted(book, _price_leg(book, leg))
+        return _discounted(book, leg, _price_leg(book, leg))
     except (ValueError, KeyError, ConvergenceError, ZeroDivisionError) as exc:
         return LegResult(ok=False, label=leg.label, pair=leg.pair,
                          error=f"{type(exc).__name__}: {exc}")
 
 
-def _discounted(book, r: LegResult) -> LegResult:
-    """Put the premium as paid beside the forward premium, where a rate allows.
+def _discounted(book, leg: OptionLeg, r: LegResult) -> LegResult:
+    """Put the premium as paid beside the forward premium, where a curve allows.
 
     Every price above is a forward value.  What changes hands is that value
-    discounted at the domestic currency's rate from the option's settlement
-    to the premium date -- the spot date, so the period is the same one the
+    discounted at the term currency's rate from the option's settlement to
+    the premium date -- the spot date, so the period is the same one the
     forward itself covers, ``t`` to a day -- and in the base currency that is
     the same money converted at today's spot.  The exotics get the same
     treatment: their price is a forward value per unit of payout and
-    discounts the same way.  No rate on the tab is no discounting, said
-    rather than assumed: ``premium_pv_*`` stays ``None`` and ``discounted``
-    is ``False``.
+    discounts the same way.  No discount curve for the currency is no
+    discounting, said rather than assumed: ``premium_pv_*`` stays ``None``
+    and ``discounted`` is ``False``.
+
+    **This is the one place a CSA is read**, and deliberately the only one.
+    ``leg.csa`` names the collateral currency; blank is the anchor, which is
+    what the FX-implied factor already is.  A delta is a hedge ratio rather
+    than a discounted cashflow and is not touched by it -- see ``discount``.
     """
     if not r.ok:
         return r
-    df = book.discount_factor(r.pair[3:6], r.t) if hasattr(book, "discount_factor") else None
+    r.csa = str(getattr(leg, "csa", "") or "").strip().upper()
+    if hasattr(book, "csa_discount_factor"):
+        df, r.csa_source = book.csa_discount_factor(r.pair[3:6], r.t, r.csa)
+    else:
+        df = book.discount_factor(r.pair[3:6], r.t) if hasattr(book, "discount_factor") else None
     if df is None:
         return r
     r.df_domestic = float(df)
@@ -796,7 +816,7 @@ def _price_leg(book, leg: OptionLeg) -> LegResult:
     # ---- vanilla --------------------------------------------------------
     premium_dom = float(black.price(forward, strike, vol, t, is_call))
     # The slice's convention: spot delta where the pair quotes one and the
-    # RATES tab can price it, forward delta otherwise -- and the row says which.
+    # feed can discount it, forward delta otherwise -- and the row says which.
     delta = float(black.delta(forward, strike, vol, t, is_call, sl.conv))
     vega = float(black.vega(forward, strike, vol, t)) / 100.0
     gamma = float(black.gamma(forward, strike, vol, t))
@@ -855,5 +875,6 @@ def price_strip(book, legs: list[OptionLeg]) -> dict:
         "totals": totals,
         "errors": sum(1 for r in results if not r.ok),
         "note": ("premiums are forward values; the premium as paid (pv_*) is the same "
-                 "discounted at the term currency's RATES-tab rate, None without one"),
+                 "discounted on the term currency's feed discount curve -- under each "
+                 "leg's own CSA -- and None without one"),
     }

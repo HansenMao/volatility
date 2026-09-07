@@ -27,7 +27,7 @@ from .black import DeltaConvention
 from .numerics import ConvergenceError, fixed_point, solve_scalar
 from .sabr import SabrCalibration, SabrParams
 from .smile import INTERPOLATORS, SmileSlice
-from .timeutil import Clock, tenor_to_years
+from .timeutil import Clock, tenor_key, tenor_to_years
 
 # The four smile parameters carried across expiries.
 PARAM_NAMES = ("slog10", "slog25", "rho25", "rho10")
@@ -241,8 +241,8 @@ class VolSurface:
     # refuses rather than guessing a level.  Signature: (t years) -> forward
     # or None.
     forward_lookup: object | None = None
-    # The base currency's discount factor at an expiry, from the workbook's
-    # RATES tab, for reading spot deltas.  The Book sets this; without it
+    # The base currency's discount factor at an expiry, from the feed's OIS
+    # rows and forwards, for reading spot deltas.  The Book sets this; without it
     # every delta is a forward delta and the slice says so.  Signature:
     # (currency, t years) -> discount factor or None.
     discount_lookup: object | None = None
@@ -289,7 +289,7 @@ class VolSurface:
         if self.discount_lookup is not None and self.conv.wants_spot_delta(t):
             try:
                 df = self.discount_lookup(ccy, t)
-            except Exception:  # noqa: BLE001 -- a rates table that cannot answer is no rate
+            except Exception:  # noqa: BLE001 -- a feed that cannot answer is no rate
                 df = None
         return self.conv.at(t, df, ccy)
 
@@ -344,9 +344,14 @@ class VolSurface:
                 self.ratio_overwrites.pop(key, None)
 
     def ratio_rows(self) -> list[dict]:
-        """One row per tenor the ratios or the quotes reach: tab, screen, both."""
+        """One row per tenor the ratios or the quotes reach: tab, screen, both.
+
+        Plus every tenor CONFIG lists, so a multiple can be set on a listed
+        tenor the sheet has not quoted yet rather than only after it has.
+        """
         tenors = {m.tenor.upper() for m in self.marks} | set(self.wing_ratios) \
-            | set(self.quote_overwrites) | set(self.ratio_overwrites)
+            | set(self.quote_overwrites) | set(self.ratio_overwrites) \
+            | {tenor_key(t) for t in self.config_tenors}
         rows = []
         for tenor in tenors:
             sheet = self.wing_ratios.get(tenor, WingRatio())
@@ -360,6 +365,70 @@ class VolSurface:
                     row["marked"] = True
             rows.append(row)
         return sorted(rows, key=lambda r: tenor_to_years(r["tenor"]))
+
+    @property
+    def config_tenors(self) -> tuple[str, ...]:
+        """The tenor set the workbook's CONFIG lists, as the ATM curve has it.
+
+        Empty when the workbook stated none, and empty is *no list* rather
+        than *no tenors*: everything below reads it that way, so a book with
+        nothing to say about tenors governs nothing.
+        """
+        return tuple(getattr(self.atm, "tenor_points", ()) or ())
+
+    def lists_tenor(self, tenor: str) -> bool:
+        """Whether CONFIG lists this tenor, matched however either side spells it."""
+        listed = self.config_tenors
+        if not listed:
+            return True
+        return tenor_key(tenor) in {tenor_key(t) for t in listed}
+
+    def implied_marks(self) -> dict[str, SmileMark]:
+        """The four quotes at each CONFIG tenor the sheet does not quote.
+
+        CONFIG lists the tenors a desk marks; the sheet holds the ones it has
+        a market for.  Where the second is short of the first -- 3W on the CNH
+        sheets here -- the tenor is not left blank: its risk reversals and
+        market strangles are **read back off the fitted smile**, which is the
+        same interpolation every price at that expiry already uses.  Nothing
+        is invented; the row is shown saying where it came from.
+
+        Display only, and deliberately never fitted: these numbers came *out*
+        of the fit, and feeding them back in would make the surface a function
+        of its own output.  Typing into one materialises it instead
+        (:meth:`overwrite_quote`), which turns a reading into a mark and the
+        tenor into a real pillar.
+
+        Keyed by :func:`timeutil.tenor_key`, empty when there is no smile to
+        read them off yet.
+        """
+        listed = self.config_tenors
+        if not listed or not self.fits:
+            return {}
+        have = {tenor_key(m.tenor) for m in self.marks}
+        have |= {tenor_key(t) for t in self.quote_overwrites}
+        out: dict[str, SmileMark] = {}
+        for tenor in listed:
+            key = tenor_key(tenor)
+            if key in have or key in out:
+                continue
+            try:
+                expiry = self.clock.datetime_from_years(self.tenor_years(tenor))
+                out[key] = SmileMark(
+                    tenor=key,
+                    rr_25=self.risk_reversal(expiry, 0.25),
+                    rr_10=self.risk_reversal(expiry, 0.10),
+                    st_25=self.strangle(expiry, 0.25),
+                    st_10=self.strangle(expiry, 0.10),
+                )
+            except (ConvergenceError, ValueError, KeyError) as exc:
+                # A tenor CONFIG lists that the smile cannot be read at is
+                # worth saying: the row is on the screen either way, and blank
+                # with no reason beside it is the silence this project refuses.
+                self.warnings.append(
+                    f"{self.pair} {key}: CONFIG lists this tenor, the sheet does not quote "
+                    f"it, and the fitted smile could not be read at it ({exc})")
+        return out
 
     def quoted_marks(self) -> list[SmileMark]:
         """The sheet's quotes with the screen's edits on them.
@@ -428,6 +497,18 @@ class VolSurface:
         wing and the ratio, applied last, would win over the box that was just
         typed into -- a number that goes back to what it was the moment you
         leave the field.  Clearing the box puts the ratio back.
+
+        A tenor **CONFIG does not list** is refused.  CONFIG is the pillar set
+        now (:meth:`implied_marks`), and a quote typed at a tenor the screen
+        will not then show is a mark nobody can see or take off again.
+
+        A tenor CONFIG lists that the sheet does not quote is the opposite
+        case and is *materialised*: the three quotes not being typed are taken
+        from :meth:`implied_marks` -- the numbers already on that row, read off
+        the fitted smile -- so one typed box turns the whole row into a mark
+        and the tenor into a fitted pillar.  Without it the row would hold one
+        typed number and three blanks, which does not fit and reports itself
+        as half a smile.  The wings a ratio derives are left to the ratio.
         """
         if field_name not in QUOTE_FIELDS:
             raise ValueError(f"unknown quote {field_name!r}; expected one of "
@@ -443,10 +524,38 @@ class VolSurface:
         except Exception as exc:  # noqa: BLE001 - the tenor is the thing being reported
             raise ValueError(f"{tenor!r} is not a tenor this book can place ({exc})") from None
         key = str(tenor).upper()
+        if not self.lists_tenor(key):
+            raise ValueError(
+                f"{self.pair}: {key} is not one of the tenors CONFIG lists "
+                f"({', '.join(self.config_tenors)}), so nothing would show the mark; put "
+                f"the tenor in CONFIG's TENORS column and it can be marked here")
+        self._materialise(key)
         self.quote_overwrites.setdefault(key, {})[field_name] = v
         wing = next((w for w, f in RATIO_WINGS.items() if f == field_name), None)
         if wing is not None and self.effective_ratio(key).get(wing) is not None:
             self.overwrite_ratio(key, wing, None)
+
+    def _materialise(self, key: str) -> None:
+        """Turn an implied row into marks, once, the first time it is typed in.
+
+        Called with the screen's own spelling of the tenor and only ever does
+        something for a tenor the sheet does not quote and nobody has typed in
+        yet.  A wing a ratio derives is skipped: the ratio is the last word on
+        it (:meth:`_derive`) and seeding it here would put a number in a box
+        that is read-only and immediately recomputed.
+        """
+        if key in {m.tenor.upper() for m in self.marks} or key in self.quote_overwrites:
+            return
+        seed = self.implied_marks().get(tenor_key(key))
+        if seed is None:
+            return
+        ratio = self.effective_ratio(key)
+        derived = {RATIO_WINGS[w] for w in RATIO_WINGS if ratio.get(w) is not None}
+        self.quote_overwrites[key] = {f: getattr(seed, f)
+                                      for f in QUOTE_FIELDS if f not in derived}
+        self.warnings.append(
+            f"{self.pair} {key}: the sheet does not quote this tenor, so its other quotes "
+            f"were taken off the fitted smile and are now marked with the one typed")
 
     def clear_quote_overwrite(self, tenor: str | None = None,
                               field_name: str | None = None) -> None:
@@ -485,19 +594,29 @@ class VolSurface:
         it.  ``marked`` is *different from the sheet*, not merely typed: a
         value typed back onto the number that was already there is not a mark
         and must not carry a dot that says the row was changed.
+
+        And every tenor CONFIG lists that neither of those reaches, carrying
+        the four numbers :meth:`implied_marks` read off the fitted smile in
+        ``<field>_implied``.  Such a row is ``implied``: nothing is quoted on
+        it, nothing is marked on it, nothing is fitted at it, and its boxes
+        are empty with those readings underneath them as the placeholder --
+        type one and the row becomes a mark like any other.
         """
         sheet = {m.tenor.upper(): m for m in self.marks}
         fitted = {f.tenor.upper() for f in self.fits}
         # What the fit is actually using, derivation included, so the box a
         # wing is read from shows the number the smile was built on.
         live = {m.tenor.upper(): m for m in self.quoted_marks()}
+        implied = self.implied_marks()
         names = list(sheet) + [t for t in self.quote_overwrites if t not in sheet]
+        names += [t for t in implied if t not in sheet and t not in self.quote_overwrites]
         rows = []
         for tenor in names:
             base, edits = sheet.get(tenor), self.quote_overwrites.get(tenor, {})
+            guess = implied.get(tenor)
             ratio = self.effective_ratio(tenor)
             row = {"tenor": tenor, "quoted": base is not None, "fitted": tenor in fitted,
-                   "marked": False}
+                   "implied": guess is not None, "marked": False}
             for f in QUOTE_FIELDS:
                 b = getattr(base, f) if base is not None else None
                 o = edits.get(f)
@@ -512,6 +631,10 @@ class VolSurface:
                     value = o if o is not None else b
                 row[f] = value
                 row[f + "_sheet"] = b
+                # What the fitted smile reads at this tenor, when nothing
+                # quotes it.  Not a value and not the sheet's number: a
+                # reading, shown where the sheet's number would be.
+                row[f + "_implied"] = None if guess is None else getattr(guess, f)
                 # A derived wing is not typed and not the sheet's either: the
                 # screen shows it read-only with the multiple that made it.
                 row[f + "_derived"] = factor if on_ratio else None

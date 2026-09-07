@@ -33,19 +33,20 @@ from volkit.cross import (CorrelationCurve, CrossAtmCurve, dollar_legs,
 from volkit import exotics
 from volkit.banded import Band, BetaBandSmile, JumpSpec, calibrate_band_smile, load_bands
 from volkit.feed import FeedError, MarketFeed, pip_divisor
-from volkit import analytics, history, listed, marketmaker, moments, quotes
+from volkit import analytics, discount, history, listed, marketmaker, moments, quotes
 from volkit.events import EventSchedule
 from volkit.knowledge import KnowledgeBank, PairKnowledge, Rule, suggest_rules
 from volkit import marketdata
-from volkit.marketdata import ExcelSource, MarketDataError
+from volkit.marketdata import ExcelSource, MarketData, MarketDataError
 from volkit.numerics import ConvergenceError, fixed_point, integrate_piecewise, solve_scalar
 from volkit.pricing import (OptionLeg, StrikeSpec, expiry_datetime, parse_strike, price_strip,
                             quick_vol, resolve_expiry)
 from volkit.smile import SmileSlice, fit_svi
-from volkit.surface import PARAM_NAMES, SmileMark, VolSurface, fit_param_term_structure
+from volkit.surface import (PARAM_NAMES, QUOTE_FIELDS, SmileMark, VolSurface,
+                            fit_param_term_structure)
 from volkit.timeutil import (Clock, DAYS_IN_YEAR, TenorError, UTC, add_tenor,
                              normalise_tenor, parse_datetime, parse_tenor,
-                             tenor_to_years)
+                             tenor_key, tenor_to_years)
 from volkit.timeweight import DEFAULT_SESSION_HOURS, TimeWeighting, session_shares
 
 def _source(*parts: str) -> str:
@@ -229,7 +230,7 @@ class TestBlack(unittest.TestCase):
         The pair's convention becomes a slice's through ``at``: with a
         discount factor it reads spot delta, without one it reads forward
         delta and says why, and beyond the boundary it reads forward delta
-        whatever the tab has.
+        whatever the feed has.
         """
         from volkit.black import DeltaConvention, delta, dns_strike, strike_from_delta
         c = DeltaConvention.for_pair("USDJPY")
@@ -238,7 +239,7 @@ class TestBlack(unittest.TestCase):
         fwd = c.at(1.0, None, "USD")
         far = c.at(2.0, 0.92, "USD")
         self.assertEqual((spot.delta_label(), fwd.delta_label(), far.delta_label()),
-                         ("spot delta", "forward delta (no USD rate on the RATES tab)",
+                         ("spot delta", "forward delta (no USD discount factor from the feed)",
                           "forward delta"))
         self.assertTrue(spot.delta_is_spot)
         self.assertFalse(fwd.delta_is_spot)
@@ -1487,55 +1488,84 @@ class TestPricing(unittest.TestCase):
         self.assertAlmostEqual(put["delta"], -10.0, places=6)
         self.assertIs(put["delta_is_call"], False)
 
-    def test_the_rates_tab_makes_the_deltas_spot_and_the_premium_paid(self):
-        """With a USD rate a 1Y USDJPY 25-delta quote lands on a lower strike.
+    def test_the_feeds_ois_rows_make_the_deltas_spot_and_the_premium_paid(self):
+        """With a USD OIS curve a 1Y USDJPY 25-delta quote lands on a lower strike.
 
         Spot delta is forward delta times the USD discount factor, so the 25
         the market quotes is a 26-and-a-bit forward delta and the strike is
         nearer the money.  The premium as paid is the forward premium at the
-        JPY discount factor.  A currency with no rate stays a forward delta
-        and an undiscounted premium, said in so many words.
+        JPY discount factor -- and *nobody types a JPY rate*: it is implied
+        from the USD curve and the USDJPY forward in the same file, so the two
+        factors a pair is priced with reproduce that forward exactly instead
+        of disagreeing with it by the basis.  A currency the file cannot reach
+        stays a forward delta and an undiscounted premium, said in so many
+        words.
         """
         import tempfile
-        from volkit import session
-        from volkit.rates import RatesTable
         d = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, d, True)
-        wb = d / "marks.xlsx"
-        shutil.copy(WORKBOOK, wb)
-        session.write_config_tabs(wb, {"RATES": [
-            {"currency": "USD", "tenor": "1m", "rate": 5.3},
-            {"currency": "USD", "tenor": "1y", "rate": 5.0},
-            {"currency": "JPY", "tenor": "1y", "rate": 0.1}]})
-        table = RatesTable.load(wb)
-        self.assertEqual(table.currencies, ("JPY", "USD"))
-        self.assertAlmostEqual(table.rate("USD", 0.5), 0.053 + (0.050 - 0.053) * (0.5 - 1 / 12) / (1 - 1 / 12), places=9)
-        self.assertAlmostEqual(table.df("USD", 1.0), 1 / 1.05)
-        self.assertIsNone(table.df("EUR", 1.0))
-        self.assertIsNone(RatesTable.load(WORKBOOK))          # no tab: None, not empty
-        book = Book.from_excel(wb, ASOF).load_all(["USDJPY", "AUDUSD"])
-        self.assertTrue(any("RATES: JPY" in n for n in book.data.notes))
-        self.assertTrue(any(w.startswith("AUDUSD: quotes spot delta but the RATES tab has no AUD")
-                            for w in book.warnings))
-        self.assertFalse(any(w.startswith("USDJPY: quotes spot delta") for w in book.warnings))
-        book.feed = MarketFeed.load(FEED)
+
+        feed = MarketFeed.load(FEED)
+        self.assertEqual(feed.problems, [])
+        self.assertEqual(sorted(feed.ois), ["JPY", "USD"])
+        self.assertAlmostEqual(feed.ois["USD"].rate(1.0), 0.0400, places=12)
+        # linear in years between the pillars listed, flat outside them
+        self.assertAlmostEqual(feed.ois["USD"].rate(0.375),
+                               0.0425 + (0.0415 - 0.0425) * 0.5, places=12)
+        self.assertAlmostEqual(feed.ois["USD"].rate(30.0), 0.0380, places=12)
+        # annually compounded, which is how an OIS is quoted
+        self.assertAlmostEqual(feed.ois["USD"].df(1.0), 1 / 1.04, places=12)
+
+        book = Book.from_excel(WORKBOOK, ASOF)
+        book.feed = feed
+        book.load_all(["USDJPY", "AUDUSD"])
+        disc = book.discount
+        self.assertTrue(disc.anchored)
+        self.assertEqual(disc.factor("USD", 1.0)[1], "USDOIS")
+        self.assertIn("implied from USDOIS and the USDJPY forward",
+                      disc.factor("JPY", 1.0)[1])
+        self.assertIn("implied from USDOIS and the EURUSD forward",
+                      disc.factor("EUR", 1.0)[1])
+        # The identity, which is the whole reason the rate comes off the feed:
+        # F = S x DF_base / DF_term, on a quoted pair and on a cross the file
+        # does not quote and builds from its legs.
+        for pair in ("USDJPY", "EURUSD", "AUDUSD", "EURJPY"):
+            level = feed.level(pair, 1.0)
+            self.assertAlmostEqual(
+                level["spot"] * disc.df(pair[:3], 1.0) / disc.df(pair[3:6], 1.0),
+                level["forward"], places=10, msg=pair)
+        # A stated non-anchor curve is read for the basis and never to
+        # discount: JPY still discounts off the forward.
+        self.assertAlmostEqual(
+            disc.basis("JPY", 1.0),
+            feed.ois["JPY"].rate(1.0) - discount.implied_rate(disc.df("JPY", 1.0), 1.0),
+            places=12)
+        self.assertEqual([r["currency"] for r in disc.basis_report(1.0)], ["JPY"])
+        # A currency the file does not quote against the dollar has no factor,
+        # and says which pair it went looking for.
+        self.assertIsNone(disc.df("CHF", 1.0))
+        self.assertIn("does not quote USDCHF", disc.factor("CHF", 1.0)[1])
+
         with_rate = quick_vol(book, "USDJPY", "1Y", "25d")
         without = quick_vol(self.book, "USDJPY", "1Y", "25d")
         self.assertEqual(with_rate["delta_kind"], "spot delta")
-        self.assertTrue(without["delta_kind"].startswith("forward delta (no USD rate"))
+        self.assertTrue(without["delta_kind"].startswith(
+            "forward delta (no USD discount factor"))
         self.assertLess(with_rate["strike_ratio"], without["strike_ratio"])
         self.assertAlmostEqual(with_rate["delta"], 25.0, places=6)
-        # forward delta beyond the boundary, tab or no tab
-        self.assertEqual(quick_vol(book, "USDJPY", "2Y", "25d")["delta_kind"], "forward delta")
+        # forward delta beyond the boundary, curve or no curve
+        self.assertEqual(quick_vol(book, "USDJPY", "2Y", "25d")["delta_kind"],
+                         "forward delta")
         # a 1M is barely moved: the factor is a month of USD rate
         near = quick_vol(book, "USDJPY", "1M", "25d")["strike_ratio"]
         near0 = quick_vol(self.book, "USDJPY", "1M", "25d")["strike_ratio"]
         self.assertLess(abs(near - near0), abs(with_rate["strike_ratio"] - without["strike_ratio"]))
-        # the premium as paid
+        # the premium as paid, at the *implied* JPY factor
         r = price_strip(book, [OptionLeg(pair="USDJPY", expiry="1Y", strike="ATM",
                                          notional=10, direction=1)])["legs"][0]
         self.assertTrue(r["discounted"])
-        self.assertAlmostEqual(r["df_domestic"], 1 / (1 + 0.001 * r["t"]), places=9)
+        self.assertAlmostEqual(r["df_domestic"], book.discount_factor("JPY", r["t"]),
+                               places=12)
         self.assertAlmostEqual(r["premium_pv_dom"], r["premium_dom"] * r["df_domestic"])
         self.assertAlmostEqual(r["pv_amount"], r["premium_amount"] * r["df_domestic"])
         self.assertEqual(r["delta_kind"], "spot delta")
@@ -1555,11 +1585,119 @@ class TestPricing(unittest.TestCase):
         self.assertAlmostEqual(out["totals"]["USDJPY"]["premium"],
                                legs[0]["premium_amount"] + legs[1]["premium_amount"])
         self.assertIsNone(out0["totals"]["USDJPY"]["pv_premium"])
-        # a bad row is named
-        session.write_config_tabs(wb, {"RATES": [{"currency": "USD", "tenor": "1x", "rate": 5}]})
-        with self.assertRaises(ValueError) as ctx:
-            RatesTable.load(wb)
-        self.assertIn("RATES row", str(ctx.exception))
+
+        # A base currency the anchor cannot reach: the warning is at load,
+        # where somebody is watching, and names what it costs.
+        thin = d / "no_aud.csv"
+        rows = FEED.read_text(encoding="utf-8").splitlines()
+        thin.write_text("\n".join(line for line in rows
+                                   if not line.startswith("AUDUSD")) + "\n",
+                        encoding="utf-8")
+        lean = Book.from_excel(WORKBOOK, ASOF)
+        lean.feed = MarketFeed.load(thin)
+        lean.load_all(["USDJPY", "AUDUSD"])
+        self.assertTrue(any(w.startswith("AUDUSD: quotes spot delta but the feed "
+                                         "cannot discount AUD") for w in lean.warnings))
+        self.assertFalse(any(w.startswith("USDJPY: quotes spot delta")
+                             for w in lean.warnings))
+        # And asked again once the feed is on, because every command that takes
+        # --feed loads it *after* the build: one line per currency, not per pair.
+        late = Book.from_excel(WORKBOOK, ASOF).load_all(["USDJPY", "AUDUSD"])
+        self.assertEqual(late.discount_warnings(), [])       # no feed, nothing to say
+        late.feed = MarketFeed.load(thin)
+        said = late.discount_warnings()
+        self.assertEqual(len(said), 1)
+        self.assertTrue(said[0].startswith("AUD: the feed does not quote AUDUSD"))
+        self.assertIn("the quoted deltas on AUDUSD are read as forward deltas", said[0])
+        late.feed = feed
+        self.assertEqual(late.discount_warnings(), [])
+
+        # A row that cannot be read is named by its line, and does not take
+        # the rest of the file with it.
+        bad = d / "bad.csv"
+        bad.write_text("USDJPY,SPOT,150.0\nUSDOIS,1x,5\nEUROIS,1M,zero\n"
+                       "JPYOIS,1M,400\nUSDOIS,7D,4.3\nUSDOIS,1W,4.4\n",
+                       encoding="utf-8")
+        broken = MarketFeed.load(bad)
+        joined = " | ".join(broken.problems)
+        self.assertIn("line 2: USDOIS '1x' is not a tenor", joined)
+        self.assertIn("line 3: EUROIS 1M rate 'zero' is not a number", joined)
+        self.assertIn("is not a percentage per annum", joined)
+        self.assertIn("USDOIS quotes 7D and 1W, which are the same tenor", joined)
+        self.assertEqual(sorted(broken.ois), ["USD"])
+        self.assertEqual(sorted(broken.pairs), ["USDJPY"])
+
+    def test_a_csa_moves_the_premium_and_nothing_else(self):
+        """Collateral changes what a cashflow is worth, not what a hedge is.
+
+        Discounting a JPY premium at the FX-implied factor *is* a USD CSA --
+        convert at the forward, discount at USD OIS, convert back at spot --
+        so the default is not a convention with no name and the blank stays
+        the number it always was.  A JPY CSA discounts the same premium on
+        JPY OIS instead, and the two differ by exactly the basis.  The delta,
+        the strike and the volatility must not move for any of it: a delta is
+        a hedge ratio, and the spot delta the market quotes is defined off
+        ``F = S x DF_base/DF_term``, which is the *forward's* factor and not
+        the collateral's.
+        """
+        feed = MarketFeed.load(FEED)
+        book = Book.from_excel(WORKBOOK, ASOF)
+        book.feed = feed
+        book.load_all(["USDJPY"])
+
+        def leg(csa):
+            return price_strip(book, [OptionLeg(pair="USDJPY", expiry="1Y", strike="ATM",
+                                                notional=10, direction=1,
+                                                csa=csa)])["legs"][0]
+
+        base, usd, jpy, eur = leg(""), leg("USD"), leg("JPY"), leg("EUR")
+        # the anchor's CSA is the implied factor, and there is one arithmetic
+        self.assertEqual(usd["df_domestic"], base["df_domestic"])
+        self.assertEqual(usd["csa_source"], base["csa_source"])
+        self.assertAlmostEqual(base["df_domestic"],
+                               book.discount_factor("JPY", base["t"]), places=12)
+        # the term currency's own CSA is its own curve, used directly -- the
+        # one place a stated non-anchor curve discounts anything
+        self.assertAlmostEqual(jpy["df_domestic"], feed.ois["JPY"].df(jpy["t"]), places=12)
+        self.assertEqual(jpy["csa_source"], "JPYOIS, on a JPY CSA")
+        self.assertNotAlmostEqual(jpy["df_domestic"], base["df_domestic"], places=6)
+        # and the gap between them is the basis, which is the whole claim
+        t = base["t"]
+        self.assertAlmostEqual(
+            discount.implied_rate(jpy["df_domestic"], t)
+            - discount.implied_rate(base["df_domestic"], t),
+            book.discount.basis("JPY", t), places=12)
+        # a collateral currency the feed cannot price falls back and says so
+        self.assertEqual(eur["df_domestic"], base["df_domestic"])
+        self.assertIn("no EUROIS rows", eur["csa_source"])
+        self.assertIn("falls back", eur["csa_source"])
+
+        # Nothing else moves.  This is the point of keeping ``csa_df`` apart
+        # from ``df``: put the collateral curve in ``df_foreign`` and every
+        # 25-delta wing lands somewhere nobody quoted.
+        for other in (usd, jpy, eur):
+            for key in ("strike", "vol", "atm_vol", "delta_pct", "smile_delta_pct",
+                        "premium_dom", "forward", "delta_kind"):
+                self.assertEqual(other[key], base[key], f"{key} moved with the CSA")
+        # the premium as paid is the only number that follows
+        self.assertAlmostEqual(jpy["pv_amount"], jpy["premium_amount"] * jpy["df_domestic"])
+        self.assertGreater(abs(jpy["pv_amount"] - base["pv_amount"]), 0.0)
+
+        # The forward identity survives inside a CSA: whatever the collateral,
+        # the two factors a pair is priced with still reproduce its forward.
+        disc = book.discount
+        level = feed.level("USDJPY", 1.0)
+        for collateral in ("", "USD", "JPY"):
+            b, _ = disc.csa_df("USD", 1.0, collateral)
+            q, _ = disc.csa_df("JPY", 1.0, collateral)
+            self.assertAlmostEqual(level["spot"] * b / q, level["forward"], places=10)
+        # a third currency's CSA reaches a pair through the cross it quotes
+        df, why = disc.csa_df("JPY", 1.0, "JPY")
+        self.assertIn("JPYOIS", why)
+        df2, why2 = disc.csa_df("EUR", 1.0, "JPY")
+        self.assertIn("EURJPY", why2)
+        self.assertAlmostEqual(df2, df * (feed.level("EURJPY", 1.0)["forward"]
+                                          / feed.level("EURJPY", 1.0)["spot"]), places=12)
 
     def test_the_three_spellings_of_the_money_and_the_long_dated_atm(self):
         """``ATM`` is the convention, ``ATMF`` the forward, ``DNS`` the straddle.
@@ -1612,10 +1750,17 @@ class TestPricing(unittest.TestCase):
         self.assertTrue(usd["premium_adjusted"])
         self.assertFalse(eur["premium_adjusted"])
         self.assertLess(usd["delta"], 50.0)
-        # unadjusted, the delta-neutral straddle *is* the 50-delta strike, to
-        # rounding -- the old ``assertGreater(…, 50.0)`` was passing on 1e-13 of
-        # floating-point noise and flipped sign when the holiday weights moved
-        self.assertAlmostEqual(eur["delta"], 50.0, places=6)
+        # Unadjusted, the delta-neutral straddle *is* the 50-delta strike --
+        # in the forward delta it is defined in.  The feed now carries the
+        # discount curve too, so what a EURUSD delta box shows is the *spot*
+        # delta at that strike, which is 50 times the EUR discount factor: a
+        # tenth of a delta at a month, and the number is exact rather than
+        # nearly-50.  (The old ``assertGreater(…, 50.0)`` was passing on 1e-13
+        # of floating-point noise and flipped sign when the weights moved.)
+        self.assertEqual(eur["delta_kind"], "spot delta")
+        self.assertAlmostEqual(eur["delta"],
+                               50.0 * book.discount_factor("EUR", eur["t"]), places=9)
+        self.assertLess(eur["delta"], 50.0)
 
     def test_the_delta_comes_back_for_a_pair_with_no_feed(self):
         """Delta is a function of moneyness, so it needs no level at all.
@@ -2724,17 +2869,35 @@ class TestExoticLegs(unittest.TestCase):
 
 class TestImpliedRRFly(unittest.TestCase):
     def test_anchoring_makes_the_surface_reproduce_its_quotes(self):
-        """The marking check the implied-vs-quoted table displays."""
+        """The marking check the implied-vs-quoted table displays.
+
+        Read at each pillar's **calendar expiry**, which is where a quoted
+        tenor sits on the volatility axis, and across every quoted tenor
+        rather than at one. Anchoring replaces the smoothed parameter term
+        structure with the tenor's own fit, so it tightens the surface against
+        its quotes *as a whole*; at any single tenor the smoothed curve can
+        happen to pass closer, which is what the 3M does here.
+        """
         book = Book.from_excel(WORKBOOK, ASOF).load_all(["USDJPY"])
         surface = book["USDJPY"]
-        mark = {m.tenor.upper(): m for m in book.data.marks["USDJPY"]}["3M"]
-        expiry = ASOF.datetime_from_years(tenor_to_years("3m"))
-        loose = abs(surface.risk_reversal(expiry, 0.25) - mark.rr_25)
+        marks = {m.tenor.upper(): m for m in book.data.marks["USDJPY"]}
+
+        def errors():
+            out = {}
+            for tenor, mark in marks.items():
+                expiry = ASOF.datetime_from_years(surface.tenor_years(tenor))
+                out[tenor] = abs(surface.risk_reversal(expiry, 0.25) - mark.rr_25)
+            return out
+
+        loose = errors()
         surface.anchor_tenors = True
         surface._slices.clear()
-        tight = abs(surface.risk_reversal(expiry, 0.25) - mark.rr_25)
-        self.assertLess(tight, loose)
-        self.assertLess(tight, 1e-4)
+        tight = errors()
+        self.assertLess(sum(tight.values()), sum(loose.values()))
+        # And anchored, every pillar reproduces its own quote to within the
+        # SABR fit's own residual there -- not just on average.
+        for tenor, err in tight.items():
+            self.assertLess(err, 1e-4, tenor)
 
 
 class TestBandedSmile(unittest.TestCase):
@@ -2997,10 +3160,47 @@ class TestConfigurationTabs(unittest.TestCase):
         from volkit import configsheets
         # CONVENTIONS is optional for the same reason: a pair with no row takes
         # the market's conventions, and most pairs never need a row.
-        optional = {"WING_RATIOS", "CONVENTIONS", "RATES"}
+        optional = {"WING_RATIOS", "CONVENTIONS"}
         needed = [s for s in configsheets.SHEETS if s not in optional]
         self.assertEqual([s for s in configsheets.present(WORKBOOK) if s not in optional],
                          needed)
+
+    def test_a_retired_tab_is_named_once_at_load_and_read_no_further(self):
+        """``RATES`` is still a tab in somebody's workbook, and reads like one.
+
+        A setting that has moved leaves its tab behind -- deleting a desk's
+        sheet is not this tool's business -- and a tab full of rates that
+        nothing reads is worse than no tab at all, because it looks like it is
+        working.  So it is said once, at load, and the numbers on it change
+        nothing: the discount factors come off the feed's OIS rows.
+        """
+        import tempfile
+        from volkit import configsheets
+        self.assertNotIn("RATES", configsheets.SHEETS)
+        self.assertNotIn("RATES", configsheets.EDITABLE)
+        d = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d, True)
+        wb = d / "marks.xlsx"
+        shutil.copy(WORKBOOK, wb)
+        self.assertEqual(configsheets.retired(wb), [])
+        wb2 = d / "old.xlsx"
+        shutil.copy(WORKBOOK, wb2)
+        import openpyxl
+        book = openpyxl.load_workbook(wb2)
+        try:
+            sheet = book.create_sheet("RATES")
+            sheet.append(["currency", "tenor", "rate"])
+            sheet.append(["USD", "1Y", 5.0])
+            book.save(wb2)
+        finally:
+            book.close()
+        said = configsheets.retired(wb2)
+        self.assertEqual(len(said), 1)
+        self.assertTrue(said[0].startswith("RATES: discount rates come from the market feed"))
+        loaded = Book.from_excel(wb2, ASOF)
+        self.assertTrue(any(w == f"workbook: {said[0]}" for w in loaded.warnings))
+        # and the number on it is not a discount factor
+        self.assertIsNone(loaded.discount_factor("USD", 1.0))
 
     def test_the_holidays_tab_reaches_the_book_and_no_further(self):
         """A lunar holiday belongs to the workbook that lists it.
@@ -4501,7 +4701,8 @@ class TestAnalysis(unittest.TestCase):
         self.assertTrue(bool(surface.conv), "USDJPY should be premium adjusted here")
         r = [x for x in analytics.carry_table(
             self.book, "USDJPY", horizon_days=7, target="25dc", cut="NY") if x.expiry][-1]
-        quoted = float(black.delta(r.forward, r.strike, r.level, r.t, True, surface.conv))
+        quoted = float(black.delta(r.forward, r.strike, r.level, r.t, True,
+                                   surface.slice_conv(r.t)))
         self.assertAlmostEqual(quoted, 0.25, places=6)          # the strike is a 25 delta one
         self.assertNotAlmostEqual(r.delta, quoted, places=3)    # and this column is not that
         self.assertAlmostEqual(
@@ -5622,8 +5823,17 @@ class TestSmileStrikeScale(unittest.TestCase):
         self.assertIsNone(b["spot"])
 
         # The strikes come back in moneyness either way: the page multiplies.
-        self.assertEqual([r["k"] for r in a["curve"]], [r["k"] for r in b["curve"]])
-        self.assertEqual([r["v"] for r in a["curve"]], [r["v"] for r in b["curve"]])
+        # They are not the *same* moneyness any more, and that is the feed's
+        # other half rather than the scale: its ``USDOIS`` rows give EUR a
+        # discount factor, so the 25-delta quotes are read as the spot deltas
+        # the market means and the curve is fitted at those strikes.  Small --
+        # two ten-thousandths of moneyness and six thousandths of a vol point
+        # at three months -- and not zero, which is the point of having it.
+        self.assertEqual(len(a["curve"]), len(b["curve"]))
+        moved = [abs(x["k"] - y["k"]) for x, y in zip(a["curve"], b["curve"])]
+        self.assertGreater(max(moved), 0.0)
+        self.assertLess(max(moved), 0.01)
+        # the marked at-the-money is a quote and moves for nothing
         self.assertEqual(a["atm"], b["atm"])
 
     def test_the_level_is_the_one_the_band_model_would_place_against(self):
@@ -5779,10 +5989,14 @@ class TestCurveComparison(unittest.TestCase):
         r = curves.ComparePanel(curves=(
             curves.CurveRequest("marks", "EURUSD"),
             curves.CurveRequest("history", "EURUSD", "latest"))).run(book, self.history(book))
-        self.assertIn("2Y", r["tenors"])            # in the workbook, not in the sheet
+        # 2W is on the workbook's marks curve and not on the history sheet,
+        # which quotes 1W, 1M, 3M, 6M and 1Y.  (It used to be 2Y; the pair
+        # sheets still quote one, but CONFIG's TENORS column does not list it
+        # so nothing reads it -- see TestConfigTenorsGovern.)
+        self.assertIn("2W", r["tenors"])            # in the workbook, not in the sheet
         self.assertIn("1M", r["tenors"])
         hist = r["curves"][1]
-        self.assertIsNone(hist_point(hist, "2Y"))
+        self.assertIsNone(hist_point(hist, "2W"))
         self.assertIsNotNone(hist_point(hist, "1M"))
         self.assertTrue(any("not every curve quotes every tenor" in n for n in r["notes"]))
 
@@ -6245,13 +6459,16 @@ class TestWebAssets(unittest.TestCase):
         into the number now sitting there.  ``swap`` is the outright written the
         other way: the browser converts it where it is typed, exactly as
         every other edge of this tool converts volatility points into
-        decimals once, and posts the outright it leaves in the box.  The
-        server must not start reading any of them -- the leg it is sent is
-        already the answer.
+        decimals once, and posts the outright it leaves in the box.
+        ``prem`` is screen state too -- which of the two premiums this leg's
+        own rows and its slice of the totals are read in -- a reading of
+        numbers the pricer already returns for every leg either way, never a
+        second price request.  The server must not start reading any of
+        them -- the leg it is sent is already the answer.
         """
         import re as _re
         from volkit import webapp as _webapp
-        BROWSER_SIDE = {"spotsrc", "fwdsrc", "swap", "strikeask"}
+        BROWSER_SIDE = {"spotsrc", "fwdsrc", "swap", "strikeask", "prem"}
         html = _source("volkit", "web", "index.html")
         js = html.split("<script>")[1].split("</script>")[0]
         body = js.split("function defaultLeg(")[1].split("\n}")[0]
@@ -6370,8 +6587,11 @@ class TestWebAssets(unittest.TestCase):
         self.assertEqual(js.count("STATE.cuts"), 1)
         self.assertIn("const all=STATE.cuts||[];",
                       js.split("function cutList(){")[1].split("\n}")[0])
-        for sel in ("#mcut", "#ancut", "#mocut", "#mmcut"):
+        for sel in ("#mcut", "#ancut", "#mmcut", "#cmpcut"):
             self.assertIn("fillSel('%s',cutList()," % sel, js)
+        # Cut moved onto each monitor panel instead of one screen-wide
+        # selector -- the per-tile markup draws straight off the same list.
+        self.assertIn("optlist(cutList().map(x=>[x,x]),t.cut)", js)
         # The model itself still has all four: this is a screen preference.
         from volkit.atm import CUTS
         self.assertEqual(sorted(CUTS), ["HK", "LDN", "NY", "TK"])
@@ -6893,7 +7113,7 @@ class TestWebAssets(unittest.TestCase):
         for f in fields:
             self.assertIn(f'"{f}"', handler, f"the server never reads {f!r}")
         panel = src.split("def panel_from_request")[1]
-        for f in ("cut", "method", "field", "tiles", "big"):
+        for f in ("method", "field", "tiles", "big"):
             self.assertIn(f'"{f}"', panel, f"the server never reads {f!r}")
 
     def test_the_relative_value_panel_fields_are_all_understood_by_the_server(self):
@@ -7274,6 +7494,154 @@ class TestSessionFile(unittest.TestCase):
             self.assertAlmostEqual(service.book["USDJPY"].atm.tenor_overwrites["1m"], 0.0925)
 
 
+class TestConfigTenorsGovern(unittest.TestCase):
+    """CONFIG's ``TENORS`` column is the pillar set, both ways.
+
+    A tenor the pair sheet quotes and CONFIG does not list is not read: not
+    shown, not fitted, not markable.  A tenor CONFIG lists and the sheet does
+    not quote is on the table with its four numbers read off the fitted smile,
+    and typing into one turns the reading into a mark.  The two halves are one
+    decision -- CONFIG says which tenors the desk marks -- and this class pins
+    both, because keeping a quote in the fit while hiding it from the screen
+    would leave a number shaping every smile that nobody can see or take off.
+    """
+
+    def book(self, pairs):
+        return Book.from_excel(WORKBOOK, ASOF).load_all(pairs)
+
+    def test_a_quoted_tenor_config_does_not_list_is_not_read(self):
+        data = ExcelSource(WORKBOOK).load()
+        self.assertNotIn("2y", [t.lower() for t in data.tenor_points])
+        self.assertTrue(data.tenors_stated)
+        # The sheet still has the row; the book does not.
+        self.assertNotIn("2Y", {m.tenor.upper() for m in data.marks["USDJPY"]})
+        self.assertTrue(any("2Y" in n and "TENORS" in n for n in data.notes), data.notes)
+        # Not a problem: the workbook is fine.  A desk that quotes further out
+        # than it marks has not made a mistake.
+        self.assertEqual(data.problems, [])
+
+    def test_a_tenor_config_does_not_list_is_not_fitted_either(self):
+        s = self.book(["USDJPY"])["USDJPY"]
+        self.assertNotIn("2Y", {f.tenor.upper() for f in s.fits})
+        self.assertNotIn("2Y", {r["tenor"] for r in s.quote_rows()})
+
+    def test_a_tenor_config_does_not_list_cannot_be_marked(self):
+        s = self.book(["USDJPY"])["USDJPY"]
+        with self.assertRaises(ValueError) as cm:
+            s.overwrite_quote("2Y", "rr_25", -0.012)
+        self.assertIn("CONFIG", str(cm.exception))
+        self.assertIn("TENORS", str(cm.exception))
+        self.assertEqual(s.quote_overwrites, {})
+
+    def test_a_workbook_that_lists_no_tenors_governs_nothing(self):
+        """An absent ``TENORS`` column is not an empty one.
+
+        The nine default points are an order to show things in, not a desk's
+        decision, and cutting a sheet down to a list nobody wrote would be
+        this tool inventing the policy.
+        """
+        data = MarketData()
+        self.assertFalse(data.tenors_stated)
+        marks = [SmileMark(tenor="2Y", rr_25=0.01, rr_10=0.02, st_25=0.003, st_10=0.008)]
+        self.assertEqual(ExcelSource._config_tenors_only("USDJPY", marks, data), marks)
+        self.assertEqual(data.notes, [])
+
+    def test_config_and_the_sheet_are_matched_however_each_spells_it(self):
+        """CONFIG is maintained in lower case and the sheets in upper."""
+        data = MarketData(tenor_points=("1m", "3 m"), tenors_stated=True)
+        marks = [SmileMark(tenor=t, rr_25=0.01, rr_10=0.02, st_25=0.003, st_10=0.008)
+                 for t in ("1M", "3M", "6M")]
+        kept = ExcelSource._config_tenors_only("USDJPY", marks, data)
+        self.assertEqual([m.tenor for m in kept], ["1M", "3M"])
+        self.assertEqual(tenor_key("3 m"), "3M")
+
+    def test_a_config_tenor_the_sheet_does_not_quote_is_implied_from_the_fit(self):
+        """USDCNH is quoted 1W, 2W, 1M ... and CONFIG lists a 3W between them."""
+        s = self.book(["USDCNH"])["USDCNH"]
+        self.assertNotIn("3W", {m.tenor.upper() for m in s.marks})
+        implied = s.implied_marks()
+        self.assertEqual(list(implied), ["3W"])
+        row = {r["tenor"]: r for r in s.quote_rows()}["3W"]
+        # Nothing quoted, nothing marked, nothing fitted -- a reading.
+        self.assertTrue(row["implied"])
+        self.assertFalse(row["quoted"])
+        self.assertFalse(row["fitted"])
+        self.assertFalse(row["marked"])
+        for f in QUOTE_FIELDS:
+            self.assertIsNone(row[f])
+            self.assertIsNone(row[f + "_sheet"])
+            self.assertIsNotNone(row[f + "_implied"])
+        # And it is an interpolation, so it sits between the tenors either side
+        # rather than off on its own.
+        by = {m.tenor.upper(): m for m in s.marks}
+        self.assertLess(by["2W"].rr_25, row["rr_25_implied"])
+        self.assertLess(row["rr_25_implied"], by["1M"].rr_25)
+        self.assertLess(by["2W"].st_25, row["st_25_implied"])
+        self.assertLess(row["st_25_implied"], by["1M"].st_25)
+
+    def test_an_implied_tenor_is_never_fitted_from_its_own_reading(self):
+        """The numbers came out of the fit; feeding them back in would make
+        the surface a function of its own output."""
+        s = self.book(["USDCNH"])["USDCNH"]
+        before = [(f.tenor, f.rho25, f.slog25) for f in s.fits]
+        s.quote_rows()
+        s.calibrate()
+        self.assertEqual(before, [(f.tenor, f.rho25, f.slog25) for f in s.fits])
+
+    def test_typing_into_an_implied_row_marks_the_whole_row(self):
+        s = self.book(["USDCNH"])["USDCNH"]
+        reading = s.implied_marks()["3W"]
+        s.warnings.clear()
+        s.overwrite_quote("3W", "rr_25", 0.0050)
+        # The three that were not typed are the numbers that were already on
+        # the row, so one box turns a reading into a pillar rather than into
+        # one number and three blanks.
+        self.assertEqual(set(s.quote_overwrites["3W"]), set(QUOTE_FIELDS))
+        self.assertAlmostEqual(s.quote_overwrites["3W"]["rr_25"], 0.0050)
+        for f in ("rr_10", "st_25", "st_10"):
+            self.assertAlmostEqual(s.quote_overwrites["3W"][f], getattr(reading, f))
+        self.assertTrue(any("taken off the fitted smile" in w for w in s.warnings), s.warnings)
+        s.calibrate()
+        row = {r["tenor"]: r for r in s.quote_rows()}["3W"]
+        self.assertTrue(row["fitted"])
+        self.assertTrue(row["marked"])
+        self.assertFalse(row["implied"])
+
+    def test_clearing_a_materialised_row_gives_the_reading_back(self):
+        s = self.book(["USDCNH"])["USDCNH"]
+        was = s.implied_marks()["3W"].rr_25
+        s.overwrite_quote("3W", "rr_25", 0.0050)
+        s.calibrate()
+        s.clear_quote_overwrite("3W")
+        s.calibrate()
+        row = {r["tenor"]: r for r in s.quote_rows()}["3W"]
+        self.assertTrue(row["implied"])
+        self.assertAlmostEqual(row["rr_25_implied"], was)
+
+    def test_the_ratio_table_reaches_every_config_tenor(self):
+        """A multiple can be set on a listed tenor the sheet has not quoted."""
+        s = self.book(["USDCNH"])["USDCNH"]
+        self.assertIn("3W", {r["tenor"] for r in s.ratio_rows()})
+
+    def test_the_marking_screen_sends_the_readings_beside_the_sheets_numbers(self):
+        from volkit.webapp import BookService
+        service = BookService(str(WORKBOOK), ASOF)
+        rows = {r["tenor"].upper(): r for r in service.marks({"pair": "USDCNH"})["atm"]}
+        # CONFIG's list, whole, and nothing beyond it.
+        self.assertEqual([r["tenor"].upper() for r in service.marks({"pair": "USDCNH"})["atm"]],
+                         [t.upper() for t in service.book.data.tenor_points])
+        self.assertTrue(rows["3W"]["implied"])
+        self.assertFalse(rows["3W"]["quoted"])
+        for f in QUOTE_FIELDS:
+            self.assertIsNone(rows["3W"]["quotes"][f])
+            self.assertIsNone(rows["3W"]["quotes_sheet"][f])
+            self.assertIsNotNone(rows["3W"]["quotes_implied"][f])
+        # In points, like every volatility the screen shows.
+        self.assertGreater(rows["3W"]["quotes_implied"]["rr_25"], 0.05)
+        self.assertFalse(rows["1M"]["implied"])
+        self.assertIsNone(rows["1M"]["quotes_implied"]["rr_25"])
+
+
 class TestQuoteMarking(unittest.TestCase):
     """Typing a quote over the one the pair's sheet holds.
 
@@ -7317,24 +7685,33 @@ class TestQuoteMarking(unittest.TestCase):
         self.assertFalse({r["tenor"]: r for r in s.quote_rows()}["3M"]["marked"])
 
     def test_a_tenor_the_sheet_does_not_quote_needs_all_four(self):
-        s = self.surface()
-        fitted = {f.tenor.upper() for f in s.fits}
-        self.assertNotIn("4M", fitted)
-        s.overwrite_quote("4M", "rr_25", -0.005)
+        """With no smile to read the missing three off, half a smile is not one.
+
+        The pair is deliberately taken *before* it is calibrated: once there
+        is a fit, a CONFIG tenor the sheet does not quote carries four implied
+        numbers and typing one materialises the rest
+        (``test_typing_into_an_implied_row_marks_the_whole_row``).  This is the
+        other case -- a pair with nothing fitted yet -- and it is the one that
+        still has to refuse.
+        """
+        s = Book.from_excel(WORKBOOK, ASOF).build(["USDCNH"])["USDCNH"]
+        self.assertEqual(s.fits, [])
+        self.assertNotIn("3W", {m.tenor.upper() for m in s.marks})
+        s.overwrite_quote("3W", "rr_25", 0.005)
         s.warnings.clear()
         s.calibrate()
-        self.assertNotIn("4M", {f.tenor.upper() for f in s.fits})
+        self.assertNotIn("3W", {f.tenor.upper() for f in s.fits})
         self.assertTrue(any("all four" in w for w in s.warnings), s.warnings)
         # The row still exists on the screen that is creating it, saying what
         # it is: quoted by nobody, fitted by nothing.
-        row = {r["tenor"]: r for r in s.quote_rows()}["4M"]
+        row = {r["tenor"]: r for r in s.quote_rows()}["3W"]
         self.assertFalse(row["quoted"])
         self.assertFalse(row["fitted"])
-        for name, v in (("st_25", 0.002), ("rr_10", -0.009), ("st_10", 0.0065)):
-            s.overwrite_quote("4M", name, v)
+        for name, v in (("st_25", 0.002), ("rr_10", 0.009), ("st_10", 0.0065)):
+            s.overwrite_quote("3W", name, v)
         s.calibrate()
-        self.assertIn("4M", {f.tenor.upper() for f in s.fits})
-        self.assertTrue({r["tenor"]: r for r in s.quote_rows()}["4M"]["fitted"])
+        self.assertIn("3W", {f.tenor.upper() for f in s.fits})
+        self.assertTrue({r["tenor"]: r for r in s.quote_rows()}["3W"]["fitted"])
 
     def test_a_strangle_is_refused_where_the_reader_would_refuse_it(self):
         """The same two checks the workbook reader makes on the cell this
@@ -7365,12 +7742,14 @@ class TestQuoteMarking(unittest.TestCase):
                  for r in service.marks({"pair": "USDJPY"})["atm"]}["3M"]
         self.assertAlmostEqual(again["quotes"]["rr_25"], -0.9)
         self.assertTrue(again["quotes_marked"])
-        # A tenor the workbook does not quote appears once it is typed into,
-        # even though the book prices no such point.
-        service.overwrite({"pair": "USDJPY", "kind": "quote", "tenor": "4M",
-                           "field": "rr_25", "value": -0.5})
-        self.assertIn("4M", {r["tenor"].upper()
-                             for r in service.marks({"pair": "USDJPY"})["atm"]})
+        # The table is CONFIG's list, so a tenor CONFIG does not name cannot
+        # be typed into at all: the mark would be one nothing then shows.
+        with self.assertRaises(ValueError) as cm:
+            service.overwrite({"pair": "USDJPY", "kind": "quote", "tenor": "4M",
+                               "field": "rr_25", "value": -0.5})
+        self.assertIn("TENORS", str(cm.exception))
+        self.assertNotIn("4M", {r["tenor"].upper()
+                                for r in service.marks({"pair": "USDJPY"})["atm"]})
 
     def test_a_block_of_quotes_is_written_and_fitted_as_one_edit(self):
         """What a paste out of a spreadsheet posts.
@@ -7553,14 +7932,22 @@ class TestWingRatios(unittest.TestCase):
                           if session._is_formula(c.value)])
 
     def test_a_new_tenor_needs_only_the_25_delta_where_a_ratio_derives_the_wing(self):
-        s = Book.from_excel(self.workbook(), ASOF).load_all(["USDJPY"])["USDJPY"]
-        s.overwrite_ratio("4M", "st", 3.0)
-        s.overwrite_ratio("4M", "rr", 1.85)
-        s.overwrite_quote("4M", "st_25", 0.0025)
-        s.overwrite_quote("4M", "rr_25", -0.006)
+        """USDCNH's 3W: CONFIG lists it and the sheet is quoted 2W then 1M.
+
+        A tenor CONFIG does not list cannot be marked at all now
+        (``TestConfigTenorsGovern``), so a "new tenor" is one of these.
+        """
+        s = Book.from_excel(self.workbook(), ASOF).load_all(["USDCNH"])["USDCNH"]
+        s.overwrite_ratio("3W", "st", 3.0)
+        s.overwrite_ratio("3W", "rr", 1.85)
+        s.overwrite_quote("3W", "st_25", 0.0025)
+        s.overwrite_quote("3W", "rr_25", 0.006)
+        # The two wings the ratios govern are never seeded off the fitted
+        # smile: the ratio is the last word on them.
+        self.assertEqual(set(s.quote_overwrites["3W"]), {"st_25", "rr_25"})
         s.warnings.clear()
         s.calibrate()
-        self.assertIn("4M", {f.tenor.upper() for f in s.fits})
+        self.assertIn("3W", {f.tenor.upper() for f in s.fits})
         self.assertEqual(s.warnings, [])
 
 
@@ -8478,24 +8865,27 @@ class TestSessionIntoWorkbook(unittest.TestCase):
             tmp = Path(tmp)
             wb = tmp / "vol_marks.xlsx"
             shutil.copy(WORKBOOK, wb)
-            book = Book.from_excel(WORKBOOK, ASOF).load_all(["USDJPY"])
-            s = book["USDJPY"]
+            # USDCNH, because the new tenor has to be one CONFIG lists: the
+            # sheet is quoted 2W then 1M and the TENORS column names a 3W
+            # between them, so that row is a reading until it is typed into.
+            book = Book.from_excel(WORKBOOK, ASOF).load_all(["USDCNH"])
+            s = book["USDCNH"]
             untouched = {m.tenor.upper(): (m.st_10, m.rr_10) for m in s.marks}
-            s.overwrite_quote("3M", "rr_25", -0.009)
-            for name, v in (("rr_25", -0.005), ("st_25", 0.002),
-                            ("rr_10", -0.009), ("st_10", 0.0065)):
-                s.overwrite_quote("4M", name, v)
+            s.overwrite_quote("3M", "rr_25", 0.009)
+            for name, v in (("rr_25", 0.005), ("st_25", 0.002),
+                            ("rr_10", 0.009), ("st_10", 0.0065)):
+                s.overwrite_quote("3W", name, v)
             s.calibrate()
-            doc = session.capture(book, ["USDJPY"])
+            doc = session.capture(book, ["USDCNH"])
             out = session.export_workbook(doc, wb)
             self.assertEqual(out["problems"], [])
             self.assertTrue(any("newly quoted tenor" in n for n in out["notes"]), out["notes"])
 
-            copy = Book.from_excel(out["written"], ASOF).load_all(["USDJPY"])
+            copy = Book.from_excel(out["written"], ASOF).load_all(["USDCNH"])
             self.assertEqual(copy.data.problems, [], copy.data.problems)
-            marks = {m.tenor.upper(): m for m in copy["USDJPY"].marks}
-            self.assertAlmostEqual(marks["3M"].rr_25, -0.009)
-            self.assertAlmostEqual(marks["4M"].st_10, 0.0065)
+            marks = {m.tenor.upper(): m for m in copy["USDCNH"].marks}
+            self.assertAlmostEqual(marks["3M"].rr_25, 0.009)
+            self.assertAlmostEqual(marks["3W"].st_10, 0.0065)
             # Everything nobody typed into is the number it was, formulas
             # included -- 1W's strangle is an array formula on this workbook.
             for tenor, (st10, rr10) in untouched.items():
@@ -8507,7 +8897,7 @@ class TestSessionIntoWorkbook(unittest.TestCase):
                 expiry = ASOF.datetime_from_years(t)
                 for k in (0.97, 1.0, 1.03):
                     self.assertAlmostEqual(float(s.vol(k, expiry)),
-                                           float(copy["USDJPY"].vol(k, expiry)),
+                                           float(copy["USDCNH"].vol(k, expiry)),
                                            places=9, msg=(t, k))
 
     def test_a_half_typed_new_tenor_is_refused_rather_than_half_written(self):
@@ -8520,14 +8910,18 @@ class TestSessionIntoWorkbook(unittest.TestCase):
             tmp = Path(tmp)
             wb = tmp / "vol_marks.xlsx"
             shutil.copy(WORKBOOK, wb)
-            book = Book.from_excel(WORKBOOK, ASOF).load_all(["USDJPY"])
-            book["USDJPY"].overwrite_quote("4M", "rr_25", -0.005)
-            doc = session.capture(book, ["USDJPY"])
+            # Uncalibrated on purpose: with a fit behind it, typing one quote
+            # at a CONFIG tenor the sheet does not quote takes the other three
+            # off the fitted smile and there is no half-typed row to refuse
+            # (``TestConfigTenorsGovern``).  This is the other case.
+            book = Book.from_excel(WORKBOOK, ASOF).build(["USDCNH"])
+            book["USDCNH"].overwrite_quote("3W", "rr_25", 0.005)
+            doc = session.capture(book, ["USDCNH"])
             out = session.export_workbook(doc, wb)
             self.assertTrue(any("all four" in p for p in out["problems"]), out["problems"])
-            copy = Book.from_excel(out["written"], ASOF).load_all(["USDJPY"])
+            copy = Book.from_excel(out["written"], ASOF).load_all(["USDCNH"])
             self.assertEqual(copy.data.problems, [], copy.data.problems)
-            self.assertNotIn("4M", {m.tenor.upper() for m in copy["USDJPY"].marks})
+            self.assertNotIn("3W", {m.tenor.upper() for m in copy["USDCNH"].marks})
 
     def test_the_events_sheet_is_written_whole_and_a_weight_reaches_every_pair(self):
         """USD 0.4 on the NFP row belongs to every pair with a dollar in it,
@@ -11886,6 +12280,204 @@ class TestMarketMakerModel(unittest.TestCase):
         self.assertIn("not a level", got.reason)
 
 
+class TestHeldFitGoesStale(unittest.TestCase):
+    """A fit is only good for the book it was fitted on.
+
+    The two panels are two routes and the marks travel between them in the
+    browser (§4), which means a trip to the marking screen can happen in the
+    middle.  ``applied_marks`` then put the fit's backbone knobs and smile
+    shifts back over whatever was marked there -- silently, and only over
+    *those two*, so a re-marked curve was thrown away while a pinned tenor or
+    a re-quoted wing went through.  A price half of this morning's marks and
+    half of a fit of the curve they replaced is a wrong answer that reads
+    perfectly well, which is the failure this class pins shut.
+    """
+
+    def service(self):
+        from volkit.webapp import BookService
+        return BookService(str(WORKBOOK), ASOF)
+
+    def fit(self, svc, pair="USDJPY", **kw):
+        payload = {"pair": pair, "cut": "TK", "target_source": "current",
+                   "free": ["initial_vol", "long_term_vol"],
+                   "fit_curve": True, "tune_wings": False, "apply": False}
+        payload.update(kw)
+        return svc.mm_fit(payload)
+
+    def quote(self, svc, marks=None, pair="USDJPY"):
+        payload = {"pair": pair, "request_text": "1M atm", "cut": "TK",
+                   "fallback_spread": 0.2}
+        if marks is not None:
+            payload["marks"] = marks
+        return svc.mm_quote(payload)
+
+    def remark_curve(self, svc, pair="USDJPY", by=2.0):
+        params = dict(svc.curve({"pair": pair})["params"])
+        params["initial_vol"] += by
+        params["long_term_vol"] += by
+        out = svc.set_curve({"pair": pair, "params": params})
+        self.assertTrue(out["ok"], out["problems"])
+
+    def test_a_fit_is_stamped_with_the_book_it_was_fitted_on(self):
+        svc = self.service()
+        marks = self.fit(svc)["marks"]
+        self.assertIn("book", marks)
+        # Every part of the pair's marked state, hashed on its own, so what
+        # moved can be named rather than only that something did.
+        self.assertIn("curve", marks["book"])
+        self.assertIn("atm_overwrites", marks["book"])
+        self.assertIn("quote_overwrites", marks["book"])
+
+    def test_a_held_fit_prices_on_the_book_it_was_made_on(self):
+        svc = self.service()
+        marks = self.fit(svc)["marks"]
+        out = self.quote(svc, marks)
+        self.assertTrue(out["marks"]["on_the_fit"])
+        self.assertEqual(out["marks"]["stale"], [])
+
+    def test_a_curve_re_marked_after_the_fit_drops_the_fit_and_says_so(self):
+        svc = self.service()
+        marks = self.fit(svc)["marks"]
+        was = self.quote(svc, marks)["sheet"]["rows"][0]["model"]
+        self.remark_curve(svc)
+        # The book alone, for comparison: this is the number the desk marked.
+        book_only = self.quote(svc)["sheet"]["rows"][0]["model"]
+        self.assertNotAlmostEqual(book_only, was, places=6)
+        out = self.quote(svc, marks)
+        self.assertFalse(out["marks"]["on_the_fit"])
+        self.assertEqual(out["marks"]["stale"], ["the curve parameters"])
+        # ...and it is the marked number that is priced, not the fit's.
+        self.assertAlmostEqual(out["sheet"]["rows"][0]["model"], book_only, places=12)
+        self.assertTrue(any("re-marked since this fit" in w for w in out["warnings"]),
+                        out["warnings"])
+
+    def test_every_kind_of_re_mark_is_noticed_and_named(self):
+        """Not only the two ``capture_marks`` holds.
+
+        A pinned tenor and a re-quoted wing went through ``applied_marks``
+        untouched, so the old behaviour was not merely wrong but *selectively*
+        wrong -- which is worse, because half a screen agreed with itself.
+        """
+        for kind, mark, name in (
+            ("pin", lambda s: s.overwrite({"pair": "USDJPY", "kind": "atm",
+                                           "tenor": "1m", "value": 9.5}),
+             "the pinned at-the-money tenors"),
+            ("re-quote", lambda s: s.overwrite({"pair": "USDJPY", "kind": "quote",
+                                                "tenor": "1M", "field": "rr_25",
+                                                "value": -0.9}),
+             "the re-quoted wings"),
+            ("curve", lambda s: self.remark_curve(s), "the curve parameters"),
+        ):
+            with self.subTest(kind):
+                svc = self.service()
+                marks = self.fit(svc)["marks"]
+                mark(svc)
+                out = self.quote(svc, marks)
+                self.assertEqual(out["marks"]["stale"], [name])
+                self.assertFalse(out["marks"]["on_the_fit"])
+
+    def test_a_fit_that_kept_its_marks_is_not_stale_against_its_own_write(self):
+        """``keep the marks`` writes the fit onto the book, and the stamp is
+        taken after that write -- otherwise the fit would arrive already out
+        of date with the book it had just made."""
+        svc = self.service()
+        marks = self.fit(svc, apply=True)["marks"]
+        out = self.quote(svc, marks)
+        self.assertTrue(out["marks"]["on_the_fit"])
+        self.assertEqual(out["marks"]["stale"], [])
+
+    def test_a_fresh_fit_is_good_again(self):
+        svc = self.service()
+        stale = self.fit(svc)["marks"]
+        self.remark_curve(svc)
+        self.assertTrue(self.quote(svc, stale)["marks"]["stale"])
+        again = self.fit(svc)["marks"]
+        self.assertEqual(self.quote(svc, again)["marks"]["stale"], [])
+
+    def test_marks_with_no_stamp_are_quoted_off_as_they_always_were(self):
+        """A payload from a client that predates the stamp, or a hand-written
+        one: refusing on a *missing* field would break every saved panel the
+        day it shipped."""
+        svc = self.service()
+        marks = self.fit(svc)["marks"]
+        marks.pop("book")
+        self.remark_curve(svc)
+        out = self.quote(svc, marks)
+        self.assertTrue(out["marks"]["on_the_fit"])
+        self.assertEqual(out["marks"]["stale"], [])
+
+    def test_quoting_leaves_the_book_where_it_found_it(self):
+        """Whether the marks were used or dropped."""
+        svc = self.service()
+        marks = self.fit(svc)["marks"]
+        self.remark_curve(svc)
+        before = marketmaker.mark_fingerprint(svc.book, "USDJPY")
+        self.quote(svc, marks)
+        self.assertEqual(marketmaker.mark_fingerprint(svc.book, "USDJPY"), before)
+
+    def test_the_fingerprint_moves_only_when_a_mark_does(self):
+        svc = self.service()
+        was = marketmaker.mark_fingerprint(svc.book, "USDJPY")
+        # Reading the book is not marking it.
+        svc.marks({"pair": "USDJPY"})
+        self.quote(svc)
+        self.fit(svc)
+        self.assertEqual(marketmaker.mark_fingerprint(svc.book, "USDJPY"), was)
+        svc.overwrite({"pair": "USDJPY", "kind": "atm", "tenor": "1m", "value": 9.5})
+        self.assertNotEqual(marketmaker.mark_fingerprint(svc.book, "USDJPY"), was)
+
+    def test_the_page_hooks_every_route_that_can_move_the_marks(self):
+        """The browser's own half of the sync.
+
+        Every marking route used to end with ``schedulePrice()`` -- the
+        *pricing* screen -- so the market-maker tab kept showing the last
+        run's numbers however much was re-marked.  The hook is in ``post``
+        rather than in each route, and this pins its list against the routes
+        the server actually marks on: a route added later that touches
+        ``self.dirty`` and is not listed here fails this test rather than
+        going quietly out of sync.
+        """
+        import re as _re
+        from volkit import webapp as _webapp
+        html = _source("volkit", "web", "index.html")
+        js = html.split("<script>")[1].split("</script>")[0]
+        listed = set(_re.findall(r"'(/api/[a-z/]+)'",
+                                 js.split("const MARKING_ROUTES=[")[1].split("];")[0]))
+        self.assertIn("/api/overwrite", listed)
+        handler = _inspect.getsource(_webapp.Handler.do_POST) \
+            if hasattr(_webapp, "Handler") else \
+            _inspect.getsource(_webapp).split("def do_POST")[1]
+        routed = _re.findall(r'url\.path == "(/api/[^"]+)":\s*\n\s*(?:self\._json\()?'
+                             r'self\.service\.(\w+)\(', handler)
+        self.assertTrue(routed)
+        # What "moves the marks" is: puts a mark on the loaded book, or
+        # replaces the book under it.  Merely *reading* ``dirty`` is not --
+        # saving a session, exporting one and asking the marking agent for a
+        # proposal all do that and leave the book exactly as they found it.
+        moves = _re.compile(r"self\.dirty = True|self\.dirty = self\.dirty or"
+                            r"|self\.reload\(|self\.book = ")
+        checked = 0
+        for path, name in routed:
+            method = getattr(_webapp.BookService, name, None)
+            if method is None or not moves.search(_inspect.getsource(method)):
+                continue
+            checked += 1
+            with self.subTest(path):
+                self.assertIn(path, listed,
+                              f"{path} can move the marks and the page does not "
+                              f"tell the market-maker screen about it")
+        self.assertGreater(checked, 8, "the route scan found almost nothing; it has broken")
+        # And nothing is listed that cannot move anything: a route that fires
+        # the hook for no reason trains a desk to ignore the flag.
+        marking = {p for p, n in routed
+                   if getattr(_webapp.BookService, n, None) is not None
+                   and moves.search(_inspect.getsource(getattr(_webapp.BookService, n)))}
+        self.assertEqual(listed - marking, set())
+        # And the hook is reached from one place: nothing may post around it.
+        self.assertEqual(js.count("method:'POST'"), 1)
+        self.assertIn("bookMoved()", js.split("const post=")[1][:400])
+
+
 class TestMarketMakerPanel(unittest.TestCase):
     """The screen as a whole: what each of its two stages reports, and what
     they leave behind.
@@ -12601,12 +13193,31 @@ class TestKaceFeed(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("no <response>", msg)
 
+    def test_an_html_reply_is_named_by_its_title(self):
+        """A page instead of a message says so, and says which page."""
+        from volkit import kace
+        for page in ('<html><head><title>kACE - Login</title></head><body>hi</body></html>',
+                     '<!DOCTYPE html>\n<html lang="en"><title>kACE - Login</title>'
+                     '<body><div ng-app>'):
+            ok, took, msg = kace.read_reply(page)
+            self.assertFalse(ok)
+            self.assertIn("web page", msg)
+            self.assertIn("kACE - Login", msg)
+        ok, _, msg = kace.read_reply("<other/>")
+        self.assertFalse(ok)
+        self.assertIn("not a gfi_message", msg)
+
     def test_the_body_is_the_forms_the_vba_sent(self):
         from volkit import kace
         body = kace.form_body('<a b="1"> x&y</a>')
         self.assertTrue(body.startswith(b"xml="))
         import urllib.parse
         self.assertEqual(urllib.parse.parse_qs(body.decode())["xml"], ['<a b="1"> x&y</a>'])
+        # Percent-encoded throughout, as the VBA's URLEncode is: a space is
+        # %20, never the "+" urlencode would write.  Correct form encoding
+        # either way, but only one spelling has ever been seen to work here.
+        self.assertNotIn(b"+", body)
+        self.assertIn(b"%20", body)
         self.assertEqual(len(kace.message_hash("m")), 16)
         self.assertNotEqual(kace.message_hash("m"), kace.message_hash("n"))
 

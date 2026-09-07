@@ -91,8 +91,8 @@ class DeltaConvention:
     delta times the foreign (base) currency's discount factor, and that
     factor is a fact about one tenor, so a pair's convention becomes a
     *slice's* convention through :meth:`at` -- which puts the discount factor
-    for that tenor into ``df_foreign``, or leaves it at 1 with a note when
-    the ``RATES`` tab has no rate for the currency.  ``df_foreign`` is what
+    for that tenor into ``df_foreign``, or leaves it at 1 with a note when the
+    feed cannot discount the currency.  ``df_foreign`` is what
     :func:`delta` and :func:`strike_from_delta` scale by, so a 25-delta quote
     lands on the strike the market meant.
     """
@@ -174,9 +174,9 @@ class DeltaConvention:
         if not self.wants_spot_delta(t):
             return replace(self, df_foreign=1.0, delta_note="forward delta")
         if df_foreign is None or not 0.0 < df_foreign <= 1.5:
-            who = f"no {foreign_ccy} rate" if foreign_ccy else "no rate"
+            who = f"no {foreign_ccy} discount factor" if foreign_ccy else "no rate"
             return replace(self, df_foreign=1.0,
-                           delta_note=f"forward delta ({who} on the RATES tab)")
+                           delta_note=f"forward delta ({who} from the feed)")
         return replace(self, df_foreign=float(df_foreign), delta_note="spot delta")
 
     @property
