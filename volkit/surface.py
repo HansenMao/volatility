@@ -100,7 +100,7 @@ def check_ratio(wing: str, tenor: str, value: float) -> float:
     return v
 
 
-def load_wing_ratios(path) -> dict[str, dict[str, WingRatio]]:
+def load_wing_ratios(path, *, overlay=None) -> dict[str, dict[str, WingRatio]]:
     """Read the workbook's ``WING_RATIOS`` tab: pair, tenor, st, rr.
 
     ``{PAIR: {TENOR: WingRatio}}``.  An absent tab is ``{}`` -- a workbook
@@ -111,7 +111,8 @@ def load_wing_ratios(path) -> dict[str, dict[str, WingRatio]]:
     """
     from . import configsheets
 
-    rows = configsheets.read_rows(path, WING_RATIOS_SHEET, required=("pair", "tenor"))
+    rows = configsheets.read_rows(path, WING_RATIOS_SHEET, required=("pair", "tenor"),
+                                  overlay=overlay)
     if rows is None:
         return {}
     out: dict[str, dict[str, WingRatio]] = {}

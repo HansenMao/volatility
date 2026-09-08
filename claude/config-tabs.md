@@ -47,33 +47,94 @@ rate that has to agree with a forward belongs in the file the forward is in.
   different answers.
 - `Row.number` is the row as Excel numbers it, because an error about a
   configuration tab is read by somebody about to go and fix it.
+- **A session may hold a tab instead of the workbook** (`read_rows(...,
+  overlay={SHEET: [row dicts]})`, `rows_from_records`). The rows a desk has
+  applied in the Config window become the same `Row` objects the sheet
+  produces, so every reader reads a marked band exactly the way it reads a
+  written one -- one parser, one set of error messages. A sheet named in the
+  overlay is not read off the file at all; a tab the workbook has not got is
+  still read from the overlay, so a setting can be added to a workbook that
+  never had the tab.
+
+## A tab is marked, not written (added 2026-09-08)
+
+The tabs used to go straight into the workbook: `write_config_tabs`, then a
+reload, which is why the card refused to save one while the session had any
+marks -- a reload is what throws marks away, so a band cost a morning. They
+are part of the **session** now, and the shape is:
+
+1. The Config window posts `/api/config/save`. `BookService.config_save` puts
+   the rows into `self.config_edits` and calls `_rebuild`, which captures the
+   session, reads the workbook again **with the overlay**, and puts the marks
+   back with `session.apply_document`. Nothing is written and nothing is lost.
+2. `Book.from_excel(config=...)` holds them as `Book.config_tabs` and hands
+   them to every reader; `session.capture` writes them into the session file
+   under `config`; `session.config_tabs_from_doc` reads them back.
+3. A session file that carries tabs is applied by **rebuilding**, never by
+   layering: `BookService.session_load` sets `config_edits` and reloads before
+   applying the marks, and `cli._book` reads the file before it builds the
+   book. `apply_document` cannot do it and says so rather than pretending
+   (`config_fingerprint`).
+4. `session.export_workbook` writes them with the marks, before the
+   `WING_RATIOS` merge, in the same backup and the same history line. That is
+   the whole of "one write": **Write to workbook** on the marking screen.
+5. `session.check_config_tabs` is the one validation and runs wherever a tab
+   arrives -- the window's Apply, the export, `write_config_tabs`, and
+   `config_tabs_from_doc` -- so a heading the tab's own reader would refuse
+   cannot be stored in a session now and discovered at the next load.
+6. **Reload workbook** (`reload(discard=True)`, the only caller with it) drops
+   them with the marks: it is the button that goes back to what the file says.
+   Every other reload is one made *in order* to apply them and keeps them.
+
+`write_config_tabs` still exists, unchanged in behaviour, as the command
+line's way in and as what `_apply_config_tabs` is shared with.
+
+**Adding or removing a pair is not a setting** and still writes the workbook
+on its own (`session.add_pair` / `remove_pair`, `BookService.config_pair`): a
+pair is a CONFIG row, a PARAMS column and a **sheet**, so there is nothing for
+the reader to read until the file has it. It no longer costs the session's
+marks -- it goes through `_rebuild` too -- and the window says so where it is
+done.
 
 ## A tab whose columns are the desk's
 
-Every tab but one has exactly the columns `EDITABLE` declares, because a
-writer that guessed at them would reorder a desk's own columns on every save.
-`Vega Weights` is the exception and is listed in `configsheets.OPEN_COLUMNS`:
-its fixed columns are `tenor`, `default` and `note`, and it carries **one more
-per pair that has its own curve shape**, which is the desk's business and not
-this module's.
+Most tabs have exactly the columns `EDITABLE` declares, because a writer that
+guessed at them would reorder a desk's own columns on every save. Two are
+listed in `configsheets.OPEN_COLUMNS`, which maps each to **what one of its
+extra columns is**:
+
+| Tab | Fixed columns | And one more per |
+|---|---|---|
+| `Vega Weights` | `tenor`, `default`, `note` | **pair** with its own curve shape |
+| `KACE_SPREADS` | `tenor`, `default`, `note` | **tier** — a kACE spreading policy |
+
+"Open" was never one rule, which is why the kind is stored rather than a flag:
+a pair column is six letters and is written back as a proper noun (`USDJPY`,
+not `usdjpy`), a tier column is a name the desk chose and is written the way
+it is read, so the name in the dropdown, the name on `--kace-tier` and the
+heading on the sheet are one string.
 
 - `configsheets.columns_for(sheet, rows)` is the one place the written column
   list is decided: the fixed columns, then every other column the rows carry
   in the order it first appears, with `note` kept at the right-hand end
-  however many the tab grows. A six-letter column is written upper case
-  because a pair is a proper noun.
+  however many the tab grows. `spell_open_column` decides how each is written.
 - `write_rows` takes a separate `header=` argument for the columns that
   *identify* the old header row. Looked for by every column, a tab gaining its
-  first pair column would find no header at all, keep the `#` lines from below
+  first extra column would find no header at all, keep the `#` lines from below
   the data as prose and write them above the new one.
-- `configsheets.check_open_columns` refuses an extra column that is not a pair
-  **before** the write, from `session.write_config_tabs`. Written through, a
-  mistyped heading is accepted, the tab's own reader refuses it on the next
-  load, and the tab is unreadable until somebody opens the workbook in Excel
-  and fixes it by hand.
-- The marking screen's Workbook card renders whatever columns the server sends
-  for the tab, and has an **Add column** box beside the Write button. That is
-  the only thing on the card that is not simply a table of the tab.
+- `configsheets.check_open_columns` refuses an extra column the tab's own
+  reader would refuse **before** anything holds it, from
+  `session.check_config_tabs`, using `open_column_ok` for the tab's kind.
+  Accepted, a mistyped heading is refused on the next load and the tab is
+  unreadable until somebody opens the workbook in Excel and fixes it by hand.
+- The Config window renders whatever columns the server sends for the tab, and
+  has an **Add pair** / **Add tier** box beside the Apply button — the label,
+  the placeholder and the box's own validation all come from the kind the
+  server sent (`open`, `shape`). A column the desk added carries a `✕` on its
+  own heading that takes it off again; the fixed columns do not, because a tab
+  that had lost one of them would be unreadable on the next load. Both are
+  marks like any other: the column goes out of the table, `Apply` puts it into
+  the session, and **Write to workbook** takes it out of the file.
 
 **Adding a configuration later is a tab and a parser**: name the tab in
 `configsheets.SHEETS` so an error can say what it was for, and call
@@ -185,9 +246,11 @@ spot delta the market quotes is defined off `F = S x DF_base/DF_term` -- the
 forward's factors, whatever the collateral. There is a test that the vol, the
 strike, the delta and the forward premium are identical under every CSA and
 only `pv_amount` follows. On the screen it is a `CSA` row of the pricing grid,
-per leg (a CSA is a property of the agreement, not of the pair), hidden by
-default behind *CSA row: hidden | shown* on the Inputs bar; `IN` rows carry a
-fifth `adv` element and `ADV` is remembered in `localStorage`.
+per leg (a CSA is a property of the agreement, not of the pair), and an
+ordinary row of the Inputs section -- it and the per-leg `Premium` row sat
+behind a `hidden | shown` toggle until that toggle turned out to be
+unreachable off the right edge of a scrolling grid; nothing hides them now
+(`claude/invariants.md`, under *a card may be shut*).
 
 **What this moved.** Loading a feed now changes deltas as well as levels: on a
 dollar-base pair the 25-delta quotes become spot deltas, so the strikes a

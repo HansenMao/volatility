@@ -32,7 +32,7 @@ sheet it was written against is kept as `files/vol_marks_legacy_format.xlsx`
 against it -- and the comparison still runs from `legacy/`. volkit reads
 either (§4).
 
-- ~35,000 lines across 50 modules, 1035 tests, `unittest` only (no pytest).
+- ~35,000 lines across 50 modules, 1050 tests, `unittest` only (no pytest).
   Tests live in `tests/test_volkit.py`, `tests/test_agent.py` (the desk
   agent, §17) and `tests/test_marking.py` (the marking agent, §18).
 - Runtime deps: numpy, scipy, pandas, openpyxl. Plus `tzdata` on Windows.
@@ -57,7 +57,7 @@ These were the user's explicit choices. Do not quietly reverse them.
 | **Implement fixes, don't just flag them** | When something is wrong, fix it and note what moves. Leave it switchable only when there is a real reason to reconcile against old marks. |
 | **Web UI, not Tkinter** | Stdlib `http.server` only. No Flask/FastAPI. The desk machine may have nothing installed. |
 | **Excel stays primary** | `vol_marks.xlsx` must keep working as-is. Abstract behind a data source; do not migrate to YAML. |
-| **Nothing writes to the workbook** | Every mark a screen makes lives on the loaded book. What a session wants to keep goes into `session.py`'s own file *beside* the workbook, never into it -- see §13. The one exception is the **export** in §13, asked for by name: it writes the saved *file*, never the live book, and keeps the workbook it replaced beside it. Within that export, an edited **quote** (`quote_overwrites`) is the only thing written into a sheet's own cell rather than into a session row the reader reads back -- a quote is the sheet's number, and the desk uses the workbook as the database behind the GUI; a pair sheet that is written is written whole, as numbers, because a quote beside a formula that reads it leaves the file disagreeing with itself. Configuration is the second exception and is deliberately *not* a session: `session.write_config_tabs`, `add_pair` and `remove_pair` write the workbook and the book is read again on top of them. Every write over the original checks `workbook_stamp` first and refuses a file that moved. |
+| **Nothing writes to the workbook** | Every mark a screen makes lives on the loaded book. What a session wants to keep goes into `session.py`'s own file *beside* the workbook, never into it -- see §13. The one exception is the **export** in §13, asked for by name: it writes the saved *file*, never the live book, and keeps the workbook it replaced beside it. Within that export, an edited **quote** (`quote_overwrites`) is the only thing written into a sheet's own cell rather than into a session row the reader reads back -- a quote is the sheet's number, and the desk uses the workbook as the database behind the GUI; a pair sheet that is written is written whole, as numbers, because a quote beside a formula that reads it leaves the file disagreeing with itself. Configuration is **part of the session**: a tab applied in the Config window goes into `Book.config_tabs` and the session file, the book is read again on top of it, and it reaches the workbook in that same export -- one write, one backup (`session.check_config_tabs`, `_apply_config_tabs`). `add_pair` and `remove_pair` are the one thing here that still writes on its own, because a pair is a CONFIG row, a PARAMS column and a sheet rather than a setting; `write_config_tabs` remains as the command line's way in. Every write over the original checks `workbook_stamp` first and refuses a file that moved. |
 | **Nothing fails silently** | The legacy `except: pass` returning `0.0000` is the anti-pattern this project exists to remove. Errors surface with the real message. |
 
 ## 3. Architecture
@@ -88,8 +88,9 @@ pricing    multi-leg strips, strike/expiry specs, per-leg error isolation, and
            the one-number reading of them the marking screen asks for
 configsheets the workbook's settings tabs -- PEG_BANDS, KACE_SPREADS,
            HOLIDAYS, WING_RATIOS, Vega Weights -- read one way, with '#'
-           comment rows and a header found rather than assumed. A new setting
-           is a tab here, not a new file
+           comment rows and a header found rather than assumed, and off the
+           session's own rows where it holds the tab (`overlay`). A new
+           setting is a tab here, not a new file
 marketdata validated Excel reader; CONFIG is two columns and a cross
            names its own dollar legs, and its TENORS column is the pillar
            set -- a pair sheet's quotes are cut down to it; EVENTS is a row
@@ -154,7 +155,9 @@ cli        every screen has a command-line equivalent
 screens    which screens a build has, shown or hidden; the one reader of the
            build's manifest, and of --enable-tab
 kace       the marked surface as the kACE RATE_FEED message the desk's pricing
-           platform takes; replaces the XML_poster workbook (§20)
+           platform takes; replaces the XML_poster workbook (§20). The
+           KACE_SPREADS tab's rows are the pillars and its columns are the
+           spreading tiers -- a width is a quoting policy, not a currency
 session    the marks a session made, saved beside the workbook and put back
 config     the startup settings file a double-clicked exe reads
 paths      resource vs user-data paths (source and frozen), and the one
@@ -187,7 +190,7 @@ working in its area — not before.
 | `claude/agent-marking.md` (§18) | `remarks.py`, `marking.py`, `consult.py`, `rules.py` — the marking agent and its rules of thumb. |
 | `claude/agent-ask.md` (§19) | `ask.py` — the read-only question agent. |
 | `claude/kace-feed.md` (§20) | `kace.py` — the RATE_FEED message, posting, the spread table. |
-| `claude/vega-weights.md` (§21) | `vegaweights.py`, the workbook's `Vega Weights` tab, the ATM card's **bump**, and the realized weighting suggested on the Workbook card. |
+| `claude/vega-weights.md` (§21) | `vegaweights.py`, the workbook's `Vega Weights` tab, the ATM card's **bump**, and the realized weighting suggested in the Config window. |
 | `claude/config-tabs.md` | **Before adding a setting**, or anything about `PEG_BANDS`, `KACE_SPREADS`, `HOLIDAYS`, `configsheets.py`, or where the discount curves come from (`discount.py`, the feed's `<CCY>OIS` rows). |
 
 Design notes that are not standing context: `claude/kace-export-design.md`,
@@ -451,7 +454,7 @@ and what is reported instead** — read it before "fixing" one.
 rules.** The essentials:
 
 ```
-python -m unittest discover -s tests        # 1035 tests, ~20m
+python -m unittest discover -s tests        # 1050 tests, ~20m
 PYTHONUTF8=0 LC_ALL=C python -m unittest discover -s tests   # as a cp1252 box
 python -m volkit check                      # validate the workbook
 python -m volkit serve --feed files/market_feed.csv --history vol_history.xlsx

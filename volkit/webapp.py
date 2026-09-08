@@ -95,7 +95,7 @@ class BookService:
                  kace_user: str | None = None, kace_password: str | None = None,
                  kace_scenario: str = kace_mod.DEFAULT_SCENARIO, kace_url: str | None = None,
                  kace_ca: str | None = None, kace_insecure: bool = False,
-                 kace_log_path: str | None = None):
+                 kace_log_path: str | None = None, kace_tier: str | None = None):
         self.path = path
         self.clock = clock or Clock.utcnow()
         self.feed_path = feed_path
@@ -136,6 +136,12 @@ class BookService:
         # is the reason the workbook is not watched at all; it is still
         # reported, so the screen can say the marks are only in memory.
         self.dirty = False
+        # The configuration tabs this session holds instead of the workbook's:
+        # ``{SHEET: [row dicts]}``, applied from the configuration window and
+        # written into the workbook only with everything else the session
+        # holds (§13).  The book is *built* with them, so they are here rather
+        # than on one screen and every reload carries them.
+        self.config_edits: dict[str, list[dict]] = {}
         # A changed file whose write time has not settled yet: read on the
         # pass after the one that first saw it move.  See ``auto_check``.
         self._auto_pending: dict[str, float] = {}
@@ -223,6 +229,11 @@ class BookService:
         self.kace_error: str | None = None
         self.kace_user, self.kace_password = kace_mod.credentials(kace_user, kace_password)
         self.kace_scenario = kace_scenario or kace_mod.DEFAULT_SCENARIO
+        # The spreading tier a message uses when the screen names none.  A
+        # start-up setting like the scenario, and overridden per request the
+        # same way, because which policy is posted is a decision of the
+        # morning rather than of the installation.
+        self.kace_tier = kace_mod.tier_name(kace_tier)
         # Where a post goes, and how.  From the command line or the
         # environment only -- the page presses the button and nothing more.
         self.kace_url = kace_mod.settings(kace_url)
@@ -231,12 +242,7 @@ class BookService:
         self.kace_log = kace_mod.PostLog.at(kace_log_path)
         # The network, replaceable: tests post into a function.
         self.kace_opener = None
-        try:
-            self.kace_spreads = kace_mod.SpreadTable.load(kace_spreads_path or self.path)
-        except kace_mod.KaceError as exc:
-            self.kace_spreads = kace_mod.SpreadTable(
-                path=f"{Path(kace_spreads_path or self.path).name}!{kace_mod.SPREADS_SHEET}")
-            self.kace_error = str(exc)
+        self._load_kace_spreads()
         self.reload()
         if session_path:
             # Asked for by name, so a failure is said out loud rather than
@@ -251,14 +257,45 @@ class BookService:
             except Exception as exc:  # noqa: BLE001 - surfaced in /api/state
                 self.history_error = f"{type(exc).__name__}: {exc}"
 
-    def reload(self) -> dict:
+    def _load_kace_spreads(self) -> None:
+        """The kACE spread table, read again whenever the book is.
+
+        It comes off the workbook's own ``KACE_SPREADS`` tab, which the
+        configuration window can hold an edited copy of -- so it is read with
+        the book and off the same overlay, or the card would go on posting
+        the widths the file had.  A table named as a separate file is that
+        file's and the overlay does not touch it.
+        """
+        path = self.kace_spreads_path or self.path
+        own = not self.kace_spreads_path or Path(self.kace_spreads_path) == Path(self.path)
+        self.kace_error = None
+        try:
+            self.kace_spreads = kace_mod.SpreadTable.load(
+                path, overlay=self.config_edits if own else None)
+        except kace_mod.KaceError as exc:
+            self.kace_spreads = kace_mod.SpreadTable(
+                path=f"{Path(path).name}!{kace_mod.SPREADS_SHEET}")
+            self.kace_error = str(exc)
+
+    def reload(self, discard: bool = False) -> dict:
+        """Read the workbook again.
+
+        ``discard`` is the **Reload workbook** button: it throws this session
+        away and goes back to what the file says -- the marks, and the
+        configuration tabs the window has applied and not yet written.  Every
+        other caller keeps the session's configuration, because they are
+        re-reading the workbook *in order* to apply it.
+        """
         with self._lock:
+            if discard:
+                self.config_edits = {}
             # Read before the load, not after: a workbook saved *while* it was
             # being read would otherwise be stamped with the time of the copy
             # the tool never saw, and the watcher would never pick it up.
             stamp = self._mtime(self.path)
             try:
-                self.book = Book.from_excel(self.path, self.clock).load_all()
+                self.book = Book.from_excel(self.path, self.clock,
+                                            config=self.config_edits).load_all()
                 if self.feed_path:
                     self.book.feed = load_for(self.book, self.feed_path)
                     self.feed_mtime = self._feed_mtime()
@@ -267,9 +304,11 @@ class BookService:
                 self.load_error = f"{type(exc).__name__}: {exc}"
             self.workbook_mtime = stamp
             self.workbook_stamp = session.workbook_stamp(self.path)
-            # Whatever this session had marked is gone with the old book, so
-            # there is nothing left to protect from the next reload.
-            self.dirty = False
+            self._load_kace_spreads()
+            # Whatever this session had marked is gone with the old book.  A
+            # configuration tab it holds is not: the book was just built with
+            # it, so it is still something the workbook does not say.
+            self.dirty = bool(self.config_edits)
             return self.state()
 
     def state(self) -> dict:
@@ -750,6 +789,12 @@ class BookService:
                 # diff the numbers to find out.
                 "seq": self.auto_seq,
                 "dirty": self.dirty,
+                # The configuration tabs this session holds and the workbook
+                # does not.  Here rather than only on /api/config because
+                # the marking screen's Write to workbook has to name what it
+                # is about to write, and it must not have to open the
+                # configuration window to find out.
+                "config_pending": sorted(self.config_edits),
                 "watching": [{"what": k, "path": str(pth), "written": _stamp(m)}
                              for k, pth, m in self._auto_targets() if pth],
                 "events": list(self.auto_events[-12:]),
@@ -1467,28 +1512,99 @@ class BookService:
                 if rows:
                     entry["rows"] = [{c: r.raw(c) if not isinstance(r.raw(c), (date, datetime))
                                       else r.text(c) for c in columns} for r in rows]
-                entry["open"] = sheet in configsheets.OPEN_COLUMNS
+                # What this session holds for the tab, where it holds one:
+                # the book was built with these rows, so they are what the
+                # window has to show.  The file's own are not a second
+                # answer to be shown beside them -- they are what **Reload
+                # workbook** goes back to.
+                edited = self.config_edits.get(sheet)
+                entry["pending"] = edited is not None
+                if edited is not None:
+                    entry["error"] = ""
+                    entry["columns"] = list(configsheets.columns_for(sheet, edited))
+                    entry["rows"] = [dict(r) for r in edited]
+                # What an extra column of this tab *is* -- "pair", "tier",
+                # or empty for a tab whose columns are fixed.  The kind, not
+                # a flag: the window has to validate the box the desk types
+                # into with the same rule the route behind it uses, and
+                # "open" was never one rule.
+                entry["open"] = configsheets.OPEN_COLUMNS.get(sheet, "")
+                entry["shape"] = configsheets.OPEN_COLUMN_SHAPE.get(entry["open"], "")
+                # The columns the tab must always have, so the window knows
+                # which of the ones it is showing can be taken away again.
+                entry["fixed"] = list(configsheets.EDITABLE[sheet][0])
                 # What the screen can measure for this tab, rather than the
                 # tab's name: the page keys off the capability so a second
                 # measurable tab is a line here and not a name in the
-                # JavaScript.
-                entry["measure"] = ("vega" if sheet == vegaweights.VEGA_WEIGHTS_SHEET
+                # JavaScript.  Only where the route behind it is in this
+                # build -- the window belongs to no screen, but the realized
+                # measurement is the marking screen's, and offering a button
+                # that answers 404 is worse than not offering it.
+                entry["measure"] = ("vega"
+                                    if (sheet == vegaweights.VEGA_WEIGHTS_SHEET
+                                        and "marking" in screens.enabled())
                                     else "")
                 out.append(entry)
             return {"workbook": path, "tabs": out,
                     "stamp": self.workbook_stamp,
+                    # Which tabs are the session's rather than the file's, so
+                    # the window can say it in one place as well as per tab.
+                    "pending": sorted(self.config_edits),
+                    "dirty": self.dirty,
+                    "session": self.session_path or "",
                     "losses": session.round_trip_losses(path),
                     "locked": str(session.excel_lock(path) or "")}
 
-    def config_save(self, payload: dict) -> dict:
-        """Write one configuration tab and re-read the book on top of it.
+    def _rebuild(self, *, config=None, write=None) -> list[str]:
+        """Read the workbook again without losing what this session marked.
 
-        A band, a holiday or a wing ratio changes how the workbook *loads*, so
-        there is no version of this that leaves the loaded book alone: it is
-        written and then read back, and what the screens show afterwards is
-        what the file now says.  Marks made in this session do not survive
-        that, which is what a reload is -- so it refuses while there are any,
-        rather than throwing them away to save a configuration change.
+        A band, a holiday or a wing ratio changes how the workbook *loads*,
+        so there is no applying one to a book that is already built: it is
+        read again.  What that used to cost was the session -- the marks live
+        on the book and a reload is what throws them away -- so a
+        configuration change was refused while there were any.  It is not
+        refused now: the marks are captured, the book is rebuilt on the new
+        configuration, and they are put back on it by the same functions the
+        session file uses.  Nothing is written down to do it, and nothing
+        reaches the workbook.
+
+        ``write`` is run against the file first, for the one change that
+        cannot be held in memory (a pair is a sheet, not a setting).
+        Returns whatever would not go back on, each with its pair's name.
+        """
+        with self._lock:
+            doc = (session.capture(self.book)
+                   if self.book is not None and self.dirty else None)
+            if write is not None:
+                write()
+            if config is not None:
+                session.check_config_tabs(config)
+                self.config_edits = {k: [dict(r) for r in v] for k, v in config.items()}
+            self.reload()
+            problems: list[str] = []
+            if doc is not None and self.book is not None:
+                # The marks are what is being put back, not the configuration
+                # they were captured under: the book has just been built on
+                # the new tabs, deliberately, and a document still carrying
+                # the old ones would report that as something that had gone
+                # wrong.
+                doc["config"] = {k: [dict(r) for r in v]
+                                 for k, v in self.book.config_tabs.items()}
+                back = session.apply_document(self.book, doc)
+                problems = list(back["problems"])
+                self.dirty = True
+            return problems
+
+    def config_save(self, payload: dict) -> dict:
+        """Apply one configuration tab to this session, and rebuild the book.
+
+        It does **not** write the workbook.  A peg band, a kACE pillar, a
+        holiday and a wing ratio are marked here like anything else: they go
+        into the session, the book is read again on top of them so every
+        screen shows what they do, and they reach the file only when the
+        session does -- one **Write to workbook**, one backup, one place to
+        look for what changed (§13).  Marks made in this session survive it
+        (see :meth:`_rebuild`).
         """
         from . import configsheets
         with self._lock:
@@ -1501,41 +1617,41 @@ class BookService:
             rows = payload.get("rows")
             if not isinstance(rows, list):
                 raise ValueError("rows must be a list of objects, one per row of the tab")
-            if self.dirty and not payload.get("force"):
-                raise ValueError(
-                    "this session has marks the workbook does not hold, and writing a "
-                    "configuration tab re-reads the workbook, which would drop them. Save "
-                    "them into the workbook first, or press again to write anyway")
-            out = session.write_config_tabs(
-                self.path, {sheet: rows},
-                expect=self.workbook_stamp, force=bool(payload.get("force")))
-            self.reload()
-            # The write's own report is kept apart from the book's state: both
-            # carry ``notes``, and a screen that read the book's notes as the
-            # write's would tell a person their configuration change said
+            tabs = dict(self.config_edits)
+            tabs[sheet] = rows
+            problems = self._rebuild(config=tabs)
+            notes = [f"{sheet}: {len(rows)} row(s) held in this session"]
+            notes.append("nothing has been written to the workbook yet -- press "
+                         "Write to workbook to put this and the marks into it")
+            # The change's own report is kept apart from the book's state:
+            # both carry ``notes``, and a screen that read the book's notes as
+            # this one's would tell a person their configuration change said
             # something about crosses.
-            return {"ok": True, "wrote": out, **self.state()}
+            return {"ok": True,
+                    "wrote": {"tabs": [sheet], "notes": notes, "problems": problems,
+                              "written": "", "pending": True},
+                    **self.state()}
 
     def config_pair(self, payload: dict) -> dict:
         """Add a pair to the workbook, or take one out, and re-read it.
 
-        The pair list is not a mark: it decides what the book *is*, so like
-        the configuration tabs it goes into the workbook and the book is read
-        again on top of it.  Same refusal while this session has marks the
-        workbook does not hold -- a reload would drop them, and losing a
-        morning to add a pair is not a trade anybody would make knowingly.
+        The pair list is not a mark and it is not a setting either: a pair is
+        a CONFIG row, a PARAMS column and a **sheet**, so unlike the
+        configuration tabs it cannot be held in memory and applied to a book
+        -- there would be nothing for the reader to read.  It is the one
+        change here that writes the workbook on its own, and the button says
+        so.  What this session has marked is kept across the reload that
+        follows (see :meth:`_rebuild`), so adding a pair no longer costs a
+        morning's marking.
         """
         with self._lock:
             pair = str(payload.get("pair") or "").strip().upper()
             action = str(payload.get("action") or "add").strip().lower()
-            if self.dirty and not payload.get("force"):
-                raise ValueError(
-                    "this session has marks the workbook does not hold, and changing the "
-                    "pair list re-reads the workbook, which would drop them. Save them into "
-                    "the workbook first, or press again to change it anyway")
+            force = bool(payload.get("force"))
             if action == "remove":
-                out = session.remove_pair(self.path, pair, expect=self.workbook_stamp,
-                                          force=bool(payload.get("force")))
+                def write():
+                    return session.remove_pair(self.path, pair,
+                                               expect=self.workbook_stamp, force=force)
             elif action == "add":
                 quotes = payload.get("quotes") or {}
                 clean: dict[str, dict[str, float]] = {}
@@ -1555,14 +1671,20 @@ class BookService:
                         row[f] = float(v)
                     if row:
                         clean[str(tenor).upper()] = row
-                out = session.add_pair(
-                    self.path, pair, atm=float(payload.get("atm") or 0.0),
-                    quotes=clean, expect=self.workbook_stamp,
-                    force=bool(payload.get("force")))
+                atm = float(payload.get("atm") or 0.0)
+
+                def write():
+                    return session.add_pair(self.path, pair, atm=atm, quotes=clean,
+                                            expect=self.workbook_stamp, force=force)
             else:
                 raise ValueError(f"unknown action {action!r}; expected 'add' or 'remove'")
-            self.reload()
-            return {"ok": True, "wrote": out, **self.state()}
+            done: dict = {}
+            problems = self._rebuild(write=lambda: done.setdefault("out", write()))
+            out = done["out"]
+            # A mark that would not go back on after the reload is this
+            # change's problem to report: it was this that re-read the book.
+            out["notes"] = list(out.get("notes") or []) + [f"! {x}" for x in problems]
+            return {"ok": not problems, "wrote": out, **self.state()}
 
     def workbook_versions(self, q: dict | None = None) -> dict:
         """Every copy of the workbook, and the log of what wrote it.
@@ -1595,19 +1717,23 @@ class BookService:
     def workbook_restore(self, payload: dict) -> dict:
         """Put one of the copies back, and read the book again on top of it.
 
-        The same refusal the configuration card makes, and for the same
-        reason: this replaces the file the session's marks were made against,
-        and the reload that follows would drop them.  What it replaces is
-        itself kept, so the undo has an undo.
+        The one thing here that still refuses while this session holds
+        something the workbook does not.  A configuration change is applied
+        to the book and the marks are put back on it, but this is not a
+        change to the workbook -- it is a different workbook, chosen because
+        of what it says, and marks made against another one are exactly what
+        a person restoring a copy has not asked to keep.  Pressed again it
+        restores anyway.  What it replaces is itself kept, so the undo has an
+        undo.
         """
         with self._lock:
             if self.dirty and not payload.get("force"):
                 raise ValueError(
-                    "this session has marks the workbook does not hold, and putting a copy "
-                    "back re-reads the workbook, which would drop them. Save them into the "
+                    "this session holds marks or configuration the workbook does not, and "
+                    "putting a copy back reads that copy instead. Write them into the "
                     "workbook first, or press again to restore anyway")
             out = session.restore_backup(self.path, str(payload.get("name") or ""))
-            self.reload()
+            self.reload(discard=True)
             return {"ok": True, "wrote": out, **self.state()}
 
     def session_state(self, q: dict | None = None) -> dict:
@@ -1672,6 +1798,11 @@ class BookService:
         off disk -- so what lands in the workbook is exactly what a person
         can open and read in the JSON beside it.  A screen cannot write a
         mark it has not first written down.
+
+        The session's **configuration tabs** go in on the same pass, in the
+        same backup: a peg band or a holiday applied on the configuration
+        window is held with the marks and written with them, so there is one
+        write of the workbook and one place to look for what changed.
         """
         with self._lock:
             if self.book is None:
@@ -1696,6 +1827,14 @@ class BookService:
                 self.workbook_stamp = result["stamp"]
                 self.workbook_mtime = self._mtime(self.path)
                 self.dirty = False
+                # The configuration tabs went in with them, so the session no
+                # longer holds anything the workbook does not.  Dropped
+                # without a reload, because the book was built from exactly
+                # the rows that have just been written into the file: reading
+                # it again would cost the marks nothing and prove nothing.
+                self.config_edits = {}
+                if self.book is not None:
+                    self.book.config_tabs = {}
             return {"ok": not result["problems"], "path": str(path), "workbook": src,
                     **result}
 
@@ -1704,6 +1843,14 @@ class BookService:
 
         Nothing is raised for a pair that will not take its marks: the report
         names it, and the rest of the book still gets what was saved for it.
+
+        A file that holds **configuration tabs** is read before the marks and
+        the book is built again on them, because a band or a holiday decides
+        how the workbook loads and cannot be layered onto a book that was
+        made without it.  A file that holds none -- every file written before
+        the configuration window, and every session that never edited a tab
+        -- puts the book back on the workbook's own tabs, which is what it
+        was marked against.
         """
         with self._lock:
             if self.book is None:
@@ -1712,7 +1859,18 @@ class BookService:
             pairs = [raw] if isinstance(raw, str) and raw.strip() else raw
             path = (payload.get("path") or "").strip() or (
                 self.session_path or str(session.default_path()))
-            out = session.restore(self.book, path, pairs)
+            doc = session.load(path)
+            tabs = session.config_tabs_from_doc(doc)
+            if session.config_fingerprint(tabs) != session.config_fingerprint(
+                    self.config_edits):
+                self.config_edits = tabs
+                self.reload()
+            out = session.apply_document(self.book, doc, pairs)
+            out["path"] = str(path)
+            if tabs:
+                out["notes"].append(
+                    f"the {', '.join(sorted(tabs))} tab(s) came back with the marks and are "
+                    f"held in this session; the workbook still says what it said")
             self.session_path = str(path)
             # The book now says something the workbook does not.  It is in a
             # file, but a reload would still drop it, so the watcher asks.
@@ -2324,7 +2482,11 @@ class BookService:
     # -- the kACE feed ------------------------------------------------------
     def kace_state(self) -> dict:
         return {"spreads": self.kace_spreads.path,
-                "pairs": sorted(self.kace_spreads.rows),
+                # The spreading tiers the tab holds, and which of them is
+                # posted when the screen names none.  The pillars are the
+                # same whichever is chosen; the tier is the width policy.
+                "tiers": self.kace_spreads.names,
+                "tier": self._kace_default_tier(),
                 "error": self.kace_error,
                 "credentials": bool(self.kace_user),
                 "scenario": self.kace_scenario,
@@ -2336,6 +2498,18 @@ class BookService:
                 "insecure": self.kace_insecure,
                 "log": self.kace_log.path,
                 "posts": self.kace_log.entries(limit=10)}
+
+    def _kace_default_tier(self) -> str:
+        """Which tier the screen starts on: the start-up one, else ``default``.
+
+        A refusal is not one here -- a table that cannot be read has already
+        put its own message in ``error`` and the tab shows that instead, and a
+        second copy of it under the dropdown says nothing new.
+        """
+        try:
+            return self.kace_spreads.resolve_tier(self.kace_tier)
+        except kace_mod.KaceError:
+            return ""
 
     def kace_post(self, payload: dict) -> dict:
         """The Post button: build the message here, send it, record it.
@@ -2357,7 +2531,7 @@ class BookService:
             hor_date=datetime.fromisoformat(out["hor_date"]).date(),
             nodes=out["xml"].count("<node "), url=self.kace_url, log=self.kace_log,
             when=when, opener=self.kace_opener, ca=self.kace_ca, insecure=self.kace_insecure,
-            dry_run=bool(payload.get("dry_run")))
+            dry_run=bool(payload.get("dry_run")), tier=out.get("tier", ""))
         entry["posts"] = self.kace_log.entries(limit=10)
         return entry
 
@@ -2365,6 +2539,7 @@ class BookService:
         if self.kace_error:
             raise kace_mod.KaceError(self.kace_error)
         return kace_mod.build(self.book, q["pair"], self.kace_spreads,
+                              tier=q.get("tier") or self.kace_tier,
                               cut=q.get("cut", "NY"), source=q.get("source", "marks"),
                               method=q.get("method", "SVI"))
 
@@ -2601,7 +2776,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": gone}, code=404)
         try:
             if url.path == "/api/reload":
-                self._json(self.service.reload())
+                self._json(self.service.reload(discard=True))
             elif url.path == "/api/kace/post":
                 self._json(self.service.kace_post(payload))
             elif url.path == "/api/overwrite":
@@ -2701,14 +2876,15 @@ def serve(path: str, host: str = "127.0.0.1", port: int = 8765,
           kace_password: str | None = None,
           kace_scenario: str = kace_mod.DEFAULT_SCENARIO, kace_url: str | None = None,
           kace_ca: str | None = None, kace_insecure: bool = False,
-          kace_log_path: str | None = None) -> None:
+          kace_log_path: str | None = None, kace_tier: str | None = None) -> None:
     """Start the local server (blocking)."""
     Handler.service = BookService(path, clock, feed_path, history_path, bank_path,
                                   session_path, auto_reload, archive_path,
                                   agent_chats, agent_sdr, ingest_state_path, dtcc_proxy,
                                   journal_path, rules_path, dtcc_direct,
                                   kace_spreads_path, kace_user, kace_password, kace_scenario,
-                                  kace_url, kace_ca, kace_insecure, kace_log_path)
+                                  kace_url, kace_ca, kace_insecure, kace_log_path,
+                                  kace_tier)
     httpd = ThreadingHTTPServer((host, port), Handler)
     url = f"http://{host}:{port}/"
     print(f"volkit serving {path}\n  -> {url}\n  (Ctrl-C to stop)")

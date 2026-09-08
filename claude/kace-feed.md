@@ -46,16 +46,42 @@ what `TestKaceFeed` pins string for string.
   check; a certificate failure says which to use.
 - **Every post is recorded**, sent or refused, in `kace_posts.jsonl` beside
   the workbook (`PostLog`; `--kace-log`): time from the book's clock, pair,
-  scenario, clear, nodes, a 16-hex hash of the message, bytes, URL, outcome,
+  scenario, tier, clear, nodes, a 16-hex hash of the message, bytes, URL, outcome,
   processing time and the first kilobyte of the reply. A dry run records
   nothing. The tab shows the last ten and the confirm step is inline, not a
   browser dialog; the clear is styled as the destructive one.
-- **The spread table names the pillars.** The workbook's `KACE_SPREADS` tab,
-  `pair, tenor, spread` in vol points;
-  the tenors listed for a pair *are* its pillars. A tenor with no mark behind
-  it is refused by name; a pair with no rows cannot be posted; a tab that is
-  there and wrong is refused whole and shown on the tab, like the rules file.
-  `--kace-spreads` points at a different workbook. The shipped rows are the USDCNH sheet's column L.
+- **The spread table names the pillars, and a tier names the widths.** The
+  workbook's `KACE_SPREADS` tab is one row per tenor -- those *are* the
+  pillars -- and **one column per spreading tier**, in vol points: `default`,
+  plus whatever else the desk names (`wide`, `thin`, a client tier). The tier
+  is chosen on the kACE feed tab from a dropdown, or with `--kace-tier`, and
+  decides only how wide the ATM two-way is at each pillar; the pillars are the
+  same whichever tier is posted. A cell a tier leaves blank falls back to
+  `default` for that tenor, cell by cell, exactly as a pair column on `Vega
+  Weights` does, so a tier that only widens the front end is two cells rather
+  than a ladder. `SpreadTable` resolves that fallback once, at load, so what
+  any caller reads is a complete ladder and there is no second place for it to
+  be written differently. A tenor with no mark behind it is refused by name; a
+  tier the tab does not hold is refused by name and told what the tab does
+  hold; a table with no rows cannot be posted; a tab that is there and wrong is
+  refused whole and shown on the tab, like the rules file. `--kace-spreads`
+  points at a different workbook. The shipped `default` column is the USDCNH
+  sheet's column L.
+
+  **It used to be `pair, tenor, spread`**, which tied a width to a currency: a
+  desk that wanted to post one pair at two widths had nowhere to say so, and a
+  new pair could not be posted until somebody typed it a whole ladder. The
+  widths are a quoting policy, not a property of the currency. The old layout
+  is the one shape `SpreadTable.load` names when it cannot find a header,
+  because every workbook this tool has ever written has it: replace the header
+  with `tenor, default` and one column per tier, one row per pillar. Tiers are
+  added, edited and removed on the `KACE_SPREADS` table in the **Config**
+  window like any other configuration tab -- marked into the session, written
+  with the marks.
+- **The post log says which tier went out.** `tier` is a field of every
+  `kace_posts.jsonl` entry (empty on a clear, which carries no widths) and a
+  column of the tab's own history table, so "what did we send kACE this
+  morning" answers with the policy as well as the pair.
 - **The daily rule is the sheet's, spelled out.** A day takes the spread of
   the last pillar expiring on or before it; a day before the O/N expiry takes
   O/N's (`spread_for`). That was an approximate `VLOOKUP` with an `ISERROR`

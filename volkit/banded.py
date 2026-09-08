@@ -95,7 +95,7 @@ class Band:
 PEG_BANDS_SHEET = "PEG_BANDS"
 
 
-def load_bands(path: str | Path | None = None) -> dict[str, Band]:
+def load_bands(path: str | Path | None = None, *, overlay=None) -> dict[str, Band]:
     """Read the workbook's ``PEG_BANDS`` tab.  Bands are policy, so they are data.
 
     ``path`` is the marks workbook -- the bands live in the same file as the
@@ -108,7 +108,7 @@ def load_bands(path: str | Path | None = None) -> dict[str, Band]:
 
     book = Path(path) if path else configsheets.default_workbook()
     rows = configsheets.read_rows(book, PEG_BANDS_SHEET,
-                                  required=("pair", "lower", "upper"))
+                                  required=("pair", "lower", "upper"), overlay=overlay)
     if rows is None:
         raise ValueError(configsheets.missing(PEG_BANDS_SHEET, book))
     out: dict[str, Band] = {}

@@ -360,16 +360,69 @@ def remove_pair(workbook, pair: str, *, expect: str = "", force: bool = False) -
     return out
 
 
+def check_config_tabs(tabs: dict) -> dict:
+    """Refuse a tab, or a column of one, before anything is written or applied.
+
+    The same rule wherever configuration arrives -- the window's own Apply,
+    the export that finally writes it, and the command line -- so a tab that
+    the reader would refuse on the next load cannot be stored in a session
+    now and discovered in six hours.  Returns the tabs, so a caller can use
+    it inline.
+    """
+    from . import configsheets
+
+    if not isinstance(tabs, dict):
+        raise SessionError("configuration is {SHEET: [row dicts]}, one entry per tab")
+    unknown = [k for k in tabs if configsheets.match_sheet(configsheets.EDITABLE, k) is None]
+    if unknown:
+        raise SessionError(
+            f"{', '.join(unknown)} is not a configuration tab this writes "
+            f"({', '.join(configsheets.EDITABLE)}); the rest of the workbook is edited "
+            f"through the marking screens")
+    for sheet, rows in tabs.items():
+        if not isinstance(rows, list):
+            raise SessionError(f"{sheet}: rows must be a list of objects, one per row")
+        for n, row in enumerate(rows, start=1):
+            if not isinstance(row, dict):
+                raise SessionError(f"{sheet} row {n}: expected an object of column: value, "
+                                   f"got {type(row).__name__}")
+        name = configsheets.match_sheet(configsheets.EDITABLE, sheet)
+        configsheets.check_open_columns(name, configsheets.columns_for(name, rows))
+    return tabs
+
+
+def _apply_config_tabs(wb, tabs: dict) -> list[str]:
+    """Write the configuration tabs into an open workbook.  One line each.
+
+    Split out because there are two ways in and they must write identically:
+    the tabs a session carries, written with its marks by ``export_workbook``,
+    and :func:`write_config_tabs`, which is that write on its own for the
+    command line.
+    """
+    from . import configsheets
+
+    check_config_tabs(tabs)
+    names = {sheet: configsheets.match_sheet(configsheets.EDITABLE, sheet) or sheet
+             for sheet in tabs}
+    # ``columns_for`` rather than the fixed list: ``Vega Weights`` carries a
+    # column per pair with its own curve shape, and a writer that knew only
+    # the fixed columns would drop every one of them on the first save.
+    return [configsheets.write_rows(
+                wb, names[sheet], configsheets.columns_for(names[sheet], rows), rows,
+                header=configsheets.EDITABLE[names[sheet]][1])
+            for sheet, rows in sorted(tabs.items())]
+
+
 def write_config_tabs(workbook, tabs: dict, *, expect: str = "",
                       force: bool = False) -> dict:
-    """Write configuration tabs into the workbook, whole.
+    """Write configuration tabs into the workbook, whole, and nothing else.
 
-    The second thing in this package that writes a workbook, and deliberately
-    not part of the session export: a peg band, a kACE pillar, a holiday and a
-    wing ratio are not *marks*.  They are what the tool is configured with, a
-    session does not carry them, and a desk that changes one means it to apply
-    to every session from now on -- so they go straight in, with the same
-    backup, the same staleness check and the same pruning the export has.
+    A peg band, a kACE pillar, a holiday and a wing ratio are edited on the
+    **configuration window**, where they go into the session and reach the
+    workbook with everything else the session holds -- one write, one backup,
+    one place to look for what changed (§13).  This is that write with the
+    marks left out: the command line's way in, and what a build with no
+    browser open uses.
 
     ``tabs`` is ``{SHEET: [row dicts]}``, each sheet one of
     ``configsheets.EDITABLE``.  A tab is replaced by what is given for it and
@@ -377,17 +430,11 @@ def write_config_tabs(workbook, tabs: dict, *, expect: str = "",
     """
     import io
     import openpyxl
-    from . import configsheets
 
     src = Path(workbook)
     if not src.exists():
         raise SessionError(f"workbook not found: {src}")
-    unknown = [k for k in tabs if k not in configsheets.EDITABLE]
-    if unknown:
-        raise SessionError(
-            f"{', '.join(unknown)} is not a configuration tab this writes "
-            f"({', '.join(configsheets.EDITABLE)}); the rest of the workbook is edited "
-            f"through the marking screens")
+    check_config_tabs(tabs)
     now = workbook_stamp(src)
     if expect and now and expect != now and not force:
         raise SessionError(
@@ -401,13 +448,7 @@ def write_config_tabs(workbook, tabs: dict, *, expect: str = "",
     # ``columns_for`` rather than the fixed list: ``Vega Weights`` carries a
     # column per pair with its own curve shape, and a writer that knew only
     # the fixed columns would drop every one of them on the first save.
-    written = {sheet: configsheets.columns_for(sheet, rows)
-               for sheet, rows in sorted(tabs.items())}
-    for sheet, columns in written.items():
-        configsheets.check_open_columns(sheet, columns)
-    notes = [configsheets.write_rows(wb, sheet, written[sheet], rows,
-                                     header=configsheets.EDITABLE[sheet][1])
-             for sheet, rows in sorted(tabs.items())]
+    notes = _apply_config_tabs(wb, tabs)
     kept = keep_backup(src, blob)
     notes.extend(kept["notes"])
     _save_workbook(wb, src, cached)
@@ -1069,6 +1110,15 @@ def capture(book, pairs=None, *, note: str = "") -> dict:
         "note": str(note or ""),
         "units": UNITS_NOTE,
         "pairs": {p: capture_pair(book, p) for p in wanted},
+        # The configuration tabs this session holds instead of the workbook's
+        # -- what the configuration window has applied and the workbook does
+        # not know about yet.  Not a mark and not per pair: a band, a holiday
+        # and a wing ratio are what the book was *built* with, which is why
+        # putting this file back rebuilds the book rather than layering onto
+        # it (``BookService.session_load``).
+        "config": {sheet: [dict(r) for r in rows]
+                   for sheet, rows in sorted(getattr(book, "config_tabs", {}).items())
+                   if rows is not None},
         # The event table is the book's, not a pair's: one row per release,
         # a weight per currency and an adjustment per pair, in points.  This
         # is the authority on the way back in; a pair block's ``events`` is
@@ -1085,6 +1135,43 @@ def capture_events(book) -> list[dict]:
              "weights": {c: v * 100.0 for c, v in sorted(r.weights.items())},
              "adjust": {p: v * 100.0 for p, v in sorted(r.adjust.items())}}
             for r in sorted(book.events.rows, key=lambda r: r.when)]
+
+
+def config_fingerprint(tabs: dict) -> tuple:
+    """What two sets of configuration tabs have to match on to be the same.
+
+    Column names as the readers spell them and values as text, because the
+    same tab reaches this from a browser (``0.5``), from a JSON file
+    (``0.5``) and from a workbook cell (``0.5`` as a float that prints
+    ``0.5``), and a session that reloaded the book for a difference in how a
+    number was typed would rebuild it on every load.
+    """
+    from . import configsheets
+
+    return tuple(sorted(
+        (configsheets.normalise(sheet),
+         tuple(tuple(sorted((configsheets.normalise(k), "" if v is None else str(v))
+                            for k, v in row.items()
+                            if configsheets.normalise(k)))
+               for row in rows))
+        for sheet, rows in (tabs or {}).items()))
+
+
+def config_tabs_from_doc(doc: dict) -> dict:
+    """The configuration tabs a session file holds: ``{SHEET: [row dicts]}``.
+
+    Empty for a file written before the configuration window existed, and for
+    a session that never edited a tab -- both mean the same thing, which is
+    that every tab is the workbook's own.  Checked here rather than where it
+    is used, so a file with a tab this build does not write is refused by
+    name at the top of a load rather than half-applied.
+    """
+    tabs = (doc or {}).get("config") or {}
+    if not tabs:
+        return {}
+    return {sheet: [dict(r) for r in rows]
+            for sheet, rows in check_config_tabs(
+                {k: list(v or []) for k, v in tabs.items()}).items()}
 
 
 def event_table_from_doc(doc: dict) -> tuple[list, list[str], list[str]]:
@@ -1398,6 +1485,19 @@ def apply_document(book, doc: dict, pairs=None) -> dict:
         book.events.source = str(doc.get("saved") or "session file")
         problems.extend(book.apply_events())
 
+    # The configuration tabs, which are not applied here.  A band, a holiday
+    # or a wing ratio decides how the workbook *loads*, so a file that
+    # carries one has to be given to the build (``Book.from_excel(config=)``)
+    # and not layered onto a book that was made without it.  Every caller in
+    # this package does that first; one that has not is told, rather than
+    # left with marks on top of the wrong configuration.
+    tabs = config_tabs_from_doc(doc)
+    if config_fingerprint(tabs) != config_fingerprint(getattr(book, "config_tabs", {})):
+        problems.append(
+            f"this file holds the {', '.join(sorted(tabs)) or 'workbook'} tab(s) as this "
+            f"session marked them, and the loaded book was not built with them; reload the "
+            f"workbook with the session to apply them")
+
     untouched = [p for p in book.pairs if p.upper() not in by_upper]
     if untouched:
         notes.append(f"the file says nothing about {', '.join(untouched)}; "
@@ -1405,7 +1505,8 @@ def apply_document(book, doc: dict, pairs=None) -> dict:
                      f"has {'them' if len(untouched) > 1 else 'it'}")
     return {"applied": applied, "problems": problems, "notes": notes,
             "saved": str(doc.get("saved") or ""), "note": str(doc.get("note") or ""),
-            "workbook": saved_book, "valuation": str(doc.get("valuation") or "")}
+            "workbook": saved_book, "valuation": str(doc.get("valuation") or ""),
+            "config": sorted(tabs)}
 
 
 # --------------------------------------------------------------------------
@@ -1518,6 +1619,10 @@ def export_workbook(doc: dict, workbook: str | Path, out: str | Path | None = No
 
     if not isinstance(doc, dict) or not isinstance(doc.get("pairs"), dict):
         raise SessionError("that is not a volkit session file: it has no 'pairs' object")
+    # Refused here, before a byte is written, rather than half-way through:
+    # a tab this build would not read back is a setting that goes into the
+    # workbook and vanishes on the next load.
+    config_tabs = config_tabs_from_doc(doc)
     src = Path(workbook)
     if not src.exists():
         raise SessionError(f"workbook not found: {src}")
@@ -1834,6 +1939,15 @@ def export_workbook(doc: dict, workbook: str | Path, out: str | Path | None = No
     if written and (rows or "event_table" in doc):
         notes.append(_write_events_sheet(wb, rows, sorted(header), tz_shift))
 
+    # -- the configuration tabs --------------------------------------------
+    # Before the wing ratios below, and deliberately: the tab the session
+    # holds is the desk's whole table, and the per-pair multipliers the marks
+    # carry are then merged on top of it for the pairs actually written --
+    # which is the same order the loaded book reads them in.
+    tabs = sorted(config_tabs)
+    if config_tabs:
+        notes.extend(_apply_config_tabs(wb, config_tabs))
+
     # -- WING_RATIOS -------------------------------------------------------
     if written and written_ratios:
         notes.append(_write_wing_ratios_sheet(wb, written_ratios))
@@ -1841,7 +1955,7 @@ def export_workbook(doc: dict, workbook: str | Path, out: str | Path | None = No
     backup = ""
     reused = False
     pruned: list[str] = []
-    if not written:
+    if not written and not config_tabs:
         problems.append("nothing was written")
     else:
         # Over the book of record: keep what it replaced.  ``blob`` is the
@@ -1863,14 +1977,16 @@ def export_workbook(doc: dict, workbook: str | Path, out: str | Path | None = No
         notes.append(f"{Path(locked).name} is beside the workbook, so Excel probably has it "
                      f"open. What is written here is what the tool holds; anything Excel "
                      f"saves afterwards is written over it")
-    out = {"written": str(dst) if written else "", "backup": backup,
-           "pairs": written, "problems": problems, "notes": notes, "reused": reused,
-           "in_place": bool(in_place), "stamp": workbook_stamp(dst) if written else "",
+    out = {"written": str(dst) if (written or config_tabs) else "", "backup": backup,
+           "pairs": written, "tabs": tabs, "problems": problems, "notes": notes,
+           "reused": reused,
+           "in_place": bool(in_place),
+           "stamp": workbook_stamp(dst) if (written or config_tabs) else "",
            "stale": stale, "pruned": pruned, "locked": locked}
     # The marks themselves, kept beside the workbook they went into.  Only for
     # a write over the book of record: a named copy is a file the person is
     # holding on to, and its history is that file's, not this workbook's.
-    if written and dst.resolve() == src.resolve():
+    if (written or config_tabs) and dst.resolve() == src.resolve():
         out["history"] = record_write(src, what="marks", wrote=out, doc=doc)
     return out
 

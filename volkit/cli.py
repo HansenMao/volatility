@@ -183,19 +183,26 @@ def _clock(args) -> Clock:
 
 
 def _book(args, pairs=None) -> Book:
-    book = Book.from_excel(args.workbook, _clock(args))
+    # A saved session's configuration tabs are read *before* the book is
+    # built, because a peg band or a holiday decides how the workbook loads
+    # and cannot be layered onto a book that was made without it.  Its marks
+    # go on afterwards, layered on the workbook rather than instead of it.
+    from . import session as session_mod
+
+    doc = session_mod.load(args.session) if getattr(args, "session", None) else None
+    book = Book.from_excel(args.workbook, _clock(args),
+                           config=session_mod.config_tabs_from_doc(doc))
     book.load_all(pairs)
     for w in book.all_problems():
         print(f"  ! {w}", file=sys.stderr)
     # A saved session goes on here rather than in each subcommand, so every
-    # command prices against the same marks the screen would be showing.  It
-    # is applied after load_all so it is layered on the workbook, never
-    # instead of it, and everything it could not put back is printed.
-    if getattr(args, "session", None):
-        from . import session as session_mod
-        out = session_mod.restore(book, args.session)
+    # command prices against the same marks the screen would be showing.
+    if doc is not None:
+        out = session_mod.apply_document(book, doc)
+        out["path"] = str(args.session)
         print(f"session {args.session}: marks restored for "
               f"{', '.join(out['applied']) or 'nothing'}"
+              + (f", the {', '.join(out['config'])} tab(s) applied" if out["config"] else "")
               + (f" (saved {out['saved']})" if out["saved"] else ""), file=sys.stderr)
         for note in out["notes"]:
             print(f"  . {note}", file=sys.stderr)
@@ -207,7 +214,7 @@ def _book(args, pairs=None) -> Book:
 def cmd_versions(args) -> int:
     """The workbook's own copies and the log of what wrote it.
 
-    The same three functions the Workbook card calls, so a desk with no
+    The same three functions the Config window calls, so a desk with no
     browser open can see the history, thin it and put a copy back.
     """
     wb = Path(args.workbook)
@@ -424,12 +431,13 @@ def cmd_kace(args) -> int:
               f"{book.clock.now.date():%d %b %Y}", file=sys.stderr)
     else:
         table = kace.SpreadTable.load(args.kace_spreads or args.workbook)
-        feed = kace.build(book, args.pair, table, cut=args.cut, source=args.source,
-                          method=args.method)
+        feed = kace.build(book, args.pair, table, tier=args.kace_tier,
+                          cut=args.cut, source=args.source, method=args.method)
         s = feed.summary()
         print(f"{s['pair']}: {s['days']} days {s['first_day']} to {s['last_day']}, "
               f"{len(s['pillars'])} pillars, {s['nodes']} nodes; horDate {s['hor_date']}, "
-              f"{s['cut']} cut, wings from {s['source']}, scenario {scenario}", file=sys.stderr)
+              f"{s['cut']} cut, wings from {s['source']}, {s['tier']} spreads, "
+              f"scenario {scenario}", file=sys.stderr)
         print(f"  {'tenor':<6}{'expiry':<12}{'bid':>9}{'offer':>9}{'25RR':>9}{'10RR':>9}"
               f"{'25FLY':>9}{'10FLY':>9}  wings", file=sys.stderr)
         for p in s["pillars"]:
@@ -447,6 +455,7 @@ def cmd_kace(args) -> int:
     if not args.post:
         return 0
     entry = kace.post_feed(text, pair=args.pair, scenario=scenario, clear=bool(args.clear),
+                           tier="" if args.clear else feed.tier,
                            hor_date=book.clock.now.date(), nodes=text.count("<node "),
                            url=kace.settings(args.kace_url), log=kace.PostLog.at(args.kace_log),
                            when=book.clock.now, ca=args.kace_ca, insecure=args.kace_insecure,
@@ -1691,6 +1700,8 @@ def cmd_session(args) -> int:
             et = doc["event_table"]
             marked = sum(1 for row in et for v in (row.get("weights") or {}).values() if v)
             print(f"  event table: {len(et)} event(s), {marked} currency weight(s)")
+        for sheet, rows in sorted((doc.get("config") or {}).items()):
+            print(f"  {sheet:<9}{len(rows)} row(s), as this session holds the tab")
         return 0
 
     if args.to_workbook is not None:
@@ -1759,7 +1770,8 @@ def cmd_serve(args) -> int:
           kace_url=getattr(args, "kace_url", None),
           kace_ca=getattr(args, "kace_ca", None),
           kace_insecure=bool(getattr(args, "kace_insecure", False)),
-          kace_log_path=getattr(args, "kace_log", None))
+          kace_log_path=getattr(args, "kace_log", None),
+          kace_tier=getattr(args, "kace_tier", None))
     return 0
 
 
@@ -2487,6 +2499,9 @@ def build_parser() -> argparse.ArgumentParser:
                                                f"(default: {kace.ENV_USER} in the environment)")
     kace_opts.add_argument("--kace-password", help=f"the feed password in the message header "
                                                    f"(default: {kace.ENV_PASSWORD})")
+    kace_opts.add_argument("--kace-tier",
+                           help=f"which spreading tier's widths to post -- a column of the "
+                                f"{kace.SPREADS_SHEET} tab (default: {kace.DEFAULT_TIER!r})")
     kace_opts.add_argument("--kace-scenario", default=kace.DEFAULT_SCENARIO,
                            help="the kACE scenario the message posts into")
     kace_opts.add_argument("--kace-url",

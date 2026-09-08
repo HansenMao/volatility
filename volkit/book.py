@@ -67,13 +67,24 @@ class Book:
     #: differently for it -- but read with the book so the marking screen and
     #: the command line share one answer about what a workbook says.
     vega_weights: VegaWeights = field(default_factory=VegaWeights)
+    #: The configuration tabs this session holds instead of the workbook's:
+    #: ``{SHEET: [row dicts]}``, as the configuration window shows them.  A
+    #: peg band or a holiday marked on that window is not written into the
+    #: workbook until the session is (§13), so it travels with the book that
+    #: was built from it -- ``session.capture`` writes it into the session
+    #: file and the export puts it into the tabs.  Empty is the ordinary
+    #: case: every tab is the workbook's.
+    config_tabs: dict[str, list[dict]] = field(default_factory=dict)
 
     @classmethod
     def from_excel(cls, path: str | Path, clock: Clock | None = None, *,
                    legacy_cross_sign: bool = False, bands: str | Path | None = None,
-                   calendars: CalendarSet | None = None, **kw) -> "Book":
-        book = cls(data=ExcelSource(path, **kw).load(), clock=clock or Clock.utcnow(),
-                   legacy_cross_sign=legacy_cross_sign)
+                   calendars: CalendarSet | None = None, config: dict | None = None,
+                   **kw) -> "Book":
+        cfg = {k: [dict(r) for r in (v or [])] for k, v in (config or {}).items()}
+        book = cls(data=ExcelSource(path, config=cfg, **kw).load(),
+                   clock=clock or Clock.utcnow(),
+                   legacy_cross_sign=legacy_cross_sign, config_tabs=cfg)
         book.events = book.data.events.copy()
         book.bands = book._default_bands(bands or path)
         book.wing_ratios = book._default_wing_ratios(path)
@@ -111,7 +122,8 @@ class Book:
         if found is None:
             return {}
         try:
-            return {k: v for k, v in load_bands(found).items() if v.upper > v.lower > 0}
+            return {k: v for k, v in load_bands(found, overlay=self.config_tabs).items()
+                    if v.upper > v.lower > 0}
         except (OSError, ValueError) as exc:
             self.warnings.append(f"managed bands: {exc}")
             return {}
@@ -127,7 +139,7 @@ class Book:
         if path is None:
             return {}
         try:
-            return load_wing_ratios(path)
+            return load_wing_ratios(path, overlay=self.config_tabs)
         except (OSError, ValueError) as exc:
             self.warnings.append(f"wing ratios: {exc}")
             return {}
@@ -201,7 +213,7 @@ class Book:
         if path is None:
             return VegaWeights()
         try:
-            return load_vega_weights(path)
+            return load_vega_weights(path, overlay=self.config_tabs)
         except (OSError, ValueError) as exc:
             self.warnings.append(f"vega weights: {exc}")
             return VegaWeights()
@@ -223,7 +235,7 @@ class Book:
             removals={k: set(v) for k, v in DEFAULT_CALENDARS.removals.items()},
         )
         try:
-            added = cal.load_overrides_sheet(path)
+            added = cal.load_overrides_sheet(path, overlay=self.config_tabs)
         except (OSError, ValueError) as exc:
             self.warnings.append(f"holidays: {exc}")
             return DEFAULT_CALENDARS

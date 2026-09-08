@@ -1070,9 +1070,14 @@ tab is the check, **Copy XML** / **↓ feed XML** the message, **↓ clear XML**
 the `clearRate` message; the **scenario** box on the tab is the kACE
 scenario it all posts into (`--kace-scenario` on the command line).
 
-The workbook's `KACE_SPREADS` tab (`pair, tenor, spread`) names the pillars
-posted for each pair and the ATM width at each — the tenors listed *are* the pillars, and a
-tenor with no mark behind it is refused by name. The header's credentials
+The workbook's `KACE_SPREADS` tab names the pillars posted — one row per
+tenor, and the tenors listed *are* the pillars — and carries **one column per
+spreading tier** (`default`, plus whatever else the desk names) holding the
+ATM width each posts at them. The tier is chosen from a dropdown on the tab
+(`--kace-tier`, `kace-tier =` in `volkit.cfg`) and changes the widths and
+nothing else; a cell a tier leaves blank falls back to `default`. A tenor with
+no mark behind it, and a tier the tab does not hold, are both refused by
+name. The header's credentials
 come from `--kace-user` / `--kace-password` (so `kace-user =` in
 `volkit.cfg`) or `VOLKIT_KACE_USER` / `VOLKIT_KACE_PASSWORD`; without a
 username the tab shows the table and withholds the message. `horDate` is the
@@ -1576,13 +1581,16 @@ the same clock always gives the same numbers.
   `marketdata` knows about Excel.
 * **A new holiday** — add a row to the workbook's `HOLIDAYS` tab.
 * **A pair with its own term-structure shape** — a column headed with that
-  pair on the workbook's `Vega Weights` tab, added on the marking screen's
-  Workbook card. Blank cells in it fall back to `default`, cell by cell.
+  pair on the workbook's `Vega Weights` tab, added in the **Config** window.
+  Blank cells in it fall back to `default`, cell by cell.
 * **A new setting of any kind** — a tab of the workbook, named in
   `configsheets.SHEETS` and read with `configsheets.read_rows`. Settings do
   not travel as loose files beside the workbook any more, because a desk
   that copies the workbook and not the file beside it gets a tool that
-  silently does less.
+  silently does less. A tab listed in `configsheets.EDITABLE` is editable in
+  the Config window, where it is applied to the **session** — the book is read
+  again on top of it, and it reaches the workbook with the marks under
+  **Write to workbook** (`claude/config-tabs.md`).
 * **A new economic event** — add a row to the workbook's `EVENTS` sheet: the
   release time in Hong Kong time, then a weight in each currency's column and
   an adjustment in each pair's.

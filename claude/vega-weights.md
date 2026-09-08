@@ -2,7 +2,7 @@
 
 `volkit/vegaweights.py`, the workbook's `Vega Weights` tab, the **bump** on
 the marking screen's ATM term structure card, and the **suggestion** measured
-off the historical book on the Workbook card. Read this before changing any of
+off the historical book in the Config window. Read this before changing any of
 them.
 
 ## What a weight is
@@ -91,7 +91,7 @@ move, and reading that off the result table is reading it one press late.
 
 `vegaweights.realized_weights` -> `BookService.vega_realized` -> `POST
 /api/vega/realized`, in a shut disclosure under the `Vega Weights` table on
-the Workbook card. `volkit vega PAIR --realized --history F --lookback 180`
+the Config window. `volkit vega PAIR --realized --history F --lookback 180`
 prints it.
 
 Each tenor's daily *change* in at-the-money volatility, regressed on the

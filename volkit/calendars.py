@@ -622,7 +622,8 @@ class CalendarSet:
         }
         target.setdefault(country.upper(), set()).update(parsed)
 
-    def load_overrides_sheet(self, path: str | Path | None = None) -> int | None:
+    def load_overrides_sheet(self, path: str | Path | None = None, *,
+                             overlay=None) -> int | None:
         """Load the workbook's ``HOLIDAYS`` tab: ``country, date, remove`` rows.
 
         Lunar-calendar holidays are published a year at a time and cannot be
@@ -637,7 +638,8 @@ class CalendarSet:
         from . import configsheets
 
         book = Path(path) if path else configsheets.default_workbook()
-        rows = configsheets.read_rows(book, HOLIDAYS_SHEET, required=("country", "date"))
+        rows = configsheets.read_rows(book, HOLIDAYS_SHEET, required=("country", "date"),
+                                      overlay=overlay)
         if rows is None:
             return None
         count = 0

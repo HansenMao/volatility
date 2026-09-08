@@ -11,6 +11,16 @@ else's spreadsheet, and the wrong thing to do to a morning's work at 5pm. So a
 session is saved *beside* the workbook, in the tool's own JSON file, the way
 the knowledge bank is.
 
+- **The file holds the configuration tabs too** (added 2026-09-08). A peg
+  band, a kACE pillar, a holiday, a wing ratio or a vega weight applied in the
+  **Config** window goes into `Book.config_tabs` and into the file under
+  `config`, and the workbook is not written. It cannot be *layered* on the way
+  back in -- a band decides how the workbook loads -- so a file that carries
+  one is applied by rebuilding: `BookService.session_load` sets the overlay
+  and reloads before the marks go on, and `cli._book` reads the file before it
+  builds the book. `session.apply_document` says so rather than pretending
+  (`config_fingerprint`). The reasoning, and the rest of the shape, is in
+  `claude/config-tabs.md`.
 - **The file holds what the screen shows.** Volatility numbers in volatility
   points, shape parameters and smile parameters raw. `session.curve_params` /
   `set_curve_params` are the one conversion **and the marking screen's own**
@@ -36,7 +46,10 @@ the knowledge bank is.
 
 The one deliberate exception to "nothing writes to the workbook", asked for
 by name: `volkit session FILE --to-workbook [OUT]`, `/api/session/export`,
-and **Write to workbook** on the marking screen.
+and **Write to workbook** on the marking screen. It is also the **only** route
+that writes it, bar adding or removing a pair (`claude/config-tabs.md`): the
+marks, the events, the re-quoted numbers and the configuration tabs go in on
+one pass, under one backup and one line of the write log.
 
 **It exports the *file*, never the live book.** The button saves the session
 first and then posts the path it wrote, and the route reads that file back
@@ -63,6 +76,12 @@ not reversible from the session file, so the file itself is kept. The button
 asks first, in the page's own inline confirmation row (`#sessconfirm`, the
 same idiom as the kACE post), never a browser dialog.
 
+- **The configuration tabs go in with the marks**, written before the
+  `WING_RATIOS` merge so that the desk's own table is what the per-pair
+  multipliers a session marked are merged on top of -- the order the loaded
+  book reads them in. `_apply_config_tabs` is shared with
+  `write_config_tabs`, so the two cannot write a tab differently, and the
+  export's report names the tabs in `tabs` beside the pairs.
 - **Every cell it writes is one the reader reads back.** Curve parameters
   and events go into the PARAMS rows the workbook always had (a cross's
   correlation into the same three cells). What the workbook had no cell for

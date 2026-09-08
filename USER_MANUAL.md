@@ -51,8 +51,8 @@ source):
 | File | What it is | Required |
 |---|---|---|
 | `vol_marks.xlsx` | the workbook: parameters, quotes, events | yes |
-| `market_feed.csv` | spot and forward points, by tenor or by date | no |
-| `vol_history.xlsx` | past spot / forwards / quotes, for the Analysis tab | no |
+| `market_feed.csv` | spot and forward points, by tenor or by date. Loaded in the **Config** window, or with `--feed` | no |
+| `vol_history.xlsx` | past spot / forwards / quotes, for the Analysis tab. Loaded in the **Config** window, or with `--history` | no |
 | `volkit.cfg` | startup settings, read when the exe is double-clicked | no |
 | `mm_knowledge.json` | the market maker's knowledge bank — widths, floors, notes | created when you first save one |
 
@@ -65,7 +65,7 @@ settings that go with them:
 | Tab | What it is |
 |---|---|
 | `PEG_BANDS` | managed/pegged trading bands: `pair, lower, upper, note` |
-| `KACE_SPREADS` | the kACE feed: which tenors are posted, and the ATM width at each |
+| `KACE_SPREADS` | the kACE feed: which tenors are posted, and the ATM width each spreading **tier** posts at them |
 | `HOLIDAYS` | holiday dates no rule derives: `country, date, remove` |
 | `CONVENTIONS` | a pair's quoting conventions where they differ from the market's: `pair, premium, atmf beyond, delta` |
 
@@ -132,6 +132,25 @@ there, but off until you ask for it. Start the tool with
 `volkit.cfg` so a double-click turns it on. If you ask for a screen this build
 does not contain at all, it says so and stops rather than starting without it.
 Run `volkit.exe --help` to see which, if any, are hidden.
+
+### The Config window
+
+Beside them, in the header, is **Config**. It is not a tab: it opens over
+whichever screen you are on and closes back onto it, and it holds the three
+things that belong to no screen.
+
+| | |
+|---|---|
+| **Market feed** | where spot, the forward points and the `<CCY>OIS` rows are read from, and **Load feed**. *Refresh spot*, *watch file* and *auto-load* stay on the pricing toolbar: where a file is is a setting, re-reading it during a morning is not |
+| **Historical workbook** | where past spot, forwards and quotes are read from, and **Load history**. One box for the whole tool — the analysis screen, the monitor and the measured vega weighting all read the same file, and it used to be a box on each |
+| **Workbook** | the pairs this workbook builds, its configuration tabs, and every copy of it that has been kept. See *The workbook as a database* below |
+
+Anything you change under **Workbook** goes into this **session** and not into
+the file: the book is read again on top of it so every screen shows what it
+does, and it reaches `vol_marks.xlsx` when the session does, under **Write to
+workbook** on the Vol marking tab. Adding or removing a pair is the one
+exception and says so. `Esc`, the **Close** button or a click outside the
+window puts it away; nothing is lost by closing it.
 
 ### Pricing
 
@@ -277,6 +296,7 @@ rewritten during the day. Three controls in the toolbar:
 
 | Control | What it does |
 |---|---|
+| **Feed file…** | opens the **Config** window, where the feed's path is typed and **Load feed** reads it. A path is a setting, so it lives there rather than in this toolbar |
 | **Refresh spot** | re-reads the feed file, puts *every* market box back on the feed at each leg's own settlement date — the levels you typed over included — and re-prices. It says how many legs it took back |
 | **watch file** | checks every fifteen seconds whether the file has been rewritten, and marks the feed pill when it has. It only *tells* you; nothing is re-read |
 | **auto-load** | re-reads the feed for you whenever it changes. Only the feed — the workbook stays on its button, because reloading it discards this session's marks (§1). Greyed out when no feed file is loaded |
@@ -561,9 +581,9 @@ move the screen.
   cross-currency basis (≈7bp of premium on a 1y yen option at the sample
   curves; more further out). The **CSA** row on the pricing grid says which,
   **per leg** — a CSA belongs to the agreement, not to the pair, so two legs
-  in one strip can sit under different ones. The row is **hidden by default**
-  (*CSA row: hidden | shown* on the Inputs bar), because a desk on one house
-  CSA should not have to look past a row it never changes. Choosing a currency
+  in one strip can sit under different ones. It is an ordinary row of the
+  Inputs section and is always on the grid: which curve discounted the premium
+  being read is not something to go looking for. Choosing a currency
   the feed states no OIS rows for falls back to USD, and the premium cell's
   hover names the curve that answered either way. **Nothing else moves**: the
   volatility, the strike and the delta are the same numbers under every CSA,
@@ -863,7 +883,7 @@ Set the **pair**, **cut** and **interpolation** at the top, then:
 | History window (days) | how far back the relative-value grid measures each cell's own mean and how much it moves. Not the realized lookback: a month of a one-month volatility is far too short to say how much it moves |
 | Cross triangle | include the legs' view of a cross in the relative-value score. Untick it for a faster grid |
 | Weights | what each relative-value signal is worth before renormalisation. **Score** re-runs, **Reset weights** puts the defaults back |
-| Historical workbook | your own file of past spot / forwards / quotes. **Load history** reads it |
+| Historical workbook | your own file of past spot / forwards / quotes. **Historical workbook…** opens the **Config** window, where the path is typed and **Load history** reads it. One box for the whole tool: this screen, the monitor and the measured vega weighting all read the same file |
 
 **Relative value.** The top card, and the short answer the cards below it are
 the working for: every expiry against every strike — 10 delta put, 25 delta put,
@@ -1604,12 +1624,24 @@ column, including anything the market-maker tab shifted).
 
 Three things to know:
 
-* **The `KACE_SPREADS` tab decides what is posted.** One row per pair and
-  tenor: `USDCNH | 1W | 0.8` means the 1W pillar is posted with a 0.8 vol-point ATM
-  width. The tenors listed for a pair are exactly its pillars, so a pair with
-  no rows cannot be posted, and a tenor listed with no marks behind it in the
-  workbook is refused by name. A day between two pillars takes the earlier
-  pillar's width; a day before the O/N expiry takes O/N's — the sheet's rule.
+* **The `KACE_SPREADS` tab decides what is posted.** One row per tenor —
+  those are the pillars — and **one column per spreading tier**. A row
+  `1W | 0.8 | 1.2` under the headings `tenor | default | wide` means the 1W
+  pillar is posted with a 0.8 vol-point ATM width on the `default` tier and
+  1.2 on `wide`. The tenors listed are the pillars whichever tier you post, so
+  a tab with no rows cannot be posted, and a tenor listed with no marks behind
+  it in the workbook is refused by name. A day between two pillars takes the
+  earlier pillar's width; a day before the O/N expiry takes O/N's — the
+  sheet's rule.
+* **The tier is a dropdown on the tab, not a property of the pair.** Pick one
+  beside **wings**; it widens or tightens every pillar and changes nothing
+  else — same pillars, same wings, same node count. A cell a tier leaves blank
+  falls back to `default` for that tenor, so a tier that only widens the front
+  end is two cells rather than a whole ladder. The browser remembers which
+  tier you last posted, `kace-tier =` in `volkit.cfg` sets what it starts as,
+  and `--kace-tier` does the same for `volkit kace`. Tiers are added, renamed
+  and removed on the `KACE_SPREADS` table in the **Config** window, like any
+  other configuration tab. The post log records which tier went out.
 * **The header needs the feed username and password.** Put `kace-user =` and
   `kace-password =` lines in `volkit.cfg` (or set `VOLKIT_KACE_USER` and
   `VOLKIT_KACE_PASSWORD` in the environment). Without them the tab still shows
@@ -1679,7 +1711,8 @@ it is somebody else's spreadsheet — but it is not what you want at five o'cloc
 The **Saved marks** card at the bottom of the Vol marking tab writes it all to a
 separate file beside the workbook instead: curve parameters, a cross's
 correlation, the event schedule, ATM and smile overwrites, the market maker's
-wing shifts, the anchor switch and the band treatment.
+wing shifts, the anchor switch, the band treatment, and any **configuration
+tab** applied in the Config window.
 
 | Button | What it does |
 |---|---|
@@ -1707,10 +1740,17 @@ The file is plain JSON and readable. Volatility numbers in it are in
 
 **Write to workbook** goes one step further: it saves the marks and then
 writes them into the workbook you loaded -- curve parameters and events into
-PARAMS, and the overwrites, wing shifts, anchor switch and band treatment into
-rows and a `BANDS` sheet the tool reads back. It asks before it writes, and it
-always writes the *saved file*, so what lands in the workbook is exactly what
-you can open and read in the JSON beside it.
+PARAMS, the overwrites, wing shifts, anchor switch and band treatment into
+rows and a `BANDS` sheet the tool reads back, and the **configuration tabs**
+the Config window has applied. It asks before it writes, and it always writes
+the *saved file*, so what lands in the workbook is exactly what you can open
+and read in the JSON beside it.
+
+**It is the one write.** A peg band, a holiday, a kACE pillar or a wing ratio
+you changed under Config goes in here, in the same backup and on the same line
+of the write log: there is one button that changes the book of record and one
+list of what it changed. (Adding or removing a *pair* is the exception, and
+says so where it is done.)
 
 Quotes are the exception, and the point of the exercise: an `RR` or `ST` you
 re-typed on the ATM term structure table goes into the **pair sheet's own
@@ -1758,7 +1798,7 @@ Beside them, `vol_marks.history/` holds the cheap half: one line per write in
 the session document that was written, a few kilobytes saying what was marked.
 So a write whose copy has been thinned away is still on the record, and the
 marks it wrote can be put back on the book without touching the workbook. The
-**Versions** block on the Workbook card lists both, with a **restore** button
+**Versions** block in the **Config** window lists both, with a **restore** button
 on each copy; what a restore replaces is itself kept, so an undo has an undo.
 `volkit versions` prints the same two lists, `--restore NAME` puts one back and
 `--prune` (with `--keep N` for the plain newest-N rule) thins them now.
@@ -1771,12 +1811,25 @@ every pair written and anything it could not write.
 ### The workbook as a database
 
 If the workbook is the store the screens read and write and nobody opens it by
-hand, three more things are done here rather than in Excel. They are on the
-**Workbook** card of the marking screen, folded away until you tick it, because
-none of them is a mark: each is written into the workbook and the book is then
-**read again on top of it**, so save your marks first — a reload drops anything
-the workbook does not hold, and the card refuses while there is anything to
-drop.
+hand, three more things are done here rather than in Excel. They are in the
+**Config** window — the button in the header, beside *Reload workbook* — under
+**Workbook**.
+
+**A setting is marked, not written.** Press **Apply `<tab>`** and the tab goes
+into this **session**: the book is read again on top of it, so every screen
+shows what it does straight away, and the workbook still says what it said. It
+reaches the file with everything else the session holds, under **Write to
+workbook** on the marking screen — one write, one backup, one list of what
+changed. Your marks live through it; a setting used to be written the moment
+it was typed, and the card refused to do it while there was a mark on the book,
+because the reload that followed would have dropped them. **Reload workbook**
+throws the session away, settings and marks alike, and goes back to the file.
+
+Adding or removing a **pair** is the exception and writes the workbook on its
+own, because a pair is a `CONFIG` row, a `PARAMS` column and a **sheet** —
+there is nothing for the reader to read until the file has it. What this
+session has marked goes back on the book afterwards, so it no longer costs a
+morning.
 
 * **The pairs it builds.** Add one and it gets a `CONFIG` row, a `PARAMS`
   column at the level you give (a **correlation** for a cross, since that is
@@ -1784,18 +1837,24 @@ drop.
   and it comes out of `CONFIG` only: its column and its sheet stay where they
   are, so adding it back finds what it had.
 * **The configuration tabs** — `PEG_BANDS`, `KACE_SPREADS`, `HOLIDAYS`,
-  `CONVENTIONS`, `WING_RATIOS` and `Vega Weights` — edited as tables
-  and written whole. The prose and `#` comment lines above each header are
-  kept.
+  `CONVENTIONS`, `WING_RATIOS` and `Vega Weights` — edited as tables and
+  applied whole. A tab this session holds is marked *held in this session*
+  until it is written. The prose and `#` comment lines above each header are
+  kept when it finally is.
 * **Vega weights, and a column per pair.** `Vega Weights` is the shape the ATM
   card's *bump* shares a move out by: a `tenor` column, a `default` column every
   pair falls back to, and one column per pair that needs its own. The fallback
   is **cell by cell** — a pair column with a blank 2Y takes the default at 2Y —
   so a view about the front end of one pair does not commit you to its back
-  end. It is the one tab whose columns are yours rather than the tool's, so it
-  has an **Add column** box beside its Write button; type a pair and fill the
-  column in. A blank cell is not a weight of one: it is no view, and a tenor no
-  column can weight is reported by the bump rather than left still.
+  end. It is one of the two tabs whose columns are yours rather than the
+  tool's — `KACE_SPREADS` is the other, with a column per kACE spreading tier
+  — so it has an **Add pair** box beside its Apply button; type a pair and
+  fill the column in. A column you added carries a `✕` on its own heading that
+  takes it off again; the fixed columns do not, because the tab's reader looks
+  for those. Adding and removing a column are marks like the cells are: press
+  **Apply** to put them into the session, and **Write to workbook** to put
+  them in the file. A blank cell is not a weight of one: it is no view, and a
+  tenor no column can weight is reported by the bump rather than left still.
 * **A weighting measured off the historical book.** Under that table, *Suggest
   a column from the historical book* takes a pair, an anchor tenor and a
   lookback in days, and regresses each tenor's daily change in at-the-money
@@ -1807,8 +1866,8 @@ drop.
   column or the tab's `default`, whichever you pick beside the button, adding
   the column and any missing tenor row — and **writes nothing**: what the market
   did last quarter is evidence about the shape, not the shape, and you press
-  *Write Vega Weights* when you have looked at it. Needs a historical workbook
-  loaded (`--history`, or the Analysis screen's box).
+  *Apply Vega Weights* when you have looked at it. Needs a historical workbook
+  loaded (`--history`, or the box in this same window).
 * **What a write would cost.** `volkit check` reports images, charts and pivot
   tables a write would drop (the library carries formulas and their values, not
   those), and whether Excel currently has the file open.
@@ -2043,13 +2102,15 @@ curve directly rather than on the implied factor, which is the same statement
 as "the default is a USD CSA" made the other way round. See the **CSA** row
 under *Pricing*; it reaches the premium and nothing else.
 
-**`KACE_SPREADS`** (a tab of the workbook) — `pair, tenor, spread`: the
-pillars the kACE feed posts for a pair and the ATM bid/offer width at each, in
-volatility points. The tenors listed are the pillars. See *Sending the marks
-to kACE* above.
+**`KACE_SPREADS`** (a tab of the workbook) — `tenor`, then a column per
+spreading **tier** (`default`, plus whatever else you name): the pillars the
+kACE feed posts and the ATM bid/offer width each tier posts at them, in
+volatility points. The tenor rows are the pillars whichever tier is chosen; a
+blank cell in a tier takes `default`. The tier is picked on the kACE feed tab.
+See *Sending the marks to kACE* above.
 
 **`kace_posts.jsonl`** — every message posted to kACE, one JSON line each,
-written by the tool: when, pair, scenario, feed or clear, node count, a hash
+written by the tool: when, pair, scenario, tier, feed or clear, node count, a hash
 of the message, and what kACE said. Read by the kACE feed tab; safe to
 archive or delete.
 

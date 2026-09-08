@@ -473,6 +473,17 @@ for the reasoning behind it. Read this file when working in the area above.
   something *was* marked, so a shut control counts the overwrites in its own
   heading and a shut overwrite column puts a dot on the tenor it belongs to.
   A mark nobody can see is the silent zero of §2 wearing a tidier screen.
+  An **input** row is not a disclosure at all. The pricing grid's `CSA` and
+  per-leg `Premium` rows shipped behind a `hidden | shown` toggle, on the
+  argument that a desk on one house CSA should not have to look past a row it
+  never changes -- and the toggle, floated right inside the Inputs section
+  row, was pinned to the right end of a table `152 + legs x 150` wide inside a
+  horizontally scrolling wrap, so with a few legs open the `shown` button sat
+  off the right edge of the window and only `hidden` could be clicked. The row
+  was unreachable. Moving the toggle was not the fix: a row that decides which
+  curve discounted the premium being read on the screen is one the desk reads,
+  so both are ordinary rows and nothing hides them. Prose may be shut (see the
+  `hint` disclosures); a field the model reads may not.
 - **Every text file is UTF-8, said once, in `paths`.** `read_text`,
   `open_text` and `write_text` are the only spellings; nothing calls
   `Path.read_text()` or `open()` on text and takes Python's default, which is

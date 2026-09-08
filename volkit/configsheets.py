@@ -37,6 +37,7 @@ for it.  Nothing else here changes, and no new file appears beside the exe.
 from __future__ import annotations
 
 import io
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -52,7 +53,7 @@ WORKBOOK_FILENAME = "vol_marks.xlsx"
 #: which ones a workbook has without going looking for them.
 SHEETS: dict[str, str] = {
     "PEG_BANDS": "managed / pegged trading bands: pair, lower, upper, note",
-    "KACE_SPREADS": "the kACE pillars and the ATM width at each: pair, tenor, spread",
+    "KACE_SPREADS": "the kACE pillars and the ATM width at each: tenor, then a column per spreading tier (default, and whatever else the desk names)",
     "HOLIDAYS": "holiday dates no rule derives: country, date, remove",
     "CONVENTIONS": "a pair's quoting conventions where they differ from the market's: "
                    "pair, premium (the currency it is paid in), atmf beyond (a tenor, "
@@ -72,7 +73,7 @@ SHEETS: dict[str, str] = {
 #: table it cannot write back.
 EDITABLE: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "PEG_BANDS": (("pair", "lower", "upper", "note"), ("pair", "lower", "upper")),
-    "KACE_SPREADS": (("pair", "tenor", "spread"), ("pair", "tenor")),
+    "KACE_SPREADS": (("tenor", "default", "note"), ("tenor", "default")),
     "HOLIDAYS": (("country", "date", "remove"), ("country", "date")),
     "CONVENTIONS": (("pair", "premium", "atmf beyond", "delta"), ("pair",)),
     "WING_RATIOS": (("pair", "tenor", "st", "rr"), ("pair", "tenor")),
@@ -89,14 +90,27 @@ RETIRED: dict[str, str] = {
              "one curve and the forwards beside it agree; the tab is no longer read",
 }
 
-#: Tabs whose columns are not the whole list.  ``Vega Weights`` carries a
-#: column per pair that has its own curve shape, and which pairs those are is
-#: the desk's business rather than this module's -- so the fixed columns above
-#: are the ones the tab must have and the ones a screen starts it with, and
-#: whatever else is on the sheet (or in what a screen sends back) is carried
-#: through.  Everywhere else a tab's columns are exactly what ``EDITABLE``
-#: says: a writer that guessed would reorder a desk's own columns on a save.
-OPEN_COLUMNS: frozenset[str] = frozenset({"Vega Weights"})
+#: Tabs whose columns are not the whole list, and **what one of the extra
+#: columns is**.  ``Vega Weights`` carries a column per pair that has its own
+#: curve shape; ``KACE_SPREADS`` carries a column per kACE spreading *tier*.
+#: Which pairs and which tiers those are is the desk's business rather than
+#: this module's -- so the fixed columns above are the ones the tab must have
+#: and the ones a screen starts it with, and whatever else is on the sheet (or
+#: in what a screen sends back) is carried through.  Everywhere else a tab's
+#: columns are exactly what ``EDITABLE`` says: a writer that guessed would
+#: reorder a desk's own columns on a save.
+#:
+#: The *kind* is here rather than in the checker because "open" was never one
+#: rule: a pair column is six letters and is written back as a proper noun, a
+#: tier column is a name the desk chose.  A checker that knew only the pair
+#: rule would refuse every tier.
+OPEN_COLUMNS: dict[str, str] = {"Vega Weights": "pair", "KACE_SPREADS": "tier"}
+
+#: What each kind of open column has to look like, in the words an error uses.
+OPEN_COLUMN_SHAPE: dict[str, str] = {
+    "pair": "six letters, like USDJPY",
+    "tier": "a name of letters, digits and underscores, like wide",
+}
 
 #: Columns an open tab keeps at the right-hand end however many it grows.
 TRAILING: frozenset[str] = frozenset({"note"})
@@ -204,26 +218,54 @@ def normalise(heading) -> str:
     return str(heading).strip().lower().replace(" ", "_").replace("-", "_")
 
 
+def open_column_ok(kind: str, column) -> bool:
+    """Whether one heading is a usable extra column of the given kind."""
+    name = normalise(column)
+    if not name:
+        return False
+    if kind == "pair":
+        return len(name) == 6 and name.isalpha()
+    # A tier is named by the desk, so the only rule is that the name survives
+    # the reader: ``normalise`` folds case and turns spaces and dashes into
+    # underscores, and a heading that starts with a digit reads back off Excel
+    # as a number rather than as the name somebody typed.
+    return not name[0].isdigit() and all(c.isalnum() or c == "_" for c in name)
+
+
+def spell_open_column(kind: str, column) -> str:
+    """How an extra column's heading is written on the sheet.
+
+    A pair is a proper noun and is written as one -- the reader matches
+    headings case-insensitively, and a desk reading the tab in Excel should
+    see ``USDJPY`` rather than ``usdjpy``.  A tier is written the way it is
+    read, so the name in the dropdown, the name on the command line and the
+    heading on the sheet are one string.
+    """
+    name = normalise(column)
+    return name.upper() if kind == "pair" else name
+
+
 def check_open_columns(sheet: str, columns) -> None:
     """Refuse a column an open tab's own reader would refuse, before writing it.
 
-    An open tab's extra columns are **pairs** -- that is what "open" means
-    here.  Written without this, a mistyped heading is accepted, the tab's
-    reader refuses it on the next load, and the tab is unreadable until
-    somebody opens the workbook in Excel and fixes it by hand.  The screen
-    validates the box too; this is the same rule on the route behind it.
+    An open tab's extra columns are pairs on one tab and spreading tiers on
+    the other -- :data:`OPEN_COLUMNS` says which.  Written without this, a
+    mistyped heading is accepted, the tab's reader refuses it on the next
+    load, and the tab is unreadable until somebody opens the workbook in Excel
+    and fixes it by hand.  The screen validates the box too; this is the same
+    rule on the route behind it.
     """
-    if sheet not in OPEN_COLUMNS:
+    kind = OPEN_COLUMNS.get(sheet)
+    if kind is None:
         return
     fixed = {normalise(c) for c in EDITABLE[sheet][0]}
     for column in columns:
-        name = normalise(column)
-        if name in fixed or (len(name) == 6 and name.isalpha()):
+        if normalise(column) in fixed or open_column_ok(kind, column):
             continue
         raise ConfigSheetError(
             f"{sheet} has no column {column!r}. Its columns are "
-            f"{', '.join(EDITABLE[sheet][0])}, and one per pair -- six letters, like "
-            f"USDJPY")
+            f"{', '.join(EDITABLE[sheet][0])}, and one per {kind} -- "
+            f"{OPEN_COLUMN_SHAPE[kind]}")
 
 
 def columns_for(sheet: str, rows=()) -> tuple[str, ...]:
@@ -231,12 +273,13 @@ def columns_for(sheet: str, rows=()) -> tuple[str, ...]:
 
     For an ordinary tab this is exactly what :data:`EDITABLE` declares.  For
     an open one it is that list plus every other column the rows carry, in the
-    order they first appear -- which is how a pair column added on the screen
-    reaches the sheet, and how one already on the sheet survives a save that
-    did not mention it.
+    order they first appear -- which is how a pair column or a tier column
+    added on the screen reaches the sheet, and how one already on the sheet
+    survives a save that did not mention it.
     """
     fixed = EDITABLE[sheet][0]
-    if sheet not in OPEN_COLUMNS:
+    kind = OPEN_COLUMNS.get(sheet)
+    if kind is None:
         return tuple(fixed)
     # ``note`` is written last whatever else the tab grows, because a comment
     # column wedged between the weights and the pairs is a column a desk
@@ -250,10 +293,7 @@ def columns_for(sheet: str, rows=()) -> tuple[str, ...]:
             if not name or name in seen:
                 continue
             seen.add(name)
-            # A pair is a proper noun and is written as one: the reader
-            # matches headings case-insensitively, and a desk reading the tab
-            # in Excel should see USDJPY rather than usdjpy.
-            head.append(name.upper() if len(name) == 6 and name.isalpha() else name)
+            head.append(spell_open_column(kind, name))
     return tuple(head + tail)
 
 
@@ -326,8 +366,40 @@ def match_sheet(names, sheet: str) -> str | None:
     return None
 
 
+def rows_from_records(sheet: str, records) -> list[Row]:
+    """One tab's rows as a session holds them: a list of ``{column: value}``.
+
+    The same :class:`Row` objects :func:`read_rows` builds off the sheet, so
+    every reader of a configuration tab reads a session's edit exactly the way
+    it reads the workbook's own -- one parser, one set of error messages, and
+    no second reading of a band or a holiday to disagree with the first.
+    Numbered from 1 because a row a screen typed has no line in a file; the
+    number is still what an error names, and it is the row of the table the
+    person is looking at.
+    """
+    out: list[Row] = []
+    for n, record in enumerate(records or (), start=1):
+        if not isinstance(record, Mapping):
+            raise ConfigSheetError(
+                f"{sheet} row {n}: expected an object of column: value, got "
+                f"{type(record).__name__}")
+        cells: dict[str, object] = {}
+        for key, value in record.items():
+            name = normalise(key)
+            if not name:
+                continue
+            if isinstance(value, str):
+                value = value.strip()
+            cells[name] = None if value == "" else value
+        if not any(v is not None for v in cells.values()):
+            continue
+        out.append(Row(number=n, cells=cells, sheet=sheet))
+    return out
+
+
 def read_rows(path: str | Path, sheet: str, *,
-              required: tuple[str, ...] = ()) -> list[Row] | None:
+              required: tuple[str, ...] = (),
+              overlay=None) -> list[Row] | None:
     """The data rows of a configuration tab, or ``None`` when there is no such tab.
 
     ``required`` names the columns the tab has to carry.  They decide where
@@ -338,7 +410,19 @@ def read_rows(path: str | Path, sheet: str, *,
     ``None`` and an empty list are different answers and both happen: no tab
     at all is a workbook that was never given this configuration, while a tab
     with a header and no rows is a desk that has deliberately emptied it.
+
+    ``overlay`` is ``{SHEET: [row dicts]}`` -- the tabs a **session** holds
+    instead of the workbook's, edited on the configuration window and not
+    written into the file until the session is (§13).  A sheet named there is
+    read from it and the file's own rows for that tab are not read at all: a
+    setting being marked has one value, and reading half of it off the
+    workbook is the disagreement this exists to prevent.  Everything else is
+    unaffected.
     """
+    if overlay:
+        found = match_sheet(overlay, sheet)
+        if found is not None:
+            return rows_from_records(sheet, overlay[found])
     wb = open_workbook(path)
     try:
         found = match_sheet(wb.sheetnames, sheet)

@@ -129,7 +129,7 @@ class VegaWeights:
         return out
 
 
-def load_vega_weights(path) -> VegaWeights:
+def load_vega_weights(path, *, overlay=None) -> VegaWeights:
     """Read the workbook's ``Vega Weights`` tab.
 
     An absent tab is an empty :class:`VegaWeights` with ``present`` False --
@@ -141,7 +141,7 @@ def load_vega_weights(path) -> VegaWeights:
     from . import configsheets
 
     rows = configsheets.read_rows(path, VEGA_WEIGHTS_SHEET,
-                                  required=("tenor", DEFAULT_COLUMN))
+                                  required=("tenor", DEFAULT_COLUMN), overlay=overlay)
     if rows is None:
         return VegaWeights()
     tenors: list[str] = []
@@ -238,7 +238,7 @@ def bump_levels(weights: VegaWeights, pair: str, anchor: str, move: float,
     if not weights.present:
         raise ValueError(
             f"this workbook has no {VEGA_WEIGHTS_SHEET} tab, so there is no shape to share "
-            f"a move out by. Add it on the Workbook card: a 'tenor' column, a "
+            f"a move out by. Add it in the Config window: a 'tenor' column, a "
             f"'{DEFAULT_COLUMN}' column, and a column per pair that needs its own")
     w_anchor, _ = weights.weight_for(pair, key)
     if w_anchor is None:

@@ -32,10 +32,21 @@ Three things the sheet did are done differently here, on purpose:
   expiry is 365 to 367 days out depending on the weekday; when it fell past
   the last row the pillar's lookup was ``#N/A``, and the literal text ``#N/A``
   went into the XML.
-* **The spread table names the pillars.** The ``KACE_SPREADS`` tab of the
-  workbook holds ``pair,tenor,spread`` rows, and the tenors listed for a pair
-  are exactly the pillars posted.  A tenor listed with no mark behind it, or
-  a pair with no rows, is refused by name rather than defaulted.
+* **The spread table names the pillars, and a tier names the widths.** The
+  ``KACE_SPREADS`` tab of the workbook is a row per tenor and a **column per
+  spreading tier** -- ``default`` and whatever else the desk names ("wide",
+  "thin", a client tier).  The tenors listed are exactly the pillars posted,
+  whichever tier is chosen; the tier decides only how wide the ATM two-way is
+  at each of them, and a blank cell in a tier falls back to ``default`` cell
+  by cell.  A tenor listed with no mark behind it is refused by name rather
+  than defaulted, and so is a tier the tab does not have.
+
+  The table used to be ``pair,tenor,spread``, which tied a width to a
+  currency: a desk that wanted to post the same pair twice at two widths had
+  nowhere to say so, and a new pair could not be posted until somebody typed
+  a whole ladder for it.  The widths are a **quoting policy**, not a property
+  of the currency, so they are tiers now and the pair is chosen on the screen
+  beside them.
 
 One rule of the sheet's is kept exactly, because it was a rule in disguise: a
 day takes the spread of the last pillar whose expiry is on or before it, and
@@ -102,6 +113,12 @@ ENV_USER = "VOLKIT_KACE_USER"
 ENV_PASSWORD = "VOLKIT_KACE_PASSWORD"
 #: The scenario the sheet posted into.
 DEFAULT_SCENARIO = "Xyz"
+#: The tier every other one falls back to, cell by cell, and the one posted
+#: when nothing names another.  It is a required column of the tab, so there
+#: is always at least one tier and never a table with no widths in it.
+DEFAULT_TIER = "default"
+#: The tab's own columns, which are not tiers.
+FIXED_COLUMNS = ("tenor", "note")
 #: The overnight pillar, as the desk spells it.
 OVERNIGHT = "O/N"
 #: Where the wings may come from.
@@ -154,10 +171,23 @@ def pillar_years(tenor: str) -> float:
 # ---------------------------------------------------------------------------
 @dataclass
 class SpreadTable:
-    """``pair,tenor,spread`` rows: the ATM bid/offer width, and the pillars, per pair."""
+    """The kACE pillars, and the ATM bid/offer width each spreading tier posts.
+
+    One row per tenor -- those are the pillars -- and one column per **tier**.
+    ``tiers`` is what the tab resolves to: a tier's blank cell has already
+    taken ``default``'s width, so what a caller reads is a complete ladder
+    whichever tier it asked for and there is no second place for the fallback
+    to be written differently.
+    """
 
     path: str = ""
-    rows: dict[str, dict[str, float]] = field(default_factory=dict)
+    #: tier name -> {tenor: spread}, ``default`` filled in where a tier is blank.
+    tiers: dict[str, dict[str, float]] = field(default_factory=dict)
+
+    @property
+    def names(self) -> list[str]:
+        """Every tier the tab holds, ``default`` first, then the desk's own."""
+        return list(self.tiers)
 
     @classmethod
     def default_path(cls) -> Path:
@@ -167,10 +197,10 @@ class SpreadTable:
         return configsheets.default_workbook()
 
     @classmethod
-    def load(cls, path: str | Path | None = None) -> "SpreadTable":
+    def load(cls, path: str | Path | None = None, *, overlay=None) -> "SpreadTable":
         """Read the ``KACE_SPREADS`` tab.  A tab that is wrong is refused whole.
 
-        ``path`` is the marks workbook: the pillars a pair is posted at are
+        ``path`` is the marks workbook: the pillars a message is posted at are
         maintained beside the marks that are posted at them, and one file
         travels to a new machine intact where two did not.
         """
@@ -180,30 +210,32 @@ class SpreadTable:
         table = cls(path=f"{p.name}!{SPREADS_SHEET}")
         try:
             rows = configsheets.read_rows(p, SPREADS_SHEET,
-                                          required=("pair", "tenor", "spread"))
+                                          required=("tenor", DEFAULT_TIER),
+                                          overlay=overlay)
         except configsheets.ConfigSheetError as exc:
-            raise KaceError(str(exc)) from None
+            raise KaceError(f"{exc}{_old_layout_hint(p, overlay)}") from None
         if rows is None:
             raise KaceError(
-                f"{p} has no {SPREADS_SHEET!r} tab: a 'pair, tenor, spread' table naming "
-                f"the pillars to post and the ATM bid/offer width at each")
+                f"{p} has no {SPREADS_SHEET!r} tab: a table of one row per tenor -- those are "
+                f"the pillars to post -- and one column per spreading tier holding the ATM "
+                f"bid/offer width at each, starting with {DEFAULT_TIER!r}")
+
+        # The tiers are whatever columns the tab has grown, in the order it
+        # has them, with the fixed ones taken out.  Read off the rows rather
+        # than off a list here, because which tiers a desk keeps is the desk's
+        # business -- the same reasoning as ``Vega Weights``' pair columns.
+        columns = configsheets.columns_for(SPREADS_SHEET, [r.cells for r in rows])
+        tiers = [c for c in columns if configsheets.normalise(c) not in FIXED_COLUMNS]
+        for name in tiers:
+            table.tiers[name] = {}
+
         bad: list[str] = []
+        seen: set[str] = set()
         for row in rows:
             where = f"row {row.number}"
-            pair, tenor = row.text("pair").upper(), canonical_tenor(row.text("tenor"))
-            if not pair or not tenor:
-                bad.append(f"{where}: expected a pair, a tenor and a spread")
-                continue
-            try:
-                spread = row.real("spread")
-            except configsheets.ConfigSheetError:
-                bad.append(f"{where}: the spread for {pair} {tenor} is not a number")
-                continue
-            if spread is None:
-                bad.append(f"{where}: {pair} {tenor} has no spread")
-                continue
-            if spread < 0:
-                bad.append(f"{where}: spread {spread:g} for {pair} {tenor} is negative")
+            tenor = canonical_tenor(row.text("tenor"))
+            if not tenor:
+                bad.append(f"{where}: expected a tenor and a width under {DEFAULT_TIER}")
                 continue
             if tenor != OVERNIGHT:
                 try:
@@ -211,21 +243,102 @@ class SpreadTable:
                 except ValueError as exc:
                     bad.append(f"{where}: {exc}")
                     continue
-            if tenor in table.rows.setdefault(pair, {}):
-                bad.append(f"{where}: {pair} {tenor} is listed twice")
+            if tenor in seen:
+                bad.append(f"{where}: {tenor} is listed twice")
                 continue
-            table.rows[pair][tenor] = spread
+            seen.add(tenor)
+            widths: dict[str, float] = {}
+            for name in tiers:
+                try:
+                    spread = row.real(name)
+                except configsheets.ConfigSheetError:
+                    bad.append(f"{where}: the {name} spread for {tenor} is not a number")
+                    continue
+                if spread is None:
+                    continue
+                if spread < 0:
+                    bad.append(f"{where}: the {name} spread {spread:g} for {tenor} is negative")
+                    continue
+                widths[name] = spread
+            if DEFAULT_TIER not in widths:
+                bad.append(f"{where}: {tenor} has no {DEFAULT_TIER} spread; every tenor needs "
+                           f"one, because it is what a tier that leaves the cell blank posts")
+                continue
+            # The fallback happens once, here: a tier is a complete ladder by
+            # the time anything reads it.
+            for name in tiers:
+                table.tiers[name][tenor] = widths.get(name, widths[DEFAULT_TIER])
         if bad:
             raise KaceError(f"{p.name}!{SPREADS_SHEET} could not be read:\n  "
                             + "\n  ".join(bad))
         return table
 
-    def for_pair(self, pair: str) -> dict[str, float]:
-        rows = self.rows.get(pair.upper())
+    def resolve_tier(self, tier: str | None = None) -> str:
+        """The tier a request means: the one it named, else ``default``.
+
+        A blank ask is not an error -- the command line and the screen both
+        have one -- but a name the tab does not hold is, and it says what the
+        tab does hold rather than quietly posting the default's widths under
+        another tier's name.
+        """
+        name = tier_name(tier)
+        if not name:
+            if DEFAULT_TIER in self.tiers:
+                return DEFAULT_TIER
+            if not self.tiers:
+                raise KaceError(f"{self.path} holds no spreading tiers: it needs a "
+                                f"{DEFAULT_TIER!r} column at least")
+            return self.names[0]
+        if name not in self.tiers:
+            raise KaceError(f"{self.path} has no {name!r} tier; it holds "
+                            f"{', '.join(self.names)}. A tier is a column of the tab, added "
+                            f"in the Config window")
+        return name
+
+    def for_tier(self, tier: str | None = None) -> dict[str, float]:
+        """One tier's ladder: ``{tenor: spread}``, the pillars and their widths."""
+        name = self.resolve_tier(tier)
+        rows = self.tiers.get(name) or {}
         if not rows:
-            raise KaceError(f"{self.path} has no rows for {pair.upper()}: the tenors listed there "
-                            f"are the pillars posted, so a pair with none cannot be posted")
+            raise KaceError(f"{self.path} has no tenor rows: the tenors listed there are the "
+                            f"pillars posted, so a table with none cannot be posted")
         return dict(rows)
+
+
+def tier_name(value) -> str:
+    """A tier name as the tab's headings are read: lower case, underscores.
+
+    One spelling for the dropdown, the command line and the sheet, so ``Wide``
+    typed on one and ``wide`` written on the other are the same tier and not
+    two.
+    """
+    from . import configsheets
+
+    return configsheets.normalise(value) if value is not None else ""
+
+
+def _old_layout_hint(path: Path, overlay) -> str:
+    """Say so when the tab is the old ``pair, tenor, spread`` table.
+
+    The header is not found, so the reader's own message is that the tab has
+    no ``tenor, default`` row -- true, and no help at all to a desk looking at
+    a tab full of tenors.  This is the one shape it is worth naming, because
+    every workbook this tool has ever written has it.
+    """
+    from . import configsheets
+
+    try:
+        if overlay and configsheets.match_sheet(overlay, SPREADS_SHEET) is not None:
+            return ""
+        rows = configsheets.read_rows(path, SPREADS_SHEET, required=("pair", "tenor", "spread"))
+    except (configsheets.ConfigSheetError, OSError):
+        return ""
+    if rows is None:
+        return ""
+    return (f". It is the old 'pair, tenor, spread' layout: the widths are not tied to a "
+            f"currency any more. Replace the header with 'tenor, {DEFAULT_TIER}' and one "
+            f"column per spreading tier, one row per pillar -- the pair is chosen on the "
+            f"kACE feed screen beside the tier")
 
 
 # ---------------------------------------------------------------------------
@@ -265,6 +378,10 @@ class Feed:
     source: str
     daily: dict[date, float]               # cumulative vol to the day's cut, vol points
     pillars: list[Pillar]
+    #: The spreading tier the widths came from.  On the message only as the
+    #: widths themselves; carried here so the screen, the file name and the
+    #: post log can all say which policy was posted.
+    tier: str = DEFAULT_TIER
     notes: list[str] = field(default_factory=list)
 
     @property
@@ -282,7 +399,7 @@ class Feed:
         days = sorted(self.daily)
         return {
             "pair": self.pair, "hor_date": self.hor_date.isoformat(), "cut": self.cut,
-            "source": self.source, "days": len(days),
+            "source": self.source, "tier": self.tier, "days": len(days),
             "first_day": days[0].isoformat() if days else None,
             "last_day": days[-1].isoformat() if days else None,
             "nodes": self.node_count(),
@@ -360,15 +477,16 @@ def credentials(user: str | None = None, password: str | None = None) -> tuple[s
 # ---------------------------------------------------------------------------
 # from the book
 # ---------------------------------------------------------------------------
-def build(book, pair: str, spreads: SpreadTable, *, cut: str = "NY", source: str = "marks",
-          method: str = "SVI") -> Feed:
-    """The feed for one pair, off the book as it is marked now."""
+def build(book, pair: str, spreads: SpreadTable, *, tier: str | None = None,
+          cut: str = "NY", source: str = "marks", method: str = "SVI") -> Feed:
+    """The feed for one pair at one spreading tier, off the book as it is marked now."""
     pair = pair.upper()
     if source not in SOURCES:
         raise KaceError(f"unknown wing source {source!r}; expected one of {SOURCES}")
     surface = book[pair]
     today = book.clock.now.date()
-    widths = spreads.for_pair(pair)
+    chosen = spreads.resolve_tier(tier)
+    widths = spreads.for_tier(chosen)
     marks = {canonical_tenor(m.tenor): m for m in surface.marks}
     notes: list[str] = []
 
@@ -377,14 +495,14 @@ def build(book, pair: str, spreads: SpreadTable, *, cut: str = "NY", source: str
     tenors = sorted(widths, key=pillar_years)
     unmarked = [t for t in tenors if t != OVERNIGHT and t not in marks]
     if unmarked:
-        raise KaceError(f"{spreads.path} lists {', '.join(unmarked)} for {pair}, but the workbook "
+        raise KaceError(f"{spreads.path} lists {', '.join(unmarked)}, but the {pair} sheet "
                         f"quotes no wings there (it has {', '.join(sorted(marks, key=pillar_years))}); "
                         f"a pillar with no mark behind it cannot be posted. A tenor the pair sheet "
                         f"quotes and CONFIG's TENORS column does not list is not read, so check "
                         f"that too; --wings fitted posts the smile's own wings at any pillar")
     quoted = [t for t in tenors if t != OVERNIGHT]
     if not quoted:
-        raise KaceError(f"{spreads.path} lists only O/N for {pair}; at least one quoted tenor "
+        raise KaceError(f"{spreads.path} lists only O/N; at least one quoted tenor "
                         f"is needed to carry the wings")
     expiries = {t: book.calendars.expiry_date(pair, calendar_tenor(t), today) for t in tenors}
 
@@ -431,7 +549,7 @@ def build(book, pair: str, spreads: SpreadTable, *, cut: str = "NY", source: str
                               rr25=wings[0], rr10=wings[1], fly25=wings[2], fly10=wings[3],
                               wings=origin))
     return Feed(pair=pair, hor_date=today, cut=cut.upper(), source=source,
-                daily=daily, pillars=pillars, notes=notes)
+                daily=daily, pillars=pillars, tier=chosen, notes=notes)
 
 
 # ---------------------------------------------------------------------------
@@ -848,7 +966,8 @@ class PostLog:
 
 def post_feed(xml_text: str, *, pair: str, scenario: str, clear: bool, hor_date: date,
               nodes: int, url: str, log: PostLog | None, when: datetime, opener=None,
-              ca: str | None = None, insecure: bool = False, dry_run: bool = False) -> dict:
+              ca: str | None = None, insecure: bool = False, dry_run: bool = False,
+              tier: str = "") -> dict:
     """Post one message and write the record; the record is the return value.
 
     A refused post is recorded too -- with what refused it -- because the
@@ -858,6 +977,9 @@ def post_feed(xml_text: str, *, pair: str, scenario: str, clear: bool, hor_date:
     """
     entry = {"at": when.isoformat(timespec="seconds"), "pair": pair.upper(),
              "scenario": scenario, "clear": bool(clear), "hor_date": hor_date.isoformat(),
+             # Which spreading tier's widths went out.  A clear carries none,
+             # and the log says so rather than naming a tier nothing used.
+             "tier": tier or "",
              "nodes": nodes, "hash": message_hash(xml_text), "bytes": len(form_body(xml_text)),
              "url": url or ""}
     if dry_run:

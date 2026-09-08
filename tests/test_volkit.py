@@ -1187,7 +1187,7 @@ class TestMarketData(unittest.TestCase):
         """Which is a real state now that a pair is created from the screens.
 
         It used to be a problem, because the only way to get here was deleting
-        rows by hand.  A pair added on the Workbook card arrives exactly like
+        rows by hand.  A pair added in the Config window arrives exactly like
         this, and a check that goes red on a pair somebody has just made is a
         check people stop reading.  Still *said* -- a pair with no smile is
         worth knowing about -- just not called a fault in the workbook.
@@ -3164,6 +3164,48 @@ class TestConfigurationTabs(unittest.TestCase):
         needed = [s for s in configsheets.SHEETS if s not in optional]
         self.assertEqual([s for s in configsheets.present(WORKBOOK) if s not in optional],
                          needed)
+
+    def test_an_open_tabs_extra_columns_are_pairs_on_one_tab_and_tiers_on_the_other(self):
+        """"Open" was never one rule.
+
+        `Vega Weights` grows a column per pair and `KACE_SPREADS` one per kACE
+        spreading tier, so the *kind* is what `OPEN_COLUMNS` holds.  A checker
+        that knew only the pair rule -- which is what it used to be -- would
+        refuse every tier a desk named, and the tab would be unwritable.
+        """
+        from volkit import configsheets as cs
+
+        self.assertEqual(cs.OPEN_COLUMNS,
+                         {"Vega Weights": "pair", "KACE_SPREADS": "tier"})
+        # A pair is six letters and is written as a proper noun; a tier is the
+        # name the desk chose, written the way the reader spells it, so the
+        # dropdown, --kace-tier and the heading are one string.
+        self.assertTrue(cs.open_column_ok("pair", "usdjpy"))
+        self.assertFalse(cs.open_column_ok("pair", "wide"))
+        self.assertEqual(cs.spell_open_column("pair", "usdjpy"), "USDJPY")
+        self.assertTrue(cs.open_column_ok("tier", "Wide EM"))
+        self.assertEqual(cs.spell_open_column("tier", "Wide EM"), "wide_em")
+        self.assertFalse(cs.open_column_ok("tier", "2nd"))       # reads back as a number
+        self.assertFalse(cs.open_column_ok("tier", "a/b"))
+
+        cs.check_open_columns("KACE_SPREADS", ("tenor", "default", "wide", "note"))
+        cs.check_open_columns("Vega Weights", ("tenor", "default", "USDJPY"))
+        with self.assertRaises(cs.ConfigSheetError) as ctx:
+            cs.check_open_columns("Vega Weights", ("tenor", "default", "wide"))
+        self.assertIn("six letters", str(ctx.exception))
+        with self.assertRaises(cs.ConfigSheetError) as ctx:
+            cs.check_open_columns("KACE_SPREADS", ("tenor", "default", "a/b"))
+        self.assertIn("tier", str(ctx.exception))
+        # A tab whose columns are fixed takes whatever it is given here, and
+        # is refused by its own writer instead.
+        cs.check_open_columns("PEG_BANDS", ("pair", "lower", "upper", "anything"))
+
+        # `columns_for` puts the fixed ones first and keeps `note` last
+        # however many tiers the tab grows.
+        self.assertEqual(
+            cs.columns_for("KACE_SPREADS",
+                           [{"tenor": "1W", "default": 0.8, "Wide": 1.2, "note": "x"}]),
+            ("tenor", "default", "wide", "note"))
 
     def test_a_retired_tab_is_named_once_at_load_and_read_no_further(self):
         """``RATES`` is still a tab in somebody's workbook, and reads like one.
@@ -6280,6 +6322,30 @@ class TestWebAssets(unittest.TestCase):
         probe = _re.sub(r"\?\.", ".", js.replace("??", " || "))
         esprima.parseScript(probe)
 
+    def test_the_csa_and_premium_rows_are_always_on_the_grid(self):
+        """They were behind a toggle, and the toggle could not be reached.
+
+        `.premtog` is `float:right`, and inside the Inputs section row that
+        pinned it to the right end of the *table*, whose width is set to
+        `152 + legs x 150` inside a horizontally scrolling wrap.  With a few
+        legs open the `shown` button sat past the right edge of the window;
+        what was left reachable was `hidden`, so every click ran
+        `setAdv(false)` and the CSA row could not be turned on from the
+        screen at all.  The fix is not a better-placed toggle: a row that
+        says which curve discounted the premium on the screen is one the desk
+        reads.  So both are ordinary rows and nothing hides them.
+        """
+        html = _source("volkit", "web", "index.html")
+        ins = html.split("const IN=[")[1].split("];")[0]
+        # Ordinary entries: a key, a label, a control, and no gate after them.
+        self.assertIn("['csa','CSA','csa'],", ins)
+        self.assertIn("['prem','Premium','premswitch'],", ins)
+        # Nothing left of the toggle it used to need.
+        for gone in ("ADV", "advbar", "data-adv", "volkit.advrows"):
+            self.assertNotIn(gone, html)
+        # And the row loop reads four elements, not five.
+        self.assertIn("IN.forEach(([k,lab,kind,only])=>{", html)
+
     def test_the_settlement_date_is_an_input_row_and_is_not_repeated_below(self):
         """It moved from Results to Inputs when it turned out to be a box.
 
@@ -6759,10 +6825,60 @@ class TestWebAssets(unittest.TestCase):
         use = js.split("use.onclick=()=>{")[1].split("cfgPaintTabs();")[0]
         self.assertIn("cfgHarvest(i)", use)
 
+    def test_the_dropped_column_is_harvested_and_only_an_added_one_may_go(self):
+        """A tier column is added and taken away in the window, and both are
+        marks: the table changes here, `Apply` puts it into the session and
+        `Write to workbook` puts it into the file.  Only a column the desk
+        added carries the cross -- a tab that had lost one of the columns its
+        own reader looks for would be unreadable on the next load."""
+        html = _source("volkit", "web", "index.html")
+        js = html.split("<script>")[1].split("</script>")[0]
+        drop = js.split("$('#cfgtabs').querySelectorAll('.cfgdropcol')")[1].split("cfgPaintTabs();")[0]
+        self.assertIn("cfgHarvest(i)", drop)          # before the repaint, like the others
+        self.assertIn("t.columns.filter", drop)
+        # The cross is only on a column that is not one of the tab's fixed ones.
+        self.assertIn("const fixed=(t.fixed||[]).map(c=>String(c).toLowerCase());", js)
+        self.assertIn("fixed.indexOf(String(c).toLowerCase())<0", js)
+        # And the box that adds one validates by the kind the server sent,
+        # rather than by the pair rule that was the only kind there used to be.
+        self.assertIn("function cfgColName(kind,text){", js)
+        self.assertIn("cfgColName(t.open,box.value||'')", js)
+        self.assertNotIn("a column is a pair, six letters", js)
+
+    def test_the_workbook_card_is_shut_and_still_says_what_is_held(self):
+        """It folds away because a morning opens this window for the two file
+        paths above it far more often than for the pairs and the tabs.  A card
+        may be shut but a mark may not be hidden, so the heading counts the
+        configuration tabs this session holds while it is shut."""
+        html = _source("volkit", "web", "index.html")
+        js = html.split("<script>")[1].split("</script>")[0]
+        # Shut in the markup, not only by script: a page whose JS died would
+        # otherwise show it, which is the opposite of every other disclosure.
+        self.assertIn('<div id="cfgbody" class="hide">', html)
+        self.assertIn('<input type="checkbox" id="cfgwbshow"', html)
+        self.assertIn('<span class="pill warn hide" id="cfgheld"></span>', html)
+        held = js.split("function cfgWorkbookVisible(){")[1].split("\nfunction ")[0]
+        self.assertIn("$('#cfgbody').classList.toggle('hide',!on)", held)
+        self.assertIn("el.classList.toggle('hide',on||!held.length)", held)
+        # Remembered per browser, like every other piece of panel state.
+        self.assertIn("volkit.cfgwb", js)
+
+    def test_the_pricing_results_heading_carries_no_premium_label(self):
+        """`premium: per leg` sat on the Results section row and said nothing
+        the Premium row above it does not: every leg's cell already carries
+        its own `fwd` / `spot` tag, and the row itself is an ordinary input
+        row that nothing hides."""
+        html = _source("volkit", "web", "index.html")
+        self.assertNotIn("premtog", html)
+        self.assertNotIn("premium: per leg", html)
+        # The row it described is still an ordinary input row.
+        self.assertIn("['prem','Premium','premswitch'],", html)
+
     def test_a_measured_weighting_is_suggested_and_never_written(self):
         """What the market did is evidence about the shape, not the shape.
-        The button fills the boxes; the tab is written by the Write button
-        beside it, by a person who has looked at them."""
+        The button fills the boxes; the tab is applied by the Apply button
+        beside it, by a person who has looked at them -- and reaches the
+        workbook later still, with the marks."""
         html = _source("volkit", "web", "index.html")
         js = html.split("<script>")[1].split("</script>")[0]
         # To the end of that handler and no further.  It used to cut at the
@@ -6771,10 +6887,9 @@ class TestWebAssets(unittest.TestCase):
         # failing the day an unrelated function with a post() in it was
         # written between this one and the next "  };".
         use = js.split("use.onclick=()=>{")[1].split("\n}")[0]
-        self.assertIn("press Write", use)
+        self.assertIn("press Apply", use)
         self.assertNotIn("post(", use)
         self.assertIn("row[into]", use)
-        self.assertIn("press Write", use)
         # Beta is the suggestion, because beta is what the tab holds.
         self.assertIn("x.beta", use)
         self.assertNotIn("sd_ratio", use)
@@ -8267,6 +8382,13 @@ class TestVegaWeightsThroughTheScreens(unittest.TestCase):
         self.assertEqual(svc.book.vega_weights.weight_for("EURUSD", "1M"), (0.5, "EURUSD"))
         # And the column that was already there is still there.
         self.assertEqual(svc.book.vega_weights.weight_for("USDCNH", "1W"), (2.6, "USDCNH"))
+        # The tab is the session's now, and says so; the workbook has not
+        # been written and still says what it said.
+        self.assertTrue(again["pending"])
+        self.assertEqual(svc.config_tabs()["pending"], ["Vega Weights"])
+        from volkit.book import Book
+        self.assertIsNone(
+            Book.from_excel(svc.path).vega_weights.weight_for("EURUSD", "1M")[0])
 
     def test_writing_a_tab_leaves_it_where_it_was_in_the_workbook(self):
         """The tab is replaced, not edited.  Recreated at the end of the
@@ -8279,6 +8401,8 @@ class TestVegaWeightsThroughTheScreens(unittest.TestCase):
         book.close()
         tab = {t["sheet"]: t for t in svc.config_tabs()["tabs"]}["Vega Weights"]
         svc.config_save({"sheet": "Vega Weights", "rows": tab["rows"]})
+        path = svc.session_save({"path": str(Path(wb).with_name("s.json"))})["written"]
+        svc.session_export({"path": path})
         book = openpyxl.load_workbook(wb, read_only=True)
         self.assertEqual(book.sheetnames, order)
         book.close()
@@ -8306,6 +8430,8 @@ class TestVegaWeightsThroughTheScreens(unittest.TestCase):
         svc, wb = self._service()
         tab = {t["sheet"]: t for t in svc.config_tabs()["tabs"]}["Vega Weights"]
         svc.config_save({"sheet": "Vega Weights", "rows": tab["rows"]})
+        path = svc.session_save({"path": str(Path(wb).with_name("s.json"))})["written"]
+        svc.session_export({"path": path})
         book = openpyxl.load_workbook(wb, read_only=True)
         first = [r[0] for r in book["Vega Weights"].iter_rows(values_only=True)][:3]
         book.close()
@@ -8703,6 +8829,214 @@ class TestWorkbookAsDatabase(unittest.TestCase):
         data = Book.from_excel(wb, ASOF).data
         self.assertEqual(data.problems, [])
         self.assertTrue(any("no quotes yet" in n for n in data.notes), data.notes)
+
+
+class TestConfigurationIsMarkedNotWritten(unittest.TestCase):
+    """The workbook's settings go into the session, and into the file with the marks.
+
+    A peg band, a kACE pillar, a holiday and a wing ratio used to be written
+    into the workbook the moment they were typed, which re-read the book and
+    was refused while there were any marks -- a morning's marking or a band,
+    and the answer was to save first and hope.  They are **marked** now: the
+    configuration window applies one to this session, the book is read again
+    on top of it so every screen shows what it does, and it reaches the file
+    only when the session does.  What is pinned here is that pair -- applying
+    changes the book and not the file, and one write changes the file -- and
+    that the marks live through it.
+    """
+
+    def _service(self):
+        import shutil
+        import tempfile
+        from volkit.webapp import BookService
+        d = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d, True)
+        wb = d / "vol_marks.xlsx"
+        shutil.copy(WORKBOOK, wb)
+        return BookService(str(wb), ASOF), wb
+
+    def _bands(self, svc):
+        tab = {t["sheet"]: t for t in svc.config_tabs()["tabs"]}["PEG_BANDS"]
+        return [dict(r) for r in tab["rows"]]
+
+    def test_a_tab_applied_on_the_window_changes_the_book_and_not_the_file(self):
+        svc, wb = self._service()
+        rows = self._bands(svc) + [{"pair": "USDSGD", "lower": 1.30, "upper": 1.40,
+                                    "note": "a band nobody has written yet"}]
+        out = svc.config_save({"sheet": "PEG_BANDS", "rows": rows})
+        self.assertEqual(out["wrote"]["written"], "")
+        self.assertTrue(out["wrote"]["pending"])
+        # The loaded book has it...
+        self.assertIn("USDSGD", svc.book.bands)
+        self.assertEqual(svc.book.bands["USDSGD"].upper, 1.40)
+        # ...and the workbook on disk does not.
+        self.assertNotIn("USDSGD", Book.from_excel(wb, ASOF).bands)
+        self.assertEqual(svc.config_tabs()["pending"], ["PEG_BANDS"])
+        self.assertTrue(svc.dirty)
+
+    def test_a_kace_tier_added_on_the_window_is_posted_from_before_it_is_written(self):
+        """A tier is a column of `KACE_SPREADS`, so it is marked like a band:
+        applied here, read again under the book, and offered by the feed tab
+        straight away -- with the file still saying what it said."""
+        svc, wb = self._service()
+        tab = {t["sheet"]: t for t in svc.config_tabs()["tabs"]}["KACE_SPREADS"]
+        self.assertEqual(tab["open"], "tier")
+        self.assertEqual(tab["fixed"], ["tenor", "default", "note"])
+        self.assertIn("wide", tab["columns"])
+        rows = [dict(r) for r in tab["rows"]]
+        for r in rows:
+            r["client_a"] = None            # a tier that takes default everywhere
+        rows[0]["client_a"] = 2.5           # except at its front pillar
+        svc.config_save({"sheet": "KACE_SPREADS", "rows": rows})
+        self.assertIn("client_a", svc.kace_spreads.names)
+        self.assertIn("client_a", svc.state()["kace"]["tiers"])
+        ladder, base = svc.kace_spreads.for_tier("client_a"), svc.kace_spreads.for_tier()
+        self.assertEqual(sorted(ladder), sorted(base))            # same pillars
+        self.assertEqual(ladder["O/N"], 2.5)
+        self.assertEqual(ladder["1M"], base["1M"])                # blank falls back
+        # The workbook still holds the tiers it held.
+        from volkit import kace as kace_mod
+        self.assertNotIn("client_a", kace_mod.SpreadTable.load(wb).names)
+        self.assertEqual(svc.config_tabs()["pending"], ["KACE_SPREADS"])
+
+    def test_the_marks_this_session_made_survive_a_tab_being_applied(self):
+        """The reason this used to be refused.  Applying a setting re-reads
+        the workbook -- there is no other way to apply a band -- and a reload
+        is what throws marks away, so the marks are captured and put back."""
+        svc, _ = self._service()
+        svc.overwrite({"pair": "USDJPY", "cut": "NY", "kind": "atm",
+                       "tenor": "1M", "value": 9.5})
+        before = svc.marks({"pair": "USDJPY", "cut": "NY"})["atm"]
+        svc.config_save({"sheet": "PEG_BANDS", "rows": self._bands(svc)})
+        after = svc.marks({"pair": "USDJPY", "cut": "NY"})["atm"]
+        self.assertEqual([r["marked"] for r in after], [r["marked"] for r in before])
+        one = [r for r in after if r["tenor"].upper() == "1M"][0]
+        self.assertAlmostEqual(one["marked"], 9.5, places=12)
+
+    def test_the_session_file_carries_the_tab_and_puts_it_back(self):
+        from volkit import session
+        svc, wb = self._service()
+        rows = self._bands(svc) + [{"pair": "USDSGD", "lower": 1.30, "upper": 1.40,
+                                    "note": ""}]
+        svc.config_save({"sheet": "PEG_BANDS", "rows": rows})
+        path = svc.session_save({"path": str(Path(wb).with_name("marks.json"))})["written"]
+        doc = session.load(path)
+        self.assertEqual(sorted(session.config_tabs_from_doc(doc)), ["PEG_BANDS"])
+
+        # A fresh service on the same workbook has the file's bands; loading
+        # the session gives it the session's, because the book is built again
+        # on them rather than layered.
+        from volkit.webapp import BookService
+        other = BookService(str(wb), ASOF)
+        self.assertNotIn("USDSGD", other.book.bands)
+        out = other.session_load({"path": path})
+        self.assertEqual(out["problems"], [])
+        self.assertIn("USDSGD", other.book.bands)
+        self.assertEqual(other.config_tabs()["pending"], ["PEG_BANDS"])
+
+    def test_the_one_write_puts_the_tab_and_the_marks_in_together(self):
+        """The consolidation: one route writes the workbook, and it writes
+        the marks and the settings in the same pass and the same backup."""
+        svc, wb = self._service()
+        svc.overwrite({"pair": "USDJPY", "cut": "NY", "kind": "atm",
+                       "tenor": "1M", "value": 9.5})
+        rows = self._bands(svc) + [{"pair": "USDSGD", "lower": 1.30, "upper": 1.40,
+                                    "note": ""}]
+        svc.config_save({"sheet": "PEG_BANDS", "rows": rows})
+        path = svc.session_save({"path": str(Path(wb).with_name("marks.json"))})["written"]
+        out = svc.session_export({"path": path})
+        self.assertEqual(out["problems"], [])
+        self.assertEqual(out["tabs"], ["PEG_BANDS"])
+        self.assertTrue(out["backup"])
+        # Both are in the file now, read back by the ordinary reader.
+        again = Book.from_excel(wb, ASOF).load_all(["USDJPY"])
+        self.assertIn("USDSGD", again.bands)
+        self.assertAlmostEqual(
+            again["USDJPY"].atm.term_vol(again["USDJPY"].tenor_years("1M")), 0.095, places=9)
+        # And the session no longer holds anything the workbook does not.
+        self.assertEqual(svc.config_tabs()["pending"], [])
+        self.assertFalse(svc.dirty)
+
+    def test_reloading_the_workbook_throws_the_held_tab_away(self):
+        """`Reload workbook` is the button that goes back to what the file
+        says.  It drops the marks -- that is what a reload is -- and it drops
+        a setting that has not been written for the same reason."""
+        svc, _ = self._service()
+        rows = self._bands(svc) + [{"pair": "USDSGD", "lower": 1.30, "upper": 1.40,
+                                    "note": ""}]
+        svc.config_save({"sheet": "PEG_BANDS", "rows": rows})
+        self.assertIn("USDSGD", svc.book.bands)
+        svc.reload(discard=True)
+        self.assertNotIn("USDSGD", svc.book.bands)
+        self.assertEqual(svc.config_tabs()["pending"], [])
+        self.assertFalse(svc.dirty)
+        # Every other reload is one made *in order* to apply the session's
+        # tabs, so it keeps them.
+        svc.config_save({"sheet": "PEG_BANDS", "rows": rows})
+        svc.reload()
+        self.assertIn("USDSGD", svc.book.bands)
+
+    def test_a_holiday_marked_here_moves_the_dates_it_should(self):
+        """Every reader of a configuration tab reads the session's copy, not
+        just the one that happens to be easy to see.  A holiday goes through
+        `CalendarSet.load_overrides_sheet` rather than the band loader, and a
+        tenor is a settlement date first (§4) -- so marking one moves the
+        expiry the whole screen is priced on."""
+        svc, _ = self._service()
+        before = svc.book.tenor_years("USDJPY", "1M")
+        svc.config_save({"sheet": "HOLIDAYS", "rows": [
+            {"country": "JP", "date": "2024-03-28", "remove": ""}]})
+        after = svc.book.tenor_years("USDJPY", "1M")
+        self.assertLess(after, before)
+        # And it is still only in the session.
+        self.assertAlmostEqual(Book.from_excel(svc.path, ASOF).tenor_years("USDJPY", "1M"),
+                               before, places=12)
+
+    def test_a_column_no_reader_would_take_is_refused_before_it_is_applied(self):
+        """The same rule the write had.  Held in a session instead, a heading
+        the tab's own reader refuses is a setting that is accepted now and
+        found to be unreadable at the next load."""
+        svc, _ = self._service()
+        tab = {t["sheet"]: t for t in svc.config_tabs()["tabs"]}["Vega Weights"]
+        rows = [dict(r) for r in tab["rows"]]
+        rows[0]["USD"] = 0.5
+        with self.assertRaises(ValueError) as ctx:
+            svc.config_save({"sheet": "Vega Weights", "rows": rows})
+        self.assertIn("six letters", str(ctx.exception))
+        self.assertEqual(svc.config_tabs()["pending"], [])
+        self.assertEqual(svc.book.vega_weights.weight_for("USDCNH", "1W"), (2.6, "USDCNH"))
+
+    def test_the_command_line_builds_the_book_with_the_sessions_tabs(self):
+        """`--session` is the screen's marks on the command line, so it is
+        the screen's configuration too -- read before the book is built,
+        because a band cannot be layered onto one that is already made."""
+        import argparse
+        from volkit import cli
+        svc, wb = self._service()
+        rows = self._bands(svc) + [{"pair": "USDSGD", "lower": 1.30, "upper": 1.40,
+                                    "note": ""}]
+        svc.config_save({"sheet": "PEG_BANDS", "rows": rows})
+        path = svc.session_save({"path": str(Path(wb).with_name("marks.json"))})["written"]
+        args = argparse.Namespace(workbook=str(wb), session=path,
+                                  asof=ASOF.now.isoformat())
+        book = cli._book(args, ["USDJPY"])
+        self.assertIn("USDSGD", book.bands)
+
+    def test_a_pair_is_still_written_when_it_is_added_and_the_marks_come_back(self):
+        """The one thing here that is not a setting.  A pair is a CONFIG row,
+        a PARAMS column and a sheet, so it cannot be held in memory -- there
+        would be nothing for the reader to read.  It writes, and what this
+        session has marked goes back on the book afterwards, which is what it
+        used to refuse rather than do."""
+        svc, wb = self._service()
+        svc.overwrite({"pair": "USDJPY", "cut": "NY", "kind": "atm",
+                       "tenor": "1M", "value": 9.5})
+        out = svc.config_pair({"action": "add", "pair": "USDSEK", "atm": 8.0})
+        self.assertEqual(Path(out["wrote"]["written"]), Path(wb))
+        self.assertIn("USDSEK", svc.book.pairs)
+        one = [r for r in svc.marks({"pair": "USDJPY", "cut": "NY"})["atm"]
+               if r["tenor"].upper() == "1M"][0]
+        self.assertAlmostEqual(one["marked"], 9.5, places=12)
 
 
 class TestSessionIntoWorkbook(unittest.TestCase):
@@ -12454,8 +12788,10 @@ class TestHeldFitGoesStale(unittest.TestCase):
         # replaces the book under it.  Merely *reading* ``dirty`` is not --
         # saving a session, exporting one and asking the marking agent for a
         # proposal all do that and leave the book exactly as they found it.
+        # ``_rebuild`` is the third way of replacing it: read the workbook
+        # again on a configuration this session holds and put the marks back.
         moves = _re.compile(r"self\.dirty = True|self\.dirty = self\.dirty or"
-                            r"|self\.reload\(|self\.book = ")
+                            r"|self\.reload\(|self\.book = |self\._rebuild\(")
         checked = 0
         for path, name in routed:
             method = getattr(_webapp.BookService, name, None)
@@ -12945,14 +13281,29 @@ class TestKaceFeed(unittest.TestCase):
 
     # -- the spread table -------------------------------------------------
     def test_the_shipped_table_is_the_sheets_column_l(self):
+        """The widths are tiers now, and `default` is still column L.
+
+        The table used to be `pair, tenor, spread`, which tied a width to a
+        currency: the same pair could not be posted at two widths and a new
+        pair could not be posted at all until somebody typed a ladder for it.
+        A tier is a quoting policy, so the pair is chosen on the screen.
+        """
         from volkit import kace
         table = kace.SpreadTable.load(self.SPREADS)
-        self.assertEqual(table.for_pair("usdcnh"),
+        self.assertEqual(table.names, ["default", "wide", "thin"])
+        self.assertEqual(table.for_tier(),
                          {"O/N": 1.0, "1W": 0.8, "2W": 0.6, "1M": 0.4, "2M": 0.3, "3M": 0.3,
                           "6M": 0.2, "9M": 0.2, "1Y": 0.2})
+        # Every tier posts the same pillars; only the widths differ.
+        self.assertEqual(sorted(table.for_tier("wide")), sorted(table.for_tier()))
+        self.assertEqual(table.for_tier("wide")["1M"], 0.6)
+        # Named however it is typed, and resolved to the tab's own spelling.
+        self.assertEqual(table.resolve_tier(" Thin "), "thin")
+        self.assertEqual(table.resolve_tier(""), kace.DEFAULT_TIER)
         with self.assertRaises(kace.KaceError) as ctx:
-            table.for_pair("EURUSD")
-        self.assertIn("EURUSD", str(ctx.exception))
+            table.for_tier("EURUSD")
+        self.assertIn("eurusd", str(ctx.exception))
+        self.assertIn("default, wide, thin", str(ctx.exception))
 
     def test_a_bad_table_is_refused_by_row(self):
         """The table is a tab now, so a bad cell is reported by the row Excel
@@ -12971,32 +13322,50 @@ class TestKaceFeed(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             p = workbook(Path(tmp) / "marks.xlsx", [
-                ["pair", "tenor", "spread"],
-                ["USDCNH", "on", 1],
-                ["USDCNH", "1W", "wide"],
-                ["USDCNH", "1W", 0.8],
-                ["USDCNH", "1W", None],
-                ["USDCNH", "7Q", 0.1],
+                ["tenor", "default", "wide"],
+                ["on", 1, 1.5],
+                ["1W", "wide", 1.2],
+                ["1W", 0.8, None],
+                ["2W", None, 0.9],
+                ["7Q", 0.1, 0.2],
+                ["1M", -0.1, 0.2],
             ])
             with self.assertRaises(kace.KaceError) as ctx:
                 kace.SpreadTable.load(p)
             msg = str(ctx.exception)
             self.assertIn(kace.SPREADS_SHEET, msg)
             self.assertIn("row 3", msg)           # not a number
-            self.assertIn("row 5", msg)           # no spread
+            self.assertIn("row 5", msg)           # no default width
             self.assertIn("row 6", msg)           # not a tenor
+            self.assertIn("row 7", msg)           # negative
 
             # Notes above the header, a '#' row anywhere, and a heading or a
-            # cell in whatever case somebody typed it.
+            # cell in whatever case somebody typed it.  A tier that leaves a
+            # cell blank takes `default` for that tenor, cell by cell, the way
+            # a pair column on `Vega Weights` does.
             good = workbook(Path(tmp) / "good.xlsx", [
                 ["# the desk's pillars"],
-                ["Pair", "Tenor", "Spread"],
-                ["USDCNH", " on ", 1],
+                ["Tenor", "Default", "Wide"],
+                [" on ", 1, 1.4],
                 ["# and the rest"],
-                ["usdcnh", "1w", 0.8],
+                ["1w", 0.8, None],
             ])
-            self.assertEqual(kace.SpreadTable.load(good).for_pair("USDCNH"),
-                             {"O/N": 1.0, "1W": 0.8})
+            table = kace.SpreadTable.load(good)
+            self.assertEqual(table.names, ["default", "wide"])
+            self.assertEqual(table.for_tier(), {"O/N": 1.0, "1W": 0.8})
+            self.assertEqual(table.for_tier("wide"), {"O/N": 1.4, "1W": 0.8})
+
+            # The old `pair, tenor, spread` layout is every workbook this tool
+            # has ever written, so it is named rather than reported as a tab
+            # with no header -- which is true and no help at all to somebody
+            # looking at a tab full of tenors.
+            legacy = workbook(Path(tmp) / "legacy.xlsx", [
+                ["pair", "tenor", "spread"],
+                ["USDCNH", "1W", 0.8],
+            ])
+            with self.assertRaises(kace.KaceError) as ctx:
+                kace.SpreadTable.load(legacy)
+            self.assertIn("old 'pair, tenor, spread' layout", str(ctx.exception))
 
             # A workbook without the tab, and no workbook at all, are both
             # said by name rather than answered with an empty table.
@@ -13016,10 +13385,10 @@ class TestKaceFeed(unittest.TestCase):
             cls._cached_book = Book.from_excel(str(WORKBOOK), ASOF).load_all(["USDCNH"])
         return cls._cached_book
 
-    def _table(self, rows):
+    def _table(self, rows, tier=None):
         from volkit import kace
         t = kace.SpreadTable(path="test")
-        t.rows = {"USDCNH": dict(rows)}
+        t.tiers = {tier or kace.DEFAULT_TIER: dict(rows)}
         return t
 
     def test_the_series_reaches_the_last_pillar_and_hordate_is_the_books(self):
@@ -13084,6 +13453,11 @@ class TestKaceFeed(unittest.TestCase):
             kace.build(self._book(), "USDCNH", self._table([("O/N", 1.0)]))
         with self.assertRaises(kace.KaceError):
             kace.build(self._book(), "USDCNH", self._table([("1W", 0.8)]), source="murex")
+        # A tier the tab does not hold is refused by name, not answered with
+        # the default's widths under another tier's label.
+        with self.assertRaises(kace.KaceError) as ctx:
+            kace.build(self._book(), "USDCNH", self._table([("1W", 0.8)]), tier="wide")
+        self.assertIn("wide", str(ctx.exception))
 
     def test_the_web_service_and_the_download(self):
         from volkit import kace
@@ -13091,7 +13465,8 @@ class TestKaceFeed(unittest.TestCase):
         service = BookService(str(WORKBOOK), ASOF, kace_spreads_path=str(self.SPREADS),
                               kace_user="feeuser", kace_password="pw")
         state = service.state()["kace"]
-        self.assertEqual(state["pairs"], ["USDCNH"])
+        self.assertEqual(state["tiers"], ["default", "wide", "thin"])
+        self.assertEqual(state["tier"], "default")
         self.assertTrue(state["credentials"])
         self.assertIsNone(state["error"])
         out = service.kace({"pair": "USDCNH"})
@@ -13099,7 +13474,21 @@ class TestKaceFeed(unittest.TestCase):
         self.assertEqual(out["hor_date"], "2024-02-28")
         self.assertEqual([p["tenor"] for p in out["pillars"]][:2], ["O/N", "1W"])
         self.assertEqual(out["scenario"], "Xyz")                 # the start-up default
+        self.assertEqual(out["tier"], "default")
         self.assertIn('<option name="scenario" value="Xyz"/>', out["xml"])
+        # The tier is the page's dropdown: it widens every pillar and nothing
+        # else -- same pillars, same wings, same nodes.
+        wide = service.kace({"pair": "USDCNH", "tier": "wide"})
+        self.assertEqual(wide["tier"], "wide")
+        self.assertEqual([p["tenor"] for p in wide["pillars"]],
+                         [p["tenor"] for p in out["pillars"]])
+        self.assertEqual(wide["nodes"], out["nodes"])
+        for a, b in zip(wide["pillars"], out["pillars"]):
+            self.assertGreater(a["spread"], b["spread"], a["tenor"])
+            self.assertEqual(a["rr25"], b["rr25"])
+        with self.assertRaises(kace.KaceError) as ctx:
+            service.kace({"pair": "USDCNH", "tier": "fat"})
+        self.assertIn("default, wide, thin", str(ctx.exception))
         name, text = service.export_kace({"pair": "USDCNH"})
         self.assertEqual(name, "USDCNH_kace_vols_Xyz_2024-02-28.xml")
         self.assertEqual(text, out["xml"])
@@ -13154,10 +13543,19 @@ class TestKaceFeed(unittest.TestCase):
         self.assertEqual(args.kace_user, "u")
         self.assertEqual(args.source, "marks")
         args = build_parser().parse_args(["serve", "--kace-spreads", "s.csv",
-                                          "--kace-scenario", "Prod"])
-        self.assertEqual((args.kace_spreads, args.kace_scenario), ("s.csv", "Prod"))
-        self.assertIn("kace", (Path(__file__).resolve().parents[1] / "volkit" / "web"
-                               / "index.html").read_text(encoding="utf-8"))
+                                          "--kace-scenario", "Prod", "--kace-tier", "wide"])
+        self.assertEqual((args.kace_spreads, args.kace_scenario, args.kace_tier),
+                         ("s.csv", "Prod", "wide"))
+        args = build_parser().parse_args(["kace", "USDCNH", "--kace-tier", "thin"])
+        self.assertEqual(args.kace_tier, "thin")
+        html = (Path(__file__).resolve().parents[1] / "volkit" / "web"
+                / "index.html").read_text(encoding="utf-8")
+        self.assertIn("kace", html)
+        # The tier is a dropdown on the tab, filled from what the tab holds,
+        # and it travels with every request the tab makes -- the table shown
+        # and the message posted are one call, so they cannot be two tiers.
+        self.assertIn('<select id="kacetier"', html)
+        self.assertIn("source:KACE_SRC,scenario:scn,tier:tier", html)
 
     # -- posting ----------------------------------------------------------
     REPLY_OK = ("<?xml version='1.0' encoding='UTF-8'?>\n"

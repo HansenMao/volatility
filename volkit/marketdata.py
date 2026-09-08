@@ -166,7 +166,7 @@ class PairSpec:
 CONVENTIONS_SHEET = "CONVENTIONS"
 
 
-def load_conventions(path: str | Path) -> dict[str, dict] | None:
+def load_conventions(path: str | Path, *, overlay=None) -> dict[str, dict] | None:
     """The ``CONVENTIONS`` tab, by pair: ``{"premium": ccy, "atmf_beyond": text}``.
 
     ``None`` when the workbook has no such tab, which is the ordinary case:
@@ -175,7 +175,8 @@ def load_conventions(path: str | Path) -> dict[str, dict] | None:
     """
     from . import configsheets
 
-    rows = configsheets.read_rows(path, CONVENTIONS_SHEET, required=("pair",))
+    rows = configsheets.read_rows(path, CONVENTIONS_SHEET, required=("pair",),
+                                  overlay=overlay)
     if rows is None:
         return None
     out: dict[str, dict] = {}
@@ -287,11 +288,16 @@ class ExcelSource:
     subtracted in the middle of the loader.
     """
 
-    def __init__(self, path: str | Path, *, event_tz_offset_hours: float = 8.0):
+    def __init__(self, path: str | Path, *, event_tz_offset_hours: float = 8.0,
+                 config: dict | None = None):
         self.path = Path(path)
         if not self.path.exists():
             raise MarketDataError(f"workbook not found: {self.path}")
         self.event_tz_offset_hours = event_tz_offset_hours
+        # The configuration tabs a session holds instead of the workbook's.
+        # Only ``CONVENTIONS`` is read here; the rest are read by the modules
+        # that own them, off the same overlay (``Book.from_excel``).
+        self.config = config or {}
 
     def load(self) -> MarketData:
         data = MarketData(source=str(self.path))
@@ -331,7 +337,7 @@ class ExcelSource:
         sheet.
         """
         try:
-            found = load_conventions(self.path)
+            found = load_conventions(self.path, overlay=self.config)
         except (OSError, ValueError) as exc:
             data.problems.append(str(exc))
             return
