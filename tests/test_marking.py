@@ -31,6 +31,19 @@ def _tmp(name: str) -> str:
     return str(Path(tempfile.mkdtemp()) / name)
 
 
+def _spread_table():
+    """The KACE_SPREADS tab the quote's bottom width rung falls back on.
+
+    Flat on purpose here: these tests are about the *ladder's place* on the
+    width ladder, not about how it is read between its own tenors, which
+    `TestMarketMakerPanel` pins.
+    """
+    from volkit import kace
+    table = kace.SpreadTable(path="test!KACE_SPREADS")
+    table.tiers = {"flat": {"1W": 0.30, "1M": 0.30, "3M": 0.30, "1Y": 0.30}}
+    return table
+
+
 def _snapshot(**curve) -> dict:
     base = {"initial_vol": 6.25, "long_term_vol": 6.95, "mean_reversion": 6.0,
             "short_addon": 0.6, "short_decay": 50.0}
@@ -688,10 +701,63 @@ class TestCard(unittest.TestCase):
         self.assertEqual(out["marks"]["pair"], "EURUSD")
         self.assertIn("marking agent", out["marks"]["what"])
         quoted = quote_panel_from_request({"pair": "EURUSD", "request_text": "1M ATM",
-                                           "marks": out["marks"], "fallback_spread": 0.3}
-                                          ).run(self.book)
+                                           "marks": out["marks"], "fallback_tier": "flat"}
+                                          ).run(self.book, spreads=_spread_table())
         self.assertIn("marking agent", quoted["marks"]["note"])
         self.assertEqual(session.capture_pair(self.book, "EURUSD"), self.before)
+
+    def test_with_no_market_pasted_the_archive_is_the_market_and_the_two_agents_confer(self):
+        # `volkit mark confer` had no button.  Propose with the market box
+        # empty and the archive on runs it: the archive's findings are the
+        # targets, the best of the bounded rounds is the proposal, and it
+        # comes back in a paste-proposal's own shape so the verdict buttons,
+        # the journal and the hand-off to the quote are the same.
+        from volkit import archive as arch, quotes
+        archive = arch.Archive.load(_tmp("a.jsonl"))
+        run = quotes.parse_quotes("1M ATM 8.20/8.60\n1M ATM 8.25/8.65\n3M ATM 8.40/8.80\n"
+                                  "3M ATM 8.45/8.85\n", pair="EURUSD")
+        archive.extend(arch.from_quotes(run, pair="EURUSD", origin="t.txt",
+                                        default_time=NOW - timedelta(days=1)))
+        out = marking.panel_from_request({"pair": "EURUSD", "text": "",
+                                          "target_source": "quotes", "rounds": 2}).run(
+            self.book, self.journal, archive=archive)
+        self.assertEqual(out["source"], "archive")
+        conf = out["conference"]
+        self.assertEqual(conf["findings"], 2)
+        self.assertGreaterEqual(conf["disagreeing"], 1)
+        self.assertTrue(conf["rounds"])
+        self.assertLessEqual(len(conf["rounds"]), 2)
+        self.assertEqual(conf["chosen"], max(r["n"] for r in conf["rounds"]
+                                             if r["n"] == conf["chosen"]))
+        self.assertTrue(out["proposal"]["moved"])
+        self.assertEqual(out["marks"]["pair"], "EURUSD")
+        self.assertTrue(out["critique"]["available"])
+        self.assertGreaterEqual(out["critique"]["inside_after"], out["critique"]["inside_before"])
+        self.assertTrue(any("the archive is the market" in n for n in out["notes"]), out["notes"])
+        self.assertEqual(session.capture_pair(self.book, "EURUSD"), self.before)
+        # The same archive through the command line's function is the same
+        # conference: the chosen round's proposal is the card's.
+        from volkit import consult, synthesis as syn
+        made = syn.synthesize(archive, "EURUSD", asof=NOW)
+        direct = consult.confer(self.book, "EURUSD", made, rounds=2,
+                                forwards=None)
+        self.assertEqual(direct.best.n, conf["chosen"])
+        # With the archive off, or empty, the card proposes from the target
+        # curve as it always did, and says why.
+        off = self._run(text="", use_archive=False)
+        self.assertEqual(off["source"], "targets")
+        self.assertNotIn("conference", off)
+        empty = marking.panel_from_request({"pair": "EURUSD", "text": "",
+                                            "target_source": "quotes"}).run(
+            self.book, self.journal, archive=arch.Archive(path=""))
+        self.assertEqual(empty["source"], "targets")
+        self.assertTrue(any("holds no level" in n for n in empty["notes"]), empty["notes"])
+        # A paste is still a paste: one proposal, scored, no conference.
+        pasted = marking.panel_from_request({"pair": "EURUSD", "text": self.RUN,
+                                             "target_source": "quotes"}).run(
+            self.book, self.journal, archive=archive)
+        self.assertEqual(pasted["source"], "paste")
+        self.assertNotIn("conference", pasted)
 
     def test_the_agent_chooses_the_knobs_unless_told_not_to(self):
         chosen = self._run()
@@ -704,7 +770,7 @@ class TestCard(unittest.TestCase):
                             if c["what"] in ("free knobs", "wings")))
 
     def test_every_field_the_card_posts_is_read(self):
-        # The page's list against this reader, the way MF and AF are pinned.
+        # The page's list against this reader, the way MCF and AF are pinned.
         import re as _re
         from pathlib import Path as _P
         root = _P(__file__).resolve().parents[1] / "volkit"
@@ -718,6 +784,30 @@ class TestCard(unittest.TestCase):
         common = (root / "marketmaker.py").read_text(encoding="utf-8").split("def _common")[1]
         for f in fields | {"free", "smile_free"}:
             self.assertIn(f'"{f}"', reader + common, f"the card reader never reads {f!r}")
+
+    def test_the_agent_and_the_hand_fit_read_the_same_boxes(self):
+        """One card, two runs, and the boxes they share are shared literally.
+
+        The hand fit was the market-maker tab's Fit button, and the agent card
+        borrowed that panel to reach its target-curve helper.  Now both read
+        `marketmaker.curve_targets` and both are posted from the same knob boxes,
+        so a target source the agent understands and the hand fit refuses (or the
+        reverse) would be one card contradicting itself.
+        """
+        payload = {"pair": "EURUSD", "text": self.RUN, "target_source": "quotes",
+                   "free": ["long_term_vol"], "smile_free": ["rho25"],
+                   "reversion_lo": "2", "reversion_hi": "5"}
+        agent = marking.panel_from_request(payload)
+        hand = marking.fit_panel_from_request(payload)
+        for attr in ("pair", "cut", "text", "vol_unit", "fly_convention",
+                     "target_source", "target_text", "free", "smile_free",
+                     "mid_pull", "max_nfev", "reversion_range"):
+            self.assertEqual(getattr(agent, attr), getattr(hand, attr), attr)
+        self.assertEqual(hand.reversion_range, (2.0, 5.0))
+        # And the hand fit is the one that may leave marks on the book.
+        self.assertFalse(hand.apply)
+        self.assertTrue(marking.fit_panel_from_request(
+            dict(payload, apply=True)).apply)
 
     def test_accepted_records_the_proposal_and_rejected_records_the_start(self):
         out = self._run()
@@ -807,33 +897,304 @@ class TestQuoteArchiveRung(unittest.TestCase):
         from volkit.marketmaker import quote_panel_from_request
         payload = {"pair": "EURUSD", "request_text": "1M ATM\n3M ATM"}
         payload.update(extra)
-        return quote_panel_from_request(payload).run(self.book, archive=self.archive)
+        return quote_panel_from_request(payload).run(self.book, archive=self.archive,
+                                                     spreads=_spread_table())
 
-    def test_off_by_default_the_archive_is_not_a_rung(self):
+    def test_the_archive_is_always_on_the_ladder_and_no_archive_is_no_rung(self):
+        # It used to be a checkbox ("widths from the archive"), off by
+        # default, and a price made with it off and one made with it on were
+        # two prices from one screen.  There is one ladder now: bank, then
+        # archive, then fallback, then nothing -- and a quote made with no
+        # archive loaded says so rather than quietly standing on the bank
+        # alone.
+        from volkit.marketmaker import quote_panel_from_request
         out = self._quote()
-        self.assertFalse(out["archive"]["used"])
-        self.assertTrue(all(r["width"] is None for r in out["sheet"]["rows"]))
+        self.assertTrue(out["archive"]["used"])
+        self.assertEqual(out["sheet"]["rows"][0]["width_rung"], "archive")
+        bare = quote_panel_from_request({"pair": "EURUSD", "request_text": "1M ATM"}).run(
+            self.book, archive=None)
+        self.assertFalse(bare["archive"]["available"])
+        self.assertIn("no observation archive", bare["archive"]["reason"])
+        self.assertIsNone(bare["sheet"]["rows"][0]["width"])
+        self.assertEqual(bare["sheet"]["rows"][0]["width_rung"], "none")
 
-    def test_on_a_quote_no_rule_matches_takes_the_archived_width_and_names_it(self):
-        out = self._quote(use_archive_width=True)
+    def test_no_rule_matches_takes_the_archived_width_and_names_it(self):
+        out = self._quote()
         one, three = out["sheet"]["rows"]
         self.assertAlmostEqual(one["width"], 0.40, places=6)
         self.assertTrue(one["width_source"].startswith("the archive"), one["width_source"])
         self.assertEqual(one["archive_observations"], 3)
+        self.assertEqual(one["agent_verdict"], "no rule")
         # The 3M has nothing behind it and gets nothing -- the ladder invents
         # no rung, and the fallback is still below the archive.
         self.assertIsNone(three["width"])
-        out = self._quote(use_archive_width=True, fallback_spread=0.3)
+        self.assertEqual(three["agent_verdict"], "thin")
+        out = self._quote(fallback_tier="flat")
         one, three = out["sheet"]["rows"]
         self.assertAlmostEqual(one["width"], 0.40, places=6)
         self.assertAlmostEqual(three["width"], 0.30, places=6)
-        self.assertEqual(three["width_source"], "panel fallback")
+        self.assertIn("flat", three["width_source"])
+        self.assertEqual(three["width_rung"], "fallback")
+        # The trace is the row's own arithmetic: the width ingredient names
+        # the rung, and the bid and offer are the mid less and plus half of it.
+        names = [i["name"] for i in one["trace"]]
+        self.assertEqual(names[0], "model mid")
+        self.assertIn("width", names)
+        self.assertIn("bid / offer", names)
+        width = next(i for i in one["trace"] if i["name"] == "width")
+        self.assertTrue(width["source"].startswith("the archive"))
+        self.assertAlmostEqual(one["our_bid"], one["our_mid"] - 0.20, places=9)
+        self.assertAlmostEqual(one["our_ask"], one["our_mid"] + 0.20, places=9)
 
     def test_the_archived_level_is_a_flag_and_moves_nothing(self):
-        with_ = self._quote(use_archive_width=True)["sheet"]["rows"][0]
-        without = self._quote()["sheet"]["rows"][0]
+        from volkit.marketmaker import quote_panel_from_request
+        with_ = self._quote()["sheet"]["rows"][0]
+        without = quote_panel_from_request({"pair": "EURUSD", "request_text": "1M ATM"}).run(
+            self.book, archive=None)["sheet"]["rows"][0]
         self.assertEqual(with_["model"], without["model"])
         self.assertEqual(with_["our_mid"], without["our_mid"])
         self.assertIsNotNone(with_["archive_level"])
+        level = next(i for i in with_["trace"] if i["name"] == "market level")
+        self.assertFalse(level["applied"])
         for flag in with_["flags"]:
             self.assertIn("applied to nothing", flag)
+
+
+class TestOneEngine(unittest.TestCase):
+    """The Quote button, `volkit mm --request` and `volkit agent quote` are one price.
+
+    There used to be three: the quote panel, `agent._decide` with its own
+    request grammar and its own copy of the width ladder, and the Suggest
+    card comparing widths on its own.  Two engines that agreed on a Tuesday
+    disagreed by Friday.  These pin that there is one.
+    """
+
+    def setUp(self):
+        from volkit import archive as arch
+        from volkit import quotes
+        self.book = _Book.get()
+        self.before = session.capture_pair(self.book, "EURUSD")
+        self.archive = arch.Archive.load(_tmp("a.jsonl"))
+        run = quotes.parse_quotes("1M ATM 6.20/6.60\n1M ATM 6.25/6.65\n1M ATM 6.30/6.70",
+                                  pair="EURUSD")
+        self.archive.extend(arch.from_quotes(run, pair="EURUSD", origin="t.txt",
+                                             default_time=NOW - timedelta(days=1)))
+
+    def tearDown(self):
+        self.assertEqual(session.capture_pair(self.book, "EURUSD"), self.before)
+
+    def test_the_agent_prices_through_the_quote_panel(self):
+        from volkit import agent
+        from volkit.marketmaker import quote_panel_from_request
+        request = agent.Request(pair="EURUSD", text="1M ATM in 100mm\n3M 25d RR",
+                                fallback_tier="flat", narrate=False)
+        out = agent.run(request, book=self.book, archive=self.archive,
+                        spreads=_spread_table())
+        panel = quote_panel_from_request({"pair": "EURUSD",
+                                          "request_text": "1M ATM in 100mm\n3M 25d RR",
+                                          "fallback_tier": "flat"})
+        sheet = panel.run(self.book, archive=self.archive, spreads=_spread_table())
+        self.assertEqual(len(out.decisions), 2)
+        for d, row in zip(out.decisions, sheet["sheet"]["rows"]):
+            self.assertEqual(d.bid, row["our_bid"])
+            self.assertEqual(d.offer, row["our_ask"])
+            self.assertEqual([i.name for i in d.trace], [i["name"] for i in row["trace"]])
+        # The prose comes off the trace: every number in the explanation is a
+        # number on the sheet.
+        from volkit import llm
+        d = out.decisions[0]
+        allowed = set()
+        for line in d.facts():
+            allowed |= llm.numbers_in(line)
+        self.assertIn(llm._canonical(f"{d.bid:.3f}"), allowed)
+        self.assertEqual(d.width_source, "archive")
+        self.assertEqual(out.decisions[1].width_source, "fallback")
+
+    def test_the_agent_refuses_what_the_panel_refuses(self):
+        from volkit import agent
+        with self.assertRaises(agent.AgentError):
+            agent.run(agent.Request(pair="EURUSD", text="   "), book=self.book,
+                      archive=self.archive)
+        with self.assertRaises(agent.AgentError):
+            agent.run(agent.Request(pair="XXXYYY", text="1M ATM"), book=self.book,
+                      archive=self.archive)
+
+    def test_the_agents_verdict_sits_on_every_quote_row(self):
+        # The Suggest card's whole answer, as columns beside the price it is
+        # about: a bank rule tighter than the archive says `tight`, one the
+        # archive supports says `agrees`, and a gap under the floor is quiet.
+        from volkit.knowledge import KnowledgeBank, Rule
+        from volkit.marketmaker import quote_panel_from_request
+        bank = KnowledgeBank()
+        bank.set_pair("EURUSD", [Rule(kind="spread", value=0.20, instrument="atm")], NOW,
+                      "test")
+        out = quote_panel_from_request({"pair": "EURUSD", "request_text": "1M ATM"}).run(
+            self.book, bank=bank, archive=self.archive)
+        row = out["sheet"]["rows"][0]
+        self.assertEqual(row["agent_verdict"], "tight")
+        self.assertAlmostEqual(row["agent_gap"], -0.20, places=6)
+        self.assertAlmostEqual(row["width"], 0.20, places=6, msg="the bank still wins")
+        self.assertEqual(row["width_rung"], "bank")
+        self.assertEqual(out["sheet"]["disagreeing"], 1)
+        bank.set_pair("EURUSD", [Rule(kind="spread", value=0.41, instrument="atm")], NOW,
+                      "test")
+        row = quote_panel_from_request({"pair": "EURUSD", "request_text": "1M ATM"}).run(
+            self.book, bank=bank, archive=self.archive)["sheet"]["rows"][0]
+        self.assertEqual(row["agent_verdict"], "agrees")
+        # Tighten the tolerance to nothing and the floor still keeps a 0.01
+        # gap quiet.
+        row = quote_panel_from_request({"pair": "EURUSD", "request_text": "1M ATM",
+                                        "tolerance": 0}).run(
+            self.book, bank=bank, archive=self.archive)["sheet"]["rows"][0]
+        self.assertEqual(row["agent_verdict"], "agrees")
+        bank.set_pair("EURUSD", [Rule(kind="spread", value=0.80, instrument="atm")], NOW,
+                      "test")
+        row = quote_panel_from_request({"pair": "EURUSD", "request_text": "1M ATM"}).run(
+            self.book, bank=bank, archive=self.archive)["sheet"]["rows"][0]
+        self.assertEqual(row["agent_verdict"], "wide")
+
+
+class TestClientOnTheQuote(unittest.TestCase):
+    """A client's record leans the mid and widens the price, capped, and says so."""
+
+    def setUp(self):
+        from volkit import archive as arch
+        from volkit import quotes
+        self.book = _Book.get()
+        self.before = session.capture_pair(self.book, "EURUSD")
+        self.archive = arch.Archive.load(_tmp("a.jsonl"))
+        run = quotes.parse_quotes("1M ATM 6.20/6.60\n1M ATM 6.25/6.65\n1M ATM 6.30/6.70",
+                                  pair="EURUSD")
+        self.archive.extend(arch.from_quotes(run, pair="EURUSD", origin="t.txt",
+                                             default_time=NOW - timedelta(days=1)))
+
+    def tearDown(self):
+        self.assertEqual(session.capture_pair(self.book, "EURUSD"), self.before)
+
+    def _show(self, client, result, *, hours_ago, bid=6.20, ask=6.60, instrument="atm",
+              tenor="1M", delta=None):
+        from volkit import archive as arch
+        when = NOW - timedelta(hours=hours_ago)
+        price = arch.shown("EURUSD", instrument=instrument, tenor=tenor, bid=bid, ask=ask,
+                           delta=delta, counterparty=client, at=when)
+        self.archive.add(price)
+        self.archive.add(arch.outcome(price, result, at=when + timedelta(minutes=5)))
+
+    def _quote(self, **extra):
+        from volkit.marketmaker import quote_panel_from_request
+        payload = {"pair": "EURUSD", "request_text": "1M ATM"}
+        payload.update(extra)
+        return quote_panel_from_request(payload).run(self.book, archive=self.archive)
+
+    def test_a_buyer_leans_the_mid_up_by_the_weight_times_the_half_width(self):
+        for h in (1, 2, 3, 4):
+            self._show("Client A", "traded_ask", hours_ago=h)
+        nobody = self._quote()["sheet"]["rows"][0]
+        row = self._quote(client="Client A", client_weight=0.5)["sheet"]["rows"][0]
+        self.assertEqual(row["client"], "Client A")
+        self.assertAlmostEqual(row["client_side"], 1.0)
+        # width 0.40 -> half 0.20 -> 0.5 * 1.0 * 0.20 = +0.10
+        self.assertAlmostEqual(row["skew_client"], 0.10, places=6)
+        self.assertAlmostEqual(row["our_mid"], nobody["our_mid"] + 0.10, places=6)
+        self.assertAlmostEqual(row["width"], nobody["width"], places=9,
+                               msg="no move against us was measured, so nothing widens")
+        self.assertIsNone(row["client_widen"])
+        lean = next(i for i in row["trace"] if i["name"] == "shading, client")
+        self.assertAlmostEqual(lean["value"], 0.10, places=6)
+        self.assertIn("a buyer", row["client_record"])
+
+    def test_a_seller_leans_it_down_and_a_zero_weight_shows_and_applies_nothing(self):
+        for h in (1, 2, 3, 4):
+            self._show("Client B", "traded_bid", hours_ago=h)
+        nobody = self._quote()["sheet"]["rows"][0]
+        row = self._quote(client="Client B")["sheet"]["rows"][0]
+        self.assertAlmostEqual(row["our_mid"], nobody["our_mid"] - 0.10, places=6)
+        off = self._quote(client="Client B", client_weight=0)["sheet"]["rows"][0]
+        self.assertEqual(off["our_mid"], nobody["our_mid"])
+        self.assertIn("a seller", off["client_record"], "the record is still on the row")
+        self.assertFalse(off["skew_client"])
+
+    def test_the_move_against_us_widens_the_price_and_is_capped(self):
+        # Four lifts at 6.60, and the market then quoted 7.20/7.60: 0.80 against
+        # us each time.  Half of that (the weight) is 0.40, which is exactly
+        # the width -- and the cap is one width, so the price doubles and no
+        # more.  A bigger weight would want more and be held there.
+        from volkit import archive as arch
+        from volkit import quotes
+        for h in (30, 31, 32, 33):
+            self._show("Client C", "traded_ask", hours_ago=h)
+        later = quotes.parse_quotes("1M ATM 7.20/7.60", pair="EURUSD")
+        self.archive.extend(arch.from_quotes(later, pair="EURUSD", origin="later.txt",
+                                             default_time=NOW - timedelta(hours=2)))
+        nobody = self._quote()["sheet"]["rows"][0]
+        row = self._quote(client="Client C", client_weight=0.5)["sheet"]["rows"][0]
+        self.assertAlmostEqual(row["client_after"], 0.80, places=6)
+        self.assertAlmostEqual(row["client_widen"], 0.5 * 0.80, places=6)
+        self.assertAlmostEqual(row["width"], nobody["width"] + 0.40, places=6)
+        self.assertAlmostEqual(row["our_ask"] - row["our_bid"], row["width"], places=9)
+        heavy = self._quote(client="Client C", client_weight=2.0)["sheet"]["rows"][0]
+        self.assertAlmostEqual(heavy["client_widen"], nobody["width"], places=6,
+                               msg="held at one width, whatever the weight asks for")
+        widen = next(i for i in row["trace"] if i["name"] == "widening, client")
+        self.assertIn("capped", widen["detail"])
+        self.assertEqual(self._quote(client="Client C")["sheet"]["widened_by_client"], 1)
+
+    def test_below_the_minimum_the_record_is_on_the_row_and_moves_nothing(self):
+        for h in (1, 2, 3):
+            self._show("Client D", "traded_ask", hours_ago=h)
+        nobody = self._quote()["sheet"]["rows"][0]
+        row = self._quote(client="Client D")["sheet"]["rows"][0]
+        self.assertEqual(row["our_mid"], nobody["our_mid"])
+        self.assertFalse(row["client_enough"])
+        self.assertIn("below the 4", row["client_record"])
+        self.assertTrue(any("moves nothing" in n for n in row["notes"]), row["notes"])
+        # The panel may lower the bar.
+        row = self._quote(client="Client D", client_min=2)["sheet"]["rows"][0]
+        self.assertTrue(row["client_enough"])
+        self.assertAlmostEqual(row["our_mid"], nobody["our_mid"] + 0.10, places=6)
+
+    def test_an_unknown_client_is_a_price_for_nobody_with_a_note(self):
+        nobody = self._quote()["sheet"]["rows"][0]
+        out = self._quote(client="Stranger")
+        row = out["sheet"]["rows"][0]
+        self.assertEqual(row["our_mid"], nobody["our_mid"])
+        self.assertIn("no price has been shown to Stranger", row["client_record"])
+        self.assertIn("holds no price shown to Stranger", out["client"]["reason"])
+        self.assertEqual(out["client"]["known"], [])
+        for h in (1, 2, 3, 4):
+            self._show("Client E", "passed", hours_ago=h)
+        self.assertEqual(self._quote(client="Stranger")["client"]["known"], ["Client E"])
+
+    def test_the_client_lean_counts_toward_the_cap_with_the_others(self):
+        # Whatever the leans sum to cannot leave the half width, and the row
+        # says when it was held.
+        for h in (1, 2, 3, 4):
+            self._show("Client F", "traded_ask", hours_ago=h)
+        row = self._quote(client="Client F", client_weight=3.0, skew_cap=1.0)["sheet"]["rows"][0]
+        self.assertTrue(row["skew_capped"])
+        self.assertAlmostEqual(abs(row["skew_total"]), row["width"] / 2.0, places=6)
+
+    def test_a_row_asked_the_other_way_turns_the_lean_with_it(self):
+        # The record is kept in the book's convention.  A client who has
+        # bought the EUR-call-over risk reversal is, on a row asked as
+        # `usd call over`, a seller of what that row shows -- so the lean on
+        # that row points down, and the same client on the same instrument
+        # asked both ways is leaned the same way in the book's terms.
+        for h in (1, 2, 3, 4):
+            self._show("Client G", "traded_ask", hours_ago=h, instrument="rr", delta=0.25,
+                       bid=0.30, ask=0.50)
+        from volkit.knowledge import KnowledgeBank, Rule
+        bank = KnowledgeBank()
+        bank.set_pair("EURUSD", [Rule(kind="spread", value=0.20, instrument="rr")], NOW, "t")
+        from volkit.marketmaker import quote_panel_from_request
+
+        def quote(text):
+            return quote_panel_from_request({"pair": "EURUSD", "request_text": text,
+                                             "client": "Client G"}).run(
+                self.book, bank=bank, archive=self.archive)["sheet"]["rows"][0]
+        straight = quote("1M 25d RR eur call over")
+        turned = quote("1M 25d RR usd call over")
+        self.assertEqual((straight["sign"], turned["sign"]), (1.0, -1.0))
+        self.assertGreater(straight["skew_client"], 0)
+        self.assertLess(turned["skew_client"], 0)
+        self.assertAlmostEqual(straight["our_mid"], -turned["our_mid"], places=9)

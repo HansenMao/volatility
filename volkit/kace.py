@@ -52,7 +52,22 @@ One rule of the sheet's is kept exactly, because it was a rule in disguise: a
 day takes the spread of the last pillar whose expiry is on or before it, and
 a day before the first pillar's expiry takes the first pillar's spread.  That
 was an approximate ``VLOOKUP`` with an ``ISERROR`` fallback; here it is
-``spread_for``, and a test pins it.
+``spread_for``, and a test pins it.  It is the default and stays the default,
+because it is what the sheet posted.  ``interpolate=True`` is the alternative
+a desk may ask for: a day between two pillars takes a width read straight
+across between theirs, by date, so the two-way widens smoothly instead of
+stepping on nine mornings of the year.  It changes only the days *between*
+pillars -- a pillar's own width is the tier's whichever rule is in force, and
+a day outside the pillars still takes the nearest one's.
+
+The **multiplier** is the other knob the widths take.  A tier is a ladder the
+desk maintains on a workbook tab; a morning that wants everything half again
+as wide should not have to type a second ladder to say so, and the multiple is
+not a policy worth a column.  ``build(..., multiplier=1.5)`` scales every
+pillar's width, and it scales the pillar the day-by-day rule then reads, so
+what is on the screen, what is in the XML and what the post log records are
+the multiplied widths and not the tab's.  It multiplies the *width*, never the
+volatility: the mid of every two-way is exactly where it was.
 
 Conventions, as the desk stated them (2026-09-01): a risk reversal is the
 base-currency call vol minus the put vol (kACE's *$ call* column for a USD
@@ -305,6 +320,37 @@ class SpreadTable:
         return dict(rows)
 
 
+def spread_multiplier(value) -> float:
+    """What the tier's widths are multiplied by, as a number, or a refusal.
+
+    Blank is 1.0 -- the tab's own ladder, which is the ordinary case and what
+    every caller that does not pass one gets.  Anything that is not a positive
+    finite number is refused by name rather than quietly taken as 1: a
+    multiplier read as a zero posts a two-way with no width at all, and one
+    read as a blank posts widths nobody chose.
+    """
+    if value is None:
+        return 1.0
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return 1.0
+        try:
+            value = float(text)
+        except ValueError:
+            raise KaceError(f"the spread multiplier {text!r} is not a number") from None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        raise KaceError(f"the spread multiplier {value!r} is not a number") from None
+    if out != out or out in (float("inf"), float("-inf")):
+        raise KaceError("the spread multiplier is not a finite number")
+    if out <= 0:
+        raise KaceError(f"the spread multiplier {out:g} is not positive; a width of zero or "
+                        f"less is not a two-way")
+    return out
+
+
 def tier_name(value) -> str:
     """A tier name as the tab's headings are read: lower case, underscores.
 
@@ -382,6 +428,13 @@ class Feed:
     #: widths themselves; carried here so the screen, the file name and the
     #: post log can all say which policy was posted.
     tier: str = DEFAULT_TIER
+    #: What the tier's widths were multiplied by on the way in.  The pillars
+    #: already hold the multiplied width -- this is here so the screen and the
+    #: log can say the widths are not the tab's.
+    multiplier: float = 1.0
+    #: Whether a day between two pillars takes a width read across between
+    #: them (``True``) or the sheet's step rule (``False``, the default).
+    interpolate: bool = False
     notes: list[str] = field(default_factory=list)
 
     @property
@@ -399,7 +452,9 @@ class Feed:
         days = sorted(self.daily)
         return {
             "pair": self.pair, "hor_date": self.hor_date.isoformat(), "cut": self.cut,
-            "source": self.source, "tier": self.tier, "days": len(days),
+            "source": self.source, "tier": self.tier,
+            "multiplier": self.multiplier, "interpolate": self.interpolate,
+            "days": len(days),
             "first_day": days[0].isoformat() if days else None,
             "last_day": days[-1].isoformat() if days else None,
             "nodes": self.node_count(),
@@ -421,7 +476,7 @@ class Feed:
         n = 0
         for day, vol in sorted(self.daily.items()):
             n += 1
-            half = spread_for(day, pillars) / 2.0
+            half = spread_for(day, pillars, interpolate=self.interpolate) / 2.0
             lines += _node(str(n), self.ccy, self.ctr, day, [
                 ("VolType", "ATM"), ("Volity", _bid_offer(vol - half, vol + half, day))])
         s = 0
@@ -456,16 +511,81 @@ def clear_message(pair: str, hor_date: date, username: str, password: str, *,
     return "\n".join(lines) + "\n"
 
 
-def spread_for(day: date, pillars: list[Pillar]) -> float:
-    """The sheet's rule: the last pillar expiring on or before the day, else the first."""
-    ordered = sorted(pillars, key=lambda p: p.expiry)
-    chosen = ordered[0].spread
-    for p in ordered:
-        if p.expiry <= day:
-            chosen = p.spread
-        else:
-            break
-    return chosen
+def read_ladder(points, x: float, *, interpolate: bool = False) -> float:
+    """One width off a ladder of ``(position, width)`` pairs, at ``x``.
+
+    The one place the rule lives, so the message and every other reader of a
+    spreading tier cannot answer the same question two ways.  ``points`` is
+    whatever the caller can measure a maturity along -- an ordinal date for
+    the daily series, a year fraction for a tenor ladder -- and the rule is
+    the same in both:
+
+    * stepped (the default): the last rung at or before ``x``, and the first
+      rung's width for anything before it.  That is the sheet's approximate
+      ``VLOOKUP`` and its ``ISERROR`` fallback, and it is what was posted.
+    * interpolated: read straight across between the two rungs ``x`` falls
+      between.  Outside the ladder there is nothing to read across to and the
+      nearest rung's width is taken, which is the answer the step rule gives
+      at both ends; a rung's own position is its own width under either rule.
+
+    ``points`` must be non-empty.  Order does not matter -- it is sorted here
+    -- and two rungs at one position resolve to the later one, because a
+    ladder cannot be read across a gap of nothing.
+    """
+    ordered = sorted(points)
+    if not ordered:
+        raise KaceError("a width cannot be read off an empty ladder")
+    if not interpolate:
+        chosen = ordered[0][1]
+        for at, width in ordered:
+            if at <= x:
+                chosen = width
+            else:
+                break
+        return chosen
+    if x <= ordered[0][0]:
+        return ordered[0][1]
+    for (lo_at, lo_w), (hi_at, hi_w) in zip(ordered, ordered[1:]):
+        if x <= hi_at:
+            span = hi_at - lo_at
+            if span <= 0:                      # two rungs at one position
+                return hi_w
+            return lo_w + (hi_w - lo_w) * ((x - lo_at) / span)
+    return ordered[-1][1]
+
+
+def spread_for(day: date, pillars: list[Pillar], *, interpolate: bool = False) -> float:
+    """The width posted on one day of the daily series, off the pillars.
+
+    ``read_ladder`` along the pillars' own expiry dates.  Whole days are the
+    right resolution here: a pillar expires on a date and the series has one
+    node per date, so there is nothing finer to interpolate over.
+    """
+    return read_ladder([(p.expiry.toordinal(), p.spread) for p in pillars],
+                       day.toordinal(), interpolate=interpolate)
+
+
+def width_at(widths: dict[str, float], years: float, *,
+             multiplier: float | str | None = None,
+             interpolate: bool = False) -> float | None:
+    """A spreading tier's width at an arbitrary maturity, in volatility points.
+
+    The tier is a ladder of tenors, so the position along it is the tenor's
+    year fraction (``pillar_years``) and the maturity asked for is a year
+    fraction too.  This is what a screen that is not the feed reads a tier
+    with: the market-maker panel's fallback width asks for 47 days and the
+    tab holds 1M and 2M, and the answer is the same rule the message uses
+    between two pillars -- stepped unless told otherwise.
+
+    ``None`` for an empty ladder, which is a tier that cannot answer rather
+    than a width of zero.  The multiplier is the feed's, validated the same
+    way, so a tier scaled on one screen means the same thing on the other.
+    """
+    if not widths:
+        return None
+    factor = spread_multiplier(multiplier)
+    points = [(pillar_years(t), w) for t, w in widths.items()]
+    return read_ladder(points, float(years), interpolate=interpolate) * factor
 
 
 def credentials(user: str | None = None, password: str | None = None) -> tuple[str, str]:
@@ -478,7 +598,8 @@ def credentials(user: str | None = None, password: str | None = None) -> tuple[s
 # from the book
 # ---------------------------------------------------------------------------
 def build(book, pair: str, spreads: SpreadTable, *, tier: str | None = None,
-          cut: str = "NY", source: str = "marks", method: str = "SVI") -> Feed:
+          cut: str = "NY", source: str = "marks", method: str = "SVI",
+          multiplier: float | str | None = None, interpolate: bool = False) -> Feed:
     """The feed for one pair at one spreading tier, off the book as it is marked now."""
     pair = pair.upper()
     if source not in SOURCES:
@@ -486,9 +607,16 @@ def build(book, pair: str, spreads: SpreadTable, *, tier: str | None = None,
     surface = book[pair]
     today = book.clock.now.date()
     chosen = spreads.resolve_tier(tier)
-    widths = spreads.for_tier(chosen)
+    factor = spread_multiplier(multiplier)
+    widths = {t: w * factor for t, w in spreads.for_tier(chosen).items()}
     marks = {canonical_tenor(m.tenor): m for m in surface.marks}
     notes: list[str] = []
+    if factor != 1.0:
+        notes.append(f"the ATM widths are the {chosen} tier's multiplied by {factor:g}; "
+                     f"the mid of every two-way is where it was")
+    if interpolate:
+        notes.append("a day between two pillars takes a width read across between them "
+                     "rather than the nearer pillar's")
 
     # The pillars are the spread table's tenors, in expiry order.  Each needs
     # a mark behind it, except O/N, which borrows the shortest quoted wings.
@@ -549,7 +677,8 @@ def build(book, pair: str, spreads: SpreadTable, *, tier: str | None = None,
                               rr25=wings[0], rr10=wings[1], fly25=wings[2], fly10=wings[3],
                               wings=origin))
     return Feed(pair=pair, hor_date=today, cut=cut.upper(), source=source,
-                daily=daily, pillars=pillars, tier=chosen, notes=notes)
+                daily=daily, pillars=pillars, tier=chosen, multiplier=factor,
+                interpolate=bool(interpolate), notes=notes)
 
 
 # ---------------------------------------------------------------------------
@@ -967,7 +1096,7 @@ class PostLog:
 def post_feed(xml_text: str, *, pair: str, scenario: str, clear: bool, hor_date: date,
               nodes: int, url: str, log: PostLog | None, when: datetime, opener=None,
               ca: str | None = None, insecure: bool = False, dry_run: bool = False,
-              tier: str = "") -> dict:
+              tier: str = "", multiplier: float = 1.0, interpolate: bool = False) -> dict:
     """Post one message and write the record; the record is the return value.
 
     A refused post is recorded too -- with what refused it -- because the
@@ -980,6 +1109,11 @@ def post_feed(xml_text: str, *, pair: str, scenario: str, clear: bool, hor_date:
              # Which spreading tier's widths went out.  A clear carries none,
              # and the log says so rather than naming a tier nothing used.
              "tier": tier or "",
+             # And what was done to them on the way out: the multiple the tier
+             # was scaled by, and whether the days between pillars were read
+             # across or stepped.  A tier alone no longer says what went.
+             "multiplier": float(multiplier or 1.0),
+             "interpolate": bool(interpolate),
              "nodes": nodes, "hash": message_hash(xml_text), "bytes": len(form_body(xml_text)),
              "url": url or ""}
     if dry_run:

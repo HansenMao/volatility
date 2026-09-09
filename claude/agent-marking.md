@@ -16,57 +16,72 @@ determine four parameters, whether to touch the wings when only the
 at-the-money was quoted -- and then whether to take what came out. That
 judgement is what this agent makes, and the last part of it is what it learns.
 
-Two ways in, like the quoting agent. `volkit mark propose|confer|learn|journal|
-record` on the command line, and a **card inside the market-maker tab**,
-beside the fit it plans. Both belong to the **mm** screen: the fit this agent
-runs is `marketmaker.fit_atm_curve` and `tune_smile_shifts`, the fit panel's
-own, so a build without that tab has nothing for it to plan, and the command
-belongs to it for the same reason. Excluding the market-maker tab takes both
-agents.
+Two ways in, like the quoting agent. `volkit mark propose|fit|confer|learn|
+journal|record` on the command line, and a **card inside the market-maker
+tab**. Both belong to the **mm** screen: the fit this agent runs is
+`marketmaker.fit_atm_curve` and `tune_smile_shifts`, so a build without that
+tab has nothing for it to plan, and the command belongs to it for the same
+reason. Excluding the market-maker tab takes both agents.
 
-## The card, and how the two agents are tied to the two buttons
+## The card owns every mark that moves
 
-The tab has two buttons because it has two jobs (§11), and each agent is
-wired to one of them:
+There used to be a **Fit** button on the market-maker toolbar that moved the
+curve and the wings, with this card beside it proposing the same thing more
+carefully. Two ways to re-mark one curve on one screen, and only one of them
+written into the journal -- so the desk's own fit moved onto this card, and the
+toolbar's remaining buttons (**Check Market**, **Quote**) read the curve and
+never touch it. One card, one journal, one place to look.
 
-- **The marking agent is on the fit.** `marking.MarkPanel` (`/api/mm/mark`)
-  reads the *fit panel's own fields* -- the paste, the target source and
-  text, the conventions -- through the same `marketmaker.panel_from_request`
-  the Fit button uses, and answers how it would run that fit and what came
-  out. It has no market of its own on purpose: a proposal about some other
-  fit is not an answer to the question on the screen. What it adds is the
-  marker's judgement -- `choose_knobs` lets it pick the free set (a rule from
-  the target count and what the quotes inform, a learned pin from the
-  journal), or it takes the panel's ticks as the caller's -- and the learned
-  nudge. Its answer carries `marks` in exactly the shape `Panel.run` hands
-  back, so **Accept** puts the proposal where a fit's answer goes: the
-  browser's one holder for the marks the quote stands on (`HELD`, filled by
-  the fit or by an accepted proposal, never both at once), and the quote
-  sheet's note names which. **Take the plan onto the fit** writes the plan
-  into the fit panel's knob boxes and runs Fit, so the desk can adjust and
-  press Fit again; **Record my fit as the edit** then journals the fit's marks
-  beside the proposal, which is the row §18 says is worth the most. The
-  verdict buttons vanish when the paste has moved on since the proposal,
-  for the same reason the quoting agent's columns do.
-- **The quoting agent is on the quote.** Its card compares widths and proposes
-  nothing, as before; the link is the **widths from the archive** switch on
-  the toolbar, which puts the archive on the quote panel's width ladder --
-  **bank, then archive, then the typed fallback, then no price**, the same
-  ladder and order as `agent.run` -- and every row names the rung. Off by
-  default: the archive is evidence about the market, and a desk that has not
-  yet convinced itself of it should not find it under its prices. The
-  evidence settings are the quoting agent card's own boxes (half-life, minimum
-  evidence, lookback) read by both, so the card and the quote never disagree
-  about what the archive holds. The archive's *level* rides on the row as a
-  flag and is applied to nothing (§17's rule). `volkit mm --archive-width`
-  is the same switch.
+The card runs two things, and they are the two halves of the same job:
+
+- **`marking.FitPanel` (`/api/mm/mark/fit`, "Fit my way") is the desk's own
+  fit.** It is the old market-maker `Panel` with the market table taken off it:
+  the same target curve (`marketmaker.curve_targets`), the same knob boxes, the
+  same mean-reversion range, the same `apply` that leaves the answer on the
+  loaded book. Where the surface then sits against the run is **Check
+  Market**'s question, not a fit's, which is why the table went and why the two
+  are separate buttons. `fit_panel_from_request` reads it, so the card and
+  `volkit mark fit` arrive at the same numbers.
+- **`marking.MarkPanel` (`/api/mm/mark`, "Propose") is the agent.** It reads
+  the same boxes -- the paste, the target source and text, the conventions, the
+  range -- through `marketmaker.curve_targets` directly (it used to borrow a
+  market-maker fit panel to get at `_targets`; that helper is module-level now
+  for exactly this reason), and answers how it would run that fit and what came
+  out. It has no market of its own on purpose: a proposal about some other fit
+  is not an answer to the question on the screen. What it adds is the marker's
+  judgement -- `choose_knobs` lets it pick the free set (a rule from the target
+  count and what the quotes inform, a learned pin from the journal), or it takes
+  the card's ticks as the caller's -- and the learned nudge.
+
+Its answer carries `marks` in exactly the shape `FitPanel.run` hands back, so
+**Accept** puts the proposal where the hand fit's answer goes: the browser's one
+holder for the marks the check and the quote stand on (`HELD`, filled by the
+hand fit or by an accepted proposal, never both at once, and tagged `hand` or
+`agent`), and both cards' notes name which. **Take the plan and fit** writes the
+plan into the knob boxes and runs `FitPanel`, so the desk can adjust and press
+*Fit my way* again; **Record my fit as the edit** then journals those marks
+beside the proposal, which is the row §18 says is worth the most -- and is the
+reason the hand fit had to move here rather than be deleted. The verdict buttons
+vanish when the paste has moved on since the proposal: a proposal is only a
+proposal about the paste it was computed from.
+- **The quoting agent is the quote.** There is one pricing engine,
+  `marketmaker.QuotePanel` (§11, §17): the archive is always on its width
+  ladder -- **bank, then archive, then the fallback tier, then no price** --
+  and every row names the rung, carries the agent's verdict on the bank's
+  width, the archive's level as a flag applied to nothing, the client's
+  record, and the trace that sums to the price. There is no switch: thin
+  evidence produces no number, so an archive that knows nothing costs nothing.
+  The evidence settings are the archive card's own boxes (half-life, minimum
+  evidence, lookback, tolerance) read by the quote, so the card and the sheet
+  never disagree about what the archive holds. `volkit agent quote` and
+  `volkit mm --request` are the same panel from a shell.
 - **`/api/mm/mark/record` is the only route on the card that writes**, and it
   writes to the journal. `accepted` records the proposal as the outcome,
   `rejected` records the start, `edited` needs the marks the desk ended on
   and refuses without them -- an edit recorded as the proposal would be the
   agent agreeing with itself. `apply` puts the recorded marks on the loaded
-  book, the fit panel's *keep the marks* decision made here, and it reads
-  that same checkbox. Answering the same proposal twice is one instance,
+  book -- the card's own *keep the marks*, which `FitPanel`'s `apply` reads
+  too, so one checkbox governs every mark this card can leave behind. Answering the same proposal twice is one instance,
   said rather than raised: the journal is content-addressed.
 - **Wing parameters are freed only where a quote reaches them.** The plan
   runs `marketmaker.informative_params` over the wing quotes before it counts
@@ -250,7 +265,7 @@ archive.
 
 **Where it is switched.** `serve --rules PATH`, `mark --rules PATH`,
 `mark --no-rules`, and the **rules of thumb** checkbox on the card (`use_rules`,
-posted with the panel and read by `panel_from_request`). `volkit mark rules
+posted with the card and read by `panel_from_request`). `volkit mark rules
 PAIR` prints the rules loaded, their weights and any contested flags, then each
 rule against the pair's real corrections; `--no-rules` on `mark learn` and
 `mark propose` prints the desk-only answer. The two side by side are how anyone
@@ -292,6 +307,19 @@ model between them could only paraphrase, and `llm.py`'s numeric guard cannot
 check a negotiation. What a model may do, at the very end, is describe the
 round that won.
 
+**It has a button (2026-09-09).** `MarkPanel.run` with the market box empty
+and `use_archive` on runs `_confer`: the archive is the market, `consult
+.confer` runs over `rounds` (a box on the card, `MKF` posts it), and the best
+round comes back in a paste-proposal's own shape -- `proposal`, `plan`,
+`marks`, `critique` -- plus a `conference` block (each round's verdict, what
+it fixed and broke, which was chosen) and `source: "archive"`; a paste is
+`source: "paste"`, a target curve alone `"targets"`. Nothing to confer over
+(no archive, or no level for the pair) falls back to the target-curve proposal
+with a note, so an empty market box never proposes nothing silently. The
+forwards for the archive's outright findings come from the findings' own
+expiries (`_forwards_for`), which the command line never passed; the shell's
+`mark confer` is otherwise the same call.
+
 A worked consequence worth knowing: with learned pins in force the fit has
 fewer free parameters, so its RMSE gets *worse* while matching what the desk
 actually does. The critique reports that numerically rather than hiding it,
@@ -305,16 +333,16 @@ minute, and under the book's lock that is a minute in which no screen answers
 (§17). The marking card needs both, and the order is binding:
 
 - **The archive is read first, on its own lock, and that lock is let go before
-  the book's is taken.** `Panel.archive_evidence` is the archive half --
+  the book's is taken.** `MarkPanel.archive_evidence` is the archive half --
   `synthesis.synthesize` and nothing else -- and what it returns is handed to
-  `Panel.run` as `archive_evidence`, which then touches no archive at all.
+  `MarkPanel.run` as `archive_evidence`, which then touches no archive at all.
   `webapp.mm_mark` borrows the clock under the book's lock, lets it go, reads
   the archive, and only then takes the book for the numeric work.
 - Held the other way round -- the book's lock outstanding while the archive's
   is waited for, which is what `mm_mark` used to do -- **a folder scan or a
   DTCC download froze the fit**. Those hold `_archive_lock` for minutes, with
   a language model behind the scan; the card queued behind them still holding
-  the book, and the Fit button beside it, which asks the archive nothing, sat
+  the book, and Check Market beside it, which asks the archive nothing, sat
   spinning until they were done. A test pins it: the book's lock is provably
   not held at the moment the archive's is taken.
 - The page cannot tell a queued run from a working one either, so it says:

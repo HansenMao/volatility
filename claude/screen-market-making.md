@@ -8,60 +8,83 @@ A fifth UI tab. The other screens answer "what is this worth"; this one answers
 "what do I show", which has three stages, kept apart because they fail for
 different reasons and the screen has to say which one broke.
 
-**Those three stages are two panels, two routes and two buttons.**
-`marketmaker.Panel` (`/api/mm/fit`) reads the market paste and does stages 1
-and 2; `marketmaker.QuotePanel` (`/api/mm/quote`) reads the **request box** and
-does stage 3. The fit puts a price on nothing and the quote fits nothing.
+**None of the three moves a mark.** It did not start that way. There was a
+**Fit** button on this tab that read the market paste and moved the
+at-the-money curve and the four smile parameters, and a **marking agent** card
+beside it that proposed the same thing more carefully and wrote the answer into
+a journal. Two ways to re-mark one curve on one screen, and only one of them
+learned from. So the fit moved: `marking.FitPanel` is the desk's own fit and
+`marking.MarkPanel` the agent's, both on that one card, and this module keeps
+the two things a desk does with a curve it is *not* changing.
 
-- A fit is a morning's decision, taken against a run that has just arrived; a
-  quote is answered in seconds, over and over, against whatever was fitted. A
-  request does not arrive with a market on it (§17 says the same thing about
-  the quoting agent), so tying the two together meant a request could only be
-  priced by re-running a fit against a market that had nothing to do with it,
-  and a market could not be fitted without also producing prices in
-  instruments nobody had asked for.
-- **They meet at `capture_marks`, and the browser carries it.** The fit hands
-  back the parameters it arrived at -- volatility knobs in points, like every
-  other number crossing this boundary -- and the quote posts them back and
-  puts them on the surface for the length of one call, under `applied_marks`,
+**Those three stages are three panels, three routes and three buttons.**
+`marketmaker.CheckPanel` (`/api/mm/check`, **Check Market**) reads the market
+paste and says where the marks sit against it; `marketmaker.QuotePanel`
+(`/api/mm/quote`, **Quote**) reads the **request box** and makes a two-way in
+each line; `marking.FitPanel` (`/api/mm/mark/fit`, **Fit my way** on the
+marking card) and `marking.MarkPanel` (`/api/mm/mark`, **Propose**) are the
+only things on the tab that move anything. The check puts a price on nothing,
+the quote fits nothing, and neither can dirty the book.
+
+- The two fitters themselves did **not** move. `fit_atm_curve`,
+  `tune_smile_shifts`, `curve_targets`, `capture_marks`, `apply_marks` and
+  `mark_fingerprint` are all still here, as model code, with `marking` as their
+  only caller. What went is the *panel* that ran them from this screen. The old
+  `Panel._targets` became module-level `curve_targets(surface, quotes, expiries,
+  source=, text=)` for exactly that reason: leaving it hanging off the check
+  panel would be a check carrying a fit's machinery around for somebody else to
+  borrow.
+- A check is answered against a run that has just arrived; a quote is answered
+  in seconds, over and over, against whatever is marked. A request does not
+  arrive with a market on it (§17 says the same thing about the quoting agent),
+  so tying the two boxes together meant a request could only be priced against
+  a market that had nothing to do with it.
+- **They meet the marking card at `capture_marks`, and the browser carries
+  it.** `FitPanel` (and `MarkPanel`, through `marks_from_snapshot`) hands back
+  the parameters it arrived at -- volatility knobs in points, like every other
+  number crossing this boundary -- and the check and the quote post them back
+  and put them on the surface for the length of one call, under `applied_marks`,
   which restores and *verifies* the restore the way `marking.marked` does. The
-  server holds no screen state (§4) and this does not change that: the marks
-  are panel state and the browser owns them. A quote given no marks prices the
-  surface as it stands, and `sheet.marks.note` says which of the two it was --
-  a price made on this morning's fit and one made on last night's marks must
-  never read the same. Marks naming another pair are refused: the browser
-  holds the fit and the pair selector apart and they can be moved apart.
-- **A held fit is only good for the book it was fitted on.** The other screen
-  between the two calls is the marking one, and the browser keeps the fit
-  across a trip to it. `applied_marks` then put the fit's backbone knobs and
+  server holds no screen state (§4) and this does not change that: the marks are
+  panel state and the browser owns them, in one holder (`HELD`) that also
+  records which of the two produced them. A panel given no marks reads the
+  surface as it stands, and both cards say which of the two it was -- a market
+  checked against this morning's proposal and one checked against last night's
+  marks must never read the same. Marks naming another pair are refused: the
+  browser holds them and the pair selector apart and they can be moved apart.
+- **Held marks are only good for the book they came from.** The other screen
+  between the calls is the marking one, and the browser keeps the marks across
+  a trip to it. `applied_marks` would then put the fit's backbone knobs and
   smile shifts back over whatever had been marked there -- silently, and only
   over *those two*, because they are all `capture_marks` holds. A curve
   re-marked and applied went back to the fit's; a pinned tenor, a re-quoted
   wing, a marked term structure and a band all went through. Half a screen
   agreed with itself, which is worse than none of it doing so.
 
-  `Panel.run` now stamps `mark_fingerprint(book, pair)` onto the marks it
-  hands back: one short hash per part of `session.capture_pair`, plus the
-  sheet's own quotes and wing ratios, which a session does not capture but a
-  reloaded workbook moves. `QuotePanel.run` recomputes it, and where it
-  differs the marks are **dropped** -- the quote prices off the book as it
-  stands, names which part moved in `marks.stale` and in a warning, and the
-  note on the sheet says which of the three it was.
+  `FitPanel.run` stamps `mark_fingerprint(book, pair)` onto the marks it hands
+  back: one short hash per part of `session.capture_pair`, plus the sheet's own
+  quotes and wing ratios, which a session does not capture but a reloaded
+  workbook moves. `CheckPanel.run` and `QuotePanel.run` recompute it, and where
+  it differs the marks are **dropped** -- the panel reads the book as it stands,
+  names which part moved in `marks.stale` and in a warning, and the note on the
+  card says which of the three it was.
 
   A photograph rather than a counter, deliberately: `capture_pair` is already
   what a re-marking instance is diffed from (§18), so a marking route written
   next year is covered on the day it is written and there is no bump for it to
-  forget. Marks carrying *no* stamp are quoted off as they always were -- a
-  payload from an older client is not a stale one, and refusing on a missing
-  field would have broken every saved panel the day it shipped. The stamp is
-  taken **after** the fit's restore-or-apply, so a fit that kept its marks is
-  not immediately out of date with the book it just wrote.
+  forget. Marks carrying *no* stamp are read as they always were -- a payload
+  from an older client is not a stale one, and refusing on a missing field would
+  have broken every saved panel the day it shipped. The stamp is taken **after**
+  the fit's restore-or-apply, so a fit that kept its marks is not immediately
+  out of date with the book it just wrote.
 - **The browser's half is one hook, in `post`.** `MARKING_ROUTES` names every
   POST route that can put a mark on the loaded book or replace it, and
-  `bookMoved()` flags the held fit, repaints the fit card with a banner over
-  it, and re-runs the **quote**. Not the fit: with `keep the marks` ticked a
-  fit writes its answer onto the book, and a refit firing on every keystroke
-  in the marking table would have the two screens marking each other. Hooked
+  `bookMoved()` flags the held marks stale and re-runs the **check** and the
+  **quote**. Never a fit: a fit moves a mark, `keep the marks` writes it, and a
+  refit firing on every keystroke in the marking table would have the two
+  screens marking each other. Both read-only stages then read the book, name
+  what moved and say so, which is why re-running them is safe and re-running a
+  fit is not. Hooked
   into `post` rather than added to each route because the routes that mark
   today are not the routes there will be -- and every marking route used to
   end with `schedulePrice()`, which is the *pricing* screen, so the
@@ -82,14 +105,14 @@ does stage 3. The fit puts a price on nothing and the quote fits nothing.
   matched on `quotes.instrument_key` -- what makes two lines the same quote --
   so "inside their market" survives the split. The paste is read here for that
   and nothing else: it is never fitted to on this route, and its own parse
-  notes are not repeated beside a price, because the fit that read it already
+  notes are not repeated beside a price, because the check that read it already
   reported them.
 - **The fair value is measured inside the marks**, not before them. It is the
   mark against realized volatility, and the mark being shaded is the one being
-  quoted; measured outside, a fit that moved the at-the-money half a point
-  would have its price shaded by the richness of the level it had just left.
-  This moves quote numbers against the single-panel version, and it is the
-  only thing that does.
+  quoted; measured outside, marks that moved the at-the-money half a point
+  would have their price shaded by the richness of the level they had just left.
+  This moved quote numbers against the single-panel version; the client's
+  record (below) is the only other thing that has since.
 
 - **The curve.** `fit_atm_curve` puts the backbone through a target term
   structure -- the tenors pinned on the marking screen, a pasted curve, or the
@@ -145,9 +168,22 @@ does stage 3. The fit puts a price on nothing and the quote fits nothing.
   than per tenor, because a handful of quotes does not determine a shape -- a
   shift that cannot reach a tenor says so in its residual instead of bending
   the surface to one quote.
-- **The quote.** Width from the knowledge bank, mid shaded by fair-value
-  richness and by the vega already on the book, both capped as a fraction of
-  the width.
+- **The quote.** **The one pricing engine** (§17): the Quote button, `volkit
+  mm --request` and `volkit agent quote` all arrive at `QuotePanel.run`. Width
+  from the knowledge bank, then the archive, then a **spreading tier** off the
+  workbook's `KACE_SPREADS` tab read at the row's own maturity, then no
+  price -- the row names the rung -- widened by what dealing with the named
+  client has cost; mid shaded by fair-value richness, by the vega already on
+  the book, by the printed tape when a weight says so, and by the client's
+  side, all capped together as a fraction of the width. Every row carries
+  `trace`: the ordered list of ingredients, each with its value, unit and
+  source, that sums to the bid and the offer. The CLI's explanation and the
+  local model's paragraph are generated from that list and never the other
+  way round. And every row carries the quoting agent's verdict on the width
+  the bank would show (`agent_verdict`, `_agent_verdict`), which used to be a
+  card of its own beside the sheet: `agrees` is the quiet case, and a gap has
+  to clear both `tolerance` (a fraction of the archived width) and
+  `AGENT_MIN_GAP` before it says `tight` or `wide`.
 
 Things that are decided once and must not be re-derived per row:
 
@@ -172,16 +208,39 @@ Things that are decided once and must not be re-derived per row:
   price *down*. Capped at a multiple of the half width so an axe can lean a
   price inside the market but never walk it out of one.
 - **The bank invents nothing.** There is no built-in default width. A quote no
-  rule matches gets no bid and no offer and says so; a visible panel fallback
-  is the only alternative, and the row reports which it was. `suggest_rules`
-  proposes a ladder measured from a pasted market, with the evidence attached,
-  and proposing and saving are two steps.
+  rule matches gets no bid and no offer and says so; a **fallback tier**
+  named on the bar is the only alternative, and the row reports which it was.
+  That tier is a column of the same `KACE_SPREADS` tab the feed posts from,
+  optionally multiplied and optionally read across between its tenors, so a
+  width shown to a client and a width posted to the platform cannot quietly
+  differ. A ladder is
+  *measured* into the bank by one function, `agent.learn_widths` -- the
+  archive's age-weighted widths, with the run on the screen counted unfiled
+  -- behind the bank card's **Learn widths** and `volkit agent learn`; the
+  paste-only `suggest_rules` / `learn_from_panel` / `volkit mm --learn` were
+  a second pipeline for the same width and are gone. Proposing and saving are
+  two steps.
 - **A `note` rule is prose, is shown, and is never applied.** A note that reads
   like an instruction the tool silently ignores is a silent zero with better
   grammar.
-- **Nothing touches the workbook.** `Panel.run` reports and then restores the
-  book exactly; `apply` leaves the marks on the loaded book, in memory only,
-  and says so.
+- **The check.** `CheckPanel` turns each line of the paste into the one number
+  the surface says at that instrument and compares it with the two-way the line
+  quoted. Outside is `through`, with the gap in volatility points **and in units
+  of the market's own width** -- the second is the number that says whether
+  being outside matters. Inside but within `NEAR_EDGE` (a quarter of the width
+  from the nearer side, a control on the bar) is `edge`, because that is one
+  market move from being outside. Anything else is `in line`. A line the surface
+  cannot be read at is `not checked`: a message, never a pass. A **choice price**
+  has no inside and is never called near an edge -- warning about a market that
+  quoted no width to be near the edge of is how a screen teaches a desk to stop
+  reading its alerts. The severities are graded on the server and the screen
+  colours the cell from them, so the amber band and the count in the header can
+  never disagree.
+- **Nothing touches the workbook, and only one route touches the book.**
+  `CheckPanel.run` and `QuotePanel.run` report and then restore it exactly.
+  `FitPanel.run`'s `apply` -- the marking card's *keep the marks* -- leaves the
+  marks on the loaded book, in memory only, and says so; so does
+  `mm_mark_record` with `apply`. Those two are the whole list.
 
 The paste (`quotes.py`) follows §8's discipline: the volatility unit is decided
 once from the whole run's level quotes and refused when they straddle 1.0; a
@@ -213,8 +272,8 @@ line came first.
   smile butterfly at one delta are deliberately two instruments.
 - **A superseded quote is kept, not dropped** (`ParsedRun.superseded`), and it
   is still **width evidence**: one tenor quoted twice is one live price and two
-  observations of how wide it is shown, so `learn_from_panel` reads
-  `all_quotes` and the fit reads `quotes`. A line read, understood and then
+  observations of how wide it is shown, so `archive.from_quotes` (and so
+  `agent.learn_widths`) reads `all_quotes` and the fit reads `quotes`. A line read, understood and then
   silently discarded is a silent zero with better manners.
 - A **column header** is recognised (no digits, two or more header words) and
   reported as passed over rather than as a line that could not be read: a

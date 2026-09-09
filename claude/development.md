@@ -23,10 +23,10 @@ python -m volkit analysis USDJPY --history files/history_sample.xlsx --sabr \
 python -m volkit analysis EURJPY --history files/history_sample.xlsx --horizon 7 \
     --relative-value --weight carry=0.4   # score the whole expiry / strike grid
 python -m volkit mm EURUSD --target-source quotes < run.txt   # the fit, on its own
-python -m volkit mm EURUSD --file run.txt --request ask.txt --fallback-spread 0.3
+python -m volkit mm EURUSD --file run.txt --request ask.txt --fallback-tier default
 python -m volkit mm EURUSD --request ask.txt --target-source none   # the quote, on its own
-python -m volkit mm EURUSD --learn < run.txt          # propose widths, --save writes them
-python -m volkit mm EURUSD --request ask.txt --archive-width   # the archive on the width ladder
+python -m volkit agent learn EURUSD --file run.txt   # propose widths from the archive, the run counted
+python -m volkit mm EURUSD --request ask.txt --client "Fund A"  # the Quote button, from a shell
 python -m volkit mark propose EURUSD --file run.txt --out p.json   # the marking-agent card's path
 python -m volkit mark rules EURUSD                    # the rules of thumb, each against the desk
 python -m volkit mark learn EURUSD --no-rules         # the desk-only answer, beside the one above
@@ -64,9 +64,13 @@ python -m volkit --session marks.json vol USDJPY 2024-05-28   # price against th
     emits — the panel shell and the painter that fills it are separate
     functions, and nothing else would catch a rename between them;
   - every field the listed panel sends is one `panel_from_request` reads;
-  - every field the market-maker panel sends is one `marketmaker
-    .panel_from_request` reads, and the same for the curve-comparison panel
-    (`curves.panel_from_request`) and the band card
+  - every field each market-maker panel sends is one its **own** reader takes —
+    `MCF` against `marketmaker.check_panel_from_request`, `MQF` against
+    `.quote_panel_from_request`, `MFF` against `marking.fit_panel_from_request`
+    and `MKF` against `marking.panel_from_request`. Four lists and four readers
+    because the tab is four buttons: a field the check sends and only the quote
+    reads would sit on the check's own toolbar doing nothing. Same guard for the
+    curve-comparison panel (`curves.panel_from_request`) and the band card
     (`banded.BandTreatment.from_request`);
   - the markup balances and the five panel roots are **siblings**. A missing
     `</div>` once nested one panel inside another, which browsers repair

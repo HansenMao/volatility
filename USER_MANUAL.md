@@ -474,6 +474,27 @@ move the screen.
   less than it looks like it should — that is the anchor doing what it says,
   not the mark being ignored.
 
+  **Contours** opens a panel over the screen with the same four parameters as
+  two **contour maps** — one for `rho`, one for `slog`. Across is expiry,
+  evenly spaced in √t and ticked at the pair's own quoted tenors; up is the
+  wing the parameter was calibrated from, 10 delta at the bottom and 25 at the
+  top. Every column is the surface at that expiry, so a marked term structure,
+  an overwrite, a shift and the anchor are all in the picture — the map cannot
+  show a curve the surface is not on. Hovering reads a value out; Escape or
+  **Close** shuts it.
+
+  It answers the question the grid does not: not *what is rho at 3M* but *what
+  shape is rho in* — where it turns over, whether the 10-delta and 25-delta
+  calibrations move together or drift apart with expiry, and whether the volvol
+  has stopped falling by the back end. One caution, printed on the panel: a
+  parameter is calibrated at **10 delta and at 25 delta and nowhere in
+  between**, so the band between the two rows is a straight line drawn between
+  two calibrations, not a model read. There is no such thing as rho at 17
+  delta. The colour follows the numbers: a parameter that changes sign is drawn
+  diverging about **zero**, one that does not is drawn in one hue over its own
+  range — in the hue of the sign it is on — and the legend says which, so a map
+  showing one colour is never mistaken for a scale that was cut.
+
   Both travel in the session file, and into the workbook on **Write to
   workbook** as `slog25 3m` and `term rho10 decay` rows.
 * **Implied vs quoted** — risk reversals and butterflies read back off the
@@ -730,13 +751,28 @@ the chart and the tables appear on the right.
 | K col / Vol col | 1-based column numbers, if the headers are not recognised |
 
 **The paste** takes tabs, commas or spaces, with or without a header row, and a
-bid/ask pair as well as a mid. Volatilities are read **as written, in points** —
+bid/ask pair as well as (or beside) a mid. Volatilities are read **as written, in points** —
 a table sitting below 1.0 is a managed pair, not a table of decimals — unless
 **Vol unit** says decimal. Underneath the tables
 you get a line for every choice the parser made and a line for every row it
 threw away, with the reason. If a strike appears twice — the exchange lists a
 call and a put at each — the out-of-the-money one is kept, because the
 in-the-money one has little time value and its implied vol is noise.
+
+**Bid and offer.** Where the paste has `bid` and `ask` (or `offer`) columns,
+both are kept beside the mid, not just averaged into it — including when the
+table also has a settlement or mid column of its own, in which case the mid is
+still what the curve is fitted to. Tick **bid/offer** in the bar at the top and
+every panel draws the two as lines on its chart, opens a *Bid %* and an
+*Offer %* column in the quotes table, and paints in red every strike where the
+**marked FX surface reads outside the listed two-way** — your mark through the
+exchange's market, which is the question a mid cannot answer. The count is on
+the panel's own line (`9 two-way, mark outside at 1`) whether or not the lines
+are drawn, and a breached strike is flagged on its own row either way. A
+crossed or non-positive two-way is not a market: it is dropped and counted, and
+the row survives on its own mid where it has one. Setting **Vol col** by hand
+turns the two-way off, because that says which single column to believe.
+`volkit listed` prints the same columns and flags the same rows.
 
 **What you get**
 
@@ -1252,10 +1288,11 @@ reminds you; it cannot check it for you.
 
 The other tabs tell you what something is worth. This one tells you what to
 show. It runs in three stages and each reports separately, so one that cannot
-run leaves the others alone — and behind **two buttons**, because fitting and
-quoting are two different jobs.
+run leaves the others alone — and **only one of the three moves a mark**.
 
-**Fit** reads the market box, moves the curve and the wings to it, and prices
+**Check Market** reads the market box and tells you where you are marked
+against it: through their bid, through their offer, near a side, or in line,
+with the distance in vol points and in units of their own width. It changes
 nothing. **Quote** reads the box below it, where you write what you are being
 *asked* for, and makes a two-way in each line — and fits nothing, so it comes
 back instantly and you can press it as often as the phone rings. A request does
@@ -1263,12 +1300,31 @@ not arrive with a broker run attached to it, which is why the two are separate:
 you should not have to re-fit to a market that has nothing to do with the price
 you are being asked to make.
 
-**Which marks the price stands on.** With **quote on the fit** ticked, the
-parameters the last fit arrived at go with the request and are used for that
-one price. Untick it, or fit nothing at all, and the price stands on the marks
-as they are. The line above the quote sheet says which of the two it was, every
-time. Either way nothing is left on the book — that is **keep the marks**, on
-the fit, and it is a separate decision.
+**Re-marking happens on the Marking agent card, and nowhere else on this tab.**
+There used to be a *Fit* button next to those two that moved the curve and the
+wings. It has gone: that is what the marking agent card already did, more
+carefully and writing every answer into a journal, and having both meant two
+ways to re-mark one curve with only one of them recorded. The card now runs
+both halves — **Propose** for the agent's answer and **Fit my way** for your
+own, on the same knobs, from the same boxes.
+
+**Which marks the two read.** With **stand on the agent's marks** ticked, the
+parameters that card last arrived at — an accepted proposal or your own fit —
+go with the request and are used for that one call. Untick it, or run nothing
+on the card, and both read the marks as they are. Each card says which of the
+two it was, every time. Either way nothing is left on the book — that is **keep
+the marks**, on the marking card, and it is a separate decision.
+
+**What Check Market flags.** A mark outside the quoted two-way is an alert, with
+how far outside it is both in vol points and as a fraction of the market's own
+width — the second number is the one that says whether it matters. A mark inside
+but within **Edge tol** of a side is an amber warning, because that is one market
+move from being outside; the box is a fraction of the width and starts at a
+quarter, and zero leaves only what is actually through. A choice price has no
+inside, so it is never called *near* an edge. A line the surface cannot be read
+at comes back **not checked** — that is a message, not a pass. The count in the
+card's heading and the colour on each row are graded the same way, so they cannot
+disagree.
 
 **Paste the market** into the left-hand box, one quote a line, in the shorthand
 it arrives in:
@@ -1402,16 +1458,16 @@ the later line wins, because that is the only ordering an untimed line carries.
 
 The quote that lost is not thrown away. It is listed under the paste with the
 line that beat it, so a mistyped update shows up as a quote that went missing
-rather than as nothing at all. It also still counts when **Learn widths from
-this paste** measures the market: one tenor quoted twice is one live price and
-two observations of how wide that broker shows it.
+rather than as nothing at all. It also still counts when **Learn widths**
+measures the market: one tenor quoted twice is one live price and two
+observations of how wide that broker shows it.
 
 A time-only line takes the last date written above it. A run with no date
 anywhere is ordered as a single day and says so — that ordering is wrong across
 midnight, and it would rather tell you than quietly get it backwards.
 
-**Stage 1 — the at-the-money curve** is fitted to a target term structure. Pick
-where the target comes from:
+**Stage 1 — the at-the-money curve** is fitted to a target term structure, on
+the **Marking agent** card. Pick where the target comes from, on that card:
 
 | Target ATM curve | What it uses |
 |---|---|
@@ -1421,13 +1477,13 @@ where the target comes from:
 | `current` | the curve as it stands — a check on the fit itself, which should change nothing |
 | `none` | leave the level alone |
 
-Tick the parameters the fit may move under **What the fit may move**. Anything
-unticked is left exactly where it is. A curve cannot be fitted with more free
+Tick the parameters the fit may move under **At-the-money curve may move**, on
+the same card. Anything unticked is left exactly where it is. A curve cannot be fitted with more free
 parameters than the target has points, and it will say so rather than produce
 an arbitrary answer. For a **cross** the level comes from its legs, so what is
 fitted is the correlation term structure — the tick boxes change to match.
 
-**Stage 2 — the wings.** The four smile parameters are moved until the quoted
+**Stage 2 — the wings**, also on that card. The four smile parameters are moved until the quoted
 risk reversals, butterflies and outrights sit inside their markets. There is
 **no penalty anywhere inside a bid and offer** — the point is that your mid
 falls inside the market, not on top of somebody's mid — and the distance to the
@@ -1440,19 +1496,26 @@ Only parameters the paste can actually inform are moved: a 25-delta quote reads
 the 25-delta anchor, and freeing the 10-delta pair as well would not inform
 them. The panel says which it left alone and why.
 
-Stages 1 and 2 are the **Fit** button, and what it produces is the *market
-against the surface* table on the right: their bid and offer, where the model
-was, where it is now, and how far it moved. There is no price in it. Whether
-the fit reached the market is the fit's own question.
+Stages 1 and 2 are the marking card's **Propose** and **Fit my way**, and what
+they produce fills the **At-the-money curve** and **Wings** cards under it.
 
-**Now** is coloured by where the mark sits in that line's own two-way: left
-alone through the middle of it, amber in the outer quarter, and in the alert
-colour when the mark is **above their offer or below their bid** — the thing
-to see first on a sheet of twenty quotes. Hover the number and it says how
-far, in volatility points and in widths of their market.
+**Check Market** is separate, and it is the *market against the curve* table:
+their bid and offer, where you are marked, and — where that is outside their
+market — the gap and how many of their own widths it is. There is no price in
+it, and it moves nothing. Which curve it read is written above the table: the
+marks as they stand, or the ones the marking card is holding.
+
+**Marked** is coloured by where the mark sits in that line's own two-way: left
+alone comfortably inside it, amber within **Edge tol** of a side, and in the
+alert colour when the mark is **above their offer or below their bid** — the
+thing to see first on a sheet of twenty quotes. Hover the number and it says how
+far, in volatility points and in widths of their market, and how far in from the
+nearer side it is when it is inside. Under the table, everything that is off is
+listed again in one line, so you do not have to read twenty rows to find the two
+that matter.
 
 The table reads **one line per quote**. Anything a line has to say — a
-warning, where its width came from, what the agent suggested — sits under it
+warning, where its width came from, the agent's verdict, the client's record — sits under it
 and appears when you **hover** the line; click the line to pin it open, and
 click again to close it. A line with something to say is marked with an
 ellipsis after its name, so nothing is hidden that was not announced.
@@ -1479,23 +1542,47 @@ asked **live** — `3M 1.0900 put live in pips`, `... prem in %` — is answered
 a **premium** two-way off the feed's forward, with the volatility two-way it
 came from in small type beneath it.
 
-Press **Quote**, and for every line:
+Name the **Client** the price is for on the bar if you know who is asking —
+their record on each instrument is part of the price (below). Then press
+**Quote**, and for every line:
 
 | Column | What it is |
 |---|---|
 | Model | the surface's own mid, on whichever marks the price is standing on |
-| Fair / Axe / Flow / Bank | the four things shading the mid, each separately |
+| Fair / Axe / Flow / Client / Bank | the five things shading the mid, each separately |
 | Skew | their total, capped; a `*` means the cap bound |
-| Our bid / ask | the mid plus the shading, with the bank's width round it |
-| Width | the width, and underneath, the rule that set it |
+| Our bid / ask | the mid plus the shading, with the width round it |
+| Width | the width; hover for the rule, the archive evidence or the fallback tier that set it, and a small `+` is what the client's record added |
+| Archive | the width the archive has seen this instrument shown at, when it holds enough |
+| Agent | the quoting agent's verdict on the width the bank would show — see §5a |
 | Their market | what the market box quoted for this same instrument, if it did |
 | Verdict | quoted; or, when the market box has it too, in line, our mid above or below theirs, or through their price |
+| Outcome | *not recorded* until you press **Record as shown**; then five buttons, and then what you answered |
+
+Every line carries **how this price was made** under it (hover, or click to
+pin): the ordered list of ingredients — the mark, the width and where it came
+from, each shading, the client's record — that sums to the bid and the offer.
+That list is the explanation; nothing about a price is said anywhere that is
+not on it.
+
+**Record as shown**, under the sheet, files every priced row into the archive
+as a price shown to the client on the bar, with the mid the model had at that
+moment. The Outcome column then offers **hit bid**, **lifted**, **passed**,
+**away** (type the level it went at, beside the button) and **pulled**; press
+one when you know, and that is where a client's record comes from. The
+buttons speak the row's own convention — *lifted* on a `JPY call over` row
+means they bought what that row showed — and the file keeps the book's, so a
+client's record on the risk reversal is one record however each request was
+worded.
 
 ### The printed tape
 
-Under the quote sheet is a card reading the **dissemination files** you have
-fetched — what actually traded in this pair, out of the public record every
-CFTC-reportable FX option print lands in.
+The **dissemination files** you have fetched — what actually traded in this
+pair, out of the public record every CFTC-reportable FX option print lands in
+— are read by the quote and shown on the archive card, under the widths.
+There used to be a card of their own; the tape is one more thing the archive
+holds, so it lives with the rest of what the archive holds, and it reaches
+the price the way everything else the archive says does.
 
 The file publishes **what printed and never who bought.** There is no buyer,
 no seller and no aggressor flag in it, by design. So the side of a trade is
@@ -1503,7 +1590,8 @@ not read, it is *inferred*: each print is turned into the volatility it
 implies — against the forward of its own date, taken from your historical
 workbook when it covers the pair and from the outrights printed in the same
 file when it does not — and then read as **paid** above your mark and
-**given** below it. Anything within the tolerance of your mark is counted as
+**given** below it. Anything within **Flow tol** of your mark (a fraction of
+the mark; half the archived width where the archive knows one) is counted as
 *unclear* rather than pushed to a side, because every market has a mid
 somebody disagrees with.
 
@@ -1521,22 +1609,30 @@ net of a bucket is what a lean would stand on.
 | Lean | that net over the flow scale, clamped to one — what the quote would use |
 | Newest | how long ago the most recent print in that bucket was |
 
-Hovering a print says what it was judged against and where its forward came
-from. Trades whose size was published as the dissemination cap are counted in
-what printed and left out of the vega, since the cap hides the size; so are
-prints the file gives no side or no premium for, and the card says how many of
-each.
+Open *the last prints this build could read* under the table to see each one
+with the mark it was judged against and where its forward came from. Trades
+whose size was published as the dissemination cap are counted in what printed
+and left out of the vega, since the cap hides the size; so are prints the
+file gives no side or no premium for, and the card says how many of each.
+The tape's age weight and window are the archive card's **Half-life** and
+**Lookback** — one clock for everything the archive says, so the tape and the
+widths on one sheet never disagree about what *recent* means.
 
 **Nothing here moves a price until you set `Flow wt` above zero.** With a
-weight, the tape becomes a fourth lean beside the fair value, the axe and the
-bank, on the **level** only — a risk reversal is a statement about shape, and
-what the tape paid for says nothing about where the skew belongs — and capped
-with the others so it can lean the price inside the market and never walk it
-out of one. **Paid means marked up**: customers paying means dealers are
-getting shorter and the next caller is more likely another buyer, which is the
-opposite direction to a long vega position. Set a negative weight to fade it
-instead. `Flow scale` is the net vega that counts as a full lean; calibrate it
-against the net vega column on the card itself.
+weight, the tape becomes a lean beside the fair value, the axe, the client
+and the bank — the **Flow** column on the quote sheet — on the **level** only
+— a risk reversal is a statement about shape, and what the tape paid for says
+nothing about where the skew belongs — and capped with the others so it can
+lean the price inside the market and never walk it out of one. **Paid means
+marked up**: customers paying means dealers are getting shorter and the next
+caller is more likely another buyer, which is the opposite direction to a long
+vega position. Set a negative weight to fade it instead. `Flow scale` is the
+net vega that counts as a full lean; calibrate it against the net vega column
+on the archive card.
+
+Ask the record the same thing in words — *who has been paying in the 1M*,
+*which side has the tape printed on this week* — and it answers per bucket,
+naming the mark each print was judged against.
 
 **If the market box quoted the same instrument, it appears beside our price**
 and the verdict compares the two, so *inside their market* still works. If it
@@ -1581,14 +1677,34 @@ wins in size. Each quoted row names the rule that priced it and lists the ones
 that matched but lost.
 
 **There is no default width.** A quote no rule matches gets no bid and no offer
-and says so. Type a **fallback width** at the top if you want one anyway; the
-row will say it came from the fallback rather than from a rule.
+and says so. Choose a **fallback tier** on the bar if you want one anyway; the
+row will say it came from the tier rather than from a rule.
 
-**Learn widths from this paste** proposes a ladder measured from the widths the
-market actually showed — the median of what was on the screen, bucketed by
-tenor, with the count and the range in its note. Quotes written as a single mid
-have no width and are left out. It only *proposes*: look at them, edit them,
-then **Save bank**.
+**The fallback is a ladder, not a number.** The tier list is the columns of the
+workbook's `KACE_SPREADS` tab — the same ladder the kACE feed posts from — and
+the width a quote falls back on is that tier's width **at the quote's own
+maturity**. A tenor the tab names (`1W`, `1M`, `3M`) reads its own row exactly;
+anything in between takes the nearer tenor's width, or, with **Between
+tenors** set to *interpolated*, a width read straight across between the two it
+falls between. **Tier ×** multiplies the whole ladder — the mid does not move,
+only the width. This replaced a single **fallback width** box, which was one
+number for every tenor on the screen: a one-week and a one-year two-way are not
+the same width, so that box was either far too wide at the front or far too
+tight at the back, and now it is the ladder the desk already maintains. Leaving
+the tier on *(none)* is the default and means what it always meant — no price
+rather than an invented one. Because it is the feed's own tab, a width shown to
+a client and a width posted to the platform cannot quietly differ; tiers are
+edited in the **Config** window.
+
+**Learn widths** proposes a ladder measured from the widths the market has
+actually been shown at — the archive's own two-ways, age-weighted, bucketed by
+tenor, with the count, the sources and the range in each rule's note, and the
+run pasted in the market box counted as if it were filed (it is not filed by
+this; *File this run* on the archive card is). It is the same thing `volkit
+agent learn` does, and it is the one way a width is measured into the bank.
+Quotes written as a single mid have no width and set none, and a bucket with
+less than **Min evidence** behind it proposes nothing. It only *proposes*: look
+at them, edit them, then **Save bank**.
 
 ---
 
@@ -1632,7 +1748,7 @@ Three things to know:
   a tab with no rows cannot be posted, and a tenor listed with no marks behind
   it in the workbook is refused by name. A day between two pillars takes the
   earlier pillar's width; a day before the O/N expiry takes O/N's — the
-  sheet's rule.
+  sheet's rule, and still what is posted unless you tick **interpolate**.
 * **The tier is a dropdown on the tab, not a property of the pair.** Pick one
   beside **wings**; it widens or tightens every pillar and changes nothing
   else — same pillars, same wings, same node count. A cell a tier leaves blank
@@ -1642,6 +1758,29 @@ Three things to know:
   and `--kace-tier` does the same for `volkit kace`. Tiers are added, renamed
   and removed on the `KACE_SPREADS` table in the **Config** window, like any
   other configuration tab. The post log records which tier went out.
+* **The `×` box widens the whole tier at once.** Type a multiple beside the
+  tier and press Enter: every one of that tier's widths is multiplied by it on
+  the way out. `1` is the tab's own ladder. `1.5` posts everything half again
+  as wide without your having to type a second column on the tab, and `0.5`
+  halves it. It moves the **width only** — the mid of every two-way is exactly
+  where the marks put it — and it applies to the days between the pillars as
+  well as to the pillars, so the table on the screen, the XML on the clipboard
+  and the line in the post log all say the same thing. Anything that is not a
+  positive number is refused and the box is put back. `--spread-multiplier`
+  does the same for `volkit kace`.
+* **`interpolate` reads the days between pillars across instead of stepping
+  them.** Off — the default — a day takes the last pillar's width, which is
+  what the spreadsheet did: the two-way holds flat between pillars and jumps
+  on each expiry. On, a day between two pillars takes a width read straight
+  across between theirs by date, so the width widens or tightens smoothly
+  through the year. The pillars themselves are untouched either way, and a day
+  outside the ladder still takes the nearest pillar's. `--interpolate-spreads`
+  does the same on the command line.
+
+  Both are the morning's choice, like the tier and the scenario: the browser
+  remembers them, and both go into the post log, so the history column under
+  the table reads **Widths** — `default spreads ×1.5, interpolated` — rather
+  than a tier name that no longer says what went out.
 * **The header needs the feed username and password.** Put `kace-user =` and
   `kace-password =` lines in `volkit.cfg` (or set `VOLKIT_KACE_USER` and
   `VOLKIT_KACE_PASSWORD` in the environment). Without them the tab still shows
@@ -1674,8 +1813,9 @@ anything else — a login page, an error element, an HTTP failure — is shown
 in red with the first line of what came back, and nothing is assumed.
 
 Every post, taken or refused, is one line in `kace_posts.jsonl` beside the
-workbook: when, pair, scenario, feed or clear, node count, a hash of the
-message, and the outcome. The last ten show under the table, so *did we
+workbook: when, pair, scenario, the widths (tier, multiplier, and whether the
+days between pillars were interpolated), feed or clear, node count, a hash of
+the message, and the outcome. The last ten show under the table, so *did we
 send kACE this morning* has an answer.
 
 If the server's certificate is not one the desk machine trusts (an internal
@@ -2183,7 +2323,8 @@ volkit agent watch --chats chats/ --every 30
                                           ... and keep reading them while you work
 volkit agent evidence EURUSD              how wide this pair has been shown, and where
 volkit agent learn EURUSD --save          turn that into knowledge-bank widths
-volkit agent quote EURUSD --record        make a two-way and keep a record of it
+volkit agent quote EURUSD --client "Fund A" --record
+                                          make a two-way for a client and keep a record of it
 volkit agent outcome EURUSD --ref ID --result traded_ask
                                           say what happened to a price you showed
 volkit agent ask EURUSD "how wide has the 3M fly been shown this month"
@@ -2194,16 +2335,19 @@ volkit session marks.json --load          put a saved file back
 volkit session marks.json --show          print what a saved file holds
 volkit band USDHKD --feed market_feed.csv --hazard 3
                                           the managed-band read-out for a pegged pair
-volkit mm EURUSD --target-source quotes < run.txt
-                                          fit the curve and the wings, and report
-volkit mm EURUSD --file run.txt --request ask.txt --fallback-spread 0.3
-                                          fit, then quote what is asked for off it
-volkit mm EURUSD --request ask.txt --target-source none --fallback-spread 0.3
-                                          quote off the marks as they stand, no fit
-volkit mm EURUSD --request ask.txt --target-source none --vega position.txt \
+volkit mm EURUSD < run.txt                check the run against the curve, and report
+volkit mm EURUSD --file run.txt --tolerance 0
+                                          the same, warning only about what is through
+volkit mm EURUSD --request ask.txt --fallback-tier default
+                                          quote off the marks as they stand
+volkit mm EURUSD --request ask.txt --vega position.txt \
     --axe-scale 500 --history vol_history.xlsx
                                           the same, with both leans on
-volkit mm EURUSD --learn < run.txt        propose bank widths from the paste; --save writes them
+volkit mark fit EURUSD --file run.txt --out-marks m.json
+                                          the hand fit -- the only thing here that moves a mark
+volkit mm EURUSD --file run.txt --request ask.txt --marks m.json
+                                          check and quote off what that fit arrived at
+volkit agent learn EURUSD --file run.txt  propose bank widths from the archive, the paste counted; --save writes them
 ```
 
 Add `--asof "2026-08-23 12:00"` to price against a fixed valuation time.
@@ -2231,40 +2375,80 @@ volkit serve --session marks.json
 
 ## 5a. The quoting agent
 
-The agent is in two places: a **card inside the Market maker tab**, and a
-command. The card answers one question about the market you have pasted --
-*is the width I am about to show the width this thing actually trades at* --
-and the command does everything else, including making a price when nobody
-has shown you anything at all.
+The agent lives inside the Market maker tab and its answer is the **Quote**
+button's. There is one pricing engine in the tool: the button, `volkit mm
+--request` and `volkit agent quote` all go through it, so a price made on the
+screen and a price made in a shell are the same price. What the agent adds to
+the quote is everything the **archive** — the file of what the market has
+shown, what printed, what you showed and what became of it — makes possible:
 
-### The card in the Market maker tab
+- **the width** the archive has seen this instrument shown at, as the second
+  rung of the width ladder: a bank rule if one matches, else the archive when
+  it holds enough, else the fallback tier named on the bar read at that row's
+  own maturity, else no price — and every row says which rung it stood on;
+- **a verdict** on the width the bank would show, in the **Agent** column;
+- **the market's recent level**, as a check on your mark and never as the
+  mark — it flags, and moves nothing;
+- **the client's record** on that instrument, which does move the price.
 
-It sits under the quote sheet, and it runs only when you press **Suggest** --
-it never moves on its own, and it fits nothing, so it answers in a moment
-without touching your curve, your wings or your marks.
-
-What it gives you, per quoted row: what the market showed, what you would
-show, and what the archive says this has actually been shown at recently --
-with two extra columns on the quote sheet itself so each suggestion sits
-beside the quote it is about. The verdict on each row is one of:
+### The Agent column
 
 | verdict | what it means |
 |---|---|
 | agrees | your width and the market's are the same thing |
-| tight | you would show tighter than this has been shown |
-| wide | you would show wider |
-| no rule | nothing in the bank matches, and here is what the archive supports |
+| tight | the bank would show tighter than this has been shown |
+| wide | the bank would show wider |
+| no rule | nothing in the bank matches, so the archive's width is the one being shown |
 | thin | not enough in the archive to have an opinion |
 
-**Nothing moves.** A row marked `tight` still quotes at your bank's width; the
-card is telling you a rule is out of date, and the rule changes in the
-Knowledge bank card below it, by you. The two extra quote-sheet columns
-disappear the moment you edit the paste, because a suggestion computed from an
-older market has no business sitting beside a newer quote.
+A `tight` row is still quoted at the bank's width: the verdict is telling you
+a rule is out of date, and the rule changes in the Knowledge bank card, by
+you (**Learn widths** writes the archive's width in). The threshold is
+**Tolerance** on the archive card, as a fraction of the archived width, with a
+floor of 0.02 so a narrow butterfly is not flagged over four thousandths.
 
-Three buttons:
+### The client
 
-- **Suggest** -- run it against what is pasted above.
+Put the client's name in the **Client** box on the bar and press Quote. Their
+record on each instrument you are quoting — built from the prices you
+recorded as shown to them and the outcomes you answered — does two things,
+both counted, both capped, both named on the row and in *how this price was
+made*:
+
+- **Their side leans the mid.** A client who has only ever lifted your offer
+  on the 1M at-the-money is a buyer of it, and a buyer coming is a reason to
+  mark up: the mid moves by **Client wt** times their side (from −1, only
+  ever hits, to +1, only ever lifts, age-weighted) times the half width. Half
+  a weight and a pure buyer is a quarter of the width. It counts toward the
+  **Skew cap** with the other leans, so nothing walks the price out of the
+  market.
+- **The move against you widens the price.** When the market has quoted the
+  instrument again in the days after they dealt, the record measures how far
+  it went their way — above your offer after they lifted it, below your bid
+  after they hit it. That is what dealing with this client has cost, and
+  **Client wt** times that average is added to the width, up to one whole
+  width and no more. Beyond that the answer is a pass, which is yours to make.
+
+Both need **Client min** answered prices on the instrument (four by default)
+before they count; below that the record is on the row and moves nothing. The
+record is matched on the instrument, at this tenor first and across every
+tenor second, and never across instruments: a buyer of the at-the-money says
+nothing about the risk reversal. Set **Client wt** to zero to see the record
+and apply none of it. The box offers the clients the archive already knows.
+
+This is the one place your own hit rate reaches a number, and it reaches it
+only for the caller on the phone. A hit rate across the whole desk mixes what
+you were axed to do with who you were showing, and says nothing a quote can
+use; the desk-wide record is still in `volkit agent evidence`, in words.
+
+### The archive card
+
+Under the tape is the archive itself: what it holds for this pair, the widths
+it has enough behind, the clients it knows, and the four ways to put more into
+it.
+
+- **Record as shown**, on the quote sheet — see the quote table above. This
+  is where a client's record starts.
 - **Fetch from DTCC** -- download the last few days of public dissemination
   files straight from DTCC into your SDR folder, and read them. The box beside
   it is how many days back; the screen is capped at 30, because a long
@@ -2277,33 +2461,23 @@ Three buttons:
   on the page, because a path a web page can name is a path anything reaching
   that page can read.
 - **File this run** -- put the market you are looking at into the archive, so
-  the next morning's comparison knows about it. Put the broker's name in the
+  the next quote's widths know about it. Put the broker's name in the
   Broker box first: filing the same run twice under one name files it once,
   and under two names it counts twice, which is right when two brokers really
   showed it and is worth knowing when they did not. The card says which
   happened.
 
-The four settings are the same ones the command line takes: **Half-life** (how
-fast an observation stops counting -- five days means a quote is worth half
-after a working week), **Min evidence** (how many age-weighted observations
-before it will state a width at all), **Lookback**, and **Tolerance** (how far
-apart your width and the market's have to be before it says anything, as a
-fraction; there is also a floor of 0.02 so a narrow butterfly is not flagged
-over four thousandths).
+Anything that goes into the archive re-runs the quote, because the quote
+stands on it.
 
-### Putting the archive under the quote
-
-The card only compares. To let the archive *make* a width, tick **widths
-from the archive** on the toolbar. The quote's width ladder is then: a bank
-rule if one matches, else the width the archive has seen this shown at (when
-it holds enough), else the fallback typed on the panel, else no price -- and
-every row says which rung it stood on. The first three settings above are
-what the quote reads too, so the card and the quote agree about what the
-archive holds. It is off until you tick it, because a width the market showed
-is evidence and not a rule; when you are happy with one, **Learn widths**
-writes it into the bank and it stops needing the switch. The archive's
-*level* -- where this has recently been quoted against where your mark is --
-appears on the row as a flag and moves nothing.
+The card's settings are the quote's: **Half-life** (how fast an observation
+stops counting -- five days means a quote is worth half after a working week),
+**Min evidence** (how many age-weighted observations before the archive will
+state a width at all), **Lookback**, **Tolerance** (the Agent column's
+threshold), and whether observations a language model transcribed count.
+There is no switch for the archive itself: it is always on the ladder, and an
+archive that knows nothing costs nothing, because thin evidence produces no
+number.
 
 ### Trades that printed
 
@@ -2453,12 +2627,13 @@ carrying the evidence in its text. Without `--save` it only proposes.
 ```
 echo "1M ATM in 100mm vega
 3M 25d RR
-2M 25d fly" | volkit agent quote EURUSD --record
+2M 25d fly" | volkit agent quote EURUSD --client "Fund A" --record
 ```
 
 One instrument a line, no prices on them -- a line with a two-way on it is a
-market somebody showed and belongs on the market-maker tab. What comes back,
-for each:
+market somebody showed and belongs in the market box. This is the Quote
+button, in a shell: the same engine, the same ladder, the same leans, and
+`--client` is the Client box. What comes back, for each:
 
 ```
 EURUSD 1M ATM in 100mm vega: showing 5.525/6.075
@@ -2466,43 +2641,46 @@ EURUSD 1M ATM in 100mm vega: showing 5.525/6.075
   market level: 5.900 vol points, the archive -- last quoted 5.900 (today) ...  (not applied)
   width: 0.550 vol points, the bank: spread 0.550 on 31d ATM <=150mm vega
   floor: 0.300 vol points, the bank: floor 0.300 on anything -- already above it  (not applied)
-  beaten rule: spread 0.350 on 31d ATM  (not applied)
+  client record: a buyer here: 5 lifted against 0 hit of 5 answered  (not applied)
   shading, fair value: +0.000 -- nothing shades this row
   shading, position: -0.138 -- the position at this tenor is +1.25 of a full axe
+  shading, client: +0.138 -- Fund A is +1.00 on the side scale ...; 0.5 of that times the half width
   shift, bank: +0.050 -- the bank: shift +0.050 on ATM
-  our record: 5 price(s) shown, 5 answered, 100% traded, 0 on the bid, 5 on the offer  (not applied)
-  mid: 5.800 -- 5.887 -0.088
-  bid / offer: 5.525 / 6.075
-  flag: 5 of 5 answered prices were lifted against 0 hit; the offer may be the
-        cheap side -- shown here, and applied to nothing
+  mid: 5.937 -- 5.887 +0.050
+  bid / offer: 5.662 / 6.212
   advice: check the ECB date before showing anything past it
 ```
 
 The list is the explanation. The lines marked `(not applied)` are things you
 should see that changed nothing, and they are there deliberately: a floor that
-did not bind, a rule a more specific one beat, where the market has been, and
-your own hit rate. If a local model is running it also writes two or three
-sentences under the list -- and if that paragraph contains a number the list
-does not, it is thrown away and you get the list, which is the worst that
-happens.
+did not bind, a rule a more specific one beat, where the market has been. The
+`client record` line is the record itself; the `shading, client` line under it
+is what the record did, and a `widening, client` line appears when the market
+has followed this client after their trades. If a local model is running it
+also writes two or three sentences under the list -- and if that paragraph
+contains a number the list does not, it is thrown away and you get the list,
+which is the worst that happens.
 
 **Where the width comes from**, in order: a rule in your knowledge bank; then
 the archive, if enough recent quotes support one, and the row says so and
-offers to write it in; then `--fallback-spread` if you typed one; then **no
-price at all**, and the reason. There is no built-in default width anywhere in
-this tool.
+offers to write it in; then the `--fallback-tier` ladder if you named one, read
+at that row's own maturity (`--fallback-multiplier`, `--interpolate-fallback`);
+then **no price at all**, and the reason. There is no built-in default width anywhere in
+this tool. The client's widening is added on top of whichever rung it stood on.
 
 **What the agent will not do.** It will not move the mid onto the level the
 archive has seen. Where the market has been is shown beside your mark and, when
 the two disagree by enough to matter, flagged -- but a mid that follows the last
 thing you were shown is a mid being led by whoever is about to trade with you.
-If the flag is right, re-mark the surface on the marking tab. It also will not
-turn your hit rate into a shift: a run of lifted offers is sometimes a mid
-that is too low and sometimes a week of being the only one showing, and the
-tool cannot tell those apart. It tells you which run you are having.
+If the flag is right, re-mark the surface on the marking card. And it will not
+turn the desk's hit rate into a shift: a run of lifted offers across every
+caller is sometimes a mid that is too low and sometimes a week of being the
+only one showing, and the tool cannot tell those apart. What it does apply is
+one client's record on one instrument, counted, and capped.
 
 **Closing the loop.** `--record` writes the prices a run made into the archive
-with the mid the model had at the time. When you find out what happened:
+with the mid the model had at the time, under the client named. When you find
+out what happened:
 
 ```
 volkit agent archive EURUSD --kind shown        # find the id
@@ -2510,29 +2688,9 @@ volkit agent outcome EURUSD --ref 04d9d74f78596569 --result traded_ask
 ```
 
 Results are `traded_bid`, `traded_ask`, `passed`, `missed`, `pulled` and
-`done_away` (add `--away 8.35` when you know the level it went at). That is
-what feeds the "our record" line and its flag next time.
-
-**Pricing a past morning.** `--asof "2026-08-20 09:00"` values everything at
-that instant *and* reads the archive only up to it, saying how many later
-observations it left out. Nothing the agent shows you for a past date can have
-been computed from what happened afterwards.
-
-## 5b. The marking agent
-
-A second agent, answering a different question. The quoting agent asks *what do I
-show*; this one asks *where should the surface be*.
-
-It does **not** replace the fit on the marking tab. That fit is fine. What it
-does is the judgement around it -- the part you currently do by hand every
-morning:
-
-- which knobs to leave free and which to pin;
-- whether the targets you have can actually determine that many parameters;
-- whether anything you were shown constrains the wings at all;
-- and then, once the fit has run, whether to take the number or nudge it.
-
-The last one is what it learns.
+`done_away` (add `--away 8.35` when you know the level it went at). These are
+the same two functions the sheet's **Record as shown** and Outcome buttons
+call, and they are what a client's record is built from.
 
 ### Proposing
 
@@ -2565,36 +2723,43 @@ names.
 
 ### The card in the Market maker tab
 
-The agent also sits on the Market maker tab as a card, under *The market
-against the surface*, because the fit it plans is that tab's **Fit** button.
-It reads exactly what Fit reads -- the market paste, the target curve and its
-source, the conventions -- so **Propose** answers *how would you run the fit
-that is on this screen, and what would come out*. There is no separate
-market box on the card on purpose.
+The agent also sits on the Market maker tab as a card, and that card is **the
+only thing on the tab that moves a mark**. It reads the market paste, the target
+curve and its source and the conventions, so **Propose** answers *how would you
+run the fit on this screen, and what would come out*. There is no separate market
+box on the card on purpose.
+
+**Fit my way** is the other button, and it is you rather than the agent: the same
+two fitters, with exactly the parameters ticked under *At-the-money curve may
+move* and *Smile parameters may move*, in the mean-reversion range you set. That
+button used to live on the toolbar and be called *Fit*; it is here now because a
+mark that moves should move in one place, next to the journal that records it.
+What it arrives at fills the **At-the-money curve** and **Wings** cards below.
 
 Two switches. **Agent chooses the knobs** lets it pick which parameters to
 free, from what the targets can determine, what the quotes actually reach,
 and what the journal says you never touch; untick it and it runs with the
-boxes ticked under *What the fit may move*, and says the choice was yours.
+boxes ticked on the card, and says the choice was yours.
 **Score against the archive** asks the quoting agent to judge the proposal at
 every archived market -- what it fixed and what it broke -- before you see it.
 
 Then you answer it, and the answer is what it learns from:
 
-- **Accept** -- the proposal becomes the marks the quote stands on, the same
-  way a fit's answer does; the quote sheet says so. With **keep the marks**
-  ticked it also goes on the loaded book.
-- **Take the plan onto the fit** -- the agent's knob choices are written into
-  the fit panel's boxes and Fit runs. Adjust whatever you disagree with, press
-  Fit again, and when you are done press **Record my fit as the edit**: the
-  journal then holds your fit beside the agent's proposal on the same
-  morning, which is the row it learns most from.
+- **Accept** -- the proposal becomes the marks Check Market and Quote stand on;
+  both cards say so. With **keep the marks** ticked it also goes on the loaded
+  book.
+- **Take the plan and fit** -- the agent's knob choices are written into
+  the boxes on this card and *Fit my way* runs. Adjust whatever you disagree
+  with, press *Fit my way* again, and when you are done press **Record my fit as
+  the edit**: the journal then holds your fit beside the agent's proposal on the
+  same morning, which is the row it learns most from.
 - **Reject** -- recorded as such; nothing moves.
 
 **One thing at a time, and the screen says so.** The tool holds one book, and
-a fit, a quote and a proposal are answered one after another rather than at
-once. Most of the time that is invisible — a fit is under a second. It stops
-being invisible when the quoting agent's **Suggest**, **Scan folders** or
+a check, a quote and a proposal are answered one after another rather than at
+once. Most of the time that is invisible — a check is instant and a fit is under
+a second. It stops
+being invisible when the archive card's **Scan folders** or
 **Fetch from DTCC** is still working, because those read whole folders and can
 take minutes. So a run that passes three seconds shows the seconds it has
 been going, and one that passes ten says it may be waiting its turn rather
@@ -2703,6 +2868,11 @@ volkit mark confer EURUSD --archive mm_archive.jsonl
 
 The quoting agent's flag — *the mark is 0.45 below where this has been quoted* —
 is evidence the marking agent can use, and this is where it gets handed over.
+On the screen, leave the **market box empty**, keep *score against the archive*
+ticked, and press **Propose**: the archive is the market, the card shows the
+rounds and which one was chosen, and the proposal is answered with the same
+Accept / Take the plan / Edit / Reject as one made from a paste. **Rounds** on
+the card is the bound.
 The quoting agent turns the archive into targets; the marking agent proposes; the
 quoting agent then scores the proposal at **every** archived point, including the
 tenors the fit was not aimed at, and reports what it fixed and **what it
@@ -2748,7 +2918,13 @@ asked: EURUSD 3M 25d FLY about widths over 31 days naming sources
 It understands a pair, a tenor (`3M`, `1Y`), an instrument (`atm`, `rr`,
 `fly`, `strangle`), a delta (`25d`), a window (`today`, `this week`, `last
 30 days`, `since 2026-08-01`), *who* for the sources, and *vol* when you want
-printed trades as the volatility they imply. Ask "and the 1M?" next and it
+printed trades as the volatility they imply. It answers about the **tape** —
+*who has been paying in the 1M*, *which side has it printed on* — per bucket,
+off the same surface the quote leans on, naming the mark each print was
+judged against; and about a **client** — *what has Fund A done in the 3M*,
+*is Fund A a buyer or a seller of the ATM*, *which clients do we have a
+record on* — reading out the same record the quote applies. A name it does
+not know is answered with the names it does. Ask "and the 1M?" next and it
 keeps the topic and the pair from the question before, and says it did.
 
 What it will not do is act. Ask it to fetch, re-mark, record or quote and it
@@ -2792,7 +2968,7 @@ the fact list, and the first line says which it was.
 | A leg shows a red error | read it — errors are never replaced by a zero |
 | *read as volatility points, as written* | every level in the paste sits below 1.0. It was **not** rescaled — that is what a managed pair marks. Set **Vol unit** to decimal only if the paste really is in decimals |
 | *the historical workbook has no sheet for X* | that pair is not in the history file, so no dated curve can be read for it |
-| *no width rule in the bank matches this quote* | add a rule in the knowledge bank, or type a **fallback width**. The tool will not invent one |
+| *no width rule in the bank matches this quote* | add a rule in the knowledge bank, or choose a **fallback tier** on the bar. The tool will not invent one |
 | *N wing quote(s) cannot determine M free smile parameter(s)* | untick smile parameters, or quote more of the smile |
 | *is not a leg of EURUSD* | a direction word named a currency that is not in the pair |
 | *offers below its own bid* | a truncated offer like `8.2/6`. Write it in full — repairing it means inventing the digits |

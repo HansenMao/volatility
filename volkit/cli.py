@@ -21,7 +21,7 @@ from pathlib import Path
 # choices, and a parser cannot be built from a module imported inside a
 # function.  All three are stdlib-only, so this does not drag the numeric
 # stack into anything that did not already have it.
-from . import (archive, config, consult, dtcc, kace, llm, marketmaker, marking, paths,
+from . import (archive, config, consult, dtcc, flow, kace, llm, marketmaker, marking, paths,
                remarks, rules, screens, session, synthesis)
 from .book import Book
 from .marketdata import ExcelSource, MarketDataError
@@ -410,6 +410,20 @@ def cmd_daily(args) -> int:
     return 0
 
 
+def _fallback_spreads(args):
+    """The spreading tier table the quote's bottom width rung reads, or None.
+
+    Only loaded when a tier is actually named: a workbook with no
+    ``KACE_SPREADS`` tab is an ordinary workbook, and a command that is not
+    using a fallback must not fail because of a tab it never asked about.  A
+    tab that *is* asked for and cannot be read is an error here rather than
+    an empty rung, which is the same rule the feed follows.
+    """
+    if not str(getattr(args, "fallback_tier", "") or "").strip():
+        return None
+    return kace.SpreadTable.load(getattr(args, "kace_spreads", None) or args.workbook)
+
+
 def cmd_kace(args) -> int:
     """The kACE feed message, off the same book the screen would build it from.
 
@@ -432,11 +446,21 @@ def cmd_kace(args) -> int:
     else:
         table = kace.SpreadTable.load(args.kace_spreads or args.workbook)
         feed = kace.build(book, args.pair, table, tier=args.kace_tier,
-                          cut=args.cut, source=args.source, method=args.method)
+                          cut=args.cut, source=args.source, method=args.method,
+                          multiplier=args.spread_multiplier,
+                          interpolate=bool(args.interpolate_spreads))
         s = feed.summary()
+        # What was done to the tier's widths belongs in the one line that says
+        # what went: a multiplied ladder read back as the tab's is the kind of
+        # thing nobody notices until a two-way is half the width it should be.
+        widths = f"{s['tier']} spreads"
+        if s['multiplier'] != 1.0:
+            widths += f" x{s['multiplier']:g}"
+        if s['interpolate']:
+            widths += ", interpolated between pillars"
         print(f"{s['pair']}: {s['days']} days {s['first_day']} to {s['last_day']}, "
               f"{len(s['pillars'])} pillars, {s['nodes']} nodes; horDate {s['hor_date']}, "
-              f"{s['cut']} cut, wings from {s['source']}, {s['tier']} spreads, "
+              f"{s['cut']} cut, wings from {s['source']}, {widths}, "
               f"scenario {scenario}", file=sys.stderr)
         print(f"  {'tenor':<6}{'expiry':<12}{'bid':>9}{'offer':>9}{'25RR':>9}{'10RR':>9}"
               f"{'25FLY':>9}{'10FLY':>9}  wings", file=sys.stderr)
@@ -456,6 +480,8 @@ def cmd_kace(args) -> int:
         return 0
     entry = kace.post_feed(text, pair=args.pair, scenario=scenario, clear=bool(args.clear),
                            tier="" if args.clear else feed.tier,
+                           multiplier=1.0 if args.clear else feed.multiplier,
+                           interpolate=False if args.clear else feed.interpolate,
                            hor_date=book.clock.now.date(), nodes=text.count("<node "),
                            url=kace.settings(args.kace_url), log=kace.PostLog.at(args.kace_log),
                            when=book.clock.now, ca=args.kace_ca, insecure=args.kace_insecure,
@@ -1166,16 +1192,32 @@ def cmd_listed(args) -> int:
           f"worst {f['max_error']:+.4f} at {f['max_error_strike']:g}   [{f['message']}]")
 
     has_book = r["comparison"] is not None
-    head = f"  {'strike':>14}{'mkt %':>10}{'fit %':>10}{'fit-mkt':>9}"
+    # The pasted two-way is shown when the table had one, and a mark that
+    # reads outside it is flagged on its own row: that is the question a
+    # two-way answers and a mid cannot.
+    has_two_way = bool(r.get("n_two_way"))
+    head = f"  {'strike':>14}{'mkt %':>10}"
+    if has_two_way:
+        head += f"{'bid %':>10}{'offer %':>10}"
+    head += f"{'fit %':>10}{'fit-mkt':>9}"
     if has_book:
         head += f"{'book %':>10}{'fit-book':>10}"
     print("\n" + head)
     for row in r["rows"]:
-        line = (f"  {row['strike']:>14g}{row['market_vol']:>10.4f}{row['fit_vol']:>10.4f}"
-                f"{row['fit_diff']:>+9.4f}")
+        line = f"  {row['strike']:>14g}{row['market_vol']:>10.4f}"
+        if has_two_way:
+            line += (f"{row['bid_vol']:>10.4f}" if row["bid_vol"] is not None else f"{'-':>10}")
+            line += (f"{row['ask_vol']:>10.4f}" if row["ask_vol"] is not None else f"{'-':>10}")
+        line += f"{row['fit_vol']:>10.4f}{row['fit_diff']:>+9.4f}"
         if has_book:
             line += f"{row['book_vol']:>10.4f}{row['book_diff']:>+10.4f}"
+            if row["mark_outside"]:
+                line += "  <- the mark is outside the market"
         print(line)
+    if has_book and has_two_way:
+        n = r.get("n_outside") or 0
+        print(f"  {n} of {r['n_two_way']} two-way strike(s) have the marked "
+              f"{r['comparison']['pair']} surface outside the listed bid/offer")
 
     if has_book:
         c = r["comparison"]
@@ -1281,22 +1323,21 @@ def _print_listed_positions(g: dict) -> None:
 
 
 def cmd_mm(args) -> int:
-    """Fit a curve and the wings to a market, and quote what is being asked for.
+    """Check a market against the curve, and quote what is being asked for.
 
-    Two stages and two panels, exactly as the screen has them (§11): the fit
-    reads the market paste and moves the marks, the quote reads the request
-    file and puts a two-way on each line of it.  Both run here when both are
-    given, and the fit's marks are handed to the quote the same way the
-    browser hands them over -- so this command and the screen stand on the
-    same numbers.  Either half runs on its own: a market with no request file
-    fits and reports, a request file with ``--no-curve --no-wings`` quotes off
-    the marks as they stand.
+    Two stages and two panels, exactly as the screen has them (§11): the check
+    reads the market paste and says where the marks sit against it, the quote
+    reads the request file and puts a two-way on each line of it.  **Neither
+    moves a mark** -- that is ``volkit mark`` now, and this command's
+    ``--marks`` takes the file ``volkit mark fit --out-marks`` writes, which is
+    the shell's version of the marks the browser holds between the cards.
 
     The web screen's Market-maker tab and this command share
-    ``marketmaker.panel_from_request`` and ``.quote_panel_from_request``, so a
-    panel set up in the browser and the same panel run from a shell script
+    ``marketmaker.check_panel_from_request`` and ``.quote_panel_from_request``,
+    so a panel set up in the browser and the same panel run from a shell script
     produce identical numbers.
     """
+    import json as _json
     from . import marketmaker as mm
     from .knowledge import KnowledgeBank
 
@@ -1318,78 +1359,60 @@ def cmd_mm(args) -> int:
     else:
         request_text = ""
 
+    # The marks both panels may stand on: the browser holds them between the
+    # marking card and these two, and a shell holds a file.  A file that names
+    # another pair, or is not a marks object at all, is refused by the panel
+    # readers rather than half-read here.
+    marks = None
+    if args.marks:
+        try:
+            held = _json.loads(paths.read_text(args.marks))
+        except (OSError, ValueError) as exc:
+            print(f"error: the marks file could not be read: {exc}", file=sys.stderr)
+            return 2
+        # Either the marks themselves or the whole answer that carried them,
+        # so `--out-marks` and a saved `--json` run are both usable.
+        marks = held.get("marks") if isinstance(held, dict) and "marks" in held else held
+
     common = {
         "pair": args.pair, "cut": args.cut, "method": args.method,
         "vol_unit": args.vol_unit, "fly_convention": args.fly, "text": market_text,
     }
-    fit_payload = {
-        **common,
-        "target_source": args.target_source,
-        "target_text": (paths.read_text(args.target) if args.target else ""),
-        "fit_curve": not args.no_curve, "free": args.free,
-        # Two boxes on the panel, two numbers here, and the same reader: an
-        # unset flag is two blanks and the fit runs in the house range.
-        "reversion_lo": (args.reversion_range or ("", ""))[0],
-        "reversion_hi": (args.reversion_range or ("", ""))[1],
-        "tune_wings": not args.no_wings, "smile_free": args.smile_free,
-        "mid_pull": args.mid_pull, "max_nfev": args.max_evals,
-        "apply": False,
-    }
+    check_payload = {**common, "near_edge": args.tolerance, "marks": marks}
     quote_payload = {
         **common,
         "request_text": request_text,
+        "marks": marks,
         "vega_text": (paths.read_text(args.vega) if args.vega else ""),
         "vega_scale": args.axe_scale, "fair_weight": args.fair_weight,
         "axe_weight": args.axe_weight, "skew_cap": args.skew_cap,
-        "horizon_days": args.horizon, "fallback_spread": args.fallback_spread,
-        "use_archive_width": bool(args.archive_width),
+        "horizon_days": args.horizon,
+        "fallback_tier": args.fallback_tier,
+        "fallback_multiplier": args.fallback_multiplier,
+        "fallback_interpolate": bool(args.interpolate_fallback),
+        "client": args.client, "client_weight": args.client_weight,
+        "client_min": args.client_min,
+        "flow_weight": args.flow_weight, "flow_scale": args.flow_scale,
+        "flow_tolerance": args.flow_tolerance,
     }
     bank = KnowledgeBank.load(args.knowledge)
     clock = _clock(args)
-    arc = None
-    if args.archive_width:
-        from . import archive as archive_mod
-        arc = archive_mod.Archive.load(args.archive)
-        for problem in arc.problems:
-            print(f"  ! archive: {problem}", file=sys.stderr)
+    # The archive is always on the quote's width ladder and is where a
+    # client's record lives (§17); a file that is not there is an empty
+    # archive, said once, and not an error.
+    from . import archive as archive_mod
+    arc = archive_mod.Archive.load(args.archive)
+    for problem in arc.problems:
+        print(f"  ! archive: {problem}", file=sys.stderr)
 
-    if args.learn:
-        book = Book.from_excel(args.workbook, clock)
-        rules, notes, parse = mm.learn_from_panel(fit_payload, clock)
-        print(f"{args.pair}: {parse['n_quotes']} quote(s) read, {parse['vol_unit']}")
-        for r in rules:
-            print(f"  {r.describe()}")
-            if r.text:
-                print(f"      {r.text}")
-        for n in notes:
-            print(f"  . {n}")
-        for row in parse["skipped"]:
-            print(f"  ! line {row['line']} skipped ({row['why']}): {row['text'][:60]}")
-        for row in parse.get("ignored") or []:
-            print(f"  . line {row['line']} passed over ({row['why']}): {row['text'][:60]}")
-        if not args.save:
-            print("\n  nothing was written; add --save to put these into the bank")
-            return 0
-        merged, merge_notes = mm.merge_rules(list(bank.for_pair(args.pair).rules), rules)
-        problems = bank.set_pair(args.pair, merged, clock.now,
-                                 f"learned from a paste of {parse['n_quotes']} quotes")
-        if problems:
-            for x in problems:
-                print(f"  ! {x}", file=sys.stderr)
-            return 2
-        print(f"\n  wrote {bank.save(args.knowledge)}")
-        for n in merge_notes:
-            print(f"  . {n}")
-        return 0
-
-    # A fit needs something to aim at: a market to read the at-the-money off,
-    # or a target curve that does not come out of one.  Neither, and there is
-    # nothing to fit and the request is quoted off the marks as they stand.
-    do_fit = bool(market_text.strip()) or args.target_source not in ("quotes", "none")
+    # A check needs a market to check against; a quote needs a request.  With
+    # neither there is nothing to do, and saying so beats printing an empty
+    # table twice.
+    do_check = bool(market_text.strip())
     do_quote = bool(request_text.strip())
-    if not do_fit and not do_quote:
-        print("  ! nothing to do: paste a market to fit to (--file), or a list of instruments "
-              "to quote (--request)", file=sys.stderr)
+    if not do_check and not do_quote:
+        print("  ! nothing to do: paste a market to check against (--file), or a list of "
+              "instruments to quote (--request)", file=sys.stderr)
         return 2
 
     book = _book(args, [args.pair])
@@ -1409,17 +1432,13 @@ def cmd_mm(args) -> int:
             print(f"  ! {args.history} has no sheet for {args.pair}", file=sys.stderr)
 
     warnings = 0
-    if do_fit:
-        fit = mm.panel_from_request(fit_payload).run(book)
-        _print_fit(fit, do_quote)
-        warnings += len(fit["warnings"])
-        # The same hand-off the browser makes, for the same reason: the fit's
-        # answer travels as numbers and is put on the surface for the length
-        # of one quote run.
-        quote_payload["marks"] = fit["marks"]
+    if do_check:
+        checked = mm.check_panel_from_request(check_payload).run(book)
+        _print_check(checked)
+        warnings += len(checked["warnings"])
     if do_quote:
-        out = mm.quote_panel_from_request(quote_payload).run(book, bank=bank, hist=hist,
-                                                             archive=arc)
+        out = mm.quote_panel_from_request(quote_payload).run(
+            book, bank=bank, hist=hist, archive=arc, spreads=_fallback_spreads(args))
         _print_quote(out, float(args.skew_cap))
         warnings += len(out["warnings"])
     return 1 if warnings else 0
@@ -1431,8 +1450,14 @@ def _cell(value, width=10, dp=4, signed=False):
     return f"{value:>+{width}.{dp}f}" if signed else f"{value:>{width}.{dp}f}"
 
 
-def _print_fit(r: dict, quoting: bool) -> None:
-    """The fit: what moved, and where the surface now sits against the market."""
+def _print_hand_fit(r: dict) -> None:
+    """The desk's own fit: what moved, and what it landed on.
+
+    No market table.  Where the marks sit against the run is the check's
+    question and ``volkit mm --marks`` answers it against what this wrote --
+    which is the same split the screen has, and the reason a fit and a check
+    are two buttons.
+    """
     print(f"{r['pair']}  cut {r['cut']}  {r['method']}  "
           f"valuation {r['valuation'][:16].replace('T', ' ')}Z"
           + ("   [cross]" if r["is_cross"] else ""))
@@ -1444,6 +1469,9 @@ def _print_fit(r: dict, quoting: bool) -> None:
         print(f"\n  curve   target: {c['evidence']}")
         print(f"          free: {', '.join(c['free'])}   [{c['message']}]   "
               f"rmse {c['rmse']:.4f} vol pts, worst {c['max_error']:+.4f} at {c['max_error_tenor']}")
+        if not c["reversion_house"]:
+            print(f"          mean reversion fitted in {c['reversion_range'][0]:g}"
+                  f"-{c['reversion_range'][1]:g}, not the house range")
         print(f"  {'tenor':<8}{'target':>9}{'before':>9}{'after':>9}{'miss':>8}{'moved':>8}")
         for row in c["rows"]:
             print(f"  {row['tenor']:<8}{row['target']:>9.4f}{row['before']:>9.4f}"
@@ -1465,9 +1493,27 @@ def _print_fit(r: dict, quoting: bool) -> None:
         print(f"      {w['evaluations']} evaluations, {w['slices']} smile fits, "
               f"{w['seconds']:.2f}s")
 
+    for n_ in r["parse"]["notes"]:
+        print(f"  . {n_}")
+    for row in r["parse"]["skipped"]:
+        print(f"  ! line {row['line']} skipped ({row['why']}): {row['text'][:60]}")
+    for row in r["parse"]["ignored"]:
+        print(f"  . line {row['line']} passed over ({row['why']}): {row['text'][:60]}")
+    print(f"\n  . this fit moved {r['marks']['what']}, and put the book back")
+    for x in r["warnings"]:
+        print(f"  ! {x}")
+
+
+def _print_check(r: dict) -> None:
+    """The check: where the marks sit against every quote the run held."""
     market = r["market"]
-    print(f"\n  {market['n_quotes']} quote(s) read, {market['inside_before']} with the model "
-          f"inside their market before the fit and {market['inside']} after")
+    print(f"{r['pair']}  cut {r['cut']}  {r['method']}  "
+          f"valuation {r['valuation'][:16].replace('T', ' ')}Z")
+    print(f"  . {r['marks']['note']}")
+
+    print(f"\n  {market['n_quotes']} quote(s) read, {market['checked']} checked: "
+          f"{market['inside']} inside their market, {market['through']} through it, "
+          f"{market['edge']} within {market['near_edge']:.0%} of a side")
     # The time column only appears when the paste was timed; a column of dashes
     # on a run nobody timestamped is noise in a table that is already wide.
     timed = any(row.get("timestamp") for row in market["rows"]) or bool(market.get("superseded"))
@@ -1475,12 +1521,21 @@ def _print_fit(r: dict, quoting: bool) -> None:
     head = f"  {'quote':<26}"
     if timed:
         head += f"{'time':>{stamp_w}}"
-    print(head + f"{'their bid':>10}{'their ask':>10}{'was':>9}{'now':>9}{'moved':>9}  verdict")
+    print(head + f"{'their bid':>10}{'their ask':>10}{'marked':>10}{'gap':>9}{'widths':>8}"
+                 f"  verdict")
     for row in market["rows"]:
         stamp = f"{(row.get('timestamp') or '-'):>{stamp_w}}" if timed else ""
-        print(f"  {row['describe']:<26}{stamp}{_cell(row['market_bid'])}{_cell(row['market_ask'])}"
-              f"{_cell(row['model_before'], 9)}{_cell(row['model_after'], 9)}"
-              f"{_cell(row['model_move'], 9, 4, True)}  {row['verdict']}")
+        # A line that is off is marked in the margin, so a long run does not
+        # have to be read to the end to find out whether anything was.
+        flag = {"through": "!", "edge": ".", "not checked": "?"}.get(row["severity"], " ")
+        # A mark inside the market is nought from outside it, and printing
+        # that as +0.0000 reads like a measurement rather than "not outside".
+        gap = None if row["position"] != "above" and row["position"] != "below" else row["gap"]
+        wid = None if gap is None else row["widths"]
+        print(f"{flag} {row['describe']:<26}{stamp}{_cell(row['market_bid'])}"
+              f"{_cell(row['market_ask'])}{_cell(row['model'], 10)}"
+              f"{_cell(gap, 9, 4, True)}{_cell(wid, 8, 2, True)}"
+              f"  {row['verdict']}")
         for x in row["warnings"]:
             print(f"      ! {x}")
     for n_ in market["notes"]:
@@ -1496,10 +1551,24 @@ def _print_fit(r: dict, quoting: bool) -> None:
         print(f"  . line {row['line']} superseded by line {row['replaced_by']}: "
               f"{row['describe']} {row['bid']:.4f}/{row['ask']:.4f}"
               + (f" at {row['timestamp']}" if row["timestamp"] else ""))
-    marks = r["marks"]
-    print(f"  . the fit moved {marks['what']}"
-          + ("; those marks are what the quote below stands on" if quoting else
-             ", and put the book back. Add --request to quote off what it arrived at"))
+    alerts = market["alerts"]
+    if alerts:
+        # "Off the curve" is for a mark outside somebody's market.  A mark that
+        # is merely close to a side has not been missed and saying it was is how
+        # a screen teaches a desk to stop reading its alerts.
+        print(f"\n  {len(alerts)} line(s) "
+              + ("off the curve:" if market["through"] else
+                 "near the edge of their market:"))
+        for a in alerts:
+            print(f"  {'!' if a['severity'] == 'through' else '.'} {a['describe']}: "
+                  f"{a['verdict']}"
+                  + ("" if a["gap"] in (None, 0.0) else
+                     f" by {abs(a['gap']):.4f} vol pts"
+                     + ("" if a["widths"] is None else f" ({abs(a['widths']):.2f} widths)")))
+        print("  . nothing here moves a mark. Propose on the marking card to re-mark the "
+              "curve, or 'volkit mark propose'")
+    else:
+        print("  . every quote that could be checked is comfortably inside its market")
     for x in r["warnings"]:
         print(f"  ! {x}")
 
@@ -1511,12 +1580,15 @@ def _print_quote(r: dict, panel_cap: float) -> None:
           f"{sheet['matched']} also quoted in the market paste")
     print(f"  . {r['marks']['note']}")
     ar = r.get("archive") or {}
-    if ar.get("used"):
-        print("  . " + (f"archive on the width ladder: {ar.get('widths', 0)} width(s) held "
-                        f"with enough behind them, {ar.get('counted', 0)} observation(s) counted"
-                        if ar.get("available") else ar.get("reason", "")))
+    print("  . " + (f"archive on the width ladder: {ar.get('widths', 0)} width(s) held "
+                    f"with enough behind them, {ar.get('counted', 0)} observation(s) counted"
+                    if ar.get("available") else ar.get("reason", "")))
+    cl = r.get("client") or {}
+    if cl.get("name"):
+        print(f"  . for {cl['name']}: " + ("; ".join(cl.get("record") or [])
+                                          or cl.get("reason") or "no record yet"))
     print(f"  {'instrument':<26}{'their bid':>10}{'their ask':>10}{'model':>9}{'skew':>9}"
-          f"{'our bid':>9}{'our ask':>10}{'width':>8}  verdict")
+          f"{'our bid':>9}{'our ask':>10}{'width':>8}  verdict / agent")
     capped = 0
     for row in sheet["rows"]:
         # A starred lean is one the cap bound: the axe wanted to move the price
@@ -1527,9 +1599,17 @@ def _print_quote(r: dict, panel_cap: float) -> None:
               f"{_cell(row['model'], 9)}{_cell(row['skew_total'], 8, 3, True)}"
               f"{'*' if row['skew_capped'] else ' '}"
               f"{_cell(row['our_bid'], 9)}{_cell(row['our_ask'])}{_cell(row['width'], 8, 3)}"
-              f"  {row['verdict']}")
+              f"  {row['verdict']} / {row['agent_verdict']}")
         if row["width_source"]:
             print(f"      . width: {row['width_source']}")
+        if row.get("agent_note") and row.get("agent_verdict") not in ("agrees", "not read"):
+            print(f"      . agent: {row['agent_note']}")
+        if row.get("client_record"):
+            print(f"      . {row['client']}: {row['client_record']}"
+                  + (f"; leans the mid {row['skew_client']:+.3f}" if row.get("skew_client")
+                     else "")
+                  + (f"; widens by {row['client_widen']:.3f}" if row.get("client_widen")
+                     else ""))
         if row["skew_reason"]:
             print(f"      . {row['skew_reason']}")
         for x in row["advice"]:
@@ -1956,16 +2036,27 @@ def cmd_agent(args) -> int:
         return 0
 
     if action == "learn":
+        # One pipeline for a width into the bank (§17): the same function the
+        # bank card's Learn widths button calls, with a pasted run counted
+        # unfiled when --file names one.
         bank = KnowledgeBank.load(args.knowledge)
-        syn = synthesis_mod.synthesize(
-            arc, pair, asof=clock.now, half_life=args.half_life,
-            min_effective=args.min_evidence, lookback_days=args.lookback,
-            include_model_read=not args.no_model_read)
-        rules = syn.proposed_rules()
-        if not rules:
-            print(f"{pair}: nothing in the archive has enough behind it to propose a width. "
+        paste = None
+        if args.file not in (None, "-"):
+            paste = agent_mod.Paste(pair=pair, text=paths.read_text(args.file),
+                                    fly_convention=args.fly)
+        got = agent_mod.learn_widths(
+            arc, pair, clock=clock, paste=paste, counterparty=args.counterparty,
+            half_life=args.half_life, min_effective=args.min_evidence,
+            lookback_days=args.lookback, include_model_read=not args.no_model_read)
+        for n in got.notes:
+            print(f"  . {n}")
+        for row in got.skipped:
+            print(f"  ! line {row['line']} skipped ({row['why']}): {row['text'][:60]}")
+        if not got.rules:
+            print(f"{pair}: nothing has enough behind it to propose a width. "
                   f"'volkit agent evidence {pair}' shows what there is")
             return 0
+        rules = got.rules
         for r in rules:
             print(f"  {r.describe()}")
             print(f"      {r.text}")
@@ -1974,7 +2065,9 @@ def cmd_agent(args) -> int:
             return 0
         merged, notes = merge_rules(list(bank.for_pair(pair).rules), rules)
         problems = bank.set_pair(pair, merged, clock.now,
-                                 f"learned from {syn.counted} archived observation(s)")
+                                 f"learned from {got.counted} archived observation(s)"
+                                 + (f", {got.from_paste} of them from a paste counted unfiled"
+                                    if got.from_paste else ""))
         for note in notes:
             print(f"  . {note}")
         for problem in problems:
@@ -2023,11 +2116,11 @@ def cmd_agent(args) -> int:
         # Read by the same grammar a broker run is read by, and then filed as
         # *ours*: the difference between a market somebody showed and a price
         # we made is not in the text, it is in who made it, so it is said here
-        # and not inferred from the line.
+        # and not inferred from the line.  The client is the counterparty.
         written = []
         for obs in archive_mod.from_quotes(run_, pair=pair, source="desk", origin="typed",
-                                           counterparty=args.counterparty, via="hand",
-                                           default_time=clock.now):
+                                           counterparty=args.client or args.counterparty,
+                                           via="hand", default_time=clock.now):
             ours = archive_mod.replace(obs, kind="shown")
             ok, why = arc.add(ours)
             if ok:
@@ -2046,22 +2139,16 @@ def cmd_agent(args) -> int:
             print("error: an outcome needs --ref (the id of the price shown) and --result",
                   file=sys.stderr)
             return 2
-        target = arc.by_id(args.ref)
-        if target is None:
-            print(f"error: no record in the archive has the id {args.ref}. "
-                  f"'volkit agent archive {pair} --kind shown' lists them", file=sys.stderr)
-            return 2
-        if target.kind != "shown":
-            print(f"error: {args.ref} is a {target.kind} record, not a price we showed; an "
-                  f"outcome answers a price we made", file=sys.stderr)
-            return 2
-        obs = archive_mod.outcome(target, args.result, away_level=args.away, at=clock.now,
-                                  counterparty=args.counterparty)
-        ok, why = arc.add(obs)
-        if not ok:
-            print(f"error: {why}", file=sys.stderr)
+        # The same function the outcome buttons on the quote sheet call.
+        try:
+            obs = agent_mod.answer(arc, args.ref, args.result, away_level=args.away,
+                                   client=args.client or args.counterparty, at=clock.now)
+        except agent_mod.AgentError as exc:
+            print(f"error: {exc}. 'volkit agent archive {pair} --kind shown' lists the prices "
+                  f"shown", file=sys.stderr)
             return 2
         arc.flush()
+        target = arc.by_id(args.ref)
         print(f"{obs.id}  {obs.describe()}  (answers {target.describe()})")
         return 0
 
@@ -2079,28 +2166,41 @@ def cmd_agent(args) -> int:
     model, model_note = _agent_model(args)
     book = _book(args, [pair])
     _apply_band(args, book)
+    if args.feed:
+        _feed(book, args.feed)
     bank = KnowledgeBank.load(args.knowledge)
     for problem in bank.problems:
         print(f"  ! {problem}", file=sys.stderr)
     hist = None
     if args.history:
         from .history import load_history
-        hist = load_history(args.history, book.pairs)
-        for problem in hist.problems:
+        loaded = load_history(args.history, book.pairs)
+        for problem in loaded.problems:
             print(f"  ! {problem}", file=sys.stderr)
+        hist = loaded[pair] if pair in loaded else None
 
+    # The one engine (§11): the same panel the Quote button posts, through the
+    # same reader, so a price made here and one made on the screen are one price.
     request = agent_mod.Request(
         pair=pair, text=text, cut=args.cut, method=args.method,
-        fly_convention=args.fly, use_archive_width=not args.no_archive_width,
+        fly_convention=args.fly, client=args.client or args.counterparty,
+        client_weight=args.client_weight, client_min=args.client_min,
         half_life=args.half_life, min_effective=args.min_evidence,
         lookback_days=args.lookback, include_model_read=not args.no_model_read,
+        tolerance=args.tolerance,
         fair_weight=args.fair_weight, axe_weight=args.axe_weight,
-        skew_cap=args.skew_cap, horizon_days=args.horizon,
+        flow_weight=args.flow_weight, flow_scale=args.flow_scale,
+        flow_tolerance=args.flow_tolerance, skew_cap=args.skew_cap,
+        horizon_days=args.horizon,
         vega_text=(paths.read_text(args.vega) if args.vega else ""),
-        vega_scale=args.axe_scale, fallback_spread=args.fallback_spread,
-        stale_days=args.stale_days, narrate=not args.no_narration)
+        vega_scale=args.axe_scale,
+        fallback_tier=args.fallback_tier,
+        fallback_multiplier=args.fallback_multiplier,
+        fallback_interpolate=bool(args.interpolate_fallback),
+        narrate=not args.no_narration)
     try:
-        out = agent_mod.run(request, book=book, archive=arc, bank=bank, hist=hist, model=model)
+        out = agent_mod.run(request, book=book, archive=arc, bank=bank, hist=hist,
+                            model=model, spreads=_fallback_spreads(args))
     except agent_mod.AgentError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -2111,12 +2211,17 @@ def cmd_agent(args) -> int:
         print(model_note)
         print(out.text())
     if args.record:
-        written = agent_mod.record_shown(arc, out, counterparty=args.counterparty,
-                                         at=clock.now)
+        written, refused = agent_mod.record_quote(arc, out.sheet,
+                                                  client=args.client or args.counterparty,
+                                                  at=clock.now)
         arc.flush()
-        print(f"\nrecorded {len(written)} price(s) in {arc.path}:")
+        print(f"\nrecorded {len(written)} price(s) in {arc.path}"
+              + (f" for {args.client or args.counterparty}" if
+                 (args.client or args.counterparty) else "") + ":")
         for o in written:
             print(f"  {o.id}  {o.describe()}")
+        for why in refused:
+            print(f"  ! {why}")
     unpriced = [d for d in out.decisions if not d.priced]
     return 1 if unpriced and len(unpriced) == len(out.decisions) else 0
 
@@ -2298,6 +2403,51 @@ def cmd_mark(args) -> int:
 
     book = _book(args, [pair])
     _apply_band(args, book)
+    if args.feed:
+        # A wing quoted against an absolute strike needs the outright forward
+        # to become a moneyness, exactly as it does on 'mm'.
+        _feed(book, args.feed)
+
+    # ---- fit: the desk's own, with exactly the knobs given ----------------
+    if action == "fit":
+        market_text = ""
+        if args.file == "-":
+            market_text = sys.stdin.read()
+        elif args.file:
+            market_text = paths.read_text(args.file)
+        source = args.target_source or ("paste" if args.target else "quotes")
+        panel = marking_mod.fit_panel_from_request({
+            "pair": pair, "cut": args.cut, "method": args.method, "text": market_text,
+            "target_source": source,
+            "target_text": paths.read_text(args.target) if args.target else "",
+            "fit_curve": not args.no_curve, "free": args.free,
+            # Two boxes on the card, two numbers here, and the same reader: an
+            # unset flag is two blanks and the fit runs in the house range.
+            "reversion_lo": (args.reversion_range or ("", ""))[0],
+            "reversion_hi": (args.reversion_range or ("", ""))[1],
+            "tune_wings": not args.no_wings, "smile_free": args.smile_free,
+            "mid_pull": args.mid_pull, "max_nfev": args.max_evals,
+            "apply": False,
+        })
+        try:
+            out = panel.run(book)
+        except marking_mod.MarkingError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        if args.json:
+            print(_json.dumps(out, indent=1, sort_keys=True, default=str))
+        else:
+            _print_hand_fit(out)
+        if args.out_marks:
+            paths.write_text(args.out_marks,
+                             _json.dumps(out["marks"], indent=1, sort_keys=True, default=str))
+            print(f"\nmarks written to {args.out_marks}")
+            print(f"  check and quote off them: volkit mm {pair} --marks {args.out_marks} "
+                  f"--request asked.txt")
+        elif not args.json:
+            print("\n  nothing has been written; --out-marks saves what this arrived at so "
+                  "'volkit mm --marks' can stand on it")
+        return 1 if out["warnings"] else 0
 
     if action == "record":
         if not args.proposal:
@@ -2395,6 +2545,10 @@ def cmd_mark(args) -> int:
                 print(f"  note   {n}")
             for w in out["warnings"]:
                 print(f"  !      {w}")
+        if args.out_marks:
+            paths.write_text(args.out_marks,
+                             _json.dumps(out["marks"], indent=1, sort_keys=True, default=str))
+            print(f"\nmarks written to {args.out_marks}")
         if args.out:
             paths.write_text(args.out, _json.dumps(out["proposal"], indent=1, sort_keys=True))
             print(f"\nproposal written to {args.out}")
@@ -2650,29 +2804,23 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_serve)
 
     s = add_command("mm", parents=[common],
-                       help="fit a curve and the wings to a market, and quote what is asked for")
+                       help="check a market against the curve, and quote what is asked for")
     s.add_argument("pair")
-    s.add_argument("--file", help="the market: a pasted broker run, what the fit is aimed at "
+    s.add_argument("--file", help="the market: a pasted broker run, checked against the curve "
                                   "(default: stdin, when --request is not given)")
     s.add_argument("--request", help="the options to be quoted, one an instrument a line and no "
                                      "prices on them: '1M ATM in 100mm', '3M 25d RR'. Priced off "
-                                     "the fit above when there is one, and off the marks as they "
-                                     "stand when there is not")
-    s.add_argument("--target-source", default="overwrites", choices=list(_target_sources()),
-                   help="where the target at-the-money curve comes from")
-    s.add_argument("--target", help="file of 'tenor vol' lines, for --target-source paste")
-    s.add_argument("--free", nargs="*", help="curve parameters to leave free")
-    s.add_argument("--reversion-range", nargs=2, metavar=("FLOOR", "CEILING"), type=float,
-                   help=f"the range the backbone's mean reversion is fitted in, a marking "
-                        f"judgement rather than a property of the model (default: "
-                        f"{marketmaker.MEAN_REVERSION_RANGE[0]:g} "
-                        f"{marketmaker.MEAN_REVERSION_RANGE[1]:g})")
-    s.add_argument("--smile-free", nargs="*", help="smile parameters to leave free")
-    s.add_argument("--no-curve", action="store_true", help="do not fit the at-the-money curve")
-    s.add_argument("--no-wings", action="store_true", help="do not fine tune the wings")
-    s.add_argument("--mid-pull", type=float, default=0.05,
-                   help="weight of the pull toward the quoted mids inside the hinge")
-    s.add_argument("--max-evals", type=int, default=300, help="fine-tune evaluation budget")
+                                     "--marks when there are some, and off the marks as they "
+                                     "stand when there are not")
+    s.add_argument("--tolerance", type=float, default=marketmaker.NEAR_EDGE,
+                   help=f"how far inside a quoted two-way still counts as near its edge, as a "
+                        f"fraction of the width; zero warns only about what is actually through "
+                        f"(default: {marketmaker.NEAR_EDGE:g})")
+    s.add_argument("--marks", metavar="PATH",
+                   help="marks to check and quote against, as written by "
+                        "'volkit mark fit --out-marks': the shell's version of what the browser "
+                        "holds between the marking card and these two. Neither this command nor "
+                        "the screen's Check Market and Quote buttons move a mark")
     s.add_argument("--vega", help="file of 'tenor vega' lines: the position leaning the mid")
     s.add_argument("--axe-scale", type=float, default=0.0,
                    help="the position that counts as a full axe, in the profile's own unit")
@@ -2683,14 +2831,36 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--skew-cap", type=float, default=1.0,
                    help="cap on the total lean, as a multiple of the half width")
     s.add_argument("--horizon", type=float, default=30.0, help="fair value horizon in days")
-    s.add_argument("--fallback-spread", type=float,
-                   help="width in vol points for quotes no bank rule matches")
-    s.add_argument("--archive-width", action="store_true",
-                   help="put the observation archive on the width ladder, between the bank "
-                        "and the fallback: a quote no rule matches is shown at the width the "
-                        "market has shown it at, when the archive holds enough")
-    s.add_argument("--archive", help=f"the observation archive, with --archive-width "
+    s.add_argument("--fallback-tier", default="",
+                   help=f"the {kace.SPREADS_SHEET} spreading tier the width ladder falls back "
+                        f"on when no bank rule and no archive evidence covers a quote, read at "
+                        f"each row's own maturity (default: none, so such a quote gets no "
+                        f"bid and no offer)")
+    s.add_argument("--fallback-multiplier", default=None, metavar="X",
+                   help="multiply that tier's widths by this (default 1)")
+    s.add_argument("--interpolate-fallback", action="store_true",
+                   help="read the tier across between the two tenors a maturity falls "
+                        "between, instead of taking the nearer one's width")
+    s.add_argument("--archive", help=f"the observation archive: the width ladder's second "
+                                     f"rung and every client's record "
                                      f"(default: {archive.ARCHIVE_FILENAME} beside the workbook)")
+    s.add_argument("--client", default="",
+                   help="who the price is for; their record on each instrument leans the mid "
+                        "and widens the price")
+    s.add_argument("--client-weight", type=float, default=0.5,
+                   help="how much of the client's side leans the mid, as a fraction of the "
+                        "half width, and how much of the move against us after their trades "
+                        "widens the price (0 shows the record and applies nothing)")
+    s.add_argument("--client-min", type=int, default=synthesis.DEFAULT_CLIENT_MIN,
+                   help="answered prices a client needs on an instrument before their record "
+                        "counts")
+    s.add_argument("--flow-weight", type=float, default=0.0,
+                   help="how much of a half width the printed tape leans the mid (0: off)")
+    s.add_argument("--flow-scale", type=float, default=flow.DEFAULT_SCALE,
+                   help="the net vega per volatility point that counts as a full tape lean")
+    s.add_argument("--flow-tolerance", type=float, default=flow.DEFAULT_TOLERANCE,
+                   help="how far from our mark a print must be to be read as paid or given, "
+                        "as a fraction of the mark")
     s.add_argument("--knowledge", help="knowledge bank JSON (default: beside the workbook)")
     s.add_argument("--feed", default=_default_feed(),
                    help="spot / forward feed CSV. Needed for a quote written against an "
@@ -2703,9 +2873,6 @@ def build_parser() -> argparse.ArgumentParser:
                    help="which butterfly an unqualified 'fly' quote means")
     s.add_argument("--cut", default="NY")
     s.add_argument("--method", default="SVI")
-    s.add_argument("--learn", action="store_true",
-                   help="propose bank rules from the pasted widths instead of quoting")
-    s.add_argument("--save", action="store_true", help="with --learn, write them to the bank")
     s.set_defaults(func=cmd_mm)
 
     # The quoting agent.  One command with an action on it rather than a family
@@ -2730,7 +2897,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--journal", help=f"with 'ask', the re-marking journal "
                                      f"(default: {remarks.JOURNAL_FILENAME} beside the workbook)")
     s.add_argument("--file", default="-",
-                   help="what to price, one instrument a line (default: stdin)")
+                   help="with 'quote', what to price, one instrument a line (default: stdin); "
+                        "with 'shown', the prices shown; with 'learn', a pasted run to count "
+                        "beside the archive without filing it")
     s.add_argument("--archive", help=f"the observation archive "
                                      f"(default: {archive.ARCHIVE_FILENAME} beside the workbook)")
     s.add_argument("--chats", action="append", default=[], metavar="DIR",
@@ -2761,10 +2930,20 @@ def build_parser() -> argparse.ArgumentParser:
                    help="how far back the archive is read, in days")
     s.add_argument("--no-model-read", action="store_true",
                    help="leave observations a language model transcribed out of the figures")
-    s.add_argument("--no-archive-width", action="store_true",
-                   help="widths from the bank only; the archive is shown and not used")
-    s.add_argument("--stale-days", type=float, default=5.0,
-                   help="an archived level older than this is called stale on the row")
+    s.add_argument("--tolerance", type=float, default=marketmaker.AGENT_TOLERANCE,
+                   help="how far the bank's width may sit from the archive's before the row "
+                        "says tight or wide, as a fraction of the archived width")
+    # the client
+    s.add_argument("--client", default="",
+                   help="who the price is for: their record leans the mid and widens the "
+                        "price, and --record files the prices under their name")
+    s.add_argument("--client-weight", type=float, default=0.5,
+                   help="how much of the client's side leans the mid, as a fraction of the "
+                        "half width, and how much of the move against us after their trades "
+                        "widens the price (0 shows the record and applies nothing)")
+    s.add_argument("--client-min", type=int, default=synthesis.DEFAULT_CLIENT_MIN,
+                   help="answered prices a client needs on an instrument before their record "
+                        "counts")
     # the model
     s.add_argument("--llm-backend", choices=list(llm.BACKENDS),
                    help="ollama (default) or an OpenAI-compatible endpoint")
@@ -2778,14 +2957,29 @@ def build_parser() -> argparse.ArgumentParser:
                    help="how much of the fair-value richness leans the mid")
     s.add_argument("--axe-weight", type=float, default=0.5,
                    help="how much of a half width a full axe leans the mid")
+    s.add_argument("--flow-weight", type=float, default=0.0,
+                   help="how much of a half width the printed tape leans the mid (0: off)")
+    s.add_argument("--flow-scale", type=float, default=flow.DEFAULT_SCALE,
+                   help="the net vega per volatility point that counts as a full tape lean")
+    s.add_argument("--flow-tolerance", type=float, default=flow.DEFAULT_TOLERANCE,
+                   help="how far from our mark a print must be to be read as paid or given, "
+                        "as a fraction of the mark")
     s.add_argument("--skew-cap", type=float, default=1.0,
                    help="cap on the total lean, as a multiple of the half width")
     s.add_argument("--horizon", type=float, default=30.0, help="fair value horizon in days")
     s.add_argument("--vega", help="file of 'tenor vega' lines: the position leaning the mid")
     s.add_argument("--axe-scale", type=float, default=0.0,
                    help="the position that counts as a full axe, in the profile's own unit")
-    s.add_argument("--fallback-spread", type=float,
-                   help="width for quotes no bank rule and no archive evidence covers")
+    s.add_argument("--fallback-tier", default="",
+                   help=f"the {kace.SPREADS_SHEET} spreading tier the width ladder falls back "
+                        f"on when no bank rule and no archive evidence covers a quote, read at "
+                        f"each row's own maturity (default: none, so such a quote gets no "
+                        f"bid and no offer)")
+    s.add_argument("--fallback-multiplier", default=None, metavar="X",
+                   help="multiply that tier's widths by this (default 1)")
+    s.add_argument("--interpolate-fallback", action="store_true",
+                   help="read the tier across between the two tenors a maturity falls "
+                        "between, instead of taking the nearer one's width")
     s.add_argument("--knowledge", help="knowledge bank JSON (default: beside the workbook)")
     s.add_argument("--history", default=_default_history(),
                    help="historical workbook, for the fair-value lean")
@@ -2835,9 +3029,12 @@ def build_parser() -> argparse.ArgumentParser:
     # that screen's fit, and a build without the tab has nothing for it to do.
     s = add_command("mark", parents=[common],
                     help="the marking agent: plan the fit, learn what this desk does after it")
-    s.add_argument("action", choices=("propose", "confer", "learn", "journal", "record",
+    s.add_argument("action", choices=("propose", "fit", "confer", "learn", "journal", "record",
                                       "rules"),
-                   help="propose: plan and run the fit against a target curve. confer: take "
+                   help="propose: plan and run the fit against a target curve. fit: run the "
+                        "two fitters by hand, with exactly the knobs given -- the shell's "
+                        "version of the marking card's 'Fit my way', and the only thing here "
+                        "that can leave marks for 'mm --marks' to stand on. confer: take "
                         "the targets from the quote archive and let the two agents settle "
                         "on a re-mark. learn: what the journal says about this desk. "
                         "journal: what is held. record: answer a proposal. rules: the "
@@ -2862,6 +3059,23 @@ def build_parser() -> argparse.ArgumentParser:
                    help="with --file, free exactly --free and --smile-free rather than "
                         "letting the agent choose the knobs")
     s.add_argument("--smile-free", nargs="*", help="smile parameters, with --no-choose")
+    # The hand fit's own knobs.  They sit on this command and not on 'mm'
+    # because a mark that moves moves here (§11): there is one place a curve
+    # can change, and this is the shell's door into it.
+    s.add_argument("--no-curve", action="store_true",
+                   help="with 'fit', do not fit the at-the-money curve")
+    s.add_argument("--no-wings", action="store_true",
+                   help="with 'fit', do not fine tune the wings")
+    s.add_argument("--reversion-range", nargs=2, metavar=("FLOOR", "CEILING"), type=float,
+                   help=f"with 'fit', the range the backbone's mean reversion is fitted in, a "
+                        f"marking judgement rather than a property of the model (default: "
+                        f"{marketmaker.MEAN_REVERSION_RANGE[0]:g} "
+                        f"{marketmaker.MEAN_REVERSION_RANGE[1]:g})")
+    s.add_argument("--max-evals", type=int, default=300,
+                   help="with 'fit', the fine-tune evaluation budget")
+    s.add_argument("--out-marks", metavar="PATH",
+                   help="with 'fit' or 'propose', write the marks it arrived at, so "
+                        "'volkit mm --marks' can check and quote off them")
     s.add_argument("--no-archive", action="store_true",
                    help="with --file, do not score the proposal against the archive")
     s.add_argument("--free", nargs="*", help="curve parameters to leave free, overriding "
@@ -2954,6 +3168,14 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--cut", default="NY", help="the cut the daily series is integrated to")
     s.add_argument("--method", default="SVI", choices=list(_methods()),
                    help="smile interpolation for --source fitted")
+    s.add_argument("--spread-multiplier", metavar="X",
+                   help="multiply every one of the tier's ATM widths by this before posting "
+                        "(default 1: the tab's own ladder). The mid of every two-way is "
+                        "unchanged; only the width moves")
+    s.add_argument("--interpolate-spreads", action="store_true",
+                   help="a day between two pillars takes a width read across between them "
+                        "rather than the nearer pillar's -- the default is the step rule the "
+                        "spreadsheet posted")
     s.add_argument("--post", action="store_true",
                    help="send the message to --kace-url the way the poster page does, and "
                         "record the outcome in the post log; the message is still written "

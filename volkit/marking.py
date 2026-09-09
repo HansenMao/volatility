@@ -1,10 +1,25 @@
-"""The marking agent: how to run the fit, and where this desk lands after it.
+"""The marking agent: every mark that moves, and where this desk lands after it.
 
-The market-maker screen's two fitters are good and stay exactly as they are.
-``fit_atm_curve`` is a cold fit against a target term structure; the wings move
-by a curve-wide additive shift under a hinge that wants our mid *inside* the
-market rather than on top of somebody's.  Those were decided for reasons (§11)
-and none of them is the thing a marker actually agonises over.
+**This module is the only place a vol mark moves.**  It did not start that way:
+the market-maker screen had a Fit button that moved the curve and the wings,
+and this card beside it that proposed the same thing more carefully, so there
+were two ways to change a mark and only one of them was ever written down.
+There is now one card.  The market-maker screen's other buttons check a market
+against the curve (``marketmaker.CheckPanel``) and quote off it
+(``marketmaker.QuotePanel``), and neither of them touches a mark.
+
+The two fitters themselves are good and stay exactly where they are, in
+:mod:`volkit.marketmaker`, as model code this module calls.  ``fit_atm_curve``
+is a cold fit against a target term structure; the wings move by a curve-wide
+additive shift under a hinge that wants our mid *inside* the market rather than
+on top of somebody's.  Those were decided for reasons (§11) and none of them is
+the thing a marker actually agonises over.
+
+Two panels here run them.  :class:`FitPanel` is the desk driving them by hand
+-- these knobs, this target, this range -- and :class:`MarkPanel` is the agent
+deciding how to drive them and whether to take what came out.  The second is
+the point of the module; the first is what makes an *edited* answer possible,
+and an edited answer is the most valuable row in the journal.
 
 What a marker agonises over is the judgement *around* the fit: which knobs to
 let move this morning and which to leave alone, whether four targets are
@@ -704,7 +719,8 @@ def propose(book, pair: str, *, targets: list[CurveTarget] | None = None,
             tendencies: Tendencies | None = None, method: str | None = None,
             cut: str = "NY", free: tuple[str, ...] | None = None,
             smile_free: tuple[str, ...] | None = None,
-            mid_pull: float = 0.05, max_nfev: int = 300) -> Proposal:
+            mid_pull: float = 0.05, max_nfev: int = 300,
+            reversion_range: tuple[float, float] | None = None) -> Proposal:
     """Run the fit the plan says to run, nudge it, and hand back a proposal.
 
     Nothing stays on the book.  The fit itself runs on a deepcopy inside
@@ -739,7 +755,8 @@ def propose(book, pair: str, *, targets: list[CurveTarget] | None = None,
     # -- the curve ---------------------------------------------------------
     if targets:
         try:
-            fit = fit_atm_curve(surface.atm, list(targets), free=plan.free or None)
+            fit = fit_atm_curve(surface.atm, list(targets), free=plan.free or None,
+                                reversion_range=reversion_range)
             out.fit = fit
             fitted = {k: v for k, v in fit.after.items()}
             after["curve"] = dict(session.curve_params(surface.atm))
@@ -853,16 +870,293 @@ def record(journal: rem.Journal, proposal: Proposal, book, *, verdict: str,
 SCREEN_VERDICTS = ("accepted", "edited", "rejected")
 
 
+# ===========================================================================
+# the hand fit
+# ===========================================================================
+
+
+@dataclass
+class FitPanel:
+    """The desk's own fit, run from the marking card.  The agent's other half.
+
+    The agent proposes; this is the desk driving the same two fitters directly
+    -- these knobs free, this target curve, this mean-reversion range -- and it
+    is what makes the ``edited`` verdict possible.  An accepted proposal
+    teaches the agent that its plan was right; an edited one is the only place
+    the tool's opinion and the desk's sit side by side on the same morning, and
+    without a hand fit there is nothing to call the edit.
+
+    It lives here rather than on the market-maker panel it used to be, because
+    the whole point of that move is that **there is one place a mark can
+    change**.  The card runs this, holds what comes back, and either hands it
+    to the quote or writes it down beside what the agent proposed.
+
+    Like every panel here it is posted whole by the browser and read by
+    :func:`fit_panel_from_request`, so the card and ``volkit mark fit`` arrive
+    at the same numbers.
+    """
+
+    pair: str
+    cut: str = "NY"
+    method: str | None = None
+    label: str = ""
+
+    # the market: what the wings are tuned against
+    text: str = ""
+    vol_unit: str = "auto"
+    fly_convention: str = "market"
+
+    # the target at-the-money curve
+    target_source: str = "overwrites"
+    target_text: str = ""
+    fit_curve: bool = True
+    free: tuple[str, ...] | None = None
+    #: The range the backbone's mean reversion is fitted in.  ``None`` is the
+    #: house judgement, ``MEAN_REVERSION_RANGE``; a panel that names one is
+    #: overriding a marking judgement for this fit and the run says so, because
+    #: a fit made inside the house range and one made outside it must not read
+    #: the same.
+    reversion_range: tuple[float, float] | None = None
+
+    # the wings
+    tune_wings: bool = True
+    smile_free: tuple[str, ...] = PARAM_NAMES
+    mid_pull: float = 0.05
+    max_nfev: int = 300
+
+    #: Leave the fit on the loaded book.  In memory only, like every mark this
+    #: tool makes: the workbook on disk is untouched and a reload discards it.
+    apply: bool = False
+    notes: tuple[str, ...] = field(default_factory=tuple)
+
+    def run(self, book) -> dict:
+        from . import marketmaker as mm
+        from .quotes import parse_quotes
+
+        surface, method, clock = mm._prepare(book, self.pair, self.method)
+        knobs = _Knobs(surface.atm)
+
+        out: dict = {
+            "pair": self.pair, "cut": self.cut, "method": method, "label": self.label,
+            "valuation": clock.now.isoformat(),
+            "is_cross": knobs.is_cross,
+            "knobs": list(knobs.available),
+            "applied": bool(self.apply),
+            "notes": list(self.notes), "warnings": [], "unavailable": {},
+            "curve": None, "wings": None, "marks": None,
+            "parse": {"notes": [], "skipped": [], "ignored": []},
+        }
+
+        # -- the market, read exactly as the check reads it ------------------
+        run_ = parse_quotes(self.text, pair=self.pair, vol_unit=self.vol_unit,
+                            fly_convention=self.fly_convention, today=clock.now.date())
+        quotes = list(run_.quotes)
+        expiries = mm.resolve_expiries(clock, quotes, self.pair, book.calendars)
+        stale = [k for k, (_, t) in expiries.items() if t <= 0]
+        if stale:
+            raise MarkingError(
+                f"{', '.join(stale)} is not in the future at the valuation time "
+                f"{clock.now:%Y-%m-%d %H:%M}Z")
+        forwards, forward_notes = mm._forwards_for(book, self.pair, expiries)
+        quotes, premium_errors = mm.premiums_as_vols(
+            quotes, expiries, mm._levels_for(book, self.pair, expiries), self.pair)
+        out["parse"] = {
+            "notes": list(run_.notes) + list(forward_notes),
+            "skipped": [{"line": n, "text": t, "why": w} for n, t, w in run_.skipped],
+            "ignored": [{"line": n, "text": t, "why": w} for n, t, w in run_.ignored],
+        }
+
+        before = mm.capture_marks(surface)
+        before_knobs = knobs.get()
+        before_shifts = {k: float(surface.param_shifts.get(k, 0.0)) for k in PARAM_NAMES}
+
+        # -- 1. the curve ---------------------------------------------------
+        curve_fit = None
+        if self.fit_curve:
+            try:
+                targets, evidence = mm.curve_targets(surface, quotes, expiries,
+                                                     source=self.target_source,
+                                                     text=self.target_text)
+                if targets:
+                    curve_fit = mm.fit_atm_curve(surface.atm, targets, free=self.free,
+                                                 reversion_range=self.reversion_range)
+                    problems = knobs.set(curve_fit.after)
+                    if problems:
+                        raise ValueError("; ".join(problems))
+                    surface.invalidate()
+                    out["curve"] = self._curve_block(curve_fit, evidence)
+                else:
+                    out["unavailable"]["curve"] = evidence
+            except (ValueError, ConvergenceError) as exc:
+                out["unavailable"]["curve"] = f"{type(exc).__name__}: {exc}"
+        else:
+            out["unavailable"]["curve"] = "the curve fit is switched off on this panel"
+
+        # -- 2. the wings ---------------------------------------------------
+        tune = None
+        # Anything whose value depends on the shape of the smile constrains the
+        # wings.  A pure at-the-money quote does not, and is the curve's job.
+        wing_quotes = [q for q, e in zip(quotes, premium_errors) if not e and (
+            q.instrument in ("rr", "fly", "outright")
+            or (q.instrument == "spread" and q.leg in ("rr", "fly"))
+            or (q.instrument == "structure" and any(l.kind != "atm" for l in q.legs)))]
+        if self.tune_wings:
+            try:
+                if not wing_quotes:
+                    raise ValueError(
+                        "the paste has no risk reversal, butterfly or outright in it, so nothing "
+                        "constrains the wings; the at-the-money quotes are the curve's job")
+                tune = tune_smile_shifts(
+                    surface, wing_quotes, expiries, forwards, method=method, cut=self.cut,
+                    free=tuple(self.smile_free), mid_pull=self.mid_pull, max_nfev=self.max_nfev)
+                out["wings"] = {
+                    "before": {k: v for k, v in tune.before.items()},
+                    "after": {k: v for k, v in tune.after.items()},
+                    "free": list(tune.free),
+                    "inside_before": tune.inside_before, "inside_after": tune.inside_after,
+                    "quotes": len(wing_quotes),
+                    "worst_before": tune.worst_before * 100.0,
+                    "worst_after": tune.worst_after * 100.0,
+                    "converged": tune.converged, "message": tune.message,
+                    "evaluations": tune.evaluations, "slices": tune.slices,
+                    "seconds": tune.seconds, "mid_pull": self.mid_pull,
+                    "warnings": list(tune.warnings),
+                }
+                out["warnings"].extend(tune.warnings)
+            except (ValueError, ConvergenceError) as exc:
+                out["unavailable"]["wings"] = f"{type(exc).__name__}: {exc}"
+        else:
+            out["unavailable"]["wings"] = "the wing fine tune is switched off on this panel"
+
+        # -- the marks the quote and the check will stand on ------------------
+        # Captured *before* the restore below, because that is the whole point
+        # of the split: the fit's answer leaves here as numbers, and nothing of
+        # it is left on the book unless somebody asked for that separately.
+        out["marks"] = {
+            **mm.capture_marks(surface),
+            "pair": self.pair, "cut": self.cut, "method": method,
+            "fitted": bool(curve_fit is not None or tune is not None),
+            "stamp": clock.now.isoformat(),
+            "source": "hand fit",
+            "what": ", ".join(
+                x for x in (
+                    ("the at-the-money curve" if curve_fit is not None else ""),
+                    ("the wings" if tune is not None else "")) if x) or "nothing",
+        }
+
+        # -- restore unless asked to keep -------------------------------------
+        if not self.apply:
+            problems = knobs.set(before_knobs)
+            surface.set_param_shifts(before_shifts)
+            surface.invalidate()
+            if problems:
+                out["warnings"].append(
+                    "the marks could not be put back exactly after the fit: "
+                    + "; ".join(problems) + ". Reload the workbook before trusting this book")
+            elif mm.capture_marks(surface) != before:
+                out["warnings"].append(
+                    "the marks were not put back exactly after the fit. Reload the workbook "
+                    "before trusting this book")
+        else:
+            # What goes on the book is the marks that were handed back, not the
+            # raw numbers the optimiser stopped at.  They differ: a knob leaves
+            # here in volatility points and comes back divided by a hundred,
+            # and that round trip moves about an eighth of all values by one
+            # place in the last bit.  Left alone, a price then depended on
+            # whether "keep the marks" had been ticked -- quoting off a book
+            # the fit was applied to and quoting off the marks it handed back
+            # gave prices a nanovol apart, which is nothing to a market and
+            # everything to a screen that has to reproduce itself.  One number,
+            # one spelling: the book holds exactly what the panel shows.
+            for problem in mm.apply_marks(surface, out["marks"]):
+                out["warnings"].append(f"the fitted marks did not go on cleanly: {problem}")
+            out["warnings"].append(
+                f"the fitted marks were written into the loaded book for {self.pair}. They are "
+                f"in memory only -- the workbook on disk is unchanged, and a reload discards them")
+        # The book as the quote and the check will find it, stamped onto the
+        # marks the browser is about to hold.  Taken *after* the restore (or
+        # the apply), because that is the state a panel standing on these marks
+        # is entitled to assume, and a re-mark made on the marking screen
+        # between here and there is exactly what it has to notice.
+        out["marks"]["book"] = mm.mark_fingerprint(book, self.pair)
+        out["warnings"].extend(surface.warnings[-6:])
+        return out
+
+    def _curve_block(self, fit, evidence: str) -> dict:
+        from .marketmaker import DAYS_IN_YEAR as _DIY
+        from .marketmaker import MEAN_REVERSION_RANGE, _knob_points
+        return {
+            "evidence": evidence,
+            "source": self.target_source,
+            "free": list(fit.free),
+            "before": {k: _knob_points(k, v) for k, v in fit.before.items()},
+            "after": {k: _knob_points(k, v) for k, v in fit.after.items()},
+            "rows": [
+                {"tenor": tg.tenor, "days": tg.t * _DIY, "source": tg.source,
+                 "target": tg.vol * 100.0, "before": b * 100.0, "after": a * 100.0,
+                 "diff": (a - tg.vol) * 100.0, "moved": (a - b) * 100.0}
+                for tg, b, a in zip(fit.targets, fit.achieved_before, fit.achieved_after)
+            ],
+            "rmse": fit.rmse * 100.0, "max_error": fit.max_error * 100.0,
+            "max_error_tenor": fit.max_error_tenor,
+            "converged": fit.converged, "message": fit.message,
+            "evaluations": fit.evaluations, "seconds": fit.seconds,
+            "warnings": list(fit.warnings),
+            # The range this fit was actually run in, and whether it was the
+            # house one.  A fit made inside the marking judgement and one made
+            # outside it must not read the same on the screen.
+            "reversion_range": list(self.reversion_range or MEAN_REVERSION_RANGE),
+            "reversion_house": self.reversion_range is None,
+        }
+
+
+def fit_panel_from_request(payload: dict) -> FitPanel:
+    """The hand fit as the browser posts it.
+
+    Same rule as every other reader here: a field the browser sends that this
+    does not read is a setting that silently does nothing, and a test pins the
+    page's list against this function.
+    """
+    from .marketmaker import (TARGET_SOURCES, _common, _opt_bool, _opt_float,
+                             _opt_tuple, _reversion_from_request)
+    pair, cut, method, fly, vol_unit = _common(payload)
+    source = str(payload.get("target_source") or "overwrites").strip().lower()
+    if source not in TARGET_SOURCES:
+        raise ValueError(f"unknown target source {source!r}; expected one of {TARGET_SOURCES}")
+    return FitPanel(
+        pair=pair, cut=cut, method=method,
+        label=str(payload.get("label") or ""),
+        text=str(payload.get("text") or ""),
+        vol_unit=vol_unit,
+        fly_convention=fly,
+        target_source=source,
+        target_text=str(payload.get("target_text") or ""),
+        fit_curve=_opt_bool(payload, "fit_curve", True),
+        free=_opt_tuple(payload, "free", None),
+        # Named here rather than inside the helper so the guard that pins the
+        # panel's field list against this reader can see them.
+        reversion_range=_reversion_from_request(payload.get("reversion_lo"),
+                                                payload.get("reversion_hi")),
+        tune_wings=_opt_bool(payload, "tune_wings", True),
+        smile_free=_opt_tuple(payload, "smile_free", PARAM_NAMES),
+        mid_pull=_opt_float(payload, "mid_pull", 0.05),
+        max_nfev=int(_opt_float(payload, "max_nfev", 300)),
+        apply=_opt_bool(payload, "apply", False),
+    )
+
+
 @dataclass
 class MarkPanel:
     """The marking agent, aimed at exactly what the fit panel is aimed at.
 
-    The card sits beside the **Fit** button and reads the same boxes: the
-    market paste, the target curve and its source, the butterfly and unit
-    conventions.  It does not have a market of its own, because the question
-    it answers is *how would you run this fit, and would you take what came
-    out* -- and that is a question about the fit on the screen, not about
-    some other fit.  What it adds is what a marker adds: which knobs to free
+    The card owns every mark that moves on this screen.  It reads the market
+    paste, the target curve and its source, and the same conventions the check
+    and the quote read, and answers *how would you run this fit, and would you
+    take what came out*.  Its other half is :class:`FitPanel`, the desk running
+    those same two fitters by hand; the agent's plan can be handed to it, and
+    what the desk ends on is the ``edited`` verdict this learns most from.
+
+    What the agent adds is what a marker adds: which knobs to free
     (``choose_knobs``), what the journal says this desk does afterwards, and
     what the quote archive makes of the result (``use_archive``).
 
@@ -875,7 +1169,7 @@ class MarkPanel:
     cut: str = "NY"
     method: str | None = None
 
-    # the fit panel's own inputs, unchanged
+    # the market and the target curve: the same boxes FitPanel reads
     text: str = ""
     vol_unit: str = "auto"
     fly_convention: str = "market"
@@ -885,6 +1179,11 @@ class MarkPanel:
     smile_free: tuple[str, ...] = PARAM_NAMES
     mid_pull: float = 0.05
     max_nfev: int = 300
+    #: The range the backbone's mean reversion is proposed in.  ``None`` is the
+    #: house judgement; a card that names one is overriding a marking judgement
+    #: for this proposal, exactly as :class:`FitPanel` does, and the two boxes
+    #: are the same two boxes.
+    reversion_range: tuple[float, float] | None = None
 
     # the agent's own
     choose_knobs: bool = True
@@ -895,17 +1194,12 @@ class MarkPanel:
     half_life: float = 5.0
     min_effective: float = 2.0
     evidence_lookback: float = 90.0
-
-    def fit_payload(self) -> dict:
-        """The fit panel this card is aimed at, as the fit reader takes it."""
-        return {
-            "pair": self.pair, "cut": self.cut, "method": self.method,
-            "text": self.text, "vol_unit": self.vol_unit,
-            "fly_convention": self.fly_convention,
-            "target_source": self.target_source, "target_text": self.target_text,
-            "free": list(self.free or ()), "smile_free": list(self.smile_free),
-            "mid_pull": self.mid_pull, "max_nfev": self.max_nfev, "apply": False,
-        }
+    #: With the market box **empty** and ``use_archive`` on, the archive *is*
+    #: the market: the two agents confer (`consult.confer`) over this many
+    #: bounded rounds, the archive's findings as the targets, and the best
+    #: round is the proposal.  This was `volkit mark confer`, reachable from a
+    #: shell and not from the screen.
+    rounds: int = 3
 
     def archive_evidence(self, archive, *, asof) -> dict | None:
         """What the observation archive says, on its own, before the book.
@@ -943,7 +1237,6 @@ class MarkPanel:
 
         if book is None or self.pair not in book:
             raise MarkingError(f"{self.pair} is not built in this book")
-        fit = mm.panel_from_request(self.fit_payload())
         surface, method, clock = mm._prepare(book, self.pair, self.method)
         out: dict = {
             "pair": self.pair, "cut": self.cut, "method": method,
@@ -976,7 +1269,9 @@ class MarkPanel:
 
         targets: list[CurveTarget] = []
         try:
-            targets, evidence = fit._targets(surface, quotes, expiries)
+            targets, evidence = mm.curve_targets(surface, quotes, expiries,
+                                                 source=self.target_source,
+                                                 text=self.target_text)
         except (ValueError, ConvergenceError) as exc:
             evidence = f"{type(exc).__name__}: {exc}"
             out["warnings"].append(f"no target curve: {exc}")
@@ -1011,6 +1306,22 @@ class MarkPanel:
                      for t in sorted(tendencies.by_key.values(),
                                      key=lambda t: (t.section, t.knob))],
         }
+        # -- no market pasted, and the archive is on: the archive is the market --
+        # The two agents confer: the archive's findings are the targets, the
+        # proposal is critiqued against them, what it broke is reweighted and
+        # it is proposed again, over bounded rounds, and the best round is
+        # handed back in exactly the shape a proposal from a paste has, so
+        # the verdict buttons, the journal and the hand-off to the check and
+        # the quote are the same buttons.
+        out["source"] = "paste" if quotes else "targets"
+        if not quotes and self.use_archive:
+            if archive_evidence is None and archive is not None:
+                archive_evidence = self.archive_evidence(archive, asof=clock.now)
+            conferred = self._confer(book, archive_evidence, tendencies, method, out)
+            if conferred is not None:
+                out["warnings"].extend(surface.warnings[-6:])
+                return conferred
+
         caller_free = None if self.choose_knobs else tuple(self.free or ())
         caller_smile = None if self.choose_knobs else tuple(self.smile_free or ())
         if caller_free is not None and not caller_free:
@@ -1023,7 +1334,8 @@ class MarkPanel:
                            expiries=expiries if wing_quotes else None,
                            forwards=forwards, tendencies=tendencies, method=method,
                            cut=self.cut, free=caller_free, smile_free=caller_smile,
-                           mid_pull=self.mid_pull, max_nfev=self.max_nfev)
+                           mid_pull=self.mid_pull, max_nfev=self.max_nfev,
+                           reversion_range=self.reversion_range)
         out["proposal"] = proposal.to_json()
         out["lines"] = proposal.lines()
         out["plan"] = {"free": list(proposal.plan.free),
@@ -1042,6 +1354,110 @@ class MarkPanel:
                                              forwards, out["notes"])
         out["warnings"].extend(surface.warnings[-6:])
         return out
+
+    def _confer(self, book, archive_evidence, tendencies, method, out: dict) -> dict | None:
+        """The archive as the market.  ``None`` when there is nothing to confer over.
+
+        Nothing to confer over -- no archive, or an archive that holds no
+        level for this pair -- falls back to the target-curve proposal the
+        card has always made, with a note; a conference that found the
+        surface inside every archived market proposes nothing, and says so
+        in the same words the critique would.
+        """
+        from . import consult
+        from . import marketmaker as mm
+        if archive_evidence is None:
+            out["notes"].append("no market is pasted and no archive is loaded, so the target "
+                                "curve alone is proposed from")
+            return None
+        synthesis = archive_evidence["synthesis"]
+        surface, _, clock = mm._prepare(book, self.pair, self.method)
+        findings, f_notes = consult.findings_from(book, self.pair, synthesis, method=method,
+                                                 cut=self.cut, forwards=None)
+        if not findings:
+            out["notes"].append("no market is pasted and the archive holds no level for "
+                                f"{self.pair}, so the target curve alone is proposed from")
+            out["notes"].extend(f_notes)
+            return None
+        expiries = mm.resolve_expiries(clock, [f.quote for f in findings])
+        forwards, forward_notes = mm._forwards_for(book, self.pair, expiries)
+        out["notes"].extend(forward_notes)
+        conference = consult.confer(
+            book, self.pair, synthesis, tendencies=tendencies, method=method, cut=self.cut,
+            forwards=forwards, rounds=max(1, int(self.rounds)), mid_pull=self.mid_pull)
+        out["source"] = "archive"
+        out["notes"].append(
+            f"no market is pasted, so the archive is the market: {len(conference.findings)} "
+            f"archived level(s) from {archive_evidence['path']}, and the target curve box "
+            f"is not read")
+        out["notes"].extend(n for n in conference.notes if n not in out["notes"])
+        out["targets"] = {
+            "n": sum(1 for f in conference.findings if f.quote.instrument == "atm"),
+            "evidence": (f"the archive's at-the-money levels, weighted by how much stands "
+                         f"behind each; {sum(1 for f in conference.findings if not f.inside)} "
+                         f"of {len(conference.findings)} archived point(s) sit outside the "
+                         f"surface")}
+        out["conference"] = {
+            "rounds": [{"n": r.n, "verdict": r.critique.verdict,
+                        "inside_before": r.critique.inside_before,
+                        "inside_after": r.critique.inside_after,
+                        "broke": [x.key for x in r.critique.broke],
+                        "fixed": [x.key for x in r.critique.fixed],
+                        "reweighted": list(r.reweighted),
+                        "moved": bool(r.proposal.moved)} for r in conference.rounds],
+            "chosen": None if conference.best is None else conference.best.n,
+            "findings": len(conference.findings),
+            "disagreeing": sum(1 for f in conference.findings if not f.inside),
+            "max_rounds": max(1, int(self.rounds)),
+        }
+        best = conference.best
+        if best is None:
+            # Inside every archived market, or nothing a fit can reach: an
+            # unmoved proposal, in the proposal's own shape, so the card reads
+            # the same as a paste that needed nothing.
+            proposal = propose(book, self.pair, targets=None, wing_quotes=None,
+                               tendencies=tendencies, method=method, cut=self.cut,
+                               mid_pull=self.mid_pull)
+            judged = None
+        else:
+            proposal, judged = best.proposal, best.critique
+        out["proposal"] = proposal.to_json()
+        out["lines"] = proposal.lines()
+        out["plan"] = {"free": list(proposal.plan.free),
+                       "smile_free": list(proposal.plan.smile_free),
+                       "tune_wings": bool(proposal.plan.tune_wings),
+                       "fit_curve": bool(out["targets"]["n"])}
+        out["marks"] = marks_from_snapshot(surface, proposal.after, pair=self.pair,
+                                           cut=self.cut, method=method, clock=clock,
+                                           fitted=proposal.moved)
+        if judged is None:
+            out["critique"] = {"available": False, "verdict": "nothing to judge",
+                               "findings": [], "rows": [], "notes": list(f_notes),
+                               "inside_before": 0, "inside_after": 0,
+                               "archive": archive_evidence["path"]}
+        else:
+            out["critique"] = self._critique_json(conference.findings, judged,
+                                                  archive_evidence["path"])
+        return out
+
+    def _critique_json(self, findings, judged, archive_path: str) -> dict:
+        from . import consult
+        return {
+            "available": True, "archive": archive_path, "verdict": judged.verdict,
+            "inside_before": judged.inside_before, "inside_after": judged.inside_after,
+            "broke": [r.key for r in judged.broke], "fixed": [r.key for r in judged.fixed],
+            "findings": [{"key": consult._key(f), "describe": f.describe(),
+                          "inside": f.inside, "gap": f.gap,
+                          "observations": f.observations, "low": f.low, "high": f.high,
+                          "model_mid": f.model_mid, "typical": f.typical}
+                         for f in findings],
+            "rows": [{"key": r.key, "describe": r.describe, "before": r.before,
+                      "after": r.after, "inside_before": r.inside_before,
+                      "inside_after": r.inside_after, "gap_before": r.gap_before,
+                      "gap_after": r.gap_after, "improved": r.improved,
+                      "worsened": r.worsened, "line": r.line()} for r in judged.rows],
+            "notes": list(judged.notes),
+        }
 
     def _critique(self, book, archive_evidence, proposal, method, forwards, notes):
         """The quoting agent's score of the proposal, or the reason there is none.
@@ -1065,29 +1481,14 @@ class MarkPanel:
                     "inside_after": 0, "archive": archive_path}
         judged = consult.critique(book, self.pair, findings, proposal.after, method=method,
                                   cut=self.cut, forwards=forwards)
-        return {
-            "available": True, "archive": archive_path, "verdict": judged.verdict,
-            "inside_before": judged.inside_before, "inside_after": judged.inside_after,
-            "broke": [r.key for r in judged.broke], "fixed": [r.key for r in judged.fixed],
-            "findings": [{"key": consult._key(f), "describe": f.describe(),
-                          "inside": f.inside, "gap": f.gap,
-                          "observations": f.observations, "low": f.low, "high": f.high,
-                          "model_mid": f.model_mid, "typical": f.typical}
-                         for f in findings],
-            "rows": [{"key": r.key, "describe": r.describe, "before": r.before,
-                      "after": r.after, "inside_before": r.inside_before,
-                      "inside_after": r.inside_after, "gap_before": r.gap_before,
-                      "gap_after": r.gap_after, "improved": r.improved,
-                      "worsened": r.worsened, "line": r.line()} for r in judged.rows],
-            "notes": list(judged.notes),
-        }
+        return self._critique_json(findings, judged, archive_path)
 
 
 def marks_from_snapshot(surface, snapshot: dict, *, pair: str, cut: str, method: str,
                         clock, fitted: bool) -> dict:
     """A session snapshot as the marks the quote panel stands on.
 
-    The same object ``marketmaker.Panel.run`` hands back, built from a
+    The same object ``FitPanel.run`` hands back, built from a
     proposal instead of a fit, so the quote panel takes either without
     knowing which it was given -- and ``what`` says which, because a price
     made on the agent's proposal and one made on the morning's fit must not
@@ -1224,11 +1625,12 @@ def answer_from_request(journal: rem.Journal, book, payload: dict, *, clock) -> 
 def panel_from_request(payload: dict) -> MarkPanel:
     """The card as the browser posts it.
 
-    Same rule as ``marketmaker.panel_from_request``: a field the browser
+    Same rule as ``fit_panel_from_request``: a field the browser
     sends that this does not read is a setting that silently does nothing,
     and a test pins the page's list against this function.
     """
-    from .marketmaker import _common, _opt_bool, _opt_float, _opt_tuple, TARGET_SOURCES
+    from .marketmaker import (_common, _opt_bool, _opt_float, _opt_tuple, TARGET_SOURCES,
+                              _reversion_from_request)
     pair, cut, method, fly, vol_unit = _common(payload)
     source = str(payload.get("target_source") or "overwrites").strip().lower()
     if source not in TARGET_SOURCES:
@@ -1241,6 +1643,8 @@ def panel_from_request(payload: dict) -> MarkPanel:
         smile_free=_opt_tuple(payload, "smile_free", PARAM_NAMES),
         mid_pull=_opt_float(payload, "mid_pull", 0.05),
         max_nfev=int(_opt_float(payload, "max_nfev", 300)),
+        reversion_range=_reversion_from_request(payload.get("reversion_lo"),
+                                               payload.get("reversion_hi")),
         choose_knobs=_opt_bool(payload, "choose_knobs", True),
         use_rules=_opt_bool(payload, "use_rules", True),
         lookback_days=_opt_float(payload, "lookback_days", 365.0),
@@ -1249,4 +1653,5 @@ def panel_from_request(payload: dict) -> MarkPanel:
         half_life=_opt_float(payload, "half_life", 5.0),
         min_effective=_opt_float(payload, "min_effective", 2.0),
         evidence_lookback=_opt_float(payload, "evidence_lookback", 90.0),
+        rounds=int(_opt_float(payload, "rounds", 3)),
     )

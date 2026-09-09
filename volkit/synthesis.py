@@ -38,9 +38,9 @@ report says which it had.
 
 **Nothing here changes a mark.**  This module reads and computes.  Turning any
 of it into a width the tool will actually quote is a knowledge-bank rule, and
-a rule is proposed here and saved by a person -- the two-step ``suggest_rules``
-already uses.  A statistic that silently became a price would be a number on a
-screen with no author.
+a rule is proposed here (``proposed_rules``, through ``agent.learn_widths``)
+and saved by a person -- two steps, always.  A statistic that silently became
+a price would be a number on a screen with no author.
 """
 
 from __future__ import annotations
@@ -311,6 +311,115 @@ class OutcomeEvidence:
         return "", ""
 
 
+#: How long after a client's trade the market is read to say whether the trade
+#: went against us.  A working week, like the half-life: long enough for the
+#: market to have shown the instrument again, short enough that the move is
+#: still about that trade and not about the month.
+AFTER_DAYS = 5.0
+
+#: Below this many answered prices a client has no record here, and the row
+#: says so.  Four: one trade is an anecdote, two a coincidence, and three is
+#: where a desk starts to say "she only ever lifts".  The screen may raise it.
+DEFAULT_CLIENT_MIN = 4
+
+
+@dataclass(frozen=True)
+class ClientEvidence:
+    """What one client has done with the prices we made for them.
+
+    The one part of the record that *is* applied to a price (§17).  A hit
+    rate across the whole desk says nothing a quote can use -- it mixes what
+    the desk was axed to do with who it was showing -- but the same counts
+    for **one caller** on **one instrument** are the two things a market
+    maker actually adjusts for: which way this client trades, and whether
+    the market follows them after they do.
+
+    Two numbers come out, both in the row's own vocabulary:
+
+    * :attr:`side` -- age-weighted, ``+1`` when every answered price was
+      lifted (they buy), ``-1`` when every one was hit (they sell), and the
+      lean it becomes is ``client_weight * side * half_width``, the same
+      shape as the axe.  A buyer is coming, so the mid goes *up*.
+    * :attr:`after_move` -- how far the market moved **their way** in the
+      days after they traded, in volatility points, positive when it went
+      against us.  That is the cost of dealing with this client and it is
+      added to the width, capped as a fraction of it.
+
+    Scope is the instrument, in a tenor bucket first and across every tenor
+    second, never across instruments: a client who buys the at-the-money and
+    sells the risk reversal is two clients.
+    """
+
+    client: str
+    instrument: str
+    bucket: str | None          # None is "every tenor": the fallback scope
+    shown: int
+    answered: int               # every outcome that was not "pulled"
+    traded_bid: int             # they hit our bid: they sold
+    traded_ask: int             # they lifted our offer: they bought
+    passed: int
+    missed: int
+    done_away: int
+    away_gap: float | None
+    effective: float            # age-weighted count of what traded
+    side: float | None          # -1 (always hits) to +1 (always lifts), age-weighted
+    after_move: float | None    # mean move in their direction, vol points; + is adverse
+    after_count: int
+    enough: bool
+    why_not: str = ""
+
+    @property
+    def traded(self) -> int:
+        return self.traded_bid + self.traded_ask
+
+    @property
+    def hit_rate(self) -> float | None:
+        return None if not self.answered else self.traded / self.answered
+
+    @property
+    def scope(self) -> str:
+        what = self.instrument.upper()
+        return f"{what} {self.bucket}" if self.bucket else f"{what}, every tenor"
+
+    def describe(self) -> str:
+        head = f"{self.client} on the {self.scope}"
+        if not self.enough:
+            return f"{head}: {self.why_not}"
+        bits = [f"{self.shown} price(s) shown", f"{self.answered} answered"]
+        if self.hit_rate is not None:
+            bits.append(f"{self.hit_rate * 100:.0f}% traded")
+        if self.traded:
+            bits.append(f"{self.traded_ask} lifted, {self.traded_bid} hit")
+        if self.passed:
+            bits.append(f"{self.passed} passed")
+        if self.done_away and self.away_gap is not None:
+            where = "inside" if self.away_gap < 0 else "outside"
+            bits.append(f"{self.done_away} done away, on average {abs(self.away_gap):.3f} "
+                        f"{where} our nearer side")
+        if self.after_move is not None:
+            way = "against us" if self.after_move > 0 else "our way"
+            bits.append(f"the market then moved {abs(self.after_move):.3f} {way} on average "
+                        f"over {self.after_count} trade(s)")
+        return f"{head}: " + ", ".join(bits)
+
+    def reading(self) -> str:
+        """The record as one clause, for the row."""
+        if not self.enough:
+            return self.why_not
+        if self.side is not None and abs(self.side) >= 0.5:
+            way = "a buyer" if self.side > 0 else "a seller"
+            head = (f"{way} here: {self.traded_ask} lifted against {self.traded_bid} hit "
+                    f"of {self.answered} answered")
+        elif self.traded:
+            head = (f"two-way here: {self.traded_ask} lifted, {self.traded_bid} hit "
+                    f"of {self.answered} answered")
+        else:
+            head = f"never traded here: {self.answered} answered, none dealt"
+        if self.after_move is not None and self.after_move > 0:
+            head += f"; the market followed them by {self.after_move:.3f} on average"
+        return head
+
+
 @dataclass(frozen=True)
 class TradeEvidence:
     """What printed, out of the dissemination file."""
@@ -343,6 +452,7 @@ class Synthesis:
     widths: list[WidthEvidence] = field(default_factory=list)
     levels: list[LevelEvidence] = field(default_factory=list)
     outcomes: list[OutcomeEvidence] = field(default_factory=list)
+    clients: list[ClientEvidence] = field(default_factory=list)
     trades: list[TradeEvidence] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     counted: int = 0
@@ -388,6 +498,41 @@ class Synthesis:
                 return oc
         return None
 
+    def client_for(self, client: str, *, instrument: str, days: float,
+                   minimum: int = DEFAULT_CLIENT_MIN) -> ClientEvidence | None:
+        """This client's record on this instrument, at this tenor first.
+
+        The bucket's own record when it has ``minimum`` answered prices behind
+        it; the instrument across every tenor when it does not; and when
+        neither has, the bucket's thin record, so the row can say how thin.
+        Never another instrument's, and never another client's -- the whole
+        point of a per-client record is that it is that client's.
+        """
+        name = _client_key(client)
+        if not name:
+            return None
+        _, label = bucket_of(days)
+        mine = [c for c in self.clients if _client_key(c.client) == name
+                and c.instrument == instrument]
+        if not mine:
+            return None
+        exact = [c for c in mine if c.bucket == label]
+        whole = [c for c in mine if c.bucket is None]
+        for candidates in (exact, whole):
+            for c in candidates:
+                if c.answered >= minimum:
+                    return _judged(c, minimum)
+        if exact:
+            return _judged(exact[0], minimum)
+        return _judged(whole[0], minimum) if whole else None
+
+    def client_names(self) -> list[str]:
+        """Every client the record knows, as written on the first price shown."""
+        seen: dict[str, str] = {}
+        for c in self.clients:
+            seen.setdefault(_client_key(c.client), c.client)
+        return sorted(seen.values(), key=str.lower)
+
     def proposed_rules(self) -> list[Rule]:
         """Every width with enough behind it, as a bank rule.  Not saved."""
         return [w.as_rule() for w in self.widths if w.enough]
@@ -399,6 +544,7 @@ class Synthesis:
         out += ["  width   " + w.describe() for w in self.widths]
         out += ["  level   " + lv.describe() for lv in self.levels]
         out += ["  record  " + oc.describe() for oc in self.outcomes]
+        out += ["  client  " + c.describe() for c in self.clients if c.bucket is None]
         out += ["  printed " + t.describe() for t in self.trades]
         out += ["  note    " + n for n in self.notes]
         return out
@@ -459,8 +605,137 @@ def synthesize(archive: Archive, pair: str, *, asof: datetime | None = None,
     _widths(syn, rows, now)
     _levels(syn, rows, now)
     _outcomes(syn, archive, rows)
+    _clients(syn, archive, rows, now)
     _trades(syn, rows, now)
     return syn
+
+
+def _client_key(name: str) -> str:
+    """One spelling per client: ``Client A``, ``client a`` and `` CLIENT A `` are one."""
+    return " ".join(str(name or "").split()).lower()
+
+
+def _judged(c: ClientEvidence, minimum: int) -> ClientEvidence:
+    """The same record, with ``enough`` decided against the caller's minimum.
+
+    The minimum is the screen's to set, so it is applied when the record is
+    asked for and not when it is built: one synthesis serves a panel that
+    wants four answered prices and a shell that wants two.
+    """
+    from dataclasses import replace
+    if c.answered >= minimum:
+        return replace(c, enough=True, why_not="")
+    return replace(c, enough=False,
+                   why_not=(f"{c.answered} answered price(s) on the {c.scope}, "
+                            f"below the {minimum} this panel asks for"))
+
+
+def _clients(syn: Synthesis, archive: Archive, rows, now: datetime) -> None:
+    """Each client's record, per instrument, in a tenor bucket and across all of them.
+
+    Built from the same ``shown`` and ``outcome`` records as :func:`_outcomes`
+    and grouped the other way: by who was shown the price.  A price shown to
+    nobody in particular has no client and lands in no group here.
+    """
+    shown = {o.id: o for o in rows if o.kind == "shown" and _client_key(o.counterparty)}
+    if not shown:
+        return
+    answers: dict[str, list] = {}
+    for o in archive.query(pair=syn.pair, kinds="outcome"):
+        if o.ref in shown and (o.when is None or o.when <= now):
+            answers.setdefault(o.ref, []).append(o)
+    # The market after each trade: every quote of the same instrument and
+    # tenor, so a trade can be followed by where the market went next.
+    market = [o for o in rows if o.kind == "quote" and o.mid is not None and o.when is not None]
+
+    groups: dict[tuple, list] = {}
+    for ident, price in shown.items():
+        days = days_of(price.tenor, asof=price.when or syn.asof)
+        label = bucket_of(days)[1] if days is not None else "tenor not understood"
+        given = answers.get(ident, [])
+        key = (_client_key(price.counterparty), price.instrument)
+        groups.setdefault(key + (label,), []).append((price, given))
+        groups.setdefault(key + (None,), []).append((price, given))
+
+    for (name, instrument, label), pairs in sorted(
+            groups.items(), key=lambda kv: (kv[0][0], kv[0][1], kv[0][2] or "")):
+        counts = {r: 0 for r in ("traded_bid", "traded_ask", "passed", "missed",
+                                 "pulled", "done_away")}
+        answered = 0
+        gaps: list[float] = []
+        side_num = side_den = 0.0
+        after: list[float] = []
+        spelled = " ".join(str(pairs[0][0].counterparty).split())
+        for price, given in pairs:
+            w = _weight(price, now, syn.half_life)
+            for ans in given:
+                if ans.result in counts:
+                    counts[ans.result] += 1
+                if ans.result != "pulled":
+                    answered += 1
+                if ans.result == "traded_ask":
+                    side_num += w
+                    side_den += w
+                elif ans.result == "traded_bid":
+                    side_num -= w
+                    side_den += w
+                if ans.result in ("traded_bid", "traded_ask"):
+                    move = _after_move(price, ans, market)
+                    if move is not None:
+                        after.append(move)
+                if ans.result == "done_away" and ans.away_level is not None:
+                    gaps.append(_away_gap(price, ans.away_level))
+        syn.clients.append(ClientEvidence(
+            client=spelled, instrument=instrument, bucket=label,
+            shown=len(pairs), answered=answered,
+            traded_bid=counts["traded_bid"], traded_ask=counts["traded_ask"],
+            passed=counts["passed"], missed=counts["missed"], done_away=counts["done_away"],
+            away_gap=(sum(gaps) / len(gaps)) if gaps else None,
+            effective=side_den,
+            side=(side_num / side_den) if side_den > 0 else None,
+            after_move=(sum(after) / len(after)) if after else None,
+            after_count=len(after),
+            enough=answered >= DEFAULT_CLIENT_MIN,
+            why_not="" if answered >= DEFAULT_CLIENT_MIN else
+                    f"{answered} answered price(s), below {DEFAULT_CLIENT_MIN}"))
+
+
+def _away_gap(price: Observation, away_level: float) -> float:
+    """Their level less our nearer side, signed so negative means inside our price."""
+    if price.bid is not None and away_level <= price.bid:
+        return away_level - price.bid
+    if price.ask is not None and away_level >= price.ask:
+        return away_level - price.ask
+    return -min(abs(away_level - (price.bid or away_level)),
+                abs(away_level - (price.ask or away_level)))
+
+
+def _after_move(price: Observation, ans: Observation, market) -> float | None:
+    """How far the market moved the client's way after they traded, in vol points.
+
+    Read off the **last** quote of the same instrument and tenor inside
+    :data:`AFTER_DAYS` of the trade -- where the market settled, not where it
+    twitched.  Positive is adverse: they lifted our offer and the market then
+    quoted above it, or hit our bid and it quoted below.  ``None`` when the
+    archive holds no such quote, which is the honest answer and not zero.
+    """
+    when = ans.when or price.when
+    if when is None:
+        return None
+    ours = price.ask if ans.result == "traded_ask" else price.bid
+    if ours is None:
+        return None
+    later = [o for o in market
+             if o.instrument == price.instrument
+             and o.tenor.upper() == (price.tenor or "").upper()
+             and ((o.delta is None and price.delta is None)
+                  or (o.delta is not None and price.delta is not None
+                      and abs(o.delta - price.delta) < 1e-9))
+             and when < o.when <= when + timedelta(days=AFTER_DAYS)]
+    if not later:
+        return None
+    settled = max(later, key=lambda o: o.when).mid
+    return (settled - ours) if ans.result == "traded_ask" else (ours - settled)
 
 
 def _widths(syn: Synthesis, rows, now: datetime) -> None:
@@ -472,7 +747,7 @@ def _widths(syn: Synthesis, rows, now: datetime) -> None:
         if o.width <= 0:
             # A choice price is a real thing to be shown and it is not a
             # width.  Averaging a zero in would quietly tighten the ladder --
-            # the same reason ``knowledge.suggest_rules`` excludes them.
+            # a zero width averaged in would quietly tighten the whole ladder.
             continue
         days = days_of(o.tenor, asof=now)
         if days is None:

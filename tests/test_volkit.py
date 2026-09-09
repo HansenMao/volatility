@@ -35,7 +35,7 @@ from volkit.banded import Band, BetaBandSmile, JumpSpec, calibrate_band_smile, l
 from volkit.feed import FeedError, MarketFeed, pip_divisor
 from volkit import analytics, discount, history, listed, marketmaker, moments, quotes
 from volkit.events import EventSchedule
-from volkit.knowledge import KnowledgeBank, PairKnowledge, Rule, suggest_rules
+from volkit.knowledge import KnowledgeBank, PairKnowledge, Rule
 from volkit import marketdata
 from volkit.marketdata import ExcelSource, MarketData, MarketDataError
 from volkit.numerics import ConvergenceError, fixed_point, integrate_piecewise, solve_scalar
@@ -3761,6 +3761,48 @@ class TestListedOptions(unittest.TestCase):
         self.assertAlmostEqual(t.quotes[0].vol, 0.0820)
         self.assertTrue(any("mid" in n for n in t.notes))
 
+    def test_the_two_way_is_kept_beside_the_mid_it_made(self):
+        """A mid is what a curve is fitted to; a two-way is what it is judged against."""
+        t = listed.parse_quote_table("Strike,Bid,Ask\n1.05,8.10,8.30\n1.08,7.40,7.60\n"
+                                     "1.10,7.55,7.75\n")
+        self.assertTrue(all(q.two_way for q in t.quotes))
+        self.assertAlmostEqual(t.quotes[0].bid, 0.0810)
+        self.assertAlmostEqual(t.quotes[0].ask, 0.0830)
+        # A table with its own mid column keeps that mid and the two-way both.
+        both = listed.parse_quote_table("Strike,Bid,Ask,Mid\n1.05,8.10,8.30,8.25\n"
+                                        "1.08,7.40,7.60,7.45\n1.10,7.55,7.75,7.60\n")
+        self.assertAlmostEqual(both.quotes[0].vol, 0.0825)
+        self.assertAlmostEqual(both.quotes[0].bid, 0.0810)
+        self.assertTrue(any("bid and an offer of their own" in n for n in both.notes))
+        # Decimals divide the two-way by the same thing they divide the mid by.
+        dec = listed.parse_quote_table("Strike,Bid,Ask\n1.05,0.0810,0.0830\n"
+                                       "1.08,0.0740,0.0760\n1.10,0.0755,0.0775\n",
+                                       vol_unit="decimal")
+        self.assertAlmostEqual(dec.quotes[0].bid, 0.0810)
+        # A mid-only table has no two-way, and says nothing about one.
+        mid = listed.parse_quote_table("Strike\tIV\n1.05\t8.20\n1.08\t7.50\n1.10\t7.65\n")
+        self.assertFalse(any(q.two_way for q in mid.quotes))
+        self.assertIsNone(mid.quotes[0].bid)
+        # And an explicit vol column says which number to believe, so it
+        # turns the two-way off rather than reading it beside the column.
+        forced = listed.parse_quote_table("Strike,Bid,Ask,Mid\n1.05,8.10,8.30,8.25\n"
+                                          "1.08,7.40,7.60,7.45\n1.10,7.55,7.75,7.60\n",
+                                          vol_column=4)
+        self.assertFalse(any(q.two_way for q in forced.quotes))
+
+    def test_a_crossed_two_way_is_dropped_and_counted(self):
+        t = listed.parse_quote_table("Strike,Bid,Ask,Mid\n1.05,8.10,8.30,8.25\n"
+                                     "1.08,7.60,7.40,7.45\n1.10,7.55,7.75,7.60\n")
+        self.assertEqual([q.two_way for q in t.quotes], [True, False, True])
+        self.assertAlmostEqual(t.quotes[1].vol, 0.0745)      # the mid survives
+        self.assertTrue(any("crossed" in n for n in t.notes))
+        # With no mid of its own there is nothing left to fit, and the line is
+        # skipped saying what was actually wrong with it.
+        gone = listed.parse_quote_table("Strike,Bid,Ask\n1.05,8.10,8.30\n1.08,7.60,7.40\n"
+                                        "1.10,7.55,7.75\n")
+        self.assertEqual(len(gone.quotes), 2)
+        self.assertIn("crossed", gone.skipped[0][2])
+
     def test_decimal_is_something_a_person_says(self):
         """A table is read in volatility points as written (§4).  A table of
         decimals is loaded with vol_unit='decimal'; it used to be inferred
@@ -4071,6 +4113,49 @@ class TestListedOptions(unittest.TestCase):
         out = self._panel_from_the_book("6E", "EURUSD", 1.0850, book).run(book)
         for row in out["rows"]:
             self.assertAlmostEqual(row["book_vol"], row["market_vol"], places=6)
+
+    def test_a_mark_outside_the_pasted_two_way_is_named_strike_by_strike(self):
+        """The question a two-way answers and a mid cannot: is the mark in the market."""
+        book = Book.from_excel(WORKBOOK, ASOF).load_all(["EURUSD"])
+        base = self._panel_from_the_book("6E", "EURUSD", 1.0850, book)
+        # Re-quote the same strikes as a two-way around the book's own marks,
+        # and move one band clear of the mark.  Every other strike is inside
+        # by construction, so exactly one breach is the whole answer.
+        lines = ["Strike\tBid\tAsk"]
+        for i, q in enumerate(base.quotes):
+            v = q.vol * 100.0
+            lo, hi = (v + 0.50, v + 0.80) if i == 2 else (v - 0.10, v + 0.10)
+            lines.append(f"{q.strike:.10f}\t{lo:.8f}\t{hi:.8f}")
+        panel = listed.panel_from_request({
+            "underlying": "6E", "expiry": "2024-06-14 19:00", "forward": base.forward,
+            "text": "\n".join(lines), "cut": "NY", "method": "SVI"})
+        out = panel.run(book)
+        self.assertEqual(out["n_two_way"], len(out["rows"]))
+        self.assertEqual(out["n_outside"], 1)
+        for i, row in enumerate(out["rows"]):
+            self.assertIsNotNone(row["bid_vol"])
+            self.assertLess(row["bid_vol"], row["ask_vol"])
+            self.assertAlmostEqual(row["market_vol"],
+                                   0.5 * (row["bid_vol"] + row["ask_vol"]), places=9)
+            self.assertEqual(row["mark_outside"], i == 2, row["strike"])
+        # No pair to compare against is not the same as "the mark is inside".
+        alone = listed.panel_from_request({
+            "underlying": "CUSTOM", "expiry": "2024-06-14 19:00", "forward": base.forward,
+            "text": "\n".join(lines), "cut": "NY", "method": "SVI"})
+        lonely = alone.run(None, clock=ASOF)
+        self.assertEqual(lonely["n_two_way"], len(lonely["rows"]))
+        self.assertEqual(lonely["n_outside"], 0)
+        self.assertTrue(all(r["mark_outside"] is None for r in lonely["rows"]))
+
+    def test_a_mid_only_paste_has_no_two_way_to_judge_against(self):
+        book = Book.from_excel(WORKBOOK, ASOF).load_all(["EURUSD"])
+        out = self._panel_from_the_book("6E", "EURUSD", 1.0850, book).run(book)
+        self.assertEqual(out["n_two_way"], 0)
+        self.assertEqual(out["n_outside"], 0)
+        for row in out["rows"]:
+            self.assertIsNone(row["bid_vol"])
+            self.assertIsNone(row["ask_vol"])
+            self.assertIsNone(row["mark_outside"])
 
     def test_the_book_delta_strikes_come_back_on_the_listed_axis(self):
         book = Book.from_excel(WORKBOOK, ASOF).load_all(["USDJPY"])
@@ -5967,22 +6052,20 @@ class TestCrossLevelsFromTheLegs(unittest.TestCase):
         """The bug, on the screen it was found on."""
         from volkit import marketmaker as mm
         book = self.book(["EURJPY"])
-        panel = mm.panel_from_request({
-            "pair": "EURJPY", "cut": "NY", "target_source": "quotes",
-            "fit_curve": False, "tune_wings": False,
+        panel = mm.check_panel_from_request({
+            "pair": "EURJPY", "cut": "NY",
             "text": "1M ATM 8.2/8.6\n1M, 162.00, 8.4/8.8\n3M, 162.00, 8.4/8.8\n"})
         rows = panel.run(book)["market"]["rows"]
         self.assertEqual(len(rows), 3)
         for row in rows:
-            self.assertIsNotNone(row["model_before"], row["raw"])
+            self.assertIsNotNone(row["model"], row["raw"])
             self.assertEqual([w for w in row["warnings"] if "forward feed" in w], [])
 
     def test_the_derivation_is_said_once_and_not_once_a_tenor(self):
         from volkit import marketmaker as mm
         book = self.book(["EURJPY"])
-        panel = mm.panel_from_request({
-            "pair": "EURJPY", "cut": "NY", "target_source": "quotes",
-            "fit_curve": False, "tune_wings": False,
+        panel = mm.check_panel_from_request({
+            "pair": "EURJPY", "cut": "NY",
             "text": "1M, 162.00, 8.4/8.8\n2M, 162.00, 8.4/8.8\n3M, 162.00, 8.4/8.8\n"})
         notes = [n for n in panel.run(book)["market"]["notes"] if "triangle" in n]
         self.assertEqual(len(notes), 1, notes)
@@ -6145,13 +6228,96 @@ class TestMarketMakerApi(unittest.TestCase):
         import json as _json, tempfile
         from volkit.webapp import _finite
         with tempfile.TemporaryDirectory() as tmp:
-            payload = self.service(tmp).mm_fit(
-                {"pair": "EURUSD", "text": self.RUN, "target_source": "quotes",
-                 "fallback_spread": "0.3", "tune_wings": False})
+            payload = self.service(tmp).mm_check({"pair": "EURUSD", "text": self.RUN})
         text = _json.dumps(_finite(payload), default=str)
         self.assertNotIn("NaN", text)
         self.assertNotIn("Infinity", text)
         self.assertEqual(_json.loads(text)["pair"], "EURUSD")
+
+    def test_check_market_moves_nothing_and_names_what_is_off(self):
+        """The button that replaced the fit, and the reason it replaced it.
+
+        The fit read this paste and *moved the curve to it*; there were then two
+        places on one screen where a mark could change and only one of them was
+        written into the journal.  So this route reads the same paste and moves
+        nothing: the book is untouched, `dirty` stays where it was, and what it
+        hands back is where the marks sit -- with the gap in volatility points
+        and in units of the market's own width, which is the number that says
+        whether being outside matters.
+        """
+        import tempfile
+        from volkit.session import capture_pair
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self.service(tmp)
+            before = capture_pair(service.book, "EURUSD")
+            out = service.mm_check({"pair": "EURUSD", "text": self.RUN})
+            self.assertEqual(capture_pair(service.book, "EURUSD"), before)
+            self.assertFalse(service.dirty)
+        # No fit's vocabulary anywhere on the answer.
+        for gone in ("curve", "wings", "applied"):
+            self.assertNotIn(gone, out)
+        market = out["market"]
+        self.assertEqual(market["n_quotes"], 5)
+        self.assertEqual(market["checked"],
+                         market["inside"] + market["through"])
+        # This run is marked well below the pasted at-the-monies, so the ATM
+        # lines are through their bid and the answer says so once, in a list a
+        # desk can read without going through twenty rows.
+        self.assertTrue(market["through"])
+        self.assertTrue(all(a["severity"] in ("through", "edge")
+                            for a in market["alerts"]))
+        low = next(r for r in market["rows"] if r["tenor"] == "3M")
+        self.assertEqual(low["position"], "below")
+        self.assertEqual(low["severity"], "through")
+        self.assertLess(low["gap"], 0.0)          # signed the way a desk reads it
+        self.assertAlmostEqual(low["widths"],
+                               low["gap"] / (low["market_ask"] - low["market_bid"]))
+        # And it read the book, because it was handed no marks.
+        self.assertFalse(out["marks"]["on_the_marks"])
+
+    def test_a_choice_price_is_never_called_near_an_edge(self):
+        """Warning about a market that quoted no width to be near the edge of
+        is how a screen teaches a desk to stop reading its alerts."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self.service(tmp).mm_check(
+                {"pair": "EURUSD", "text": "1M ATM 5.831\n", "near_edge": "0.4"})
+        row = out["market"]["rows"][0]
+        self.assertEqual(row["market_bid"], row["market_ask"])
+        self.assertIn(row["severity"], ("in line", "through"))
+        self.assertIsNone(row["widths"])
+
+    def test_the_hand_fit_is_the_only_market_maker_route_that_moves_a_mark(self):
+        """The marks the check and the quote stand on come from one place.
+
+        `mm_mark_fit` is the old fit panel, on the marking card.  What it hands
+        back is checked and quoted off exactly as before -- that hand-off is the
+        thing the split had to preserve -- and `apply` is the only way anything
+        of it reaches the loaded book.
+        """
+        import tempfile
+        from volkit.session import capture_pair
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self.service(tmp)
+            before = capture_pair(service.book, "EURUSD")
+            fit = service.mm_mark_fit({"pair": "EURUSD", "text": self.RUN,
+                                       "target_source": "quotes"})
+            self.assertEqual(capture_pair(service.book, "EURUSD"), before)
+            self.assertFalse(service.dirty)
+            self.assertTrue(fit["marks"]["fitted"])
+            # Checked against what it arrived at, the run it was fitted to is
+            # inside its own market -- which is the whole point of the fit, and
+            # is now measured by the *other* button.
+            on = service.mm_check({"pair": "EURUSD", "text": self.RUN,
+                                   "marks": fit["marks"]})
+            self.assertTrue(on["marks"]["on_the_marks"])
+            self.assertEqual(on["market"]["through"], 0)
+            # And keeping them is the one route here that dirties the book.
+            kept = service.mm_mark_fit({"pair": "EURUSD", "text": self.RUN,
+                                        "target_source": "quotes", "apply": True})
+            self.assertTrue(kept["applied"])
+            self.assertTrue(service.dirty)
+            self.assertNotEqual(capture_pair(service.book, "EURUSD"), before)
 
     def test_the_bank_is_the_only_state_the_server_keeps(self):
         """The panel is posted whole every time, like the listed screen; the
@@ -6165,8 +6331,8 @@ class TestMarketMakerApi(unittest.TestCase):
                           {"kind": "note", "text": "wider into the ECB"}]})
             self.assertTrue(saved["ok"], saved.get("problems"))
             self.assertTrue(Path(saved["written"]).exists())
-            # The bank is the quote route's, not the fit's: a width is a
-            # property of what we show, and the fit shows nothing.
+            # The bank is the quote route's alone: a width is a property of
+            # what we show, and neither the check nor a fit shows anything.
             out = service.mm_quote({"pair": "EURUSD", "request_text": "1M ATM\n"})
             atm = next(r for r in out["sheet"]["rows"] if r["instrument"] == "atm")
             self.assertAlmostEqual(atm["width"], 0.28)
@@ -6257,7 +6423,7 @@ class TestMarketMakerApi(unittest.TestCase):
             service = BookService(str(WORKBOOK), ASOF, bank_path=str(Path(tmp) / "bank.json"),
                                   archive_path=path)
             ask = {"pair": "EURUSD", "request_text": "1M ATM\n1M 25d RR\n",
-                   "fallback_spread": "0.4"}
+                   "fallback_tier": "default"}
             off = service.mm_quote(dict(ask))
             self.assertTrue(off["flow"]["buckets"], off["flow"]["reason"])
             self.assertIn("set a flow weight", off["flow"]["reason"])
@@ -6271,6 +6437,22 @@ class TestMarketMakerApi(unittest.TestCase):
             self.assertGreater(rows_on["atm"]["our_bid"], off["sheet"]["rows"][0]["our_bid"])
             # And a risk reversal is left alone.
             self.assertEqual(rows_on["rr"]["skew_flow"], 0.0)
+            # The tape's age weight and window are the archive card's, not a
+            # second pair of boxes: one evidence clock on the sheet.
+            self.assertEqual(on["flow"]["half_life"], on["archive"]["half_life"])
+            self.assertEqual(on["flow"]["lookback_days"], on["archive"]["lookback_days"])
+            self.assertNotIn("flow_half_life", _inspect.getsource(marketmaker.QuotePanel))
+            # The same tape, read out in words by the record agent off the
+            # same surface: it says the market has been paying, names the
+            # mark each print was judged against, and writes nothing.
+            told = service.mm_ask({"pair": "EURUSD", "text": "who has been paying in the 1M",
+                                   "transcript": []})
+            self.assertFalse(told.get("refused"), told)
+            lines = [f["text"] for f in told["facts"]]
+            self.assertTrue(any("paid" in x and "vega" in x for x in lines), lines)
+            self.assertTrue(any("has been paying" in x for x in lines), lines)
+            self.assertTrue(any("against a mark of" in x for x in lines), lines)
+            self.assertEqual(len(arch.Archive.load(path).records), len(rows))
 
     def test_a_bad_rule_set_is_rejected_without_touching_the_file(self):
         import tempfile
@@ -6284,17 +6466,32 @@ class TestMarketMakerApi(unittest.TestCase):
             self.assertTrue(bad["problems"])
             self.assertEqual(len(self.service(tmp).bank.for_pair("EURUSD").rules), 1)
 
-    def test_learning_proposes_and_does_not_save(self):
+    def test_learning_proposes_and_does_not_save_and_does_not_file(self):
         """A paste that happens to hold one wide quote must not be able to
-        rewrite the desk's ladder without somebody looking at it."""
+        rewrite the desk's ladder without somebody looking at it -- and
+        learning from it must not quietly file it either: one pipeline,
+        the archive's, with the paste counted unfiled."""
         import tempfile
+        from volkit.webapp import BookService
         with tempfile.TemporaryDirectory() as tmp:
-            service = self.service(tmp)
+            service = BookService(str(WORKBOOK), ASOF, bank_path=str(Path(tmp) / "bank.json"),
+                                  archive_path=str(Path(tmp) / "arc.jsonl"))
             got = service.mm_learn({"pair": "EURUSD", "text": self.RUN,
-                                    "target_source": "quotes"})
-            self.assertTrue(got["rules"])
+                                    "archive_min_effective": 0.5})
+            self.assertTrue(got["rules"], got["notes"])
             self.assertTrue(all(r["kind"] == "spread" for r in got["rules"]))
+            self.assertEqual(got["from_paste"], 5)
             self.assertEqual(service.bank.for_pair("EURUSD").rules, [])
+            self.assertEqual(len(service.archive.records), 0)
+            self.assertFalse((Path(tmp) / "arc.jsonl").exists())
+            # Filed, the same run teaches once and not twice.
+            service.mm_agent_file({"pair": "EURUSD", "text": self.RUN})
+            again = service.mm_learn({"pair": "EURUSD", "text": self.RUN,
+                                      "archive_min_effective": 0.5})
+            self.assertEqual(again["from_paste"], 0)
+            self.assertEqual(again["counted"], got["counted"])
+            self.assertEqual([r["value"] for r in again["rules"]],
+                             [r["value"] for r in got["rules"]])
 
     def test_the_state_endpoint_tells_the_browser_what_it_may_choose_from(self):
         import tempfile
@@ -6306,6 +6503,69 @@ class TestMarketMakerApi(unittest.TestCase):
             self.assertIn(key, state)
         self.assertIn("overwrites", state["target_sources"])
         self.assertIn("rho25", state["smile_params"])
+
+    def test_a_quote_is_recorded_under_a_client_and_answered_and_the_next_quote_knows(self):
+        """The loop the whole agent exists to close, through the two routes.
+
+        Quote for a client, record it, answer it as lifted four times over,
+        and the next quote for that client is leaned up -- off the same
+        archive the routes wrote, under the archive's own lock, with the book
+        untouched and `dirty` where it was.  A price recorded from a shell
+        goes through the same two functions.
+        """
+        import tempfile
+        from volkit.session import capture_pair
+        from volkit.webapp import BookService
+        with tempfile.TemporaryDirectory() as tmp:
+            service = BookService(str(WORKBOOK), ASOF, bank_path=str(Path(tmp) / "bank.json"),
+                                  archive_path=str(Path(tmp) / "arc.jsonl"))
+            before = capture_pair(service.book, "EURUSD")
+
+            def ask(size):
+                return {"pair": "EURUSD", "request_text": f"1M ATM in {size}mm",
+                        "fallback_tier": "default", "client": "Client Q",
+                        "client_weight": 0.5, "client_min": 4}
+            first = service.mm_quote(ask(100))
+            row = first["sheet"]["rows"][0]
+            self.assertEqual(first["client"]["name"], "Client Q")
+            self.assertIn("no price shown to Client Q", first["client"]["reason"])
+            self.assertIsNotNone(row["our_bid"])
+            # Four prices shown, four lifted.  Different sizes, because the
+            # clock here is pinned and the id is a hash of the content: the
+            # same price shown to the same client in the same instant *is*
+            # one price, and the route says so rather than counting it twice.
+            for size in (100, 50, 75, 25):
+                sheet = service.mm_quote(ask(size))
+                shown = service.mm_record({"sheet": sheet, "client": "Client Q"})
+                self.assertEqual(len(shown["recorded"]), 1, shown)
+                done = service.mm_outcome({"ref": shown["recorded"][0]["id"],
+                                           "result": "traded_ask", "sign": 1})
+                self.assertEqual(done["result"], "traded_ask")
+            twice = service.mm_record({"sheet": sheet, "client": "Client Q"})
+            self.assertEqual(twice["recorded"], [])
+            self.assertIn("already in the archive", twice["refused"][0])
+            self.assertEqual(capture_pair(service.book, "EURUSD"), before)
+            self.assertFalse(service.dirty)
+
+            again = service.mm_quote(ask(100))
+            leaned = again["sheet"]["rows"][0]
+            self.assertTrue(again["client"]["applied"])
+            self.assertTrue(leaned["client_enough"])
+            self.assertAlmostEqual(leaned["client_side"], 1.0)
+            self.assertAlmostEqual(leaned["our_mid"], row["our_mid"] + 0.10, places=6)
+            self.assertIn("Client Q", again["client"]["known"])
+            self.assertEqual(again["archive"]["shown"], 4)
+            self.assertEqual(again["archive"]["outcome"], 4)
+            # The file on disk is what was written.
+            from volkit.archive import Archive
+            held = Archive.load(str(Path(tmp) / "arc.jsonl"))
+            self.assertEqual(len(held.query(pair="EURUSD", kinds="shown")), 4)
+            self.assertEqual(len(held.query(pair="EURUSD", kinds="outcome")), 4)
+            # Nothing to record, or nothing that was shown: refused with a reason.
+            with self.assertRaises(Exception):
+                service.mm_record({"client": "Client Q"})
+            with self.assertRaises(Exception):
+                service.mm_outcome({"ref": "nosuch", "result": "passed"})
 
 
 class TestWebAssets(unittest.TestCase):
@@ -7039,53 +7299,126 @@ class TestWebAssets(unittest.TestCase):
         silently does nothing, which is the failure mode this project exists
         to remove.
 
-        Two lists and two readers, because the screen is two stages: the fit
-        panel and the quote panel post different payloads to different routes.
-        Checking them against one reader would let a field the fit sends and
-        only the quote reads pass, and that field would sit on the fit's own
-        toolbar doing nothing.
+        Four lists and four readers, because the tab is four buttons: Check
+        Market, Quote, and the marking card's Propose and Fit my way, each
+        posting a different payload to a different route.  Checking them
+        against one reader would let a field the check sends and only the
+        quote reads pass, and that field would sit on the check's own toolbar
+        doing nothing.
+
+        The check's list is the short one on purpose.  It used to be the fit's,
+        and it carried the target curve, the knobs and `apply`; every mark that
+        moves is the marking card's now, so those fields moved to MFF and MKF
+        and a check that still posted them would be a button advertising a
+        power it does not have.
         """
         import re as _re
         html = _source("volkit", "web", "index.html")
         js = html.split("<script>")[1].split("</script>")[0]
         src = _source("volkit", "marketmaker.py")
+        mark_src = _source("volkit", "marking.py")
+        common = src.split("def _common")[1].split("def _reversion_from_request")[0]
+        rev = src.split("def _reversion_from_request")[1].split("def check_panel_from_request")[0]
 
-        fit = set(_re.findall(r"\['([a-z_]+)'", js.split("const MF=[")[1].split("];")[0]))
-        self.assertIn("text", fit)
-        self.assertIn("target_source", fit)
-        handler = src.split("def panel_from_request")[1].split("def quote_panel_from_request")[0]
-        common = src.split("def _common")[1].split("def panel_from_request")[0]
-        for f in fit | {"free", "smile_free", "fit_curve", "tune_wings"}:
-            self.assertIn(f'"{f}"', handler + common, f"the fit reader never reads {f!r}")
+        def sent(name):
+            return set(_re.findall(r"\['([a-z_]+)'", js.split("const %s=[" % name)[1]
+                                   .split("];")[0]))
 
-        quote = set(_re.findall(r"\['([a-z_]+)'", js.split("const MQF=[")[1].split("];")[0]))
+        check = sent("MCF")
+        self.assertIn("text", check)
+        self.assertIn("near_edge", check)
+        # And nothing that would move a mark: those live on the marking card.
+        for gone in ("target_source", "target_text", "apply", "reversion_lo"):
+            self.assertNotIn(gone, check, f"the check panel still posts {gone!r}")
+        handler = src.split("def check_panel_from_request")[1].split(
+            "def quote_panel_from_request")[0]
+        for f in check | {"marks"}:
+            self.assertIn(f'"{f}"', handler + common, f"the check reader never reads {f!r}")
+
+        quote = sent("MQF")
         self.assertIn("request_text", quote)
-        self.assertIn("fallback_spread", quote)
+        self.assertIn("fallback_tier", quote)
         handler = src.split("def quote_panel_from_request")[1]
         for f in quote | {"marks"}:
             self.assertIn(f'"{f}"', handler + common, f"the quote reader never reads {f!r}")
 
-    def test_the_desk_agent_fields_are_all_understood_by_the_server(self):
-        """Same guard again, for the agent card inside the market-maker tab.
+        # The hand fit, on the marking card, and the one panel on this tab
+        # that may leave a mark on the book.
+        fit = sent("MFF")
+        for f in ("target_source", "apply", "reversion_lo"):
+            self.assertIn(f, fit, f"the hand fit does not post {f!r}")
+        handler = mark_src.split("def fit_panel_from_request")[1]
+        for f in fit | {"free", "smile_free", "fit_curve", "tune_wings"}:
+            self.assertIn(f'"{f}"', handler + common + rev,
+                          f"the hand-fit reader never reads {f!r}")
 
-        The card posts its own payload rather than the panel's, so it needs
-        its own list checked against its own reader; sharing the market
-        maker's would let a field the agent sends go unread by either.
+    def test_the_quoting_agent_has_no_panel_of_its_own_and_the_file_button_is_pinned(self):
+        """The Suggest card is gone; its answer is the Quote button's.
+
+        There used to be a third payload on this tab (`AF`) posted to
+        `/api/mm/agent`, read by `agent.panel_from_request`.  Its columns --
+        the archived width, the verdict on the bank's width -- are on every
+        quote row now, off the one engine, and the card that is left files
+        the paste: a smaller list, pinned against its own reader the same way.
         """
         import re as _re
         html = _source("volkit", "web", "index.html")
         js = html.split("<script>")[1].split("</script>")[0]
-        block = js.split("const AF=[")[1].split("];")[0]
+        self.assertNotIn("const AF=[", js)
+        self.assertNotIn("/api/mm/agent'", js)
+        self.assertNotIn('"/api/mm/agent"', _source("volkit", "webapp.py"))
+        agent_src = _source("volkit", "agent.py")
+        for gone in ("class SuggestPanel", "def panel_from_request", "def _decide",
+                     "def parse_asks"):
+            self.assertNotIn(gone, agent_src, f"{gone} is still in agent.py")
+        block = js.split("const PF=[")[1].split("];")[0]
         fields = set(_re.findall(r"\['([a-z_]+)'", block))
-        self.assertIn("text", fields)
-        self.assertIn("half_life", fields)
-        handler = _source("volkit", "agent.py").split("def panel_from_request")[1]
+        self.assertEqual(fields, {"pair", "text", "fly_convention", "vol_unit", "counterparty"})
+        reader = agent_src.split("def paste_from_request")[1].split("def file_paste")[0]
         for f in fields - {"counterparty"}:
-            self.assertIn(f'"{f}"', handler, f"the server never reads {f!r}")
-        # The one field the panel reader does not take: it says who showed the
+            self.assertIn(f'"{f}"', reader, f"the paste reader never reads {f!r}")
+        # Learn widths: the file button's list plus the evidence settings,
+        # read by the one learning function's reader.
+        block = js.split("const LF=[")[1].split("];")[0]
+        learn = set(_re.findall(r"\['([a-z_]+)'", block))
+        self.assertTrue(fields <= learn, learn)
+        self.assertIn("archive_half_life", learn)
+        reader = agent_src.split("def learn_from_request")[1].split("def file_paste")[0]
+        for f in learn - fields:
+            self.assertIn(f'"{f}"', reader, f"the learn reader never reads {f!r}")
+        self.assertIn('"counterparty"', reader)
+        self.assertNotIn("def learn_from_panel", _source("volkit", "marketmaker.py"))
+        self.assertNotIn("def suggest_rules", _source("volkit", "knowledge.py"))
+        # The one field the reader does not take: it says who showed the
         # market, which only matters when the run is filed to the archive.
         filer = _source("volkit", "webapp.py").split("def mm_agent_file")[1]
         self.assertIn('"counterparty"', filer)
+        # The quote sheet's own two buttons post to the two routes that
+        # replaced it, and both are the market-maker screen's.
+        from volkit import screens
+        for route in ("/api/mm/record", "/api/mm/outcome"):
+            self.assertIn(route, screens.BY_NAME["mm"].routes)
+            self.assertIn(f"'{route}'", js)
+        self.assertNotIn("/api/mm/agent\"", ",".join(screens.BY_NAME["mm"].routes) + "\"")
+
+    def test_the_quote_posts_the_client_and_the_agents_settings_and_the_server_reads_them(self):
+        """The one engine reads every box the bar and the archive card hold."""
+        import re as _re
+        html = _source("volkit", "web", "index.html")
+        js = html.split("<script>")[1].split("</script>")[0]
+        block = js.split("const MQF=[")[1].split("];")[0]
+        fields = set(_re.findall(r"\['([a-z_]+)'", block))
+        for f in ("client", "client_weight", "client_min", "tolerance", "include_model_read",
+                  "archive_half_life", "archive_min_effective", "archive_lookback_days"):
+            self.assertIn(f, fields, f"the quote does not post {f!r}")
+        self.assertNotIn("use_archive_width", fields,
+                         "the archive is always on the ladder; there is no checkbox")
+        self.assertNotIn("mqarchive", html)
+        src = _source("volkit", "marketmaker.py")
+        common = src.split("def _common")[1].split("def _reversion_from_request")[0]
+        reader = src.split("def quote_panel_from_request")[1]
+        for f in fields:
+            self.assertIn(f'"{f}"', reader + common, f"the quote reader never reads {f!r}")
 
     def test_the_ask_card_fields_are_all_understood_by_the_server(self):
         """The third agent's card posts its own list, pinned against its own reader."""
@@ -7382,6 +7715,90 @@ class TestSmileTermStructureMarks(unittest.TestCase):
         svc.overwrite({"pair": "EURUSD", "kind": "clear_smile_term"})
         self.assertTrue(all(r["marked"] is None
                             for r in svc.marks({"pair": "EURUSD", "cut": "NY"})["term"]))
+
+    def test_the_field_is_the_surface_read_across_expiry_and_wing(self):
+        """The contour panel's grid: the surface's own columns, and a straight
+        line between the two wings it was calibrated at.
+        """
+        from volkit.webapp import BookService
+        svc = BookService(str(WORKBOOK), clock=ASOF)
+        g = svc.param_grid({"pair": "EURUSD", "points": 41, "deltas": 9})
+        self.assertEqual(g["families"], ["rho", "slog"])
+        self.assertEqual(len(g["t"]), 41)
+        self.assertEqual(len(g["deltas"]), 9)
+        self.assertAlmostEqual(g["deltas"][0], 0.10)
+        self.assertAlmostEqual(g["deltas"][-1], 0.25)
+        # The expiry axis runs between the quoted tenors, evenly in sqrt(t) --
+        # the axis a term structure is read on.
+        fits = svc.book["EURUSD"].fits
+        self.assertAlmostEqual(g["t"][0], fits[0].t, places=12)
+        self.assertAlmostEqual(g["t"][-1], fits[-1].t, places=12)
+        roots = [math.sqrt(t) for t in g["t"]]
+        steps = [b - a for a, b in zip(roots, roots[1:])]
+        self.assertAlmostEqual(max(steps), min(steps), places=12)
+        self.assertEqual([x["tenor"] for x in g["tenors"]],
+                         [f.tenor for f in fits])
+        for family in ("rho", "slog"):
+            m = g["maps"][family]
+            self.assertEqual(len(m["z"]), 9)
+            self.assertEqual(len(m["z"][0]), 41)
+            # The two edge rows are the surface's own numbers at every column,
+            # and the middle row is halfway between them -- which is all the
+            # band between them claims to be.
+            for i, t in enumerate(g["t"]):
+                at = svc.book["EURUSD"].params_at(t)
+                self.assertAlmostEqual(m["z"][0][i], at[f"{family}10"], places=12)
+                self.assertAlmostEqual(m["z"][-1][i], at[f"{family}25"], places=12)
+                self.assertAlmostEqual(m["z"][4][i],
+                                       0.5 * (at[f"{family}10"] + at[f"{family}25"]),
+                                       places=12)
+        # rho is signed and reads about zero; slog is a positive magnitude.
+        self.assertTrue(g["maps"]["rho"]["diverging"])
+        self.assertFalse(g["maps"]["slog"]["diverging"])
+        self.assertIn("nowhere in between", g["interpolated"])
+
+    def test_the_field_moves_when_the_surface_does(self):
+        """The map cannot show a curve the surface is not on."""
+        from volkit.webapp import BookService
+        svc = BookService(str(WORKBOOK), clock=ASOF)
+        before = svc.param_grid({"pair": "EURUSD", "points": 21, "deltas": 5})
+        svc.overwrite({"pair": "EURUSD", "kind": "smile_term", "param": "rho10",
+                       "initial": "-0.2", "final": "-0.05", "decay": "1.5"})
+        after = svc.param_grid({"pair": "EURUSD", "points": 21, "deltas": 5})
+        self.assertNotEqual(after["maps"]["rho"]["z"][0], before["maps"]["rho"]["z"][0])
+        for i, t in enumerate(after["t"]):
+            self.assertAlmostEqual(after["maps"]["rho"]["z"][0][i],
+                                   -0.05 - (-0.05 - -0.2) * math.exp(-1.5 * t), places=12)
+        # The 25-delta row and the other family are where they were: a marked
+        # curve is one parameter and the map must not smear it across four.
+        # (Marking re-reads the book, so the untouched rows come back through
+        # the fit again and agree to the last few bits rather than exactly.)
+        for a, b in zip(after["maps"]["rho"]["z"][-1], before["maps"]["rho"]["z"][-1]):
+            self.assertAlmostEqual(a, b, places=12)
+        for ra, rb in zip(after["maps"]["slog"]["z"], before["maps"]["slog"]["z"]):
+            for a, b in zip(ra, rb):
+                self.assertAlmostEqual(a, b, places=12)
+        self.assertTrue(any("anchor" in n for n in after["notes"]))
+        svc.overwrite({"pair": "EURUSD", "kind": "clear_smile_term"})
+
+    def test_a_pair_with_nothing_fitted_is_refused_by_name(self):
+        from volkit.webapp import BookService
+        svc = BookService(str(WORKBOOK), clock=ASOF)
+        surface = svc.book["EURUSD"]
+        surface.fits = []
+        with self.assertRaises(ValueError) as caught:
+            svc.param_grid({"pair": "EURUSD"})
+        self.assertIn("no fitted tenors", str(caught.exception))
+
+    def test_the_field_route_belongs_to_the_marking_screen(self):
+        from volkit import screens
+        owner = {r: sc.name for sc in screens.SCREENS for r in sc.routes}
+        self.assertEqual(owner["/api/params/grid"], "marking")
+        # And the page reaches it from the smile card, which is the card the
+        # parameters are on.
+        html = _source("volkit", "web", "index.html")
+        self.assertIn("/api/params/grid", html)
+        self.assertIn('id="mctropen"', html)
 
     def test_the_workbook_row_grammar_reads_what_the_export_writes(self):
         from volkit.marketdata import overlay_label
@@ -10920,12 +11337,14 @@ class TestScreens(unittest.TestCase):
 
     def test_an_excluded_screen_refuses_its_routes_by_name(self):
         self._select(["pricing", "marking"])
-        msg = self.screens.route_refusal("/api/mm/fit")
+        msg = self.screens.route_refusal("/api/mm/check")
         self.assertIsNotNone(msg)
         self.assertIn("Market maker", msg)
         # Both agents live on this tab and leave with it: the quoting agent's
-        # card and the marking agent's, routes and command alike.
+        # card and the marking agent's, routes and command alike -- including
+        # the hand fit, which is the only route on the tab that moves a mark.
         self.assertIsNotNone(self.screens.route_refusal("/api/mm/mark"))
+        self.assertIsNotNone(self.screens.route_refusal("/api/mm/mark/fit"))
         self.assertIsNotNone(self.screens.route_refusal("/api/mm/mark/record"))
         self.assertEqual(self.screens.command_screen("mark"), "mm")
         # The shell and the screens that stayed are untouched.
@@ -11859,11 +12278,10 @@ class TestQuoteTimestamps(unittest.TestCase):
 
     def test_the_panel_reports_the_time_and_what_it_replaced(self):
         from volkit import marketmaker as mm
-        panel = mm.panel_from_request({
+        panel = mm.check_panel_from_request({
             "pair": "EURUSD", "cut": "NY", "method": "SVI",
             "text": ("09:15, 1M, ATM, 8.20/8.60\n09:41, 1M, ATM, 8.25/8.65\n"
                      "09:20, 2M, 25d, 8.00/8.40\n"),
-            "fit_curve": False, "tune_wings": False,
         })
         book = Book.from_excel(WORKBOOK, ASOF).load_all(["EURUSD"])
         sheet = panel.run(book)["market"]
@@ -12221,7 +12639,7 @@ class TestKnowledgeBank(unittest.TestCase):
         fell_back = pk.overlay(instrument="rr", days=30, tenor="1M", delta=0.25, fallback=0.4)
         self.assertEqual(fell_back.spread, 0.4)
         self.assertIsNone(fell_back.spread_rule)
-        self.assertIn("panel fallback", fell_back.reason)
+        self.assertIn("fallback tier", fell_back.reason)
 
     def test_a_bad_rule_set_is_rejected_whole(self):
         bank = KnowledgeBank()
@@ -12257,14 +12675,24 @@ class TestKnowledgeBank(unittest.TestCase):
         live -- but both are evidence of how wide this market is shown, which
         is why the bank reads ``all_quotes`` and the fit reads ``quotes``.
         """
+        from volkit import agent, archive as arch
+        from volkit.timeutil import Clock
         run = quotes.parse_quotes(
             "1M atm 8.20/8.60\n1M atm 8.30/8.70\n2M atm 9.00\n", pair="EURUSD")
         self.assertEqual(len(run.quotes), 2)
         self.assertEqual(len(run.superseded), 1)
-        rules, notes = suggest_rules(run.all_quotes, days_of=lambda q: 30.0)
-        self.assertEqual(len(rules), 1)
-        self.assertAlmostEqual(rules[0].value, 0.0040)
-        self.assertIn("median of 2", rules[0].text)
+        # Learning a width is the archive's job, and the paste is counted on
+        # its way through: both 1M lines are evidence, the choice price is
+        # not, and nothing is written.
+        empty = arch.Archive(path="")
+        got = agent.learn_widths(empty, "EURUSD", clock=Clock(ASOF.now),
+                                 paste=agent.Paste(pair="EURUSD", text=(
+                                     "1M atm 8.20/8.60\n1M atm 8.30/8.70\n2M atm 9.00\n")))
+        self.assertEqual(len(got.rules), 1)
+        self.assertAlmostEqual(got.rules[0].value, 0.40, places=6)
+        self.assertEqual(got.from_paste, 3, "the choice price is filed, and sets no width")
+        self.assertIn("2 observation(s)", got.rules[0].text)
+        self.assertEqual(len(empty.records), 0, "proposing is not filing")
 
 
 class TestMarketMakerModel(unittest.TestCase):
@@ -12477,19 +12905,28 @@ class TestMarketMakerModel(unittest.TestCase):
         """Two blanks are the house range -- the same reading as an empty
         market box handing the field back to the feed.  One blank is a range
         somebody meant to type and did not finish, and reading it half way
-        would fit in a range nobody chose."""
+        would fit in a range nobody chose.
+
+        Read here through the two panels that carry the boxes -- the hand fit
+        and the agent, both on the marking card -- because that is where they
+        now are, and one reader (`_reversion_from_request`) behind both so a
+        range legal on one cannot be illegal on the other."""
+        from volkit import marking
         base = {"pair": "EURUSD"}
-        self.assertIsNone(marketmaker.panel_from_request(base).reversion_range)
-        self.assertIsNone(marketmaker.panel_from_request(
-            {**base, "reversion_lo": "", "reversion_hi": ""}).reversion_range)
-        self.assertEqual(marketmaker.panel_from_request(
-            {**base, "reversion_lo": "2", "reversion_hi": "9"}).reversion_range, (2.0, 9.0))
-        for bad, why in ((("2", ""), "both"), (("", "9"), "both"),
-                         (("0", "9"), "above zero"), (("9", "2"), "above its floor")):
-            with self.assertRaises(ValueError) as ctx:
-                marketmaker.panel_from_request(
-                    {**base, "reversion_lo": bad[0], "reversion_hi": bad[1]})
-            self.assertIn(why, str(ctx.exception))
+        for reader in (marking.fit_panel_from_request, marking.panel_from_request):
+            with self.subTest(reader.__name__):
+                self.assertIsNone(reader(base).reversion_range)
+                self.assertIsNone(reader(
+                    {**base, "reversion_lo": "", "reversion_hi": ""}).reversion_range)
+                self.assertEqual(reader(
+                    {**base, "reversion_lo": "2", "reversion_hi": "9"}).reversion_range,
+                    (2.0, 9.0))
+                for bad, why in ((("2", ""), "both"), (("", "9"), "both"),
+                                 (("0", "9"), "above zero"),
+                                 (("9", "2"), "above its floor")):
+                    with self.assertRaises(ValueError) as ctx:
+                        reader({**base, "reversion_lo": bad[0], "reversion_hi": bad[1]})
+                    self.assertIn(why, str(ctx.exception))
 
     def test_a_cross_fits_its_correlation_not_a_level_it_does_not_own(self):
         book = Book.from_excel(WORKBOOK, ASOF).load_all(["AUDUSD", "USDJPY", "AUDJPY"])
@@ -12615,11 +13052,11 @@ class TestMarketMakerModel(unittest.TestCase):
 
 
 class TestHeldFitGoesStale(unittest.TestCase):
-    """A fit is only good for the book it was fitted on.
+    """Held marks are only good for the book they came from.
 
-    The two panels are two routes and the marks travel between them in the
-    browser (§4), which means a trip to the marking screen can happen in the
-    middle.  ``applied_marks`` then put the fit's backbone knobs and smile
+    The fit, the check and the quote are three routes and the marks travel
+    between them in the browser (§4), which means a trip to the marking screen
+    can happen in the middle.  ``applied_marks`` then put the fit's backbone knobs and smile
     shifts back over whatever was marked there -- silently, and only over
     *those two*, so a re-marked curve was thrown away while a pinned tenor or
     a re-quoted wing went through.  A price half of this morning's marks and
@@ -12636,11 +13073,17 @@ class TestHeldFitGoesStale(unittest.TestCase):
                    "free": ["initial_vol", "long_term_vol"],
                    "fit_curve": True, "tune_wings": False, "apply": False}
         payload.update(kw)
-        return svc.mm_fit(payload)
+        return svc.mm_mark_fit(payload)
+
+    def check(self, svc, marks=None, pair="USDJPY"):
+        payload = {"pair": pair, "cut": "TK", "text": "1M ATM 8.0/8.6\n"}
+        if marks is not None:
+            payload["marks"] = marks
+        return svc.mm_check(payload)
 
     def quote(self, svc, marks=None, pair="USDJPY"):
         payload = {"pair": pair, "request_text": "1M atm", "cut": "TK",
-                   "fallback_spread": 0.2}
+                   "fallback_tier": "default"}
         if marks is not None:
             payload["marks"] = marks
         return svc.mm_quote(payload)
@@ -12666,7 +13109,7 @@ class TestHeldFitGoesStale(unittest.TestCase):
         svc = self.service()
         marks = self.fit(svc)["marks"]
         out = self.quote(svc, marks)
-        self.assertTrue(out["marks"]["on_the_fit"])
+        self.assertTrue(out["marks"]["on_the_marks"])
         self.assertEqual(out["marks"]["stale"], [])
 
     def test_a_curve_re_marked_after_the_fit_drops_the_fit_and_says_so(self):
@@ -12678,12 +13121,12 @@ class TestHeldFitGoesStale(unittest.TestCase):
         book_only = self.quote(svc)["sheet"]["rows"][0]["model"]
         self.assertNotAlmostEqual(book_only, was, places=6)
         out = self.quote(svc, marks)
-        self.assertFalse(out["marks"]["on_the_fit"])
+        self.assertFalse(out["marks"]["on_the_marks"])
         self.assertEqual(out["marks"]["stale"], ["the curve parameters"])
         # ...and it is the marked number that is priced, not the fit's.
         self.assertAlmostEqual(out["sheet"]["rows"][0]["model"], book_only, places=12)
-        self.assertTrue(any("re-marked since this fit" in w for w in out["warnings"]),
-                        out["warnings"])
+        self.assertTrue(any("re-marked since these marks were made" in w
+                            for w in out["warnings"]), out["warnings"])
 
     def test_every_kind_of_re_mark_is_noticed_and_named(self):
         """Not only the two ``capture_marks`` holds.
@@ -12708,7 +13151,7 @@ class TestHeldFitGoesStale(unittest.TestCase):
                 mark(svc)
                 out = self.quote(svc, marks)
                 self.assertEqual(out["marks"]["stale"], [name])
-                self.assertFalse(out["marks"]["on_the_fit"])
+                self.assertFalse(out["marks"]["on_the_marks"])
 
     def test_a_fit_that_kept_its_marks_is_not_stale_against_its_own_write(self):
         """``keep the marks`` writes the fit onto the book, and the stamp is
@@ -12717,7 +13160,7 @@ class TestHeldFitGoesStale(unittest.TestCase):
         svc = self.service()
         marks = self.fit(svc, apply=True)["marks"]
         out = self.quote(svc, marks)
-        self.assertTrue(out["marks"]["on_the_fit"])
+        self.assertTrue(out["marks"]["on_the_marks"])
         self.assertEqual(out["marks"]["stale"], [])
 
     def test_a_fresh_fit_is_good_again(self):
@@ -12728,6 +13171,27 @@ class TestHeldFitGoesStale(unittest.TestCase):
         again = self.fit(svc)["marks"]
         self.assertEqual(self.quote(svc, again)["marks"]["stale"], [])
 
+    def test_the_check_reads_a_held_set_of_marks_the_same_way_the_quote_does(self):
+        """One stamp, one reading of it.  The check used to *be* the fit and had
+        no marks to read at all; it reads them now, because checking the book
+        while an unanswered proposal sits on the screen would be checking a
+        curve nobody is quoting off -- and a check that took a stale set at face
+        value would be worse than one that took none."""
+        svc = self.service()
+        marks = self.fit(svc)["marks"]
+        fresh = self.check(svc, marks)
+        self.assertTrue(fresh["marks"]["on_the_marks"])
+        self.assertEqual(fresh["marks"]["stale"], [])
+        on_marks = fresh["market"]["rows"][0]["model"]
+        self.remark_curve(svc)
+        stale = self.check(svc, marks)
+        self.assertFalse(stale["marks"]["on_the_marks"])
+        self.assertEqual(stale["marks"]["stale"], ["the curve parameters"])
+        # The marked number, not the dropped fit's.
+        self.assertNotAlmostEqual(stale["market"]["rows"][0]["model"], on_marks, places=6)
+        self.assertAlmostEqual(stale["market"]["rows"][0]["model"],
+                               self.check(svc)["market"]["rows"][0]["model"], places=12)
+
     def test_marks_with_no_stamp_are_quoted_off_as_they_always_were(self):
         """A payload from a client that predates the stamp, or a hand-written
         one: refusing on a *missing* field would break every saved panel the
@@ -12737,7 +13201,7 @@ class TestHeldFitGoesStale(unittest.TestCase):
         marks.pop("book")
         self.remark_curve(svc)
         out = self.quote(svc, marks)
-        self.assertTrue(out["marks"]["on_the_fit"])
+        self.assertTrue(out["marks"]["on_the_marks"])
         self.assertEqual(out["marks"]["stale"], [])
 
     def test_quoting_leaves_the_book_where_it_found_it(self):
@@ -12815,14 +13279,17 @@ class TestHeldFitGoesStale(unittest.TestCase):
 
 
 class TestMarketMakerPanel(unittest.TestCase):
-    """The screen as a whole: what each of its two stages reports, and what
-    they leave behind.
+    """The screen as a whole: what each of its stages reports, and what they
+    leave behind.
 
-    Fitting and quoting are two panels and two routes, so they are two sets of
-    tests here.  Most of these switch the wing fine tune off; it is exercised
-    properly in ``TestMarketMakerModel`` and in the tests here that need it,
-    and running a full one in every case would spend a minute of the suite
-    re-proving it.
+    Three panels and three routes, so three sets of tests here.  The fit is
+    ``marking.FitPanel``: it was this module's own ``Panel`` until every mark
+    that moves became the marking card's, and it is tested from here anyway
+    because the hand-off it makes to the check and the quote is a market-maker
+    screen invariant.  Most of these switch the wing fine tune off; it is
+    exercised properly in ``TestMarketMakerModel`` and in the tests here that
+    need it, and running a full one in every case would spend a minute of the
+    suite re-proving it.
     """
 
     TEXT = ("1M ATM 6.05/6.35 in 100mm vega\n"
@@ -12842,15 +13309,31 @@ class TestMarketMakerPanel(unittest.TestCase):
         cls.book = Book.from_excel(WORKBOOK, ASOF).load_all(["EURUSD"])
 
     def panel(self, **kw):
+        """The hand fit, which lives on the marking card."""
+        from volkit import marking
         payload = {"pair": "EURUSD", "text": self.TEXT, "target_source": "quotes",
                    "tune_wings": False}
         payload.update(kw)
-        return marketmaker.panel_from_request(payload)
+        return marking.fit_panel_from_request(payload)
+
+    def check(self, **kw):
+        payload = {"pair": "EURUSD", "text": self.TEXT}
+        payload.update(kw)
+        return marketmaker.check_panel_from_request(payload)
 
     def quote(self, **kw):
-        payload = {"pair": "EURUSD", "request_text": self.ASKED, "fallback_spread": "0.30"}
+        payload = {"pair": "EURUSD", "request_text": self.ASKED, "fallback_tier": "flat"}
         payload.update(kw)
         return marketmaker.quote_panel_from_request(payload)
+
+    @staticmethod
+    def spreads(**tiers):
+        """A KACE_SPREADS table, as the bottom rung of the width ladder reads it."""
+        from volkit import kace
+        table = kace.SpreadTable(path="test!KACE_SPREADS")
+        table.tiers = {"flat": {"1W": 0.30, "1M": 0.30, "3M": 0.30, "1Y": 0.30}}
+        table.tiers.update(tiers)
+        return table
 
     def bank(self):
         bank = KnowledgeBank()
@@ -12884,39 +13367,66 @@ class TestMarketMakerPanel(unittest.TestCase):
         self.assertNotAlmostEqual(surface.atm.term_vol(tenor_to_years("1m")), before)
         self.assertTrue(any("in memory only" in w for w in out["warnings"]))
 
-    def test_the_fit_puts_a_price_on_nothing(self):
-        """The whole point of the split.  A fit that also quoted the run it was
-        fitted to made a price in every instrument a broker happened to show,
-        which is not what anybody asked for -- and it meant a request could
-        only be priced by re-running a fit against a market that had nothing
-        to do with it."""
+    def test_the_fit_puts_a_price_on_nothing_and_reads_no_market_table(self):
+        """The whole point of the split, twice over.  A fit that also quoted the
+        run it was fitted to made a price in every instrument a broker happened
+        to show, which is not what anybody asked for.  And a fit that also
+        reported where the surface sat against that run was answering Check
+        Market's question with a button that moves marks, which is why there
+        were two ways to re-mark one curve."""
         out = self.panel().run(self.book)
         self.assertNotIn("sheet", out)
+        self.assertNotIn("market", out)
+        self.assertIsNotNone(out["curve"])
+        self.assertIsNotNone(out["marks"])
+
+    def test_a_section_that_cannot_run_empties_only_itself(self):
+        """No pinned tenor means no target curve.  The panel still answers,
+        the same way the analysis screen keeps its sections apart."""
+        out = self.panel(target_source="overwrites").run(self.book)
+        self.assertIsNone(out["curve"])
+        self.assertIn("no tenor is pinned", out["unavailable"]["curve"])
+        self.assertEqual(out["marks"]["what"], "nothing")
+
+    # -- the check --------------------------------------------------------
+    def test_the_check_reports_where_the_marks_sit_against_theirs(self):
+        out = self.check().run(self.book)
+        for row in out["market"]["rows"]:
+            self.assertIn(row["position"], ("inside", "below", "above"))
+            self.assertIn(row["severity"], marketmaker.SEVERITIES)
+            if row["position"] == "inside":
+                self.assertEqual(row["gap"], 0.0)
+                self.assertIn(row["severity"], ("in line", "edge"))
+            else:
+                self.assertNotEqual(row["gap"], 0.0)
+                self.assertEqual(row["severity"], "through")
+        self.assertEqual(out["market"]["n_quotes"], 6)
+
+    def test_the_check_moves_nothing_and_quotes_nothing(self):
+        """It replaced the fit and inherited none of its powers."""
+        before = marketmaker.capture_marks(self.book["EURUSD"])
+        out = self.check().run(self.book)
+        self.assertEqual(marketmaker.capture_marks(self.book["EURUSD"]), before)
+        for gone in ("curve", "wings", "applied", "sheet"):
+            self.assertNotIn(gone, out)
         for row in out["market"]["rows"]:
             self.assertNotIn("our_bid", row)
             self.assertNotIn("width", row)
 
-    def test_a_section_that_cannot_run_empties_only_itself(self):
-        """No pinned tenor means no target curve.  The market table is still
-        built, the same way the analysis screen keeps its sections apart."""
-        out = self.panel(target_source="overwrites").run(self.book)
-        self.assertIsNone(out["curve"])
-        self.assertIn("no tenor is pinned", out["unavailable"]["curve"])
-        self.assertIsNotNone(out["market"])
-        self.assertEqual(out["market"]["n_quotes"], 6)
-
-    def test_the_market_table_reports_where_the_model_sits_against_theirs(self):
-        out = self.panel().run(self.book)
-        for row in out["market"]["rows"]:
-            self.assertIn(row["position"], ("inside", "below", "above"))
-            if row["position"] == "inside":
-                self.assertEqual(row["edge"], 0.0)
-            else:
-                self.assertNotEqual(row["edge"], 0.0)
-        self.assertEqual(out["market"]["n_quotes"], 6)
+    def test_the_tolerance_decides_what_counts_as_near_an_edge(self):
+        """Zero is the honest setting for a desk that does not want amber, and
+        it must not silently mean the default."""
+        loose = self.check(near_edge="0.45").run(self.book)["market"]
+        off = self.check(near_edge="0").run(self.book)["market"]
+        self.assertEqual(off["edge"], 0)
+        self.assertGreaterEqual(loose["edge"], off["edge"])
+        self.assertEqual(loose["through"], off["through"])
+        with self.assertRaises(ValueError) as got:
+            self.check(near_edge="0.5")
+        self.assertIn("fraction of the quoted width", str(got.exception))
 
     def test_a_paste_the_reader_cannot_use_is_listed_not_silently_shortened(self):
-        out = self.panel(text=self.TEXT + "3M 25d rr 0.4/0.6 jpy call over\n").run(self.book)
+        out = self.check(text=self.TEXT + "3M 25d rr 0.4/0.6 jpy call over\n").run(self.book)
         self.assertEqual(out["market"]["n_quotes"], 6)
         self.assertEqual(len(out["market"]["skipped"]), 1)
         self.assertIn("not a leg of EURUSD", out["market"]["skipped"][0]["why"])
@@ -12972,15 +13482,29 @@ class TestMarketMakerPanel(unittest.TestCase):
         self.assertEqual(marketmaker.capture_marks(book["EURUSD"]), before)
         self.assertEqual([w for w in out["warnings"] if "put back" in w], [])
 
+    def test_the_check_says_which_marks_it_read(self):
+        """A market checked against this morning's proposal and one checked
+        against last night's marks must never read the same."""
+        fit = self.panel().run(self.book)
+        on = self.check(marks=fit["marks"]).run(self.book)
+        self.assertTrue(on["marks"]["on_the_marks"])
+        self.assertIn("handed", on["marks"]["note"])
+        plain = self.check().run(self.book)
+        self.assertFalse(plain["marks"]["on_the_marks"])
+        self.assertIn("as they stand", plain["marks"]["note"])
+        # And a different answer, which is the point of saying which.
+        self.assertNotEqual([r["model"] for r in on["market"]["rows"]],
+                            [r["model"] for r in plain["market"]["rows"]])
+
     def test_a_quote_says_which_marks_it_stood_on(self):
         """A price made on this morning's fit and one made on last night's
         marks must never read the same."""
         fit = self.panel().run(self.book)
         handed = self.quote(marks=fit["marks"]).run(self.book, bank=self.bank())
-        self.assertTrue(handed["marks"]["on_the_fit"])
+        self.assertTrue(handed["marks"]["on_the_marks"])
         self.assertIn("handed", handed["marks"]["note"])
         plain = self.quote().run(self.book, bank=self.bank())
-        self.assertFalse(plain["marks"]["on_the_fit"])
+        self.assertFalse(plain["marks"]["on_the_marks"])
         self.assertIn("as they stand", plain["marks"]["note"])
         # And they are different prices, which is the point of saying which.
         self.assertNotEqual([r["our_bid"] for r in handed["sheet"]["rows"]],
@@ -13015,11 +13539,68 @@ class TestMarketMakerPanel(unittest.TestCase):
         self.assertIn("ATM", atm["width_source"])
 
     def test_a_request_with_no_rule_and_no_fallback_gets_no_price(self):
-        out = self.quote(fallback_spread="").run(self.book, bank=KnowledgeBank())
+        out = self.quote(fallback_tier="").run(self.book, bank=KnowledgeBank(),
+                                               spreads=self.spreads())
         for row in out["sheet"]["rows"]:
             self.assertIsNone(row["our_bid"])
             self.assertEqual(row["verdict"], "no width")
             self.assertTrue(any("no width rule" in w for w in row["warnings"]))
+        self.assertEqual(out["sheet"]["fallback"]["tier"], "")
+        self.assertFalse(out["sheet"]["fallback"]["error"])
+
+    def test_the_fallback_is_a_tier_read_at_each_rows_own_maturity(self):
+        """The bottom rung is a ladder, not one width for every tenor."""
+        table = self.spreads(steep={"1W": 0.10, "1M": 0.20, "3M": 0.60, "1Y": 1.00})
+        out = self.quote(request_text="1M ATM\n3M ATM\n",
+                         fallback_tier="steep").run(self.book, bank=KnowledgeBank(),
+                                                    spreads=table)
+        rows = {r["tenor"]: r for r in out["sheet"]["rows"]}
+        self.assertAlmostEqual(rows["1M"]["width"], 0.20)
+        self.assertAlmostEqual(rows["3M"]["width"], 0.60)
+        for r in rows.values():
+            self.assertEqual(r["width_rung"], "fallback")
+            self.assertIn("steep", r["width_source"])
+            self.assertAlmostEqual(r["our_ask"] - r["our_bid"], r["width"], places=9)
+        block = out["sheet"]["fallback"]
+        self.assertEqual(block["tier"], "steep")
+        self.assertEqual(block["multiplier"], 1.0)
+        self.assertFalse(block["interpolate"])
+
+    def test_the_fallback_tier_is_multiplied_and_may_be_read_across(self):
+        table = self.spreads(steep={"1W": 0.10, "1M": 0.20, "3M": 0.60, "1Y": 1.00})
+        asked = "2M ATM\n"
+        stepped = self.quote(request_text=asked, fallback_tier="steep").run(
+            self.book, bank=KnowledgeBank(), spreads=table)
+        across = self.quote(request_text=asked, fallback_tier="steep",
+                            fallback_interpolate="1").run(
+            self.book, bank=KnowledgeBank(), spreads=table)
+        wide = self.quote(request_text=asked, fallback_tier="steep",
+                          fallback_multiplier="1.5").run(
+            self.book, bank=KnowledgeBank(), spreads=table)
+        # Stepped, 2M takes 1M's width; read across it sits between 1M and 3M.
+        self.assertAlmostEqual(stepped["sheet"]["rows"][0]["width"], 0.20)
+        self.assertGreater(across["sheet"]["rows"][0]["width"], 0.20)
+        self.assertLess(across["sheet"]["rows"][0]["width"], 0.60)
+        self.assertAlmostEqual(wide["sheet"]["rows"][0]["width"], 0.30)
+        self.assertIn("1.5", wide["sheet"]["rows"][0]["width_source"])
+        self.assertTrue(across["sheet"]["fallback"]["interpolate"])
+        # And the mid is where it was: a multiplier widens, it does not move.
+        self.assertAlmostEqual((wide["sheet"]["rows"][0]["our_bid"]
+                                + wide["sheet"]["rows"][0]["our_ask"]) / 2.0,
+                               (stepped["sheet"]["rows"][0]["our_bid"]
+                                + stepped["sheet"]["rows"][0]["our_ask"]) / 2.0, places=9)
+
+    def test_a_fallback_tier_that_is_not_there_is_one_message_not_a_crash(self):
+        """A quote run still prices what the bank can answer."""
+        out = self.quote(fallback_tier="fat").run(self.book, bank=self.bank(),
+                                                  spreads=self.spreads())
+        self.assertIn("fat", out["sheet"]["fallback"]["error"])
+        for row in out["sheet"]["rows"]:
+            self.assertIsNotNone(row["our_bid"], row["tenor"])
+            self.assertEqual(row["width_rung"], "bank")
+        # And with no table loaded at all it says that instead.
+        none = self.quote().run(self.book, bank=self.bank())
+        self.assertIn("KACE_SPREADS", none["sheet"]["fallback"]["error"])
 
     def test_an_absolute_strike_without_a_feed_is_reported_not_priced_at_one(self):
         """Without a forward there is no moneyness, and pricing it at a forward
@@ -13078,12 +13659,18 @@ class TestMarketMakerPanel(unittest.TestCase):
     def test_the_panel_and_the_command_line_share_one_entry_point(self):
         """A panel set up in the browser and the same panel run from a shell
         must produce the same numbers, which is only guaranteed if there is one
-        function -- and now two stages, so two of them."""
+        function -- and now three stages, so three of them, across two
+        commands: `volkit mm` is the two that read the curve and `volkit mark`
+        is the one that moves it."""
         import inspect
         from volkit import cli
         source = inspect.getsource(cli.cmd_mm)
-        self.assertIn("panel_from_request", source)
+        self.assertIn("check_panel_from_request", source)
         self.assertIn("quote_panel_from_request", source)
+        # And nothing in `mm` fits, because nothing in `mm` may move a mark.
+        for gone in ("fit_panel_from_request", "fit_atm_curve", "tune_smile_shifts"):
+            self.assertNotIn(gone, source, f"`volkit mm` still reaches {gone}")
+        self.assertIn("fit_panel_from_request", inspect.getsource(cli.cmd_mark))
 
 
 class TestCurveInvalidation(unittest.TestCase):
@@ -13243,6 +13830,61 @@ class TestKaceFeed(unittest.TestCase):
         self.assertEqual(kace.spread_for(date(2026, 2, 4), pillars), 0.8)    # 1W's until 2W
         self.assertEqual(kace.spread_for(date(2026, 2, 5), pillars), 0.6)
         self.assertEqual(kace.spread_for(date(2027, 6, 1), pillars), 0.2)    # past 1Y: 1Y's
+
+    def test_a_day_between_two_pillars_can_be_read_across_instead_of_stepped(self):
+        """The alternative to the sheet's rule: interpolate, and only between pillars."""
+        from volkit import kace
+        pillars = self._sheet_feed().pillars
+        cross = lambda d: kace.spread_for(d, pillars, interpolate=True)
+        # A pillar's own day is the pillar's width either way, and outside the
+        # ladder there is nothing to read across to.
+        self.assertEqual(cross(date(2026, 1, 1)), 1.0)                    # before O/N
+        self.assertEqual(cross(date(2026, 1, 23)), 1.0)                   # the O/N expiry
+        self.assertEqual(cross(date(2026, 1, 29)), 0.8)                   # the 1W expiry
+        self.assertEqual(cross(date(2027, 6, 1)), 0.2)                    # past 1Y
+        # Between them it is a straight line in date: O/N 23 Jan at 1.0 to
+        # 1W 29 Jan at 0.8 is six days, so 26 Jan is halfway.
+        self.assertAlmostEqual(cross(date(2026, 1, 26)), 0.9)
+        self.assertAlmostEqual(cross(date(2026, 1, 24)), 1.0 - 0.2 / 6)
+        # And it is monotone between two pillars, where the step rule is flat
+        # and then drops.
+        walk = [cross(date(2026, 1, 23) + timedelta(days=i)) for i in range(7)]
+        self.assertEqual(walk, sorted(walk, reverse=True))
+        self.assertEqual(kace.spread_for(date(2026, 1, 26), pillars), 1.0)  # still stepped
+
+    def test_the_multiplier_scales_the_width_and_leaves_the_mid_alone(self):
+        from volkit import kace
+        book = self._book()
+        plain = kace.build(book, "USDCNH", kace.SpreadTable.load(self.SPREADS))
+        wide = kace.build(book, "USDCNH", kace.SpreadTable.load(self.SPREADS),
+                          multiplier=1.5)
+        self.assertEqual(plain.multiplier, 1.0)
+        self.assertEqual(wide.multiplier, 1.5)
+        for a, b in zip(plain.pillars, wide.pillars):
+            self.assertAlmostEqual(b.spread, a.spread * 1.5, msg=a.tenor)
+            self.assertAlmostEqual(b.atm, a.atm)
+            # The two-way widens around the mark; it does not move it.
+            self.assertAlmostEqual((b.bid + b.offer) / 2.0, (a.bid + a.offer) / 2.0)
+        self.assertTrue(any("1.5" in n for n in wide.notes))
+        self.assertEqual(wide.summary()["multiplier"], 1.5)
+        # The daily nodes are written off the multiplied pillars too, so the
+        # screen and the message cannot show two different widths.
+        self.assertAlmostEqual(kace.spread_for(min(wide.daily), wide.pillars),
+                               kace.spread_for(min(plain.daily), plain.pillars) * 1.5)
+
+    def test_a_multiplier_that_is_not_a_positive_number_is_refused(self):
+        from volkit import kace
+        self.assertEqual(kace.spread_multiplier(None), 1.0)
+        self.assertEqual(kace.spread_multiplier(""), 1.0)
+        self.assertEqual(kace.spread_multiplier("  "), 1.0)
+        self.assertEqual(kace.spread_multiplier("2.5"), 2.5)
+        for bad in ("0", "-1", "wide", float("nan"), float("inf")):
+            with self.assertRaises(kace.KaceError):
+                kace.spread_multiplier(bad)
+        with self.assertRaises(kace.KaceError) as ctx:
+            kace.build(self._book(), "USDCNH", kace.SpreadTable.load(self.SPREADS),
+                       multiplier="0")
+        self.assertIn("positive", str(ctx.exception))
 
     def test_decimals_are_plain_and_dates_are_english(self):
         from volkit import kace
@@ -13489,6 +14131,35 @@ class TestKaceFeed(unittest.TestCase):
         with self.assertRaises(kace.KaceError) as ctx:
             service.kace({"pair": "USDCNH", "tier": "fat"})
         self.assertIn("default, wide, thin", str(ctx.exception))
+        # The multiplier and the interpolation switch travel on the query
+        # string like the tier, and a query string has no booleans -- the
+        # words a browser sends for *off* have to mean off.
+        times = service.kace({"pair": "USDCNH", "multiplier": "1.5"})
+        self.assertEqual(times["multiplier"], 1.5)
+        self.assertFalse(times["interpolate"])
+        for a, b in zip(times["pillars"], out["pillars"]):
+            self.assertAlmostEqual(a["spread"], b["spread"] * 1.5, msg=a["tenor"])
+            self.assertAlmostEqual((a["bid"] + a["offer"]) / 2.0,
+                                   (b["bid"] + b["offer"]) / 2.0)
+        self.assertEqual(times["nodes"], out["nodes"])
+        for blank in ("", None):
+            self.assertEqual(service.kace({"pair": "USDCNH", "multiplier": blank}
+                                          )["multiplier"], 1.0)
+        with self.assertRaises(kace.KaceError):
+            service.kace({"pair": "USDCNH", "multiplier": "-2"})
+        for off in ("", "0", "false", "off"):
+            self.assertFalse(service.kace({"pair": "USDCNH", "interpolate": off}
+                                          )["interpolate"], off)
+        for on in ("1", "true", "yes"):
+            self.assertTrue(service.kace({"pair": "USDCNH", "interpolate": on}
+                                         )["interpolate"], on)
+        # Interpolating changes the days between pillars and nothing else:
+        # the pillars, the wings and the node count are what they were.
+        across = service.kace({"pair": "USDCNH", "interpolate": "1"})
+        self.assertEqual(across["nodes"], out["nodes"])
+        self.assertEqual([p["spread"] for p in across["pillars"]],
+                         [p["spread"] for p in out["pillars"]])
+        self.assertNotEqual(across["xml"], out["xml"])
         name, text = service.export_kace({"pair": "USDCNH"})
         self.assertEqual(name, "USDCNH_kace_vols_Xyz_2024-02-28.xml")
         self.assertEqual(text, out["xml"])

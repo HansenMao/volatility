@@ -23,8 +23,10 @@ an **overlay** on top of the model mid.  Three principles:
 * **Nothing is invented.**  There is no built-in default width.  A quote no
   rule matches gets no bid and no offer, and says so.  Numbers that appear on
   a screen without a source are the thing this project exists to remove;
-  ``suggest_rules`` therefore proposes a starter ladder **measured from a
-  pasted market**, with the evidence attached, rather than from a constant.
+  a starter ladder is therefore **measured** -- ``agent.learn_widths``
+  proposes it from the archive's own two-ways, age-weighted and with the
+  evidence attached, and a person saves it -- rather than taken from a
+  constant.
 
 Widths, floors and shifts are all in volatility points -- what the desk says
 out loud -- and are converted at the panel boundary like everything else.
@@ -260,8 +262,8 @@ class PairKnowledge:
         reason = ""
         if spread_rule is None:
             reason = ("no width rule in the bank matches this quote"
-                      + ("; the panel fallback was used instead" if fallback is not None
-                         else ", and no panel fallback is set, so it has no bid or offer"))
+                      + ("; the fallback tier was used instead" if fallback is not None
+                         else ", and no fallback tier is set, so it has no bid or offer"))
         if spread is not None and floor_rule is not None and floor_rule.value > spread:
             spread = floor_rule.value
 
@@ -382,53 +384,6 @@ class KnowledgeBank:
 _BUCKETS = ((7.0, "out to a week"), (31.0, "out to a month"),
             (93.0, "out to three months"), (366.0, "out to a year"),
             (float("inf"), "beyond a year"))
-
-
-def suggest_rules(quotes, *, days_of, min_observations: int = 1) -> tuple[list[Rule], list[str]]:
-    """Propose spread rules from the widths a pasted market actually showed.
-
-    This is the only way a width gets into the bank without somebody typing
-    it, and it is still not invented: every proposed rule is the median width
-    of quotes that were really on the screen, and its text says how many and
-    over what range.  Quotes written as a single mid have no width and are
-    excluded -- averaging a zero width in would quietly tighten the ladder.
-
-    ``days_of`` maps a quote to its calendar days to expiry, so this function
-    needs no clock of its own.
-    """
-    from statistics import median
-
-    buckets: dict[tuple[str, float, float | None], list[float]] = {}
-    for q in quotes:
-        if q.is_choice:
-            continue
-        days = days_of(q)
-        if days is None or not math.isfinite(days) or days <= 0:
-            continue
-        edge = next(e for e, _ in _BUCKETS if days <= e)
-        buckets.setdefault((q.instrument, edge, q.delta), []).append(q.spread)
-
-    rules: list[Rule] = []
-    notes: list[str] = []
-    for (instrument, edge, delta), widths in sorted(
-            buckets.items(), key=lambda kv: (kv[0][1], kv[0][0], kv[0][2] or 0)):
-        if len(widths) < min_observations:
-            notes.append(f"{instrument} {'' if delta is None else f'{delta:.0%} '}"
-                         f"had only {len(widths)} two-way quote(s); no rule proposed")
-            continue
-        label = next(lbl for e, lbl in _BUCKETS if e == edge)
-        width = float(median(widths))
-        rules.append(Rule(
-            kind="spread", value=width, instrument=instrument,
-            max_days=(None if not math.isfinite(edge) else edge),
-            min_days=None, delta=delta,
-            text=(f"median of {len(widths)} quoted width(s) {label} in this paste "
-                  f"({min(widths):.3f} to {max(widths):.3f})"),
-        ))
-    if not rules:
-        notes.append("no two-way quote in the paste had a width, so there is nothing to learn "
-                     "from it; add rules by hand instead")
-    return rules, notes
 
 
 def merge_rules(existing: list[Rule], proposed: list[Rule]) -> tuple[list[Rule], list[str]]:

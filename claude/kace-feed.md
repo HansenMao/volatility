@@ -68,6 +68,17 @@ what `TestKaceFeed` pins string for string.
   points at a different workbook. The shipped `default` column is the USDCNH
   sheet's column L.
 
+  **The market-maker screen reads the same tab.** The quote's bottom width
+  rung is a tier off `KACE_SPREADS`, named on that screen's own bar and read at
+  each quoted row's maturity (`kace.width_at`, `QuotePanel.run(spreads=...)`).
+  The 2026-09-01 note argued the other direction -- that the feed should not
+  take the market-maker's *learned* widths, because a re-learned quoting width
+  would move a posted mark. This is not that: nothing measured flows into the
+  tab, the desk still writes it, and the coupling is one ladder read by two
+  screens rather than one screen's output driving the other. It is also the
+  bottom rung, below the bank and the archive, so it only decides a width
+  nothing else could.
+
   **It used to be `pair, tenor, spread`**, which tied a width to a currency: a
   desk that wanted to post one pair at two widths had nowhere to say so, and a
   new pair could not be posted until somebody typed it a whole ladder. The
@@ -85,7 +96,27 @@ what `TestKaceFeed` pins string for string.
 - **The daily rule is the sheet's, spelled out.** A day takes the spread of
   the last pillar expiring on or before it; a day before the O/N expiry takes
   O/N's (`spread_for`). That was an approximate `VLOOKUP` with an `ISERROR`
-  fallback.
+  fallback. It stays the default because it is what was posted.
+- **Two knobs on the widths, neither of which moves a mid.** The **multiplier**
+  (`build(multiplier=…)`, the `×` box on the tab, `--spread-multiplier`) scales
+  every one of the chosen tier's widths. A tier is a ladder somebody maintains
+  on a workbook tab; a morning that wants everything half again as wide should
+  not have to type a second ladder to say so, and the multiple is not a policy
+  worth a column. It scales the pillars *before* the day-by-day rule reads
+  them, so the screen, the XML and the log all carry the multiplied width and
+  cannot disagree; blank is 1, and anything that is not a positive finite
+  number is refused by name (`spread_multiplier`) rather than taken as one.
+  **Interpolation** (`spread_for(..., interpolate=True)`, the *interpolate*
+  checkbox, `--interpolate-spreads`) reads a day between two pillars straight
+  across between their widths, by calendar date, instead of taking the last
+  pillar's — so the two-way widens smoothly rather than stepping on nine
+  mornings a year. It changes only the days *between* pillars: a pillar's own
+  width is the tier's either way, and outside the ladder the nearest pillar's
+  is still what is posted. Both are the morning's choice like the tier and the
+  scenario, remembered per browser, sent on every route, and written into
+  `kace_posts.jsonl` (`multiplier`, `interpolate`) — a tier name alone stopped
+  being the whole answer the moment it could be multiplied, so the tab's
+  history column is *Widths*, not *Tier*.
 - **Three things done differently, on purpose.** `horDate` is the book's
   valuation date, not `TODAY()`. The daily series runs to the last pillar plus
   `MARGIN_DAYS`, whatever `[daily] horizon_years` says -- the sheet's fixed

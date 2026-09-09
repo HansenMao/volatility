@@ -67,3 +67,25 @@ card to ask about, and excluding it takes all three agents.
   still answers about the archive; a question about the surface says the
   surface is not there. The model is looked up per request, like the other
   agent routes, so starting Ollama mid-morning is enough.
+
+## Two topics added with the one-quote work (2026-09-09)
+
+- **`flow`** -- *who has been paying in the 1M*, *which side has the tape
+  printed on*. `_answer_flow` runs `flow.read_flow` against the loaded
+  surface (`marketmaker.Evaluator`, the same mark the quote leans on) and
+  answers per bucket, with the last prints and the mark each was judged
+  against. Without a surface it says so and counts what printed, taking no
+  side: a side is an inference against *our* mark and there is no other.
+- **`clients`** -- *what has Fund A done in the 3M*, *is Fund A a buyer or a
+  seller*, *which clients do we have a record on*. `_answer_clients` reads
+  `Synthesis.clients`, the same evidence the quote applies. The name is read
+  by `_find_client` (a quoted name; `client X`; `X's record`; `record of X`;
+  `with X`), cut at the first word that starts the rest of the question, and
+  then matched against the names the archive knows -- longest first, in the
+  whole question -- because the archive's own spellings are the authority. A
+  name it does not know is answered with the names it does, never guessed.
+  A quoted name is taken out of the text before the topic scan, so `"Big
+  Bank HK"` in quotes does not make the question about the knowledge bank.
+- **`record` the verb hands off, `record` the noun answers.** The write
+  hand-off matches `record that / this / the / it / as / my`; *a client's
+  record* and *the record on the 1M* are questions.

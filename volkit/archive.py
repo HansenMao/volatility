@@ -310,7 +310,7 @@ class Observation:
         if self.delta is not None and not (0.0 < float(self.delta) < 1.0):
             # 25 instead of 0.25 is the mistake this catches, and it is worth
             # catching: a rule written for 0.25 would never match it, so the
-            # quote would silently fall through to the panel fallback.
+            # quote would silently fall through to the fallback tier.
             bad.append(f"delta {self.delta!r} is not a fraction; a 25 delta is 0.25 here")
         for name in ("bid", "ask", "away_level"):
             v = getattr(self, name)

@@ -102,6 +102,7 @@ SCREENS: tuple[Screen, ...] = (
     Screen(
         name="marking", label="Vol marking", panel="p-marking",
         routes=("/api/marks", "/api/overwrite", "/api/smile", "/api/term",
+                "/api/params/grid",
                 "/api/daily", "/api/curve", "/api/events", "/api/events/workbook", "/api/events/weights",
                 "/api/rrfly", "/api/export/daily", "/api/band", "/api/band/fit", "/api/vol",
                 "/api/kace", "/api/export/kace", "/api/kace/post",
@@ -125,18 +126,20 @@ SCREENS: tuple[Screen, ...] = (
     ),
     Screen(
         name="mm", label="Market maker", panel="p-mm",
-        # The quoting agent is a card *inside* this screen rather than a screen
-        # of its own: it answers a question about the market on this tab, and
-        # a build without the market-maker tab has nothing for it to answer.
-        # The marking agent is the other card: it plans and judges *this*
-        # screen's fit, so it belongs here with the fit it is aimed at, and
-        # its command comes with it.  The third agent, the question box, reads
-        # what the other two keep and lives beside them.  Excluding the tab
-        # takes all three.
-        routes=("/api/mm/fit", "/api/mm/quote", "/api/mm/learn", "/api/mm/bank",
-                "/api/mm/agent", "/api/mm/agent/ingest", "/api/mm/agent/file",
-                "/api/mm/agent/fetch", "/api/mm/mark", "/api/mm/mark/record",
-                "/api/mm/ask"),
+        # The quoting agent is *inside* this screen rather than a screen of its
+        # own: its answer is the Quote button's, its record is the sheet's
+        # Record and outcome buttons, and its archive is a card on this tab.
+        # A build without the market-maker tab has nothing for it to answer.
+        # The marking agent is the other card, and the only thing on this tab
+        # that moves a mark: it runs the fit this screen's two fitters are for,
+        # so it belongs here with them, and its command comes with it.  The
+        # third agent, the question box, reads what the other two keep and lives
+        # beside them.  Excluding the tab takes all three.
+        routes=("/api/mm/check", "/api/mm/quote", "/api/mm/learn", "/api/mm/bank",
+                "/api/mm/record", "/api/mm/outcome",
+                "/api/mm/agent/ingest", "/api/mm/agent/file",
+                "/api/mm/agent/fetch", "/api/mm/mark", "/api/mm/mark/fit",
+                "/api/mm/mark/record", "/api/mm/ask"),
         commands=("mm", "agent", "mark"),
     ),
 )

@@ -569,7 +569,7 @@ def _fisn_side(fisn: str, base: str, quote: str) -> bool | None:
     named after it.  Used only when the legs did not say, and never against
     the order the pair is written in -- the currency it names is looked up."""
     text = str(fisn or "").upper()
-    m = re.search(r"(CALL|PUT)\s+([A-Z]{3})", text)
+    m = re.search(r"\b(CALL|PUT)\b\s+([A-Z]{3})\b", text)
     if not m:
         return None
     on, ccy = m.group(1), m.group(2)

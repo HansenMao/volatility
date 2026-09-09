@@ -225,6 +225,19 @@ class Quote:
     kind: str | None = None      # 'C', 'P' or None
     weight: float = 1.0
     line: int = 0
+    # The two-way the row was quoted as, where the paste had one.  ``vol`` is
+    # still the one number everything is fitted to -- the mid when the table
+    # gave no mid of its own -- and these are carried beside it so a screen can
+    # ask the question a mid cannot answer: is a curve inside the market, or
+    # through it.  ``None`` when the paste had no bid/ask columns, or when the
+    # row's own pair was unusable.
+    bid: float | None = None
+    ask: float | None = None
+
+    @property
+    def two_way(self) -> bool:
+        """Whether this row came with a bid and an offer of its own."""
+        return self.bid is not None and self.ask is not None
 
 
 @dataclass(frozen=True)
@@ -360,7 +373,14 @@ def parse_quote_table(text: str, *, vol_unit: str = "auto",
                        else f"column {i_vol + 1}"))
 
     # -- values ----------------------------------------------------------
-    staged: list[tuple[int, float, float, str | None, float]] = []
+    # A row's own two-way, where the paste has one.  It is kept whether or not
+    # the mid came from it: a table with bid, ask *and* a settlement mid is
+    # ordinary, and the mid being somebody else's number does not make the
+    # two-way less true.  Only an explicit --vol-column drops them, because
+    # that says which column to believe.
+    staged: list[tuple[int, float, float, str | None, float,
+                       float | None, float | None]] = []
+    crossed = 0
     for n, cells in rows:
         def cell(idx):
             return cells[idx] if idx is not None and 0 <= idx < len(cells) else ""
@@ -370,10 +390,21 @@ def parse_quote_table(text: str, *, vol_unit: str = "auto",
             skipped.append((n, delim.join(cells) if delim != "ws" else " ".join(cells),
                             f"column {i_strike + 1} is not a number"))
             continue
+        b = _to_float(cell(i_bid)) if i_bid is not None else None
+        a = _to_float(cell(i_ask)) if i_ask is not None else None
+        was_crossed = b is not None and a is not None and (b <= 0 or a <= 0 or b > a)
+        if was_crossed:
+            # A crossed or non-positive two-way is not a market.  Where the
+            # table has a mid of its own the row survives on it and only the
+            # two-way is dropped; where the mid *was* the two-way there is
+            # nothing left to fit and the row is skipped, saying which it was
+            # rather than "not a number", which it is.
+            crossed += 1
+            b = a = None
         if i_vol is None:
-            b, a = _to_float(cell(i_bid)), _to_float(cell(i_ask))
             v = None if b is None or a is None else 0.5 * (b + a)
-            why = "bid or ask is not a number"
+            why = ("the bid/offer is crossed or not positive" if was_crossed
+                   else "bid or ask is not a number")
         else:
             v = _to_float(cell(i_vol))
             why = f"column {i_vol + 1} is not a number"
@@ -392,7 +423,7 @@ def parse_quote_table(text: str, *, vol_unit: str = "auto",
         if kt[:1] in ("C", "P"):
             kind = kt[:1]
         w = _to_float(cell(i_weight)) if i_weight is not None else None
-        staged.append((n, k, v, kind, 1.0 if w is None or w <= 0 else w))
+        staged.append((n, k, v, kind, 1.0 if w is None or w <= 0 else w, b, a))
 
     if not staged:
         detail = "; ".join(f"line {n}: {why}" for n, _, why in skipped[:4])
@@ -402,7 +433,7 @@ def parse_quote_table(text: str, *, vol_unit: str = "auto",
         )
 
     # -- units -----------------------------------------------------------
-    vals = [v for _, _, v, _, _ in staged]
+    vals = [v for _, _, v, _, _, _, _ in staged]
     unit = vol_unit.lower()
     if unit == "auto":
         # As written, in volatility points.  The level is not evidence of the
@@ -423,16 +454,29 @@ def parse_quote_table(text: str, *, vol_unit: str = "auto",
     div = 100.0 if unit == "percent" else 1.0
 
     quotes = []
-    for n, k, v, kind, w in staged:
+    for n, k, v, kind, w, b, a in staged:
         vv = v / div
         if vv > 5.0:
             skipped.append((n, str(v), f"volatility of {vv:.1%} is beyond anything the "
                                        f"lognormal formulae can represent"))
             continue
-        quotes.append(Quote(strike=k, vol=vv, kind=kind, weight=w, line=n))
+        # The two-way is in the same unit as the mid, so it takes the same
+        # divisor.  Anything else would put a bid in points beside a mid in
+        # decimals and call the mark outside the market.
+        quotes.append(Quote(strike=k, vol=vv, kind=kind, weight=w, line=n,
+                            bid=None if b is None else b / div,
+                            ask=None if a is None else a / div))
     if not quotes:
         raise ValueError("every row was rejected once the volatility unit was applied")
 
+    two_way = sum(1 for q in quotes if q.two_way)
+    if two_way and i_vol is not None:
+        notes.append(f"{two_way} row(s) carry a bid and an offer of their own; the fit still "
+                     f"uses {vol_label}")
+    if crossed:
+        notes.append(f"{crossed} row(s) had a crossed or non-positive bid/offer; the two-way "
+                     f"was dropped" + (", and with it the row" if i_vol is None
+                                       else ", the mid kept"))
     quotes.sort(key=lambda q: q.strike)
     return ParsedTable(
         quotes=tuple(quotes), delimiter={"\t": "tab", ";": "semicolon", ",": "comma",
@@ -469,9 +513,15 @@ def dedupe(quotes, forward: float) -> tuple[tuple[Quote, ...], tuple[str, ...]]:
                          f"{len(group)} rows")
         else:
             mean = float(np.mean([q.vol for q in group]))
+            # The averaged row keeps a two-way only when every row it came
+            # from had one: a bid from one quote beside an offer from another
+            # is not a market anybody made.
+            both = all(q.two_way for q in group)
             out.append(Quote(strike=k, vol=mean, kind=None,
                              weight=float(np.mean([q.weight for q in group])),
-                             line=group[0].line))
+                             line=group[0].line,
+                             bid=float(np.mean([q.bid for q in group])) if both else None,
+                             ask=float(np.mean([q.ask for q in group])) if both else None))
             notes.append(f"strike {k:g}: averaged {len(group)} quotes spanning "
                          f"{min(q.vol for q in group):.4%}–{max(q.vol for q in group):.4%}")
     return tuple(out), tuple(notes)
@@ -1139,11 +1189,21 @@ class Panel:
                 "book_vol": None,
                 "book_diff": None,
                 "fx_strike": None,
+                # The row's own two-way, where the paste had one, and whether
+                # the marked FX surface reads outside it at this strike.
+                # ``None`` for "there is nothing to say" -- no two-way, or no
+                # pair to compare against -- which is not the same as False.
+                "bid_vol": None if q.bid is None else q.bid * 100.0,
+                "ask_vol": None if q.ask is None else q.ask * 100.0,
+                "mark_outside": None,
             }
             if cmp_ is not None:
                 row["book_vol"] = cmp_.book_vols[i] * 100.0
                 row["book_diff"] = (fit.model_vols[i] - cmp_.book_vols[i]) * 100.0
                 row["fx_strike"] = float(self.underlying.to_fx(q.strike))
+                if q.two_way:
+                    row["mark_outside"] = bool(cmp_.book_vols[i] < q.bid
+                                               or cmp_.book_vols[i] > q.ask)
             rows.append(row)
 
         lo, hi = min(fit.strikes) * 0.94, max(fit.strikes) * 1.06
@@ -1173,6 +1233,12 @@ class Panel:
             "days": t * 365.2425,
             "forward": self.forward,
             "n_quotes": len(quotes),
+            # How many rows came with a two-way, and how many of those the
+            # marked surface reads outside.  The screen offers its bid/offer
+            # switch off the first and says the second beside it; a panel
+            # pasted from a mid-only table has neither and says so.
+            "n_two_way": sum(1 for q in quotes if q.two_way),
+            "n_outside": sum(1 for r in rows if r["mark_outside"]),
             "fit": {
                 "alpha": fit.params.alpha, "rho": fit.params.rho, "volvol": fit.params.volvol,
                 "log_volvol": fit.params.log_volvol, "beta": fit.beta,

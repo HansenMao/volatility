@@ -53,14 +53,16 @@ DAYS_IN_YEAR = 365.2425
 #: What a question may be about.  One declaration; the grammar, the refusal
 #: message and the answer all read it, so a topic the grammar recognises and
 #: the answer cannot build is impossible by construction.
-TOPICS = ("widths", "levels", "trades", "outcomes", "shown", "archive",
+TOPICS = ("widths", "levels", "trades", "flow", "outcomes", "clients", "shown", "archive",
           "journal", "tendencies", "marks", "rules")
 
 _TOPIC_HELP = {
     "widths": "how wide something has been shown (the archive's two-ways)",
     "levels": "where something has been quoted, against the mark",
     "trades": "what printed in the dissemination files, and the volatility it implies",
+    "flow": "which side of our mark the tape printed on: paid against given, in vega",
     "outcomes": "what became of the prices we showed",
+    "clients": "one client's record: which way they trade with us, and what it has cost",
     "shown": "the prices we made",
     "archive": "what the archive holds",
     "journal": "every time somebody moved a mark",
@@ -78,8 +80,14 @@ _TOPIC_WORDS = {
                "where was", "run", "runs", "market level"),
     "trades": ("trade", "trades", "traded", "print", "prints", "printed", "dtcc", "sdr",
                "dissemination", "business", "notional", "premium"),
+    "flow": ("flow", "tape", "paid", "paying", "given", "giving", "buying", "selling",
+             "buyers", "sellers", "demand", "supply", "one way", "one-way", "net vega",
+             "which side"),
     "outcomes": ("outcome", "outcomes", "hit", "lifted", "hit rate", "became of",
                  "done away", "passed", "missed", "our record", "were we right"),
+    "clients": ("client", "clients", "customer", "customers", "counterparty's",
+                "record of", "record on", "'s record", "with us", "buyer or a seller",
+                "buyer or seller", "lifts us", "hits us", "do with", "done with"),
     "shown": ("we showed", "we show", "we made", "we have shown", "we've shown", "our price",
               "our prices", "prices we", "what did we show"),
     "archive": ("archive", "hold", "holds", "how many records", "how many observations",
@@ -103,7 +111,10 @@ _HANDOFFS = (
       "propose"),
      "this agent moves nothing; a re-mark goes through the marking agent's card so the "
      "journal sees it, or 'volkit mark propose PAIR --file run.txt'"),
-    (("record", "file this", "file the", "save", "write"),
+    # "record" the verb hands off; "record" the noun -- a client's record, the
+    # record on the 1M -- is a question this agent answers.
+    (("record that", "record this", "record the", "record it", "record as", "record my",
+      "file this", "file the", "save", "write"),
      "this agent writes nothing; 'volkit agent shown' records a price, 'volkit agent "
      "outcome' what became of it, and 'volkit mark record' a verdict on a proposal"),
     (("quote me", "make a price", "price the", "price me", "show me a price", "two way in"),
@@ -154,6 +165,7 @@ class Question:
     since: str = ""                    # a YYYY-MM-DD the window starts at, when one was said
     who: bool = False                  # name the sources
     invert: bool = False               # trades: as volatilities
+    client: str = ""                   # clients: who the question is about
     handoff: str = ""                  # something this agent will not do, and what does
     inherited: list[str] = field(default_factory=list)   # what came from the turn before
     notes: list[str] = field(default_factory=list)
@@ -276,6 +288,46 @@ def _has(low: str, words) -> bool:
     return False
 
 
+#: The ways a question names a client.  A quoted name first -- it is the
+#: only spelling that survives a name with a stop word in it -- then ``client
+#: X``, ``X's record``, ``record of X`` and ``with X``, each cut at the first
+#: word that starts the rest of the question.  What is found is a candidate:
+#: :func:`_answer_clients` matches it against the names the archive knows and
+#: says so when it cannot.
+_CLIENT_STOP = ("on", "in", "for", "at", "do", "does", "did", "has", "have", "been", "buy",
+                "sell", "buying", "selling", "usually", "tend", "tends", "trade", "trades",
+                "traded", "lift", "lifts", "hit", "hits", "with", "and", "or", "the",
+                "over", "last", "since", "this", "that", "of", "to", "done", "usually")
+_CLIENT_RES = (
+    re.compile(r"""["“]([^"”]{1,60})["”]"""),
+    re.compile(r"'([^']{1,60})'"),
+    re.compile(r"\b(?:client|customer|counterparty)\s+(.+)$", re.I),
+    re.compile(r"\b(.+?)'s\s+(?:record|history|trades|prices)\b", re.I),
+    re.compile(r"\brecord\s+(?:of|on|for)\s+(.+)$", re.I),
+    re.compile(r"\b(?:with|for)\s+(.+)$", re.I),
+)
+
+
+def _find_client(text: str) -> str:
+    body = re.sub(r"[?!.]+$", "", str(text or "").strip())
+    for n, rx in enumerate(_CLIENT_RES):
+        m = rx.search(body)
+        if not m:
+            continue
+        cand = m.group(1).strip()
+        if n < 2:
+            return cand
+        words = []
+        for w in cand.split():
+            bare = w.strip(",;:").lower()
+            if bare in _CLIENT_STOP or _looks_like_pair(bare.upper()):
+                break
+            words.append(w.strip(",;:"))
+        if words:
+            return " ".join(words)
+    return ""
+
+
 def _find_pair(text: str, known=None) -> str:
     """A six-letter pair in the question, the known list winning over shape."""
     upper = text.upper()
@@ -351,7 +403,13 @@ def parse_question(text: str, *, pair: str = "", known_pairs=None,
     q = Question(text=str(text or "").strip())
     if not q.text:
         raise AskError("nothing was asked")
-    low = " " + re.sub(r"\s+", " ", q.text.lower()) + " "
+    q.client = _find_client(q.text)
+    scan = q.text
+    if q.client and any(rx.search(scan) for rx in _CLIENT_RES[:2]):
+        # A quoted name is the client's and nothing else: "Big Bank HK" in
+        # quotes must not make the question about the knowledge bank.
+        scan = re.sub(r"""["“'][^"”']{1,60}["”']""", " ", scan)
+    low = " " + re.sub(r"\s+", " ", scan.lower()) + " "
 
     for words, what in _HANDOFFS:
         if _has(low, words):
@@ -650,6 +708,119 @@ def _answer_trades(q, ans, s: syn.Synthesis, archive, since, days, now, hist_pai
             ans.facts.append(Fact(n, "note", "trades"))
 
 
+def _answer_flow(q, ans, archive, book, cut, method, hist_pair, now, half_life, min_effective,
+                 days) -> None:
+    """Which side of our mark the tape printed on.  The one inference, in words.
+
+    The dissemination file publishes no buyer and no seller, so a side is
+    judged against **our own mark** (``flow.py``), and every print that is
+    named here carries the mark it was judged against, so the call can be
+    argued with.  Without a surface the read is a census of what printed and
+    says so; it never guesses a side from the strike alone.
+    """
+    from . import flow as flow_mod
+    from .marketmaker import Evaluator
+    label = _bucket_label(q)
+    mark_vol = None
+    try:
+        loaded = book() if callable(book) else book
+    except Exception as exc:  # noqa: BLE001 - the book is optional here
+        loaded = None
+        ans.notes.append(f"the surface could not be loaded: {exc}")
+    if loaded is not None and q.pair in loaded:
+        surface = loaded[q.pair]
+        ev = Evaluator(surface, method or surface.method, cut)
+        clock = loaded.clock
+
+        def mark_vol(days_, strike, is_call, fwd):
+            try:
+                t = max(float(days_) / DAYS_IN_YEAR, 1e-9)
+                return float(ev.strike_vol(clock.datetime_from_years(t), t,
+                                           float(strike) / float(fwd))) * 100.0
+            except Exception:  # noqa: BLE001 - a strike off the surface takes no side
+                return None
+    else:
+        ans.facts.append(Fact(f"{q.pair}: no surface is loaded, so no print can be read as "
+                              f"paid or given; what printed is counted and takes no side",
+                              "note", "flow"))
+    try:
+        read = flow_mod.read_flow(archive, q.pair, asof=now, mark_vol=mark_vol,
+                                  hist_pair=hist_pair, half_life=half_life,
+                                  min_effective=min_effective, lookback_days=days)
+    except Exception as exc:  # noqa: BLE001 - one topic, one failure
+        ans.facts.append(Fact(f"the tape could not be read: {exc}", "note", "flow"))
+        return
+    buckets = [b for b in read.buckets if label is None or b.bucket == label]
+    if not buckets:
+        ans.facts.append(Fact(f"{q.pair}: nothing printed in the last {days:.0f} days"
+                              f"{' ' + label if label else ''} that could be turned into a "
+                              f"volatility; 'volkit agent fetch' brings the dissemination "
+                              f"files in", "archive", "flow"))
+        for n in read.notes[:3]:
+            ans.facts.append(Fact(n, "note", "flow"))
+        return
+    for b in buckets:
+        ans.facts.append(Fact(f"{q.pair} {b.describe()}", "archive", "flow"))
+        if b.enough and b.net_vega:
+            way = "paying" if b.net_vega > 0 else "giving"
+            ans.facts.append(Fact(f"{q.pair} {b.bucket}: the tape has been {way} -- "
+                                  f"judged against our own mark as it stands now, and applied "
+                                  f"to a price only when a flow weight is set", "archive",
+                                  "flow"))
+    prints = [p for p in read.prints if label is None or p.bucket == label]
+    for p in prints[-_MAX_LIST:]:
+        ans.facts.append(Fact(f"{p.at[:16]} {p.describe()}", "archive", "flow"))
+    if len(prints) > _MAX_LIST:
+        ans.notes.append(f"{len(prints) - _MAX_LIST} older print(s) not listed")
+    for n in read.notes[:3]:
+        ans.facts.append(Fact(n, "note", "flow"))
+
+
+def _answer_clients(q, ans, s: syn.Synthesis) -> None:
+    """One client's record, as the quote reads it and in words."""
+    known = s.client_names()
+    if not known:
+        ans.facts.append(Fact(f"{q.pair}: no price in the archive was shown to a named client; "
+                              f"Record as shown on the quote sheet, or 'volkit agent quote "
+                              f"--client NAME --record', starts a record", "archive", "clients"))
+        return
+    low = " " + re.sub(r"\s+", " ", q.text.lower()) + " "
+    key = syn._client_key(q.client)
+    name = next((n for n in known if syn._client_key(n) == key), "") if key else ""
+    if not name:
+        # The candidate the grammar cut out may be a word short or long; the
+        # archive's own names are the authority, so the question is searched
+        # for each of them, longest first.
+        for n in sorted(known, key=len, reverse=True):
+            if f" {syn._client_key(n)} " in low or syn._client_key(n) in low:
+                name = n
+                break
+    if not name:
+        ans.facts.append(Fact(f"{q.pair}: clients with a record -- {', '.join(known)}"
+                              + (f"; nothing is held for {q.client!r}" if q.client else
+                                 "; name one to read their record"), "archive", "clients"))
+        return
+    mine = [c for c in s.clients if syn._client_key(c.client) == syn._client_key(name)
+            and (not q.instrument or c.instrument == q.instrument)]
+    whole = [c for c in mine if c.bucket is None]
+    label = _bucket_label(q)
+    exact = [c for c in mine if c.bucket is not None and (label is None or c.bucket == label)]
+    if not mine:
+        ans.facts.append(Fact(f"{name} has no record on {q.pair}"
+                              + (f" {q.instrument.upper()}" if q.instrument else ""),
+                              "archive", "clients"))
+        return
+    for c in whole:
+        ans.facts.append(Fact(c.describe(), "archive", "clients"))
+        reading = c.reading()
+        ans.facts.append(Fact(f"{name} on the {c.instrument.upper()}: {reading}"
+                              + ("" if c.enough else " -- below the minimum, so a quote "
+                                 "shows this and applies nothing"), "archive", "clients"))
+    for c in exact:
+        if c.answered:
+            ans.facts.append(Fact(c.describe(), "archive", "clients"))
+
+
 def _answer_outcomes(q, ans, s: syn.Synthesis) -> None:
     label = _bucket_label(q)
     rows = [oc for oc in s.outcomes
@@ -858,7 +1029,8 @@ def ask(text: str, *, archive: arch.Archive, pair: str = "", book=None, journal=
 
     since, days = _since(q, now, lookback_days)
     s = None
-    if any(t in q.topics for t in ("widths", "levels", "trades", "outcomes", "archive")):
+    if any(t in q.topics for t in ("widths", "levels", "trades", "outcomes", "archive",
+                                   "clients")):
         s = syn.synthesize(archive, q.pair or "", asof=now, half_life=half_life,
                            min_effective=min_effective, lookback_days=days,
                            include_model_read=include_model_read) if q.pair else \
@@ -874,8 +1046,13 @@ def ask(text: str, *, archive: arch.Archive, pair: str = "", book=None, journal=
             _answer_levels(q, ans, s, book, cut, method)
         elif topic == "trades":
             _answer_trades(q, ans, s, archive, since, days, now, hist_pair, discount_rate)
+        elif topic == "flow":
+            _answer_flow(q, ans, archive, book, cut, method, hist_pair, now, half_life,
+                         min_effective, days)
         elif topic == "outcomes":
             _answer_outcomes(q, ans, s)
+        elif topic == "clients":
+            _answer_clients(q, ans, s)
         elif topic == "shown":
             _answer_shown(q, ans, archive, since, now)
         elif topic == "archive":

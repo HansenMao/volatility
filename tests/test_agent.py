@@ -100,7 +100,7 @@ class TestArchiveRefusals(unittest.TestCase):
 
     def test_a_delta_in_points_is_refused(self):
         # 25 instead of 0.25 would never match a bank rule written for 0.25,
-        # so the quote would fall silently through to the panel fallback.
+        # so the quote would fall silently through to the fallback tier.
         problems = _obs(instrument="rr", delta=25.0, bid=0.3, ask=0.5).problems()
         self.assertTrue(any("fraction" in p for p in problems), problems)
 
@@ -335,6 +335,18 @@ class TestSdr(unittest.TestCase):
         self.assertEqual(sdr._date("03/04/2026"), "")
         self.assertEqual(sdr._date("2026-09-21"), "2026-09-21")
 
+    def test_the_fisn_names_the_side_when_the_legs_did_not(self):
+        # The pattern was written with literal backspace characters in place
+        # of the word boundaries it meant, so it matched nothing and every row
+        # that relied on the FISN for its side came back without one.
+        self.assertTrue(sdr._fisn_side("NA/O Van Put HKD USD", "USD", "HKD"),
+                        "a put on the quote currency is a call on the base")
+        self.assertFalse(sdr._fisn_side("NA/O Van Put USD HKD", "USD", "HKD"))
+        self.assertTrue(sdr._fisn_side("NA/O Van Call USD HKD", "USD", "HKD"))
+        self.assertIsNone(sdr._fisn_side("NA/Fwd NDF HKD USD", "USD", "HKD"))
+        self.assertIsNone(sdr._fisn_side("NA/O Van Put JPY USD", "USD", "HKD"),
+                          "a currency not in the pair names no side")
+
 
 # ==========================================================================
 class TestModelLeash(unittest.TestCase):
@@ -528,382 +540,371 @@ class TestSynthesis(unittest.TestCase):
 
 
 # ==========================================================================
-class TestAsks(unittest.TestCase):
-    """Reading what was asked for."""
+class TestClientEvidence(unittest.TestCase):
+    """What one client has done with our prices, and what a quote may do with it.
 
-    def setUp(self):
-        from volkit import agent
-        self.agent = agent
+    The desk-wide hit rate used to be words only ("shown here, and applied to
+    nothing").  Per client, per instrument, it is the one part of the record a
+    price applies (§17): their side leans the mid, the move against us after
+    their trades widens the price.  These pin the counting; the engine tests
+    in ``test_marking`` pin what the price does with it.
+    """
 
-    def test_25d_is_a_delta_on_a_risk_reversal_and_an_expiry_otherwise(self):
-        # Read as a tenor unconditionally, "3M 25d RR" became a risk reversal
-        # with no delta and an expiry nobody asked for.
-        asks, _, _ = self.agent.parse_asks("3M 25d RR\n25d ATM\n")
-        self.assertEqual(asks[0].tenor, "3M")
-        self.assertEqual(asks[0].delta, 0.25)
-        self.assertEqual(asks[1].tenor, "25D")
-        self.assertIsNone(asks[1].delta)
+    def _archive(self):
+        return arch.Archive.load(_tmp("arc.jsonl"))
 
-    def test_25_delta_written_with_a_space_is_one_token(self):
-        asks, _, _ = self.agent.parse_asks("1M 25 delta rr\n")
-        self.assertEqual(asks[0].delta, 0.25)
+    def _show(self, a, client, result, *, hours_ago=1.0, instrument="atm", tenor="1M",
+              bid=8.20, ask=8.60, away=None, delta=None):
+        when = MORNING - timedelta(hours=hours_ago)
+        price = arch.shown("EURUSD", instrument=instrument, tenor=tenor, bid=bid, ask=ask,
+                           delta=delta, counterparty=client, at=when)
+        ok, why = a.add(price)
+        self.assertTrue(ok, why)
+        if result:
+            ans = arch.outcome(price, result, away_level=away,
+                               at=when + timedelta(minutes=5))
+            ok, why = a.add(ans)
+            self.assertTrue(ok, why)
+        return price
 
-    def test_a_price_on_a_request_line_is_refused(self):
-        # A line with a two-way on it is a market somebody showed, and taking
-        # it here would quote over the top of it without reading it.
-        asks, _, skipped = self.agent.parse_asks("1M ATM 8.20/8.60\n")
-        self.assertEqual(asks, [])
-        self.assertIn("market-maker screen", skipped[0][1])
+    def test_a_client_who_only_lifts_is_a_buyer_and_the_side_says_so(self):
+        a = self._archive()
+        for h in (1, 2, 3, 4):
+            self._show(a, "Client A", "traded_ask", hours_ago=h)
+        out = syn.synthesize(a, "EURUSD", asof=MORNING)
+        rec = out.client_for("Client A", instrument="atm", days=30)
+        self.assertTrue(rec.enough, rec.why_not)
+        self.assertEqual((rec.traded_ask, rec.traded_bid, rec.answered), (4, 0, 4))
+        self.assertAlmostEqual(rec.side, 1.0)
+        self.assertIn("a buyer", rec.reading())
 
-    def test_a_wing_without_a_delta_is_refused(self):
-        _, _, skipped = self.agent.parse_asks("3M RR\n")
-        self.assertIn("needs a delta", skipped[0][1])
+    def test_the_side_is_age_weighted_and_two_way_is_near_zero(self):
+        a = self._archive()
+        self._show(a, "Client B", "traded_ask", hours_ago=1)
+        self._show(a, "Client B", "traded_bid", hours_ago=2)
+        self._show(a, "Client B", "traded_ask", hours_ago=3)
+        self._show(a, "Client B", "traded_bid", hours_ago=4)
+        out = syn.synthesize(a, "EURUSD", asof=MORNING)
+        rec = out.client_for("Client B", instrument="atm", days=30)
+        self.assertTrue(rec.enough)
+        self.assertLess(abs(rec.side), 0.05)
+        self.assertIn("two-way", rec.reading())
+        # A month-old lift counts for less than this morning's hit: the side
+        # leans toward the recent trade, the way every other statistic here does.
+        b = self._archive()
+        self._show(b, "Client C", "traded_bid", hours_ago=1)
+        self._show(b, "Client C", "traded_ask", hours_ago=24 * 30)
+        self._show(b, "Client C", "passed", hours_ago=2)
+        self._show(b, "Client C", "passed", hours_ago=3)
+        rec = syn.synthesize(b, "EURUSD", asof=MORNING).client_for(
+            "Client C", instrument="atm", days=30)
+        self.assertLess(rec.side, -0.9)
 
-    def test_an_unqualified_fly_takes_the_convention_and_says_so(self):
-        asks, notes, _ = self.agent.parse_asks("2M 25d fly\n")
-        self.assertEqual(asks[0].fly_kind, "market")
-        self.assertTrue(any("market convention" in n for n in notes), notes)
+    def test_below_the_minimum_the_record_is_shown_and_not_enough(self):
+        # Three answered prices are a story; the row must be able to tell it
+        # without leaning on it.  The minimum is the caller's, so one synthesis
+        # answers a panel that wants four and a shell that wants two.
+        a = self._archive()
+        for h in (1, 2, 3):
+            self._show(a, "Client D", "traded_ask", hours_ago=h)
+        out = syn.synthesize(a, "EURUSD", asof=MORNING)
+        rec = out.client_for("Client D", instrument="atm", days=30)
+        self.assertFalse(rec.enough)
+        self.assertIn("below the 4", rec.why_not)
+        self.assertEqual(rec.traded_ask, 3, "the counts are still there to be shown")
+        self.assertTrue(out.client_for("Client D", instrument="atm", days=30,
+                                       minimum=2).enough)
 
-    def test_a_request_carries_no_price_into_the_evaluator(self):
-        # nan rather than zero: a zero bid and offer is a market of zero, and
-        # every width and hinge downstream would take it at face value.
-        ask = self.agent.parse_asks("1M ATM\n")[0][0]
-        quote = ask.as_quote()
-        self.assertNotEqual(quote.bid, quote.bid)      # nan
-        self.assertNotEqual(quote.ask, quote.ask)
+    def test_a_pulled_price_was_never_answered(self):
+        a = self._archive()
+        for h in (1, 2, 3, 4):
+            self._show(a, "Client E", "pulled", hours_ago=h)
+        rec = syn.synthesize(a, "EURUSD", asof=MORNING).client_for(
+            "Client E", instrument="atm", days=30)
+        self.assertEqual(rec.answered, 0)
+        self.assertEqual(rec.shown, 4)
+        self.assertFalse(rec.enough)
+
+    def test_the_tenor_bucket_is_tried_first_and_the_instrument_second(self):
+        # Four lifts on the 1Y and a question about the 1M: the 1M bucket is
+        # thin, the instrument across every tenor is not, and the answer says
+        # which scope it came from.  Never another instrument: a buyer of the
+        # at-the-money says nothing about the risk reversal.
+        a = self._archive()
+        for h in (1, 2, 3, 4):
+            self._show(a, "Client F", "traded_ask", hours_ago=h, tenor="1Y")
+        out = syn.synthesize(a, "EURUSD", asof=MORNING)
+        rec = out.client_for("Client F", instrument="atm", days=30)
+        self.assertTrue(rec.enough)
+        self.assertIsNone(rec.bucket)
+        self.assertIn("every tenor", rec.scope)
+        self.assertIsNone(out.client_for("Client F", instrument="rr", days=30, minimum=1))
+        self.assertIsNone(out.client_for("Nobody", instrument="atm", days=30))
+
+    def test_a_client_name_is_matched_whatever_its_spacing_and_case(self):
+        a = self._archive()
+        for h, name in enumerate(("Client G", "client g", "CLIENT  G", " Client G "), start=1):
+            self._show(a, name, "traded_bid", hours_ago=h)
+        out = syn.synthesize(a, "EURUSD", asof=MORNING)
+        rec = out.client_for("client G", instrument="atm", days=30)
+        self.assertTrue(rec.enough)
+        self.assertEqual(rec.traded_bid, 4)
+        self.assertEqual(out.client_names(), ["Client G"])
+
+    def test_the_market_moving_their_way_after_a_trade_is_the_cost_of_dealing(self):
+        # They lifted our offer at 8.60 four times; the market then quoted
+        # 8.80/9.20 (mid 9.00).  It went 0.40 against us each time, and that
+        # is what widens the next price -- the adverse move, not the hit rate.
+        a = self._archive()
+        for h in (30, 31, 32, 33):
+            self._show(a, "Client H", "traded_ask", hours_ago=h)
+        run = quotes.parse_quotes("1M ATM 8.80/9.20", pair="EURUSD")
+        a.extend(arch.from_quotes(run, pair="EURUSD", origin="later.txt",
+                                  default_time=MORNING - timedelta(hours=2)))
+        out = syn.synthesize(a, "EURUSD", asof=MORNING)
+        rec = out.client_for("Client H", instrument="atm", days=30)
+        self.assertEqual(rec.after_count, 4)
+        self.assertAlmostEqual(rec.after_move, 0.40, places=6)
+        self.assertIn("followed them", rec.reading())
+        # A quote *before* the trade is not a move after it, and a quote
+        # further out than AFTER_DAYS is somebody else's week.
+        b = self._archive()
+        for h in (1, 2, 3, 4):
+            self._show(b, "Client I", "traded_bid", hours_ago=h)
+        b.extend(arch.from_quotes(run, pair="EURUSD", origin="earlier.txt",
+                                  default_time=MORNING - timedelta(days=1)))
+        rec = syn.synthesize(b, "EURUSD", asof=MORNING).client_for(
+            "Client I", instrument="atm", days=30)
+        self.assertIsNone(rec.after_move)
+        self.assertEqual(rec.after_count, 0)
+
+    def test_hitting_our_bid_and_the_market_falling_is_adverse_too(self):
+        a = self._archive()
+        for h in (30, 31, 32, 33):
+            self._show(a, "Client J", "traded_bid", hours_ago=h)
+        run = quotes.parse_quotes("1M ATM 7.60/8.00", pair="EURUSD")
+        a.extend(arch.from_quotes(run, pair="EURUSD", origin="later.txt",
+                                  default_time=MORNING - timedelta(hours=2)))
+        rec = syn.synthesize(a, "EURUSD", asof=MORNING).client_for(
+            "Client J", instrument="atm", days=30)
+        self.assertAlmostEqual(rec.after_move, 0.40, places=6)
+        self.assertAlmostEqual(rec.side, -1.0)
+
+    def test_done_away_inside_our_price_is_a_negative_gap(self):
+        a = self._archive()
+        for h in (1, 2, 3, 4):
+            self._show(a, "Client K", "done_away", hours_ago=h, away=8.50)
+        rec = syn.synthesize(a, "EURUSD", asof=MORNING).client_for(
+            "Client K", instrument="atm", days=30)
+        self.assertEqual(rec.done_away, 4)
+        self.assertLess(rec.away_gap, 0)
+        self.assertIn("inside our nearer side", rec.describe())
+
+    def test_a_price_shown_to_nobody_is_in_no_client_record(self):
+        a = self._archive()
+        for h in (1, 2, 3, 4):
+            self._show(a, "", "traded_ask", hours_ago=h)
+        out = syn.synthesize(a, "EURUSD", asof=MORNING)
+        self.assertEqual(out.clients, [])
+        # ... but it is still in the desk's own record.
+        self.assertEqual(out.outcome_for(instrument="atm", days=30).traded_ask, 4)
 
 
-class _FakeEvaluator:
-    """A surface that says one number, so the ladder can be tested without one."""
+class TestDecisionProse(unittest.TestCase):
+    """The explanation is generated from the trace, never the other way round."""
 
-    def __init__(self, vol_points: float = 8.40):
-        self.vol = vol_points / 100.0
-
-    def value(self, quote, expiries, forwards):
-        return self.vol
-
-
-class TestDecision(unittest.TestCase):
-    """The width ladder, the shading and the trace, with no surface involved."""
-
-    def setUp(self):
-        from volkit import agent, marketmaker
-        self.agent = agent
-        self.clock_now = MORNING
-        from volkit.timeutil import Clock
-        self.clock = Clock(MORNING)
-        self.marketmaker = marketmaker
-
-    def _decide(self, text="1M ATM in 100mm vega", *, rules=(), synthesis=None,
-                request=None, rich=None, axe=None, model_mid=8.40):
-        asks, _, _ = self.agent.parse_asks(text)
-        ask = asks[0]
-        quote = ask.as_quote()
-        expiries = self.marketmaker.resolve_expiries(self.clock, [quote])
-        forwards = {k: 1.10 for k in expiries}
-        pk = PairKnowledge(rules=list(rules))
-        empty = synthesis or syn.Synthesis(pair="EURUSD", asof=MORNING)
-        req = request or self.agent.Request(pair="EURUSD")
-        return self.agent._decide(
-            ask, quote, pair="EURUSD", evaluator=_FakeEvaluator(model_mid),
-            expiries=expiries, forwards=forwards, pk=pk, synthesis=empty,
-            request=req, rich_at=rich, axe_at=axe, method="SVI")
-
-    def test_no_rule_and_no_evidence_means_no_price(self):
-        # There is no built-in default width anywhere in this package.
-        out = self._decide()
-        self.assertFalse(out.priced)
-        self.assertEqual(out.width_source, "none")
-        self.assertEqual(out.quote_text(), "no price")
-        self.assertTrue(out.warnings)
-
-    def test_a_bank_rule_beats_the_archive(self):
-        evidence = syn.Synthesis(pair="EURUSD", asof=MORNING, widths=[
-            syn.WidthEvidence(instrument="atm", bucket="out to a month", delta=None,
-                              observations=9, effective=6.0, sources=3, median=0.80,
-                              low=0.7, high=0.9, tightest=0.7, widest=0.9,
-                              newest_days=0.0, oldest_days=3.0, model_read=0, enough=True)])
-        out = self._decide(rules=[Rule(kind="spread", value=0.40, instrument="atm")],
-                           synthesis=evidence)
-        self.assertEqual(out.width_source, "bank")
-        self.assertAlmostEqual(out.width, 0.40)
-
-    def test_the_archive_is_used_when_the_bank_has_nothing(self):
-        evidence = syn.Synthesis(pair="EURUSD", asof=MORNING, widths=[
-            syn.WidthEvidence(instrument="atm", bucket="out to a month", delta=None,
-                              observations=9, effective=6.0, sources=3, median=0.44,
-                              low=0.4, high=0.5, tightest=0.4, widest=0.5,
-                              newest_days=0.0, oldest_days=3.0, model_read=0, enough=True)])
-        out = self._decide(synthesis=evidence)
-        self.assertEqual(out.width_source, "archive")
-        self.assertAlmostEqual(out.width, 0.44)
-        self.assertTrue(any("not from the bank" in a for a in out.advice), out.advice)
-
-    def test_the_fallback_is_the_last_rung_and_says_so(self):
-        request = self.agent.Request(pair="EURUSD", fallback_spread=0.5)
-        out = self._decide(request=request)
-        self.assertEqual(out.width_source, "fallback")
-        self.assertTrue(out.priced)
-
-    def test_a_floor_that_did_not_bind_is_shown_as_not_applied(self):
-        out = self._decide(rules=[Rule(kind="spread", value=0.40, instrument="atm"),
-                                  Rule(kind="floor", value=0.20)])
-        floor = [i for i in out.trace if i.name == "floor"][0]
-        self.assertFalse(floor.applied)
-        self.assertAlmostEqual(out.width, 0.40)
-
-    def test_a_floor_that_binds_widens_the_quote_and_names_itself(self):
-        out = self._decide(rules=[Rule(kind="spread", value=0.10, instrument="atm"),
-                                  Rule(kind="floor", value=0.30)])
-        self.assertAlmostEqual(out.width, 0.30)
-        self.assertAlmostEqual(out.offer - out.bid, 0.30, places=9)
-
-    def test_a_note_is_shown_and_never_applied(self):
-        out = self._decide(rules=[Rule(kind="spread", value=0.40, instrument="atm"),
-                                  Rule(kind="note", text="check the ECB date")])
-        self.assertIn("check the ECB date", out.advice)
-        self.assertAlmostEqual(out.mid, 8.40, places=9)
-
-    def test_the_trace_adds_up_to_the_mid(self):
-        # The explanation is generated from the trace, so a trace that does
-        # not reconcile is an explanation of a different price.
-        out = self._decide(rules=[Rule(kind="spread", value=0.40, instrument="atm"),
-                                  Rule(kind="shift", value=0.05, instrument="atm")],
-                           rich=lambda t: 0.002)
-        parts = {i.name: i.value for i in out.trace}
-        total = (parts["shading, fair value"] + parts["shading, position"]
-                 + parts["shift, bank"])
-        self.assertAlmostEqual(out.model_mid + total, out.mid, places=9)
-        self.assertAlmostEqual((out.bid + out.offer) / 2.0, out.mid, places=9)
-
-    def test_the_archive_level_flags_the_mark_and_does_not_move_it(self):
-        evidence = syn.Synthesis(pair="EURUSD", asof=MORNING, levels=[
-            syn.LevelEvidence(instrument="atm", tenor="1M", delta=None, observations=6,
-                              effective=4.0, typical=9.90, newest=9.90, newest_days=0.0,
-                              low=9.8, high=10.0, enough=True)])
-        out = self._decide(rules=[Rule(kind="spread", value=0.40, instrument="atm")],
-                           synthesis=evidence)
-        self.assertAlmostEqual(out.mid, 8.40, places=9)
-        self.assertTrue(any("not applied to it" in f for f in out.flags), out.flags)
-        level = [i for i in out.trace if i.name == "market level"][0]
-        self.assertFalse(level.applied)
-
-    def test_a_stale_archive_level_says_it_is_stale(self):
-        evidence = syn.Synthesis(pair="EURUSD", asof=MORNING, levels=[
-            syn.LevelEvidence(instrument="atm", tenor="1M", delta=None, observations=6,
-                              effective=4.0, typical=8.41, newest=8.41, newest_days=40.0,
-                              low=8.3, high=8.5, enough=True)])
-        out = self._decide(rules=[Rule(kind="spread", value=0.40, instrument="atm")],
-                           synthesis=evidence)
-        self.assertTrue(any("stale" in f for f in out.flags), out.flags)
+    def _row(self, **kw):
+        row = {
+            "line": 1, "raw": "1M ATM in 100mm", "describe": "1M ATM in 100mm",
+            "instrument": "atm", "tenor": "1M", "model": 8.40, "our_mid": 8.35,
+            "our_bid": 8.15, "our_ask": 8.55, "width": 0.40, "width_rung": "bank",
+            "skew_total": -0.05, "agent_verdict": "wide",
+            "agent_note": "the bank would show 0.400, which is 0.100 wider than the 0.300",
+            "flags": ["a flag"], "advice": ["some advice"], "warnings": [],
+            "trace": [
+                {"name": "model mid", "value": 8.40, "unit": "vol points",
+                 "source": "the marked surface", "detail": "", "applied": True},
+                {"name": "width", "value": 0.40, "unit": "vol points",
+                 "source": "the bank: atm 0.40", "detail": "", "applied": True},
+                {"name": "shading, fair value", "value": -0.05, "unit": "vol points",
+                 "source": "implied against realized", "detail": "", "applied": True},
+                {"name": "mid", "value": 8.35, "unit": "vol points",
+                 "source": "the mark plus the shading", "detail": "8.400 -0.050",
+                 "applied": True},
+                {"name": "bid / offer", "value": None, "unit": "vol points",
+                 "source": "the mid, 0.400 wide", "detail": "8.150 / 8.550",
+                 "applied": True},
+            ],
+        }
+        row.update(kw)
+        return row
 
     def test_the_facts_are_what_the_explanation_may_say(self):
-        out = self._decide(rules=[Rule(kind="spread", value=0.40, instrument="atm")])
-        facts = out.facts()
+        from volkit import agent
+        d = agent.Decision(row=self._row(), pair="EURUSD")
+        self.assertTrue(d.priced)
+        self.assertEqual(d.quote_text(), "8.150/8.550")
+        facts = d.facts()
         allowed = set()
         for line in facts:
             allowed |= llm.numbers_in(line)
-        self.assertIn(llm._canonical(f"{out.bid:.3f}"), allowed)
-        self.assertIn(llm._canonical(f"{out.offer:.3f}"), allowed)
+        self.assertIn(llm._canonical(f"{d.bid:.3f}"), allowed)
+        self.assertIn(llm._canonical(f"{d.offer:.3f}"), allowed)
+        self.assertTrue(any("width verdict: wide" in f for f in facts), facts)
+        self.assertTrue(any(f.strip().startswith("flag: a flag") for f in facts))
+        self.assertTrue(any(f.strip().startswith("advice: some advice") for f in facts))
+
+    def test_a_signed_ingredient_is_printed_with_its_sign(self):
+        from volkit import agent
+        d = agent.Decision(row=self._row(), pair="EURUSD")
+        lines = [i.line() for i in d.trace]
+        self.assertTrue(any(x.startswith("shading, fair value: -0.050") for x in lines), lines)
+        self.assertTrue(any(x.startswith("model mid: 8.400") for x in lines), lines)
+        self.assertTrue(any("bid / offer: 8.150 / 8.550" in x for x in lines), lines)
+
+    def test_an_unpriced_row_says_no_price(self):
+        from volkit import agent
+        d = agent.Decision(row=self._row(our_bid=None, our_ask=None, width=None,
+                                         width_rung="none"), pair="EURUSD")
+        self.assertFalse(d.priced)
+        self.assertEqual(d.quote_text(), "no price")
+        self.assertEqual(d.width_source, "none")
+        self.assertEqual(d.to_json()["quote"], "no price")
 
 
-class TestRecordShown(unittest.TestCase):
+class TestRecordAndAnswer(unittest.TestCase):
+    """A price shown, filed under a client, and what became of it.
+
+    One pair of functions for the sheet's buttons and the command line, so a
+    price recorded from a shell and one recorded from the screen are one kind
+    of record.
+    """
+
+    def _sheet(self, *rows):
+        return {"pair": "EURUSD", "client": {"name": "Client A"},
+                "sheet": {"rows": list(rows)}}
+
+    def _row(self, **kw):
+        row = {"line": 1, "raw": "1M ATM in 100mm", "describe": "1M ATM in 100mm",
+               "instrument": "atm", "tenor": "1M", "tenor_far": None, "delta": None,
+               "strike": None, "is_call": None, "fly_kind": None, "size": 100.0,
+               "size_basis": "unspecified", "sign": 1.0, "direction": None,
+               "model": 8.40, "our_mid": 8.40, "our_bid": 8.20, "our_ask": 8.60,
+               "width": 0.40, "width_rung": "bank", "skew_total": 0.0, "flags": []}
+        row.update(kw)
+        return row
 
     def test_a_price_is_recorded_with_the_mid_it_was_made_from(self):
         # Looked up when the outcome arrives instead, the question "was our
         # market right that morning" is answered by a curve re-marked since.
         from volkit import agent
-        run = agent.AgentRun(pair="EURUSD")
-        ask = agent.parse_asks("1M ATM in 100mm vega")[0][0]
-        run.decisions.append(agent.Decision(ask=ask, pair="EURUSD", model_mid=8.40,
-                                            mid=8.40, bid=8.20, offer=8.60, width=0.40,
-                                            width_source="bank"))
         a = arch.Archive.load(_tmp("arc.jsonl"))
-        written = agent.record_shown(a, run, counterparty="CptyX", at=MORNING)
+        written, refused = agent.record_quote(a, self._sheet(self._row()), at=MORNING)
+        self.assertEqual(refused, [])
         self.assertEqual(len(written), 1)
         self.assertEqual(written[0].kind, "shown")
         self.assertEqual(written[0].model_mid, 8.40)
-        answer = arch.outcome(written[0], "traded_ask", at=MORNING)
+        self.assertEqual(written[0].counterparty, "Client A")
+        self.assertEqual(written[0].size, 100.0)
+        answer = agent.answer(a, written[0].id, "traded_ask", at=MORNING)
         self.assertEqual(answer.ref, written[0].id)
         self.assertEqual(answer.tenor, "1M")
+        self.assertEqual(answer.counterparty, "Client A")
 
-    def test_an_unpriced_row_is_not_recorded(self):
+    def test_an_unpriced_row_is_not_recorded_and_says_so(self):
         from volkit import agent
-        run = agent.AgentRun(pair="EURUSD")
-        ask = agent.parse_asks("1M ATM")[0][0]
-        run.decisions.append(agent.Decision(ask=ask, pair="EURUSD", model_mid=8.40))
         a = arch.Archive.load(_tmp("arc.jsonl"))
-        self.assertEqual(agent.record_shown(a, run), [])
+        written, refused = agent.record_quote(
+            a, self._sheet(self._row(our_bid=None, our_ask=None, width=None)), at=MORNING)
+        self.assertEqual(written, [])
+        self.assertEqual(len(refused), 1)
+        self.assertIn("no price", refused[0])
+
+    def test_a_row_asked_the_other_way_round_is_filed_in_the_books_convention(self):
+        # `JPY call over` on USDJPY is sign -1: the row shows -0.55/-0.35 and
+        # the file holds 0.35/0.55, because a client's record on the risk
+        # reversal must be one record however each request was worded.  So
+        # "they lifted our offer" on that row is "they hit our bid" in the file.
+        from volkit import agent
+        a = arch.Archive.load(_tmp("arc.jsonl"))
+        sheet = {"pair": "USDJPY", "client": {"name": "Client B"}, "sheet": {"rows": [
+            self._row(instrument="rr", delta=0.25, sign=-1.0, direction="JPY call over",
+                      model=-0.45, our_mid=-0.45, our_bid=-0.55, our_ask=-0.35,
+                      width=0.20)]}}
+        written, _ = agent.record_quote(a, sheet, at=MORNING)
+        self.assertEqual((written[0].bid, written[0].ask), (0.35, 0.55))
+        self.assertEqual(written[0].model_mid, 0.45)
+        self.assertTrue(any("book's convention" in n for n in written[0].notes))
+        answer = agent.answer(a, written[0].id, "traded_ask", sign=-1.0, away_level=None,
+                              at=MORNING)
+        self.assertEqual(answer.result, "traded_bid")
+        self.assertTrue(any("filed as traded_bid" in n for n in answer.notes))
+        away = agent.answer(a, written[0].id, "done_away", sign=-1.0, away_level=-0.30,
+                            at=MORNING + timedelta(minutes=1))
+        self.assertEqual(away.away_level, 0.30)
+
+    def test_only_the_lines_asked_for_are_recorded(self):
+        from volkit import agent
+        a = arch.Archive.load(_tmp("arc.jsonl"))
+        sheet = self._sheet(self._row(line=1), self._row(line=2, tenor="3M"))
+        written, _ = agent.record_quote(a, sheet, at=MORNING, lines=[2])
+        self.assertEqual([o.tenor for o in written], ["3M"])
+
+    def test_an_answer_that_names_nothing_or_the_wrong_thing_is_refused(self):
+        from volkit import agent
+        a = arch.Archive.load(_tmp("arc.jsonl"))
+        written, _ = agent.record_quote(a, self._sheet(self._row()), at=MORNING)
+        with self.assertRaises(agent.AgentError):
+            agent.answer(a, "nosuchid", "traded_ask")
+        with self.assertRaises(agent.AgentError):
+            agent.answer(a, written[0].id, "lifted")
+        # An outcome answers a price we made, never a market somebody showed.
+        market = _obs()
+        a.add(market)
+        with self.assertRaises(agent.AgentError) as caught:
+            agent.answer(a, market.id, "traded_ask")
+        self.assertIn("not a price we showed", str(caught.exception))
+
+    def test_the_two_routes_read_the_sheet_and_the_button(self):
+        from volkit import agent
+        from volkit.timeutil import Clock
+        a = arch.Archive.load(_tmp("arc.jsonl"))
+        clock = Clock(MORNING)
+        with self.assertRaises(agent.AgentError):
+            agent.record_from_request(a, {"client": "Client A"}, clock=clock)
+        out = agent.record_from_request(a, {"sheet": self._sheet(self._row()),
+                                            "client": "Client Z"}, clock=clock)
+        self.assertEqual(out["client"], "Client Z")
+        self.assertEqual(len(out["recorded"]), 1)
+        self.assertEqual(a.by_id(out["recorded"][0]["id"]).counterparty, "Client Z",
+                         "the client typed on the bar beats the one the sheet was made for")
+        done = agent.outcome_from_request(
+            a, {"ref": out["recorded"][0]["id"], "result": "passed", "sign": 1},
+            clock=clock)
+        self.assertEqual(done["result"], "passed")
+        self.assertEqual(done["ref"], out["recorded"][0]["id"])
+        with self.assertRaises(agent.AgentError):
+            agent.outcome_from_request(a, {"ref": out["recorded"][0]["id"],
+                                           "result": "done_away", "away_level": "far"},
+                                       clock=clock)
 
 
 class _FakeBook:
-    """Only the clock: the width comparison never touches a surface."""
+    """Only the clock: filing a paste never touches a surface."""
 
     def __init__(self, now=MORNING):
         from volkit.timeutil import Clock
         self.clock = Clock(now)
 
 
-class TestSuggestCard(unittest.TestCase):
-    """The card inside the market-maker tab: the bank against the archive."""
-
-    def setUp(self):
-        from volkit import agent
-        self.agent = agent
-        self.book = _FakeBook()
-        self.archive = arch.Archive.load(_tmp("arc.jsonl"))
-
-    def _seen(self, width: float, days=(0, 0.5, 1, 2), instrument="atm",
-              tenor="1M", **kw):
-        for i, ago in enumerate(days):
-            when = MORNING - timedelta(days=ago)
-            body = dict(kind="quote", pair="EURUSD", at=arch._iso(when),
-                        instrument=instrument, tenor=tenor,
-                        bid=8.40 - width / 2, ask=8.40 + width / 2,
-                        counterparty=f"broker{i}")
-            body.update(kw)
-            ok, why = self.archive.add(arch.Observation(**body))
-            self.assertTrue(ok, why)
-
-    def _run(self, text="1M ATM 8.20/8.60", rules=(), **kw):
-        bank = KnowledgeBank()
-        if rules:
-            bank.set_pair("EURUSD", list(rules), MORNING, "test")
-        payload = dict(pair="EURUSD", text=text, fly_convention="market",
-                       vol_unit="auto", half_life=5, min_effective=2,
-                       lookback_days=90, include_model_read=True, tolerance=0.1)
-        payload.update(kw)
-        return self.agent.panel_from_request(payload).run(self.book, self.archive, bank)
-
-    # ----------------------------------------------------------------------
-    def test_a_bank_width_the_archive_supports_is_left_alone(self):
-        # A screen with an opinion about every row is a screen nobody reads.
-        self._seen(0.40)
-        out = self._run(rules=[Rule(kind="spread", value=0.41, instrument="atm")])
-        self.assertEqual(out["rows"][0]["verdict"], "agrees")
-
-    def test_a_bank_width_tighter_than_the_market_is_flagged(self):
-        self._seen(0.44)
-        out = self._run(rules=[Rule(kind="spread", value=0.30, instrument="atm")])
-        row = out["rows"][0]
-        self.assertEqual(row["verdict"], "tight")
-        self.assertLess(row["gap"], 0)
-        self.assertIn("tighter", row["note"])
-
-    def test_a_bank_width_wider_than_the_market_is_flagged_too(self):
-        self._seen(0.30)
-        out = self._run(rules=[Rule(kind="spread", value=0.60, instrument="atm")])
-        self.assertEqual(out["rows"][0]["verdict"], "wide")
-        self.assertIn("wider", out["rows"][0]["note"])
-
-    def test_a_small_gap_on_a_narrow_instrument_is_not_a_disagreement(self):
-        # Without the floor a 0.08 butterfly width "disagrees" over four
-        # thousandths, which is a flag on every wing row forever.
-        self._seen(0.08, instrument="fly", tenor="2M", delta=0.25, bid=0.20, ask=0.28)
-        out = self._run(text="2M 25d fly 0.20/0.28",
-                        rules=[Rule(kind="spread", value=0.09, instrument="fly")])
-        self.assertEqual(out["rows"][0]["verdict"], "agrees")
-
-    def test_no_rule_says_what_the_archive_would_support(self):
-        self._seen(0.44)
-        out = self._run()
-        row = out["rows"][0]
-        self.assertEqual(row["verdict"], "no rule")
-        self.assertIsNone(row["bank_width"])
-        self.assertAlmostEqual(row["archive_width"], row["archive_width"])
-        self.assertIn("no bank rule", row["note"])
-
-    def test_thin_evidence_produces_no_comparison(self):
-        self._seen(0.44, days=(0,))
-        out = self._run(rules=[Rule(kind="spread", value=0.30, instrument="atm")])
-        row = out["rows"][0]
-        self.assertEqual(row["verdict"], "thin")
-        self.assertIsNone(row["archive_width"])
-        self.assertEqual(row["archive_observations"], 1)
-
-    def test_an_empty_archive_flags_nothing_and_still_answers(self):
-        out = self._run(rules=[Rule(kind="spread", value=0.30, instrument="atm")])
-        self.assertEqual(out["rows"][0]["verdict"], "thin")
-        self.assertEqual(out["widths"], [])
-        self.assertEqual(out["archive"]["records"], 0)
-
-    def test_a_superseded_quote_is_still_a_row(self):
-        # One tenor quoted twice is two observations of how wide it is shown,
-        # and the card is about width.
-        self._seen(0.40)
-        out = self._run(text="09:15 1M ATM 8.20/8.60\n09:41 1M ATM 8.25/8.65")
-        self.assertEqual(len(out["rows"]), 2)
-        self.assertTrue(any(r["superseded"] for r in out["rows"]))
-
-    def test_the_rows_are_the_request_box_when_it_holds_anything(self):
-        # The card sits beside the quote button and the desk read it as
-        # answering about the market paste instead: with a request typed it
-        # still compared the paste's rows.  The request box is what is being
-        # asked for, so those are the rows; the paste supplies "their width"
-        # beside a request it also quoted, matched the quote panel's way.
-        self._seen(0.40)
-        out = self._run(text="1M ATM 8.20/8.60\n3M ATM 8.00/8.50",
-                        request_text="1M ATM\n2M 25d RR",
-                        rules=[Rule(kind="spread", value=0.41, instrument="atm")])
-        self.assertEqual(out["source"], "request")
-        self.assertEqual([r["line"] for r in out["rows"]], [1, 2])
-        atm, rr = out["rows"]
-        self.assertEqual(atm["instrument"], "atm")
-        self.assertAlmostEqual(atm["market_width"], 0.40)      # the paste's 1M
-        self.assertEqual(atm["verdict"], "agrees")
-        self.assertEqual(rr["instrument"], "rr")
-        self.assertIsNone(rr["market_width"])                  # not in the paste
-        self.assertEqual(rr["verdict"], "thin")
-
-    def test_a_request_needs_no_market_paste(self):
-        self._seen(0.40)
-        out = self._run(text="", request_text="1M ATM",
-                        rules=[Rule(kind="spread", value=0.30, instrument="atm")])
-        self.assertEqual(out["rows"][0]["verdict"], "tight")
-        self.assertIsNone(out["rows"][0]["market_width"])
-        self.assertTrue(any("no market is pasted" in n for n in out["notes"]))
-
-    def test_a_price_in_the_request_box_is_refused_not_quoted(self):
-        self._seen(0.40)
-        out = self._run(text="", request_text="1M ATM 8.20/8.60")
-        self.assertEqual(out["rows"], [])
-        self.assertTrue(out["skipped"], "the priced line should be reported")
-
-    def test_the_paste_is_compared_only_when_nothing_is_asked_for(self):
-        self._seen(0.40)
-        out = self._run(text="1M ATM 8.20/8.60", request_text="")
-        self.assertEqual(out["source"], "market")
-        self.assertEqual(len(out["rows"]), 1)
-        self.assertAlmostEqual(out["rows"][0]["market_width"], 0.40)
-
-    def test_the_card_answers_with_nothing_pasted(self):
-        self._seen(0.40)
-        out = self._run(text="")
-        self.assertEqual(out["rows"], [])
-        self.assertTrue(out["widths"])
-        self.assertTrue(any("nothing is pasted" in n for n in out["notes"]))
-
-    def test_the_size_a_quote_carries_picks_the_rule(self):
-        # The bank's ladder is size-conditioned and the comparison has to use
-        # the rung the quote would really stand on.
-        self._seen(0.44)
-        out = self._run(text="1M ATM 8.20/8.60 in 100mm vega", rules=[
-            Rule(kind="spread", value=0.30, instrument="atm"),
-            Rule(kind="spread", value=0.45, instrument="atm", max_size=150.0,
-                 size_basis="vega")])
-        self.assertAlmostEqual(out["rows"][0]["bank_width"], 0.45)
-        self.assertEqual(out["rows"][0]["verdict"], "agrees")
+class TestPasteReader(unittest.TestCase):
 
     def test_a_pair_is_required(self):
-        from volkit.agent import AgentError
+        from volkit.agent import AgentError, paste_from_request
         with self.assertRaises(AgentError):
-            self.agent.panel_from_request({"text": "1M ATM 8.2/8.6"})
-
-    def test_a_non_numeric_setting_is_named(self):
-        from volkit.agent import AgentError
-        with self.assertRaises(AgentError) as caught:
-            self.agent.panel_from_request({"pair": "EURUSD", "half_life": "soon"})
-        self.assertIn("half_life", str(caught.exception))
+            paste_from_request({"text": "1M ATM 8.2/8.6"})
+        p = paste_from_request({"pair": "eurusd", "text": "x"})
+        self.assertEqual((p.pair, p.fly_convention, p.vol_unit), ("EURUSD", "market", "auto"))
 
 
 class TestFilingThePaste(unittest.TestCase):
@@ -1460,6 +1461,40 @@ class TestAskAgent(unittest.TestCase):
                          before)
         self.assertEqual(len(self.archive.records), records)
         self.assertEqual(len(self.journal), 0)
+
+    def test_a_clients_record_is_answered_by_name_and_the_names_are_listed(self):
+        # The quote applies a client's record; the record agent reads the
+        # same evidence out in words, and it never guesses a name: one the
+        # archive does not know is answered with the names it does.
+        for h in (1, 2, 3, 4):
+            when = MORNING - timedelta(hours=h)
+            price = arch.shown("EURUSD", instrument="atm", tenor="1M", bid=8.20, ask=8.60,
+                               counterparty="Fund A", at=when)
+            self.archive.add(price)
+            self.archive.add(arch.outcome(price, "traded_ask", at=when + timedelta(minutes=5)))
+        out = self._ask("what has client Fund A done in the 1M?")
+        self.assertTrue(out.ok, out.refused)
+        self.assertEqual(out.question.client, "Fund A")
+        self.assertTrue(any("a buyer here" in f.text for f in out.facts), out.fact_lines())
+        self.assertTrue(all(f.source == "archive" for f in out.facts), out.facts)
+        out = self._ask("is fund a a buyer or a seller of the atm")
+        self.assertTrue(any("a buyer here" in f.text for f in out.facts), out.fact_lines())
+        out = self._ask("what has client Nobody Ltd done with us")
+        self.assertTrue(out.ok, out.refused)
+        self.assertTrue(any("Fund A" in f.text and "nothing is held for 'Nobody Ltd'" in f.text
+                            for f in out.facts), out.fact_lines())
+        out = self._ask("which clients do we have a record on")
+        self.assertTrue(any("clients with a record -- Fund A" in f.text for f in out.facts),
+                        out.fact_lines())
+
+    def test_the_tape_is_answered_in_words_and_takes_no_side_without_a_surface(self):
+        # No trade in this archive: the answer says so and names the fetch.
+        out = self._ask("who has been paying in the 1M")
+        self.assertTrue(out.ok, out.refused)
+        self.assertEqual(out.question.topics, ["flow"])
+        self.assertTrue(any("nothing printed" in f.text for f in out.facts), out.fact_lines())
+        self.assertTrue(any("no surface is loaded" in f.text for f in out.facts),
+                        out.fact_lines())
 
     def test_doing_is_handed_off_by_name(self):
         for text, where in (("fetch the dtcc files for the last 3 days", "volkit agent fetch"),

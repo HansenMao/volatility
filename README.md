@@ -329,6 +329,12 @@ feed the pricing panel immediately:
    across the quoted tenors and markable over. The second is the same four
    parameters **per tenor**. A term structure moves the parameter at every
    expiry and an overwrite pins one tenor, so the card counts them apart.
+   **Contours** opens the same parameters as two contour maps over expiry and
+   wing delta (`/api/params/grid`), which is where a *shape* is read rather
+   than a number: every column is `params_at(t)`, so the marks, the shifts and
+   the anchor are all in the picture. The band between the 10-delta and
+   25-delta rows is a straight line between two calibrations and the panel says
+   so — a parameter exists at those two deltas and nowhere in between.
 
 Beside them is the **vol query**: an expiry, a strike or a delta, and the
 volatility there. It takes the pricing tab's own boxes — a tenor or a date, and
@@ -854,27 +860,44 @@ screen without anyone asking for it is the one thing this panel must not do.
 
 The other panels answer *what is this worth*. This one answers *what do I
 show*, in three stages that report separately so one that cannot run leaves
-the others alone — and behind **two buttons**, because fitting and quoting are
-two jobs asked at two different moments.
+the others alone — and only one of the three moves a mark.
 
-**Fit** reads the market box, moves the curve and the wings, and puts a price
-on nothing. **Quote** reads a second box, where you write what you are being
-*asked* for, and makes a two-way in each line of it — and fits nothing, which
-is why it answers instantly and can be pressed as often as the phone rings. A
-request does not arrive with a broker run attached to it, and tying the two
-together meant you could only price one by re-fitting to a market that had
-nothing to do with it.
+**Check Market** reads the market box and says *where you are marked against
+it*: through their bid or their offer, near a side, or in line, with the
+distance in vol points and in units of their own width. It moves nothing.
+**Quote** reads a second box, where you write what you are being *asked* for,
+and makes a two-way in each line of it — and fits nothing, which is why it
+answers instantly and can be pressed as often as the phone rings. A request
+does not arrive with a broker run attached to it, and tying the two together
+meant you could only price one by re-fitting to a market that had nothing to do
+with it.
 
-They meet at the marks. With **quote on the fit** ticked, the parameters the
-last fit arrived at travel back with the request and go on the surface for the
-length of that one call; untick it, or fit nothing, and the price stands on the
-marks as they are. The sheet says which of the two it was every time. Nothing
-is left on the book either way — that is **keep the marks**, on the fit, and it
-is a separate decision. (The server keeps no screen state, here as everywhere:
-the browser holds the fit's answer and posts it whole, which is what makes
-`volkit mm --request` reproduce a screen exactly.)
+Re-marking is the **marking agent** card's, and only its. There used to be a
+*Fit* button beside these two that moved the curve and the wings — which is
+exactly what that card does, more carefully and with a record of it, so having
+both meant two ways to re-mark one curve and only one of them written down.
+The card runs the agent's proposal and your own **Fit my way** from the same
+place, on the same knobs, into the same journal.
 
-**1. Fit the at-the-money curve to a target.** The target is one of:
+The three meet at the marks. With **stand on the agent's marks** ticked, the
+parameters that card last arrived at — an accepted proposal or your own fit —
+travel back with the request and go on the surface for the length of that one
+call; untick it, or run nothing on the card, and both stages read the marks as
+they are. Both say which of the two it was, every time. Nothing is left on the
+book either way — that is **keep the marks**, on the marking card, and it is a
+separate decision. (The server keeps no screen state, here as everywhere: the
+browser holds the card's answer and posts it whole, which is what makes
+`volkit mm --marks` reproduce a screen exactly.)
+
+**Edge tol** is how far inside a quoted two-way still counts as near its edge,
+as a fraction of the width — a quarter by default, so a mark in the outer
+quarter of somebody's market goes amber before it is through rather than after.
+Zero leaves only what is actually outside. A choice price has no inside and is
+never called *near* an edge, and a line the surface cannot be read at comes
+back **not checked**, which is a message and never a pass.
+
+**1. Fit the at-the-money curve to a target.** On the marking card. The target
+is one of:
 
 | Source | What it uses |
 |---|---|
@@ -889,8 +912,8 @@ never moved. A fit cannot have more free parameters than the target has
 points. For a **cross** the level belongs to its legs, so what gets fitted is
 the correlation term structure instead.
 
-**2. Fine tune the wings to the quoted market.** Paste a broker run in the
-shorthand it arrives in:
+**2. Fine tune the wings to the quoted market.** Also the marking card, off the
+same paste. Paste a broker run in the shorthand it arrives in:
 
 ```
 1M ATM 8.20/8.60 in 100mm vega
@@ -986,14 +1009,16 @@ market** beside our price, and the crossing verdict with it, so *inside their
 market* survives the split. One nothing quoted is priced just the same, which
 is the whole reason for asking separately.
 
-Nothing here touches the workbook. The fit reports and then puts the marks
-back, and so does a quote made on them; tick **keep the marks** to leave the
-fit on the loaded book, in memory only.
+Nothing here touches the workbook. The check and the quote report and then put
+the marks back; tick **keep the marks** on the marking card to leave what you
+accepted, edited or fitted on the loaded book, in memory only.
 
 ```bash
-volkit mm EURUSD --file run.txt                    # fit, and report
-volkit mm EURUSD --file run.txt --request ask.txt  # fit, then quote off it
-volkit mm EURUSD --request ask.txt --target-source none   # quote off the marks as they are
+volkit mm EURUSD --file run.txt                          # check the run against the curve
+volkit mm EURUSD --file run.txt --tolerance 0            # ... and warn only about what is through
+volkit mm EURUSD --request ask.txt                       # quote off the marks as they are
+volkit mark fit EURUSD --file run.txt --out-marks m.json  # the hand fit, saved
+volkit mm EURUSD --file run.txt --request ask.txt --marks m.json   # check and quote off it
 ```
 
 ### The knowledge bank
@@ -1013,10 +1038,14 @@ quoted row names the rule that set its width and the rule that moved its mid,
 and lists the rules that matched but lost.
 
 There is no built-in default width. A quote no rule matches gets no bid and no
-offer and says so; a visible fallback on the panel is the only alternative, and
-the row reports which it was. **Learn widths from this paste** proposes a
-ladder measured from the widths the market actually showed, with the evidence
-attached — proposing and saving are two steps on purpose.
+offer and says so; the only alternative is a **fallback tier** named on the bar
+-- a column of the workbook's `KACE_SPREADS` tab, the same ladder the kACE feed
+posts from, read at each quote's own maturity, optionally multiplied and
+optionally read across between the tab's tenors -- and the row reports which it
+was. **Learn widths** proposes a ladder measured from
+the widths the archive has seen the market show — age-weighted, the pasted run
+counted unfiled — with the evidence attached; the same function as `volkit
+agent learn`, and proposing and saving are two steps on purpose.
 
 ### Monitor
 
@@ -1077,7 +1106,14 @@ ATM width each posts at them. The tier is chosen from a dropdown on the tab
 (`--kace-tier`, `kace-tier =` in `volkit.cfg`) and changes the widths and
 nothing else; a cell a tier leaves blank falls back to `default`. A tenor with
 no mark behind it, and a tier the tab does not hold, are both refused by
-name. The header's credentials
+name. Beside the tier are two knobs on the widths, neither of which moves a
+mid: a **multiplier** (`--spread-multiplier`, the `×` box) scaling every one
+of that tier's widths, so a morning that wants everything half again as wide
+does not need a second column on the tab; and **interpolate**
+(`--interpolate-spreads`) reading a day between two pillars straight across
+between their widths instead of taking the last pillar's, which is the
+spreadsheet's rule and still the default. Both are recorded with the post.
+The header's credentials
 come from `--kace-user` / `--kace-password` (so `kace-user =` in
 `volkit.cfg`) or `VOLKIT_KACE_USER` / `VOLKIT_KACE_PASSWORD`; without a
 username the tab shows the table and withholds the message. `horDate` is the
@@ -1206,7 +1242,10 @@ as you want and they are remembered between sessions.
 Paste the exchange's strike and volatility columns straight in — tabs, commas
 or spaces, header row or not, bid/ask or mid. Everything the parser infers is
 printed under the table and every line it cannot use is listed with the reason;
-nothing is dropped quietly. Volatilities are read **as written, in points**: a
+nothing is dropped quietly. A pasted **bid and offer** are kept beside the mid
+rather than only averaged into it: the **bid/offer** switch draws them as two
+lines and paints every strike where the marked FX surface reads outside them,
+which is the question a mid cannot answer. Volatilities are read **as written, in points**: a
 table sitting entirely below 1.0 is a managed pair rather than a table of
 decimals, and it says once that it read it that way. A table that really is in
 decimals is loaded by setting the volatility unit, which is something a person
@@ -1378,11 +1417,15 @@ python3 -m volkit session marks.json                 # save every mark on the bo
 python3 -m volkit session marks.json --show          # what a saved file holds
 python3 -m volkit --session marks.json vol USDJPY 2024-05-28 --strike 155
 
-python3 -m volkit mm EURUSD --target-source quotes < run.txt          # fit, and report
-python3 -m volkit mm EURUSD --file run.txt --request ask.txt --fallback-spread 0.3
-python3 -m volkit mm EURUSD --request ask.txt --target-source none \
+python3 -m volkit mm EURUSD < run.txt                 # check the run against the curve
+python3 -m volkit mm EURUSD --file run.txt --request ask.txt --fallback-tier default
+python3 -m volkit mm EURUSD --request ask.txt \
     --vega position.txt --axe-scale 500 --history vol_history.xlsx   # quote off the marks
-python3 -m volkit mm EURUSD --learn < run.txt        # propose widths; --save writes them
+python3 -m volkit agent learn EURUSD --file run.txt  # propose widths from the archive, the run counted; --save writes them
+
+# the hand fit lives with the marking agent, because it moves a mark
+python3 -m volkit mark fit EURUSD --file run.txt --out-marks m.json
+python3 -m volkit mm EURUSD --file run.txt --marks m.json   # check against what it arrived at
 
 # the quoting agent: keep an archive of what the market has shown, and quote from it
 python3 -m volkit agent fetch  --sdr sdr/ --days 5           # get DTCC's public dissemination
@@ -1392,16 +1435,16 @@ python3 -m volkit agent ingest --chats chats/ --sdr sdr/    # read what is new
 python3 -m volkit agent watch  --chats chats/ --every 30    # ... and keep reading
 python3 -m volkit agent evidence EURUSD                     # what the archive says
 python3 -m volkit agent learn    EURUSD --save              # propose widths from it
-python3 -m volkit agent quote    EURUSD --record <<< '1M ATM in 100mm vega'
+python3 -m volkit agent quote    EURUSD --client "Fund A" --record <<< '1M ATM in 100mm vega'
 python3 -m volkit agent archive  EURUSD --kind shown        # the prices we made
-python3 -m volkit agent outcome  EURUSD --ref <id> --result traded_ask
+python3 -m volkit agent outcome  EURUSD --ref <id> --result traded_ask   # ... and what became of one
 python3 -m volkit agent ask      EURUSD "how wide has the 3M fly been shown, and by whom"
 python3 -m volkit agent ask      EURUSD                     # ... a question a line; it writes nothing
 
 # the same archive behind the cards in the Market maker tab (the quoting agent, the
 # marking agent, and "Ask the record" -- the question box that writes nothing)
 python3 -m volkit serve --chats chats/ --sdr sdr/ --archive mm_archive.jsonl
-python3 -m volkit mm EURUSD --request ask.txt --archive-width   # the archive on the width ladder
+python3 -m volkit mm EURUSD --request ask.txt --client "Fund A"   # the same price the Quote button makes
 
 # the marking agent: how to run the fit, and what this desk does after it
 python3 -m volkit mark propose EURUSD --file run.txt --out p.json     # the card's own path
@@ -1423,30 +1466,43 @@ interface see the same ones.
 Add `--asof "2024-02-28 12:00"` to price against a fixed valuation time.
 Without it the current UTC time is used, once, at startup.
 
-The quoting agent is both a command and a **card inside the Market maker tab**,
-not a screen of its own -- it answers a question about the market pasted on
-that tab, so it is three more routes on `mm` and it leaves with that tab if a
-build excludes it. `serve --chats DIR --sdr DIR` names the folders the card
-may scan; `--archive` names the file. The card compares the width you would
-show against the width the archive says this thing is actually shown at, per
-quoted row, and changes nothing.
+The quoting agent lives **inside the Market maker tab**, not on a screen of its
+own, and its answer is the **Quote** button's: there is one pricing engine
+(`marketmaker.QuotePanel`) and the button, `volkit mm --request` and `volkit
+agent quote` all arrive at it. Every quote row carries what the agent learned
+-- the width the archive has seen the instrument shown at (the second rung of
+the width ladder, below a bank rule and above the fallback tier), its verdict
+on the width the bank would show, the market's recent level as a check on the
+mark, and the **client's record** on that instrument -- and the ordered list of
+ingredients that sums to the bid and the offer. Name a client on the bar and
+their record moves the price: which way they trade leans the mid, and the move
+against us after their trades widens it, both counted with a minimum and
+capped. **Record as shown** files the sheet's prices under that client and
+the buttons that then appear beside each row answer them -- hit, lifted,
+passed, away, pulled -- which is where a client's record comes from. `serve
+--chats DIR --sdr DIR` names the folders the archive card may scan;
+`--archive` names the file.
 
-There are **two agents**, and on the Market maker tab each is tied to one of
-its two buttons. The quoting agent above answers *what do I show*; its link to
-**Quote** is the *widths from the archive* switch, which puts the archive on
-the quote's width ladder between the bank and the typed fallback. The
-**marking agent** (`volkit mark`, and the *Marking agent* card beside the fit)
-answers *where should the surface be*: it is aimed at the **Fit** button's own
-inputs and decides how to run that fit -- which knobs to free,
-what the targets can actually determine, whether anything constrains the wings
--- proposes the result, and learns from what you do to its proposals. It
-learns tendencies with counts on them, never a policy: a desk re-marks a curve
-a few times a day, so a correction is applied only when the desk's answers
-agree with each other, and it is capped at half of what the fit itself moved.
-On the card, **Accept** hands the proposal to the quote as the marks it stands
-on, **Take the plan onto the fit** puts the agent's knob choices on the fit
-panel and runs it, and each answer is a line in the journal (`serve
---journal`; `mm_remarks.jsonl` beside the workbook by default).
+There are **two agents** on the Market maker tab. The quoting agent above
+answers *what do I show*. The **marking agent** (`volkit mark`, and the *Marking
+agent* card) answers *where should the surface be* -- and it is the only thing
+on the tab that moves a mark. It reads the market paste and the target curve and
+decides how to run the fit -- which knobs to free, what the targets can actually
+determine, whether anything constrains the wings -- proposes the result, and
+learns from what you do to its proposals. It learns tendencies with counts on
+them, never a policy: a desk re-marks a curve a few times a day, so a correction
+is applied only when the desk's answers agree with each other, and it is capped
+at half of what the fit itself moved.
+
+On the card, **Propose** is the agent and **Fit my way** is you, driving the
+same two fitters with exactly the knobs ticked there. **Accept** hands the
+proposal to the check and the quote as the marks they stand on, **Take the plan
+and fit** puts the agent's knob choices in the boxes and runs your fit, and
+**Record my fit as the edit** journals what you ended on beside what it proposed
+-- the one row where the tool's opinion and yours sit side by side on the same
+morning, and the reason the hand fit lives here rather than on the toolbar. Each
+answer is a line in the journal (`serve --journal`; `mm_remarks.jsonl` beside
+the workbook by default).
 
 Before the journal holds anything the agent can be given **rules of thumb**
 (`mm_rules.toml` beside the workbook, TOML, hand-edited; `serve --rules`;
@@ -1465,7 +1521,10 @@ about where the market has been becomes a target for the marking agent; the
 marking agent proposes; the quoting agent scores what the proposal fixed and
 **what it broke** at every archived point, including the ones the fit was not
 aimed at. It re-weights what it broke, tries again a bounded number of times,
-and puts the best round in front of you. All numbers, no language model.
+and puts the best round in front of you. All numbers, no language model. On
+the screen it is **Propose with the market box empty** and *score against the
+archive* ticked: the archive is the market, the rounds are shown, and the best
+one is answered with the same four buttons.
 
 `agent fetch` downloads DTCC's public price dissemination files -- the
 anonymised FX option trade reports the CFTC requires to be published -- into

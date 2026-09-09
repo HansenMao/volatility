@@ -146,3 +146,43 @@ volkit serve --kace-url https://pfcshkwapp01:8500/xmlposter --kace-ca desk.pem  
 - The network is injected, like `dtcc.py`'s: six more tests (`read_reply` on the poster page's own reply and on four kinds of not-success, the form body, `post_message` through a fake, the log and a refused post, the route sending exactly the table's message and the clear, the options). 845 in the suite. A live run against a stub kACE on the Mac received 413 nodes form-encoded and was logged.
 
 Still open: one live day of RR and butterfly compared side by side with the kACE page before the first real post into the live scenario, since the sign and the strangle-versus-butterfly reading were confirmed in words and not yet against the platform -- post into a test scenario first, which is what the scenario box is for. The address is confirmed by the desk as `https://pfcshkwapp01:8500/xmlposter`, and the shipped `files/volkit.cfg` now carries it.
+
+## The two width knobs (2026-09-09)
+
+The tier answered "which ladder", and for a while that was the whole question. It is not: a
+morning that wants the whole ladder half again as wide had to be given a second column on
+`KACE_SPREADS`, which makes a transient decision look like a policy and leaves the tab growing a
+column every time somebody widens up for a day. And the sheet's step rule — a day takes the last
+pillar's width — means the posted two-way holds flat between pillars and jumps on each expiry,
+which nobody chose; it was what a `VLOOKUP` does.
+
+So two knobs sit beside the tier on the feed tab, and on the command line:
+
+- **`×` (`--spread-multiplier`, `build(multiplier=…)`)** multiplies every one of the chosen tier's
+  widths. Blank is 1. It scales the pillars *before* `spread_for` reads them, so the pillar table,
+  the daily nodes and the post log all carry the multiplied width and cannot disagree; and it
+  moves the width only — the mid of every two-way is exactly where the marks put it. Anything
+  that is not a positive finite number is refused by name (`spread_multiplier`), because a
+  multiplier read as a zero posts a two-way with no width at all.
+- **`interpolate` (`--interpolate-spreads`, `spread_for(..., interpolate=True)`)** reads a day
+  between two pillars straight across between their widths, by calendar date. It changes only the
+  days *between* pillars: a pillar's own width is the tier's either way, and outside the ladder
+  the nearest pillar's is still what is posted. Off is the default, because the step rule is what
+  was posted and what `TestKaceFeed` pins.
+
+Both are the morning's choice like the tier and the scenario — typed on the tab, remembered per
+browser, sent on `/api/kace`, `/api/export/kace` and `/api/kace/post` — and both are fields of
+every `kace_posts.jsonl` entry. The tab's history column is therefore **Widths**
+(`default spreads ×1.5, interpolated`) and no longer **Tier**: a tier name stopped being the whole
+answer the moment it could be multiplied.
+
+A query string has no booleans, so `webapp._flag` spells out the words that mean *off* rather than
+leaving `bool("0")` to whichever caller forgets.
+
+## The tab is read by the market maker too (2026-09-09)
+
+The quote screen's width ladder ends in a **spreading tier** off this same
+`KACE_SPREADS` tab, read at each quoted row's own maturity, rather than the
+single typed fallback width it used to end in. The reasoning, and why this is
+not the coupling the 2026-09-01 note argued against, is in
+`claude/one-quote-and-the-client-record.md`.

@@ -32,7 +32,7 @@ sheet it was written against is kept as `files/vol_marks_legacy_format.xlsx`
 against it -- and the comparison still runs from `legacy/`. volkit reads
 either (§4).
 
-- ~35,000 lines across 50 modules, 1050 tests, `unittest` only (no pytest).
+- ~35,000 lines across 50 modules, 1060 tests, `unittest` only (no pytest).
   Tests live in `tests/test_volkit.py`, `tests/test_agent.py` (the desk
   agent, §17) and `tests/test_marking.py` (the marking agent, §18).
 - Runtime deps: numpy, scipy, pandas, openpyxl. Plus `tzdata` on Windows.
@@ -117,9 +117,13 @@ quotes     a broker run, in English or in columns: outrights, RR, fly, spreads,
            timestamps and which of two quotes for one thing is live. And the
            same grammar with the price taken out: what is being asked for
 knowledge  the per-pair knowledge bank: widths, floors, shifts, notes
-marketmaker  two panels: the fit (curve to a target, wings to a market) and the
-           quote (a two-way in each instrument asked for). They meet at the
-           marks the fit hands back
+marketmaker  two panels, neither of which moves a mark: the check (a pasted
+           market against the curve, and what is through it) and the quote --
+           **the one pricing engine**: a two-way in each instrument asked for,
+           off the bank, the archive, the leans and the client's record, with
+           the trace that sums to it on every row. Both may stand on the marks
+           the marking card hands them. The two fitters live here as model
+           code; the only caller is `marking`
 archive    every observation the desk has kept: quotes shown, trades printed,
            prices we made and what became of them. Append-only, content-addressed
 dtcc       fetching the public dissemination files from DTCC: which URL, whether
@@ -131,25 +135,29 @@ llm        a local model on a short leash: prose into the house grammar, and the
            against the text it was given
 ingest     the watched folders, read once each by content
 synthesis  the archive worked out: age-weighted widths, where the market has
-           been, what became of our prices, what printed, and the forward
-           curve the tape itself printed
+           been, what became of our prices -- per client, per instrument:
+           which way they trade and whether the market follows them -- what
+           printed, and the forward curve the tape itself printed
 flow       the printed tape as market colour: each print inverted to a
            volatility, read as paid or given against our own mark, weighted by
            vega and by age, and netted per tenor bucket. The one inference in
            the package -- the file publishes no buyer and no seller
-agent      request in, price out, with the ordered list of ingredients that
-           sum to it
+agent      what is around the one engine: the command line's request and its
+           decisions read off the quote rows, the record of what we showed and
+           what became of it, and filing a paste. It prices nothing itself
 remarks    every time somebody moved a mark, and what from: a re-mark is a diff
            of two snapshots, so nothing has to be instrumented
-marking    the marking agent: how to run the fit, and what this desk does after
-           it -- tendencies with counts on them, never a policy
+marking    every mark that moves, and what this desk does after it: the agent's
+           proposal, the desk's own hand fit, and tendencies with counts on
+           them, never a policy
 rules      the marking agent's rules of thumb: what a desk believes before the
            journal knows anything, seeded into the sample so it can be outvoted
 consult    what the two agents say to each other: a finding, a proposal, and a
            scored critique of what it broke
-ask        the third agent: a question in English about what the tool holds,
-           answered from the record with every fact sourced. Reads everything,
-           writes nothing
+ask        the third agent: a question in English about what the tool holds --
+           widths, levels, the tape, a client's record, the journal, the marks,
+           the bank -- answered from the record with every fact sourced. Reads
+           everything, writes nothing
 webapp     JSON API + stdlib server;  web/index.html is the whole front end
 cli        every screen has a command-line equivalent
 screens    which screens a build has, shown or hidden; the one reader of the
@@ -157,7 +165,10 @@ screens    which screens a build has, shown or hidden; the one reader of the
 kace       the marked surface as the kACE RATE_FEED message the desk's pricing
            platform takes; replaces the XML_poster workbook (§20). The
            KACE_SPREADS tab's rows are the pillars and its columns are the
-           spreading tiers -- a width is a quoting policy, not a currency
+           spreading tiers -- a width is a quoting policy, not a currency.
+           A tier may be multiplied on the way out, and the days between
+           pillars read across instead of stepped; both are the morning's
+           choice, both are recorded with the post, and neither moves a mid
 session    the marks a session made, saved beside the workbook and put back
 config     the startup settings file a double-clicked exe reads
 paths      resource vs user-data paths (source and frozen), and the one
@@ -181,7 +192,7 @@ working in its area — not before.
 | `claude/screen-listed.md` (§8) | `listed.py`, exchange-traded options, the paste parser, positions and aggregated greeks. |
 | `claude/screen-analysis.md` (§9) | `analytics.py`, `moments.py`, `history.py`, `relvalue.py` — carry and roll, fair value, realized, the cross triangle, the relative-value grid. |
 | `claude/development.md` (§10) | The full command cookbook, `TestWebAssets`, PyInstaller and packaging rules, how to add a screen. |
-| `claude/screen-market-making.md` (§11) | `quotes.py`, `knowledge.py`, `marketmaker.py` — the fit, the quote, the paste grammar, the knowledge bank. |
+| `claude/screen-market-making.md` (§11) | `quotes.py`, `knowledge.py`, `marketmaker.py` — Check Market, the quote, the paste grammar, the knowledge bank. |
 | `claude/screen-monitor.md` (§12) | `monitor.py`, `curves.py` — tiles and the curve-comparison panel. |
 | `claude/session-files.md` (§13) | `session.py` — saving marks beside the workbook, and the one deliberate export *into* it. |
 | `claude/build-and-screens.md` (§14) | `screens.py`, `--exclude-tab` / `--only-tabs` / `--hidden-tab`, trimmed builds. |
@@ -194,7 +205,7 @@ working in its area — not before.
 | `claude/config-tabs.md` | **Before adding a setting**, or anything about `PEG_BANDS`, `KACE_SPREADS`, `HOLIDAYS`, `configsheets.py`, or where the discount curves come from (`discount.py`, the feed's `<CCY>OIS` rows). |
 
 Design notes that are not standing context: `claude/kace-export-design.md`,
-`claude/marking-agent-design.md`.
+`claude/marking-agent-design.md`, `claude/one-quote-and-the-client-record.md`.
 
 ---
 
@@ -373,19 +384,57 @@ to safely amend.
   `atm.CUTS` still holds all four and `--cut LDN` still answers.
 - **The smile chart's strike axis is a scale, not a model change.** The slice
   is always built in moneyness.
-- **A fit and a quote are two calls, and the marks travel between them** in the
-  browser (`capture_marks` / `applied_marks`). The book holds exactly what the
-  panel shows — one number, one spelling.
-- **A held fit is only good for the book it was fitted on.** `Panel.run` stamps
-  `marketmaker.mark_fingerprint` (a hash per part of `session.capture_pair`,
-  plus the sheet's own quotes) onto the marks it hands back, and `QuotePanel`
-  **drops** marks whose stamp no longer matches, prices off the book and names
-  what moved. The browser's half is one hook in `post()`
-  (`MARKING_ROUTES` → `bookMoved`), which flags the fit card and re-runs the
-  quote; it never re-runs the fit, because `keep the marks` writes. Nothing
-  else may POST — `api()` direct, a route added outside the list — and a test
-  pins the list against every route that touches `self.dirty` or rebuilds the
-  book.
+- **The smile parameters have a picture as well as a grid.** *Contours* on the
+  smile card opens two contour maps -- `rho` and `slog` over expiry and wing
+  delta -- off `/api/params/grid`, whose every column is `params_at(t)`, so a
+  marked curve, an overwrite, a shift and the anchor are all in it and the map
+  cannot show a curve the surface is not on. The **delta axis is not the
+  surface's**: a parameter is calibrated at 10d and at 25d and nowhere between,
+  so the band between the two rows is a straight line between two calibrations
+  and the panel says so in as many words. The colour follows the numbers, not
+  the parameter's name -- diverging about zero only where the field actually
+  changes sign, one hue over its own range where it does not -- and the legend
+  says which, so a map showing one colour is never read as a scale that was
+  cut.
+- **One place a vol mark moves, and it is the marking agent** (§18). The
+  market-maker screen's other two buttons read the curve and never touch it:
+  `marketmaker.CheckPanel` says where the marks sit against a pasted run and
+  `marketmaker.QuotePanel` makes a two-way. There was a *Fit* button beside
+  them that also moved the curve and the wings — two ways to re-mark one curve,
+  and only one of them written into the journal. `marking.FitPanel` is the hand
+  fit now and `marking.MarkPanel` the agent; the two fitters themselves
+  (`fit_atm_curve`, `tune_smile_shifts`, `curve_targets`) stay in
+  `marketmaker.py` as model code with `marking` as their only caller.
+- **A fit, a check and a quote are separate calls, and the marks travel between
+  them** in the browser (`capture_marks` / `applied_marks`). The book holds
+  exactly what the panel shows — one number, one spelling.
+- **One pricing engine** (§17). The Quote button, `volkit mm --request` and
+  `volkit agent quote` all arrive at `marketmaker.QuotePanel.run`; nothing
+  else makes a two-way. The width ladder is bank, then archive, then a
+  **spreading tier** off the workbook's `KACE_SPREADS` tab -- named on the
+  bar, scaled by a multiplier, read at each row's own maturity (stepped or
+  interpolated between the tab's tenors, `kace.width_at`) -- then no price,
+  always, and every row names its rung. That bottom rung used to be one typed
+  width for every tenor on the screen, which is not a width any desk shows;
+  it is the same ladder the feed posts from, so a width shown to a client and
+  a width posted to the platform cannot quietly differ. Every row
+  carries `trace`, the ordered ingredients that sum to it, and every sentence
+  about a price is generated from that list. The desk-wide hit rate moves
+  nothing; **one client's record on one instrument** leans the mid by their
+  side and widens by the move against us after their trades, counted with a
+  minimum and capped with the other leans, and the archive keeps that record
+  in the book's convention. A second engine, a second grammar or a second
+  copy of the ladder is the bug this line was written after.
+- **Held marks are only good for the book they came from.** `FitPanel.run`
+  stamps `marketmaker.mark_fingerprint` (a hash per part of
+  `session.capture_pair`, plus the sheet's own quotes) onto the marks it hands
+  back, and `CheckPanel` and `QuotePanel` both **drop** marks whose stamp no
+  longer matches, read the book and name what moved. The browser's half is one
+  hook in `post()` (`MARKING_ROUTES` → `bookMoved`), which flags the held marks
+  stale and re-runs the check and the quote; it never re-runs a fit, because a
+  mark does not move on a keystroke and `keep the marks` writes. Nothing else
+  may POST — `api()` direct, a route added outside the list — and a test pins
+  the list against every route that touches `self.dirty` or rebuilds the book.
 
 ## 5. Things that moved marks vs the legacy tool
 
@@ -454,7 +503,7 @@ and what is reported instead** — read it before "fixing" one.
 rules.** The essentials:
 
 ```
-python -m unittest discover -s tests        # 1050 tests, ~20m
+python -m unittest discover -s tests        # 1060 tests, ~20m
 PYTHONUTF8=0 LC_ALL=C python -m unittest discover -s tests   # as a cp1252 box
 python -m volkit check                      # validate the workbook
 python -m volkit serve --feed files/market_feed.csv --history vol_history.xlsx

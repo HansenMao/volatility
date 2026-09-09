@@ -42,9 +42,9 @@ from .archive import Archive, ArchiveError
 from . import rules as rules_mod
 from .knowledge import KnowledgeBank, KnowledgeError, RULE_INSTRUMENTS, RULE_KINDS, SIZE_BASES
 from .marketmaker import (BACKBONE_KNOBS, CROSS_KNOBS, DEFAULT_BACKBONE_FREE,
-                          DEFAULT_CROSS_FREE, MEAN_REVERSION_RANGE, TARGET_SOURCES,
-                          learn_from_panel)
-from .marketmaker import panel_from_request as mm_panel_from_request
+                          DEFAULT_CROSS_FREE, MEAN_REVERSION_RANGE, NEAR_EDGE,
+                          SEVERITIES, TARGET_SOURCES)
+from .marketmaker import check_panel_from_request as mm_check_panel_from_request
 from .marketmaker import quote_panel_from_request as mm_quote_panel_from_request
 from .marketmaker import rules_from_request
 from .quotes import FLY_CONVENTIONS
@@ -391,6 +391,13 @@ class BookService:
                     # for the panel to show and send its own back -- the same
                     # arrangement as the relative-value weights above.
                     "reversion_range": list(MEAN_REVERSION_RANGE),
+                    # What Check Market counts as near the edge of a quoted
+                    # two-way, and what a checked line can come back as.
+                    # Declared once in marketmaker.py, for the same reason as
+                    # the range above: the box on the screen shows the house
+                    # figure rather than a number typed into the page.
+                    "near_edge": NEAR_EDGE,
+                    "severities": list(SEVERITIES),
                     "smile_params": list(PARAM_NAMES),
                     "fly_conventions": list(FLY_CONVENTIONS),
                     "vol_units": list(QUOTE_VOL_UNITS),
@@ -511,6 +518,101 @@ class BookService:
                     "arbitrage_free": sl.svi.arbitrage_free,
                 },
             }
+
+    #: The two families the smile parameters come in, and what each map is
+    #: called.  ``rho`` is the correlation and is signed, so its map is
+    #: diverging about zero; ``slog`` is nu*sqrt(t) and is positive, so its
+    #: map is sequential.  The wings they are calibrated from are the axis.
+    PARAM_FAMILIES = ("rho", "slog")
+    #: The two wings every smile parameter is quoted at, as fractions.  These
+    #: are the only deltas a parameter *has*: everything between them on the
+    #: map is a straight line drawn between two calibrations, and the panel
+    #: says so rather than letting a smooth picture imply a model that is not
+    #: there.
+    PARAM_DELTAS = (0.10, 0.25)
+
+    def param_grid(self, q: dict) -> dict:
+        """The smile parameters as a field over (wing delta, expiry).
+
+        One call per pair, for the contour panel on the marking screen's
+        smile card.  The expiry axis is the **surface's own**: every column is
+        ``params_at(t)``, so a marked term structure, a per-tenor overwrite, a
+        shift and the anchor are all in the picture, and the map cannot show a
+        curve the surface is not on.  The delta axis is not the surface's --
+        a parameter exists at 10d and at 25d and nowhere else -- so it is a
+        straight line between the two, and ``interpolated`` says so.
+
+        Evenly spaced in sqrt(t), because that is the axis a volatility term
+        structure is read on: linear in t spends most of the picture on the
+        back end, where the parameters have stopped moving.
+        """
+        with self._lock:
+            pair = q["pair"]
+            surface = self.book[pair]
+            fits = list(surface.fits)
+            if not fits:
+                raise ValueError(f"{pair} has no fitted tenors, so its parameters have no "
+                                 f"term structure to draw")
+            n_t = max(9, min(241, int(float(q.get("points", 129)))))
+            n_d = max(3, min(65, int(float(q.get("deltas", 33)))))
+            tenors = [{"tenor": f.tenor, "t": f.t} for f in fits]
+            lo, hi = fits[0].t, fits[-1].t
+            if hi <= lo:                       # one quoted tenor: a column, not a field
+                hi = lo * 1.0001 + 1e-9
+            roots = np.linspace(math.sqrt(lo), math.sqrt(hi), n_t)
+            ts = [float(r * r) for r in roots]
+            d0, d1 = self.PARAM_DELTAS
+            deltas = [float(d) for d in np.linspace(d0, d1, n_d)]
+            columns, failed = [], []
+            for t in ts:
+                try:
+                    columns.append(surface.params_at(t))
+                except (ValueError, ArithmeticError) as exc:
+                    columns.append(None)
+                    failed.append(f"{t:.4f}y: {exc}")
+            maps = {}
+            for family in self.PARAM_FAMILIES:
+                near, far = f"{family}25", f"{family}10"
+                z = []
+                for d in deltas:
+                    w = (d - d0) / (d1 - d0)
+                    z.append([None if c is None else
+                              float(c[far] + (c[near] - c[far]) * w) for c in columns])
+                flat = [v for row in z for v in row if v is not None and math.isfinite(v)]
+                maps[family] = {
+                    "z": z,
+                    "lo": min(flat) if flat else None,
+                    "hi": max(flat) if flat else None,
+                    # What each map is: the correlation is signed and reads
+                    # about zero; nu*sqrt(t) is positive and reads off a floor.
+                    "diverging": family == "rho",
+                    "label": ("rho — the SABR correlation" if family == "rho"
+                              else "slog — nu times the square root of t"),
+                    # The two rows that are the surface's own numbers, so the
+                    # panel can mark them and say the rest is a straight line.
+                    "at": {near: [None if c is None else float(c[near]) for c in columns],
+                           far: [None if c is None else float(c[far]) for c in columns]},
+                }
+            notes = []
+            if surface.anchor_tenors:
+                notes.append("the smile is anchored to the quoted tenors, so the map passes "
+                             "through every fitted tenor exactly and the shape between them "
+                             "is the parameter's own term structure")
+            else:
+                notes.append("the smile is not anchored, so the map is the parameter term "
+                             "structure itself and need not pass through a fitted tenor")
+            if failed:
+                notes.append(f"{len(failed)} column(s) could not be read: {failed[0]}")
+            return {"pair": pair, "t": ts, "deltas": deltas, "tenors": tenors,
+                    "maps": maps, "anchored": bool(surface.anchor_tenors),
+                    "families": list(self.PARAM_FAMILIES),
+                    # Said once, on the panel: between 10d and 25d there is no
+                    # parameter, only a line drawn between two calibrations.
+                    "interpolated": ("a parameter is calibrated at 10 delta and at 25 delta and "
+                                     "nowhere in between; the band between the two rows is a "
+                                     "straight line drawn between them, not a model read"),
+                    "notes": notes,
+                    "warnings": list(surface.shift_warnings())}
 
     def term(self, q: dict) -> dict:
         with self._lock:
@@ -2132,25 +2234,25 @@ class BookService:
                 out["source_note"] = pk.source_note
             return out
 
-    def mm_fit(self, payload: dict) -> dict:
-        """Fit and fine tune one market-maker panel.  It quotes nothing.
+    def mm_check(self, payload: dict) -> dict:
+        """Check a pasted market against the curve.  It moves nothing at all.
 
-        Like the listed screen, the server keeps no panel state: the browser
-        owns the panel and posts it whole, so the same call reproduces the
-        same screen from the command line.  What it hands back includes
-        ``marks`` -- the parameters the fit arrived at -- which the browser
-        holds and posts to :meth:`mm_quote`.  That is what lets a price stand
-        on the morning's fit without the server remembering anything.
+        This was the fit, and moving marks was half of what it did.  Every mark
+        that moves is the marking card's now (:meth:`mm_mark_fit`,
+        :meth:`mm_mark`, :meth:`mm_mark_record`), so this route cannot dirty
+        the book and there is nothing on it to keep.
+
+        Like every panel here the browser owns the panel and posts it whole, so
+        the same call reproduces the same screen from the command line.  It may
+        be handed the marks the marking card is holding, exactly as
+        :meth:`mm_quote` is: checking the book while an unanswered proposal is
+        on the screen would be checking a curve nobody is quoting off.
         """
         with self._lock:
             if self.book is None:
                 raise ValueError(self.load_error or "no workbook is loaded")
-            panel = mm_panel_from_request(payload)
-            out = panel.run(self.book)
-            # Only when it left its marks on the book: a panel that reported
-            # and restored has changed nothing to lose.
-            self.dirty = self.dirty or bool(out.get("applied"))
-            return out
+            panel = mm_check_panel_from_request(payload)
+            return panel.run(self.book)
 
     def mm_quote(self, payload: dict) -> dict:
         """Price the instruments in the request box.  It fits nothing.
@@ -2170,9 +2272,16 @@ class BookService:
             # The archive is the quoting agent's file and the quote's third rung
             # (§17): read under its own lock, like the agent card reads it.
             with self._archive_lock:
-                out = panel.run(self.book, bank=self.bank, hist=hist, archive=self.archive)
+                # The fallback rung is a spreading tier off the same
+                # KACE_SPREADS table the feed posts from -- one ladder on the
+                # workbook, read by both, so a width shown to a client and a
+                # width posted to the platform cannot quietly differ.
+                out = panel.run(self.book, bank=self.bank, hist=hist, archive=self.archive,
+                                spreads=self.kace_spreads)
             out["bank"]["error"] = self.bank_error
             out["archive"]["error"] = self.archive_error
+            # For the archive card under the sheet: where more can come from.
+            out["folders"] = {"chats": list(self.agent_chats), "sdr": list(self.agent_sdr)}
             return out
 
     def mm_mark(self, payload: dict) -> dict:
@@ -2211,6 +2320,26 @@ class BookService:
         out["archive_error"] = self.archive_error
         return out
 
+    def mm_mark_fit(self, payload: dict) -> dict:
+        """The desk's own fit, from the marking card.  The one route here that fits.
+
+        The agent's other half: the same two fitters, driven by the knobs as
+        the desk ticked them rather than as the agent planned them.  What comes
+        back is numbers -- the browser holds them, hands them to the quote and
+        to the check, and records them beside the proposal as the *edited*
+        answer -- unless ``apply`` is set, which is the card's *keep the marks*
+        and leaves the fit on the loaded book, in memory only.
+        """
+        from .marking import fit_panel_from_request
+        with self._lock:
+            if self.book is None:
+                raise ValueError(self.load_error or "no workbook is loaded")
+            out = fit_panel_from_request(payload).run(self.book)
+            # Only when it left its marks on the book: a fit that reported and
+            # restored has changed nothing to lose.
+            self.dirty = self.dirty or bool(out.get("applied"))
+            return out
+
     def mm_mark_record(self, payload: dict) -> dict:
         """What the desk did with a proposal, into the journal.
 
@@ -2227,38 +2356,52 @@ class BookService:
             return out
 
     def mm_learn(self, payload: dict) -> dict:
-        """Propose bank rules from the widths the pasted market showed.
+        """Propose bank widths from the archive, with the paste on the screen counted.
 
         Proposing and saving are deliberately two steps: a paste that happens
         to contain one wide quote should not be able to rewrite the desk's
-        ladder without somebody looking at it.
+        ladder without somebody looking at it.  One pipeline (§17): the same
+        `agent.learn_widths` as `volkit agent learn`, under the archive's
+        lock; the book is read for its clock and nothing else.
         """
+        from .agent import learn_from_request
         with self._lock:
             if self.book is None:
                 raise ValueError(self.load_error or "no workbook is loaded")
-            rules, notes, parse = learn_from_panel(payload, self.book.clock)
-            return {"rules": [asdict(r) for r in rules],
-                    "describe": [r.describe() for r in rules],
-                    "notes": notes, "parse": parse}
-
-    def mm_agent(self, payload: dict) -> dict:
-        """The quoting-agent card: the pasted run's widths against the archive.
-
-        Deliberately does no fitting.  A width comparison needs the paste, the
-        bank and the archive and no surface at all, so this answers without
-        touching the curve, the wings or the marks -- which is what lets the
-        card sit on its own button beside a fit that takes a second.
-        """
-        from .agent import panel_from_request as agent_panel_from_request
-        panel = agent_panel_from_request(payload)
-        with self._lock:
-            if self.book is None:
-                raise ValueError(self.load_error or "no workbook is loaded")
-            book, bank = self.book, self.bank
+            clock = self.book.clock
         with self._archive_lock:
-            out = panel.run(book, self.archive, bank=bank)
-        out["folders"] = {"chats": list(self.agent_chats), "sdr": list(self.agent_sdr)}
-        out["archive"]["error"] = self.archive_error
+            out = learn_from_request(self.archive, payload, clock=clock)
+        out["error"] = self.archive_error
+        return out
+
+    def mm_record(self, payload: dict) -> dict:
+        """The sheet's *Record* button: file the prices on it as shown to a client.
+
+        The payload carries the Quote answer the browser is holding, whole,
+        because the server holds no screen state (§4) and a price re-made now
+        may not be the price that was shown a minute ago.  Written to the
+        archive under its own lock; the book is read only for its clock.
+        """
+        from .agent import record_from_request
+        with self._lock:
+            if self.book is None:
+                raise ValueError(self.load_error or "no workbook is loaded")
+            clock = self.book.clock
+        with self._archive_lock:
+            out = record_from_request(self.archive, payload, clock=clock)
+        out["error"] = self.archive_error
+        return out
+
+    def mm_outcome(self, payload: dict) -> dict:
+        """One outcome button beside a recorded price: what became of it."""
+        from .agent import outcome_from_request
+        with self._lock:
+            if self.book is None:
+                raise ValueError(self.load_error or "no workbook is loaded")
+            clock = self.book.clock
+        with self._archive_lock:
+            out = outcome_from_request(self.archive, payload, clock=clock)
+        out["error"] = self.archive_error
         return out
 
     def mm_agent_ingest(self, payload: dict) -> dict:
@@ -2531,7 +2674,9 @@ class BookService:
             hor_date=datetime.fromisoformat(out["hor_date"]).date(),
             nodes=out["xml"].count("<node "), url=self.kace_url, log=self.kace_log,
             when=when, opener=self.kace_opener, ca=self.kace_ca, insecure=self.kace_insecure,
-            dry_run=bool(payload.get("dry_run")), tier=out.get("tier", ""))
+            dry_run=bool(payload.get("dry_run")), tier=out.get("tier", ""),
+            multiplier=out.get("multiplier", 1.0),
+            interpolate=bool(out.get("interpolate")))
         entry["posts"] = self.kace_log.entries(limit=10)
         return entry
 
@@ -2541,7 +2686,12 @@ class BookService:
         return kace_mod.build(self.book, q["pair"], self.kace_spreads,
                               tier=q.get("tier") or self.kace_tier,
                               cut=q.get("cut", "NY"), source=q.get("source", "marks"),
-                              method=q.get("method", "SVI"))
+                              method=q.get("method", "SVI"),
+                              # Both are the morning's, like the tier and the
+                              # scenario: a query string with neither is the
+                              # tab's own ladder and the sheet's step rule.
+                              multiplier=q.get("multiplier"),
+                              interpolate=_flag(q.get("interpolate")))
 
     def _kace_scenario(self, q: dict) -> str:
         """The scenario the message posts into: the page's box, else the start-up default.
@@ -2624,6 +2774,21 @@ def _number(q: dict, field: str) -> float:
         return float(value)
     except (TypeError, ValueError):
         raise ValueError(f"{field}: {value!r} is not a number") from None
+
+
+def _flag(value) -> bool:
+    """A checkbox off a query string.
+
+    A query string has no booleans: everything arrives as text, and ``bool``
+    of the text ``"0"`` is ``True``.  The words a browser or a person might
+    send for *off* are spelt out here rather than left to whichever caller
+    forgets.
+    """
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return value.strip().lower() not in ("", "0", "false", "no", "off")
+    return bool(value)
 
 
 def _stamp(mtime: float | None) -> str:
@@ -2710,6 +2875,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self.service.curve(q))
             elif url.path == "/api/rrfly":
                 self._json(self.service.rrfly(q))
+            elif url.path == "/api/params/grid":
+                self._json(self.service.param_grid(q))
             elif url.path == "/api/feed":
                 self._json(self.service.feed_state(q))
             elif url.path == "/api/auto":
@@ -2801,16 +2968,18 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self.service.listed_fit(payload))
             elif url.path == "/api/listed/greeks":
                 self._json(self.service.listed_greeks(payload))
-            elif url.path == "/api/mm/fit":
-                self._json(self.service.mm_fit(payload))
+            elif url.path == "/api/mm/check":
+                self._json(self.service.mm_check(payload))
             elif url.path == "/api/mm/quote":
                 self._json(self.service.mm_quote(payload))
             elif url.path == "/api/mm/learn":
                 self._json(self.service.mm_learn(payload))
             elif url.path == "/api/mm/bank":
                 self._json(self.service.mm_save_bank(payload))
-            elif url.path == "/api/mm/agent":
-                self._json(self.service.mm_agent(payload))
+            elif url.path == "/api/mm/record":
+                self._json(self.service.mm_record(payload))
+            elif url.path == "/api/mm/outcome":
+                self._json(self.service.mm_outcome(payload))
             elif url.path == "/api/mm/agent/ingest":
                 self._json(self.service.mm_agent_ingest(payload))
             elif url.path == "/api/mm/agent/file":
@@ -2819,6 +2988,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self.service.mm_agent_fetch(payload))
             elif url.path == "/api/mm/mark":
                 self._json(self.service.mm_mark(payload))
+            elif url.path == "/api/mm/mark/fit":
+                self._json(self.service.mm_mark_fit(payload))
             elif url.path == "/api/mm/ask":
                 self._json(self.service.mm_ask(payload))
             elif url.path == "/api/mm/mark/record":

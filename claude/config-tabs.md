@@ -274,8 +274,9 @@ one on every major.
 
 Note that the overrides were previously loadable but never loaded -- a Chinese
 New Year in `holiday_overrides.csv` moved no expiry. They now apply.
-`marketmaker.learn_from_panel` still uses `DEFAULT_CALENDARS` deliberately:
-there is no book there, it reads a paste and proposes rules.
+`agent.learn_widths` (which replaced `marketmaker.learn_from_panel`) reads a
+paste with no book behind it and so resolves nothing on a calendar: the
+archive keeps a tenor as written and buckets it by nominal days.
 
 A tab written back keeps **its place in the tab bar** as well as its name:
 `write_rows` deletes and recreates the sheet, and one recreated at the end of

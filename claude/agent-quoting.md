@@ -4,110 +4,155 @@ Extracted verbatim from `CLAUDE.md` §17. Section numbers throughout this reposi
 CLAUDE.md's original scheme and are unchanged. CLAUDE.md carries the one-line rule and points here
 for the reasoning behind it. Read this file when working in the area above.
 
-The market-maker screen answers "what do I show against *this* market" and
-needs a paste to fit to. A request does not arrive with a market on it, so the
-agent answers "where are you on the 1 month at-the-money in a hundred million"
-out of four sources: the marked surface, the knowledge bank, an archive of what
-has been seen, and the same two leans (fair value, position) the market-maker
-screen uses with the same caps.
+The market-maker screen answers "what do I show" out of the marked surface,
+the knowledge bank and the two leans. The quoting agent is what the **archive**
+adds to that answer -- an append-only file of what the market has shown, what
+printed, what we showed and what became of it -- and it adds it **inside the
+one pricing engine**, `marketmaker.QuotePanel` (§11). The Quote button,
+`volkit mm --request` and `volkit agent quote` all arrive there, and a price
+made in a browser and a price made in a shell are the same price because
+there is one function that makes one.
 
-Two ways in. `volkit agent <action>` on the command line, with `quote`,
-`ingest`, `watch`, `evidence`, `learn`, `shown`, `outcome` and `archive`; and
-a **card inside the market-maker tab** — not a seventh screen.
+It was not always one. This module priced on its own (`agent._decide`), with
+its own request grammar (`parse_asks`) and a second copy of the width ladder
+and the leans; a **Suggest** card beside the sheet compared widths on its own
+(`SuggestPanel`, `/api/mm/agent`); and the quote panel had a checkbox that
+put the archive on its ladder or did not. Three answers to "what do I show"
+on one tab, two of them engines, and two engines that agreed on a Tuesday
+disagreed by Friday. So: one engine, every row of it carrying what the agent
+learned, and this module keeps what is *around* the engine -- the command
+line's `Request` and `Decision`, the record (`record_quote`, `answer`) and
+filing a paste. Excluding the market-maker tab from a build takes all of it.
 
-That is deliberate. The card answers a question *about the market on that
-tab*, and a build without the market-maker screen has nothing for it to
-answer, so it is three more routes on `mm` (`/api/mm/agent`,
-`/api/mm/agent/ingest`, `/api/mm/agent/file`) and `agent` is one of `mm`'s
-commands. `screens.SCREENS` keeps six entries, the nav and panel-map tests are
-untouched, and excluding the market-maker tab takes the agent with it.
+**What the agent learns, and what each thing is allowed to do.** The scope
+is deliberately what a counting agent is good at -- age-weighted statistics
+with counts on them, per instrument, never a fitted model -- and each thing it
+learns has one stated power:
 
-The card is `agent.SuggestPanel` and it **fits nothing**. A width comparison
-needs the paste, the bank and the archive and no surface at all, so it answers
-without touching the curve, the wings or the marks — which is what lets it sit
-on its own button beside a fit that takes a second and a half. It posts its
-own payload (`const AF=[…]` in the page) rather than the market maker's, read
-by `agent.panel_from_request`, with a test pinning the two lists against each
-other exactly as `MF` is pinned against `marketmaker.panel_from_request`.
+| learns | from | does |
+|---|---|---|
+| **widths**, per instrument and tenor bucket, per delta | every two-way in the archive | the second rung of the width ladder, and a **verdict** on the bank's width on every row |
+| **a client's record**, per instrument | the prices recorded as shown to them and the outcomes answered | **leans the mid** by their side and **widens** by what dealing with them has cost -- the one place the desk's own hit rate reaches a number |
+| **the market's level**, per instrument and tenor | the same two-ways | a **flag** beside the mark, applied to nothing |
+| **the printed tape**, per tenor bucket | the dissemination files | a lean, off unless `flow_weight` is set (`flow.py`); shown on the archive card and read out by the ask agent |
 
-Things the card decides once:
-
-- **It reads the request box, and the paste only stands beside it.** The
-  rows are the instruments asked for (`request_text`, the quote panel's own
-  box); a request the paste also quoted carries that market's width beside
-  it, matched on `quotes.instrument_key` the way the quote panel matches. It
-  read the market paste for its rows once, and a desk read that as the agent
-  answering about the wrong box -- the card sits beside the quote, and a
-  width proposal about a run nobody asked to be quoted was the fit's
-  question answered with the quote's tools. With the request box empty it
-  falls back to the paste's rows and says so; `source` on the answer names
-  which box the rows came from, and the page keys its two extra columns
-  (on the quote sheet for requests, on the market sheet for the paste) and
-  their freshness on that.
-- **It compares widths and proposes nothing else.** Per row: what the
-  market showed (blank for a request the paste did not quote), what we would
-  show (the bank rule, or the panel fallback), and what the archive says
-  this has actually been shown at. The verdict is
-  `agrees`, `tight`, `wide`, `no rule`, `thin` or `not read`, and the quote
-  sheet's width does not move until a rule is written in the bank below it.
-- **Agreement is the quiet case.** A gap has to clear both a fraction of the
-  archived width (`tolerance`, 10% by default) *and* an absolute floor
-  (`MIN_GAP`, 0.02) before it is worth saying. Without the floor a 0.08
-  butterfly "disagrees" over four thousandths and every wing row carries a
-  flag forever, which is a screen nobody reads.
-- **Its columns only appear beside the quotes they were computed from.** The
-  page keeps the paste the last run saw (`agentFresh()`), and the two extra
-  quote-sheet columns are omitted when the textarea has moved on. A stale
-  width sitting next to a fresh quote is worse than no width at all.
-- **The browser chooses when to scan, never where.** The watched folders come
-  from `serve --chats` / `--sdr` and live on the service; the ingest route
-  reads no path out of the payload, and a test pins that. A path a page can
-  post is a path anything that reaches the page can read.
-- **Filing the pasted run stamps it at the start of the valuation day**, not
-  at the instant the button was pressed — the id is a hash of the content, so
-  "now" would give a double-clicked morning a new id and count it twice in
-  every width it touches. The same run under a *different* broker name is a
-  genuinely new record (three brokers showing one width is stronger evidence
-  than one broker three times) and is also the obvious way to double a width
-  by accident, so `under_another_name` counts it and the card says so.
-
-Things decided once, which must not be re-derived per row:
+Things decided once on the row, which must not be re-derived anywhere else:
 
 - **The output is a list of ingredients that sums to the price, and the prose
-  is generated from the list.** Not the other way round. `Decision.trace` is
-  the record, `Decision.facts()` renders it, `explain()` prints it and
-  `llm.narrate` writes the paragraph *from it*. A story written first and
-  reconciled to the numbers afterwards is a story that stays plausible when
-  the numbers are wrong.
+  is generated from the list.** Not the other way round. `row["trace"]` is
+  the record, built in `QuotePanel._row` as each ingredient is read;
+  `agent.Decision` is a view of the row, `Decision.facts()` renders it,
+  `explain()` prints it, `llm.narrate` writes the paragraph *from it*, and the
+  page shows it under every line as *how this price was made*. A story
+  written first and reconciled to the numbers afterwards is a story that stays
+  plausible when the numbers are wrong.
+- **The width ladder is bank, then archive, then a spreading tier, then no
+  price**, and it is always that ladder. Every row names the rung it stood on
+  (`width_rung`). A row that reaches the bottom shows no bid and no offer --
+  §11's rule, unchanged, and the archive is a rung on that ladder rather than
+  a default. There is no switch for the archive: thin evidence produces no
+  number, so an archive that knows nothing costs nothing, and a checkbox that
+  made two prices out of one screen was the reason the engines drifted. The
+  order matters: the bank overlay folds the fallback in when no rule
+  matches, so the archive is tested against `spread_rule` and not `spread`,
+  or the fallback would beat it.
+- **The bottom rung is a ladder, not a number.** It is a **spreading tier** --
+  a column of the workbook's `KACE_SPREADS` tab, the same object the kACE feed
+  posts from -- named on the bar (`fallback_tier`, `--fallback-tier`), scaled
+  by `fallback_multiplier`, and read at *each row's own maturity*: a tenor the
+  tab names takes that rung exactly, and anything in between is stepped or,
+  with `fallback_interpolate`, read straight across between the two tenors it
+  falls between (`kace.width_at`). It was one typed width for every tenor on
+  the screen until 2026-09-09, which is not a width any desk shows: a one-week
+  and a one-year two-way are not the same width, so a single box was either
+  far too wide at the front or far too tight at the back. The panel takes the
+  table as `run(spreads=...)`; a tier that is not there is one message on the
+  sheet (`sheet["fallback"]["error"]`) and every row the bank and the archive
+  can answer is still priced. **A tenor the tab names is read off its own
+  rung**, not by year fraction: the calendar's 1M is 30 or 31 days and the
+  ladder's `1M` sits at 30.44, so reading by year fraction alone would show a
+  quote asked for as *1M* at the 1W width.
+- **The verdict is the quiet case first.** `agent_verdict` compares the width
+  the bank would show (or the fallback tier) with the archive's: `agrees`,
+  `tight`, `wide`, `no rule` (the archive's width is the one being shown),
+  `thin`, `not read`. A gap has to clear both `tolerance` (a fraction of the
+  archived width, `AGENT_TOLERANCE`) *and* `AGENT_MIN_GAP` before it is worth
+  saying. Without the floor a 0.08 butterfly "disagrees" over four
+  thousandths and every wing row carries a flag forever, which is a screen
+  nobody reads. The verdict moves nothing: a `tight` row is still quoted at
+  the bank's width, and the rule changes in the bank, by a person.
 - **The archive is never quoted back at the market.** The recent market level
-  is computed, shown beside the mark, and applied to nothing. A market maker
-  whose mid follows the last thing it was shown is being led by the party it
-  is about to trade with. A gap is a *flag*; the answer to a flag is to
-  re-mark on the marking screen, deliberately.
-- **The width ladder is bank, then archive, then a typed fallback, then no
-  price.** Every row names the rung it stood on. A row that reaches the bottom
-  shows no bid and no offer — §11's rule, unchanged, and the archive is a new
-  rung on that ladder rather than a new default. The quote panel has the same
-  ladder behind `QuotePanel.use_archive_width` (§18 says how it is switched
-  on), and the order matters there: the bank overlay folds the typed fallback
-  in when no rule matches, so the archive is tested against `spread_rule`
-  and not against `spread`, or the fallback would beat it.
-- **What became of our prices moves nothing.** Hit rate and adverse selection
-  are the most interesting thing in the archive and the easiest to over-read:
-  a run of lifted offers is sometimes a mid that is too low and sometimes a
-  week of being the only one showing. `OutcomeEvidence.lean()` returns
-  *words*, and the row says "shown here, and applied to nothing".
+  is computed, shown beside the mark, flagged when they disagree by enough to
+  matter, and applied to nothing. A market maker whose mid follows the last
+  thing it was shown is being led by the party it is about to trade with. A
+  gap is a *flag*; the answer to a flag is to re-mark on the marking card,
+  deliberately.
+- **A client's record moves the price, and only a client's.** The desk-wide
+  hit rate is the most interesting thing in the archive and the easiest to
+  over-read: a run of lifted offers is sometimes a mid that is too low and
+  sometimes a week of being the only one showing, and it mixes what the desk
+  was axed to do with who it was showing. `OutcomeEvidence` stays words. But
+  the same counts for **one caller** on **one instrument** are the two things
+  a market maker actually adjusts for, and `synthesis.ClientEvidence` carries
+  them: `side` (age-weighted, +1 only ever lifts, -1 only ever hits) and
+  `after_move` (how far the market went their way in the `AFTER_DAYS` after
+  they dealt, read off the last quote of the same instrument and tenor in
+  that window -- positive is adverse). On the row: `client_weight * side *
+  half_width` leans the mid, the same shape as the axe and the same sign as
+  the tape (a buyer coming is a reason to mark up), counted toward the skew
+  cap with the others; and `client_weight * after_move` is added to the
+  width, capped at `CLIENT_WIDEN_CAP` of the width before it. Below
+  `client_min` answered prices the record is on the row and moves nothing.
+  Scope is the instrument, in the tenor bucket first and across every tenor
+  second, never across instruments: a buyer of the at-the-money says nothing
+  about the risk reversal. A zero weight shows the record and applies none of
+  it.
+- **The record is kept in the book's convention.** A row asked as `JPY call
+  over` carries `sign = -1`; `record_quote` turns the bid and offer back
+  before filing and notes how it was asked, and `answer` swaps `traded_bid`
+  and `traded_ask` (and negates `away_level`) for a row shown that way. The
+  lean is applied in the book's convention and multiplied by the row's sign
+  once, where the row is built. One convention in the file is what lets a
+  client's record on the risk reversal be one record however each request was
+  worded, and §5's first entry is what a sign kept in two places costs.
+- **Recording is a button, answering is five, and both are the same functions
+  the command line calls.** `/api/mm/record` files every priced row of the
+  Quote answer the browser is holding (posted whole -- the server holds no
+  screen state, §4) as a `shown` observation under the client on the bar,
+  with the mid the model had *then*; `/api/mm/outcome` files one answer. The
+  browser keeps the ids against the request lines (`MQREC`) and re-keys them
+  when the pair, the request box or the client changes. A price that is shown
+  and not recorded can never become evidence, and the moment to answer it is
+  when the phone goes down.
 - **Thin evidence produces no number.** Weights sum to an effective count and
   below the floor (default 2.0) the answer is "not enough", named, with what
-  there is. Same rule as the bank, same reason.
+  there is. Same rule as the bank, same reason; the client's minimum is the
+  same rule in counts.
 - **Age is a weight, not a cutoff.** `0.5 ** (age / half_life)`, default five
   days. A cutoff would make a width jump the day one observation crossed a
   line, for a reason nobody could point at. An observation with no readable
-  time counts as one half-life old — treating it as current and dropping it
+  time counts as one half-life old -- treating it as current and dropping it
   are both wrong in a way that surfaces later as a width nobody can explain.
 - **Nothing after the valuation time is used.** `--asof` a past date and the
   archive is read to that instant, and says how many observations it left out.
   Without this every backward-looking check on this tool flatters it.
+- **Filing the pasted run stamps it at the start of the valuation day**, not
+  at the instant the button was pressed -- the id is a hash of the content, so
+  "now" would give a double-clicked morning a new id and count it twice in
+  every width it touches. The same run under a *different* broker name is a
+  genuinely new record (three brokers showing one width is stronger evidence
+  than one broker three times) and is also the obvious way to double a width
+  by accident, so `under_another_name` counts it and the card says so. The
+  paste is read by `agent.paste_from_request`, and a test pins the page's
+  `PF` list against it, as `MQF` is pinned against
+  `marketmaker.quote_panel_from_request`.
+- **The browser chooses when to scan, never where.** The watched folders come
+  from `serve --chats` / `--sdr` and live on the service; the ingest route
+  reads no path out of the payload, and a test pins that. A path a page can
+  post is a path anything that reaches the page can read.
+- **A folder scan does not hold the book lock.** The archive has its own; a
+  minute spent reading a large SDR file or waiting on a model is not a minute
+  the pricing screen is frozen.
 
 The model, specifically:
 
@@ -341,10 +386,21 @@ to be inferred, and this module is the only place that inference lives.
   currency per volatility point, which is the unit the quote panel's own axe is
   typed in, so the two can be compared without conversion.
 - **It decides nothing.** The module produces a signed, age-weighted vega per
-  tenor bucket and stops. `marketmaker.skew_for` takes it as a fourth lean
-  beside the fair value, the axe and the bank, **off unless `flow_weight` is
-  set**, capped with the others, and on level instruments only: what the tape
-  paid for says nothing about where the skew belongs.
+  tenor bucket and stops. `marketmaker.skew_for` takes it as a lean beside
+  the fair value, the axe, the client and the bank, **off unless
+  `flow_weight` is set**, capped with the others, and on level instruments
+  only: what the tape paid for says nothing about where the skew belongs.
+- **It is read in one place and shown in two.** `QuotePanel._flow` reads it
+  on every quote, off the marks being quoted, with the archive card's own
+  half-life and window (one evidence clock: `flow_half_life` and
+  `flow_lookback_days` were a second pair of boxes and are gone; the
+  tolerance stays, as `Flow tol` on the bar). The quote answer's `flow` block
+  is painted on the archive card under the widths -- there was a card of its
+  own, and a card that only repeated a block the quote already carried was a
+  second place for the tape to be stale. `ask._answer_flow` reads the same
+  `read_flow` off the same surface for a question in words (`flow` topic:
+  paid, given, tape, who has been buying), so the sheet and the answer never
+  disagree about which side a print was on.
 - **Paid means mark up.** Customers paying means dealers are getting shorter
   and the next caller is more likely another buyer, which is the opposite sign
   to a long vega axe. A desk that would rather fade the crowd sets a negative

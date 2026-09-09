@@ -44,6 +44,26 @@ the server keeps no panel state and `volkit listed` reproduces a screen exactly.
   market implied.
 - The parser reports every inference and every rejected line. A table
   straddling 1.0 is refused, not guessed.
+- **A two-way is kept beside the mid it made.** Where the paste has `bid` and
+  `ask`/`offer` columns, `Quote.bid` and `Quote.ask` carry them in the same
+  unit as the mid, whether or not the mid came from them: a table with bid,
+  ask *and* a settlement mid is ordinary, and the mid being somebody else's
+  number does not make the two-way less true. The fit is unchanged — it is
+  still one number per strike — because the two-way answers a different
+  question: `run()` returns `bid_vol`, `ask_vol` and `mark_outside` per row,
+  and `n_two_way` / `n_outside` beside them, where `mark_outside` is the
+  **marked FX surface** reading outside the listed bid/offer at that strike.
+  `None` there means there is nothing to say (no two-way, or no pair to
+  compare against) and is deliberately not `False`. The screen's **bid/offer**
+  switch draws the two lines and paints the breaching strikes; the count is on
+  the panel's stat line whether or not the lines are drawn, and the CLI prints
+  the columns and flags the rows. A crossed or non-positive two-way is not a
+  market: it is dropped and counted, the row surviving on its own mid where it
+  has one and skipped with that reason where it does not. An explicit
+  **vol column** turns the two-way off, because that says which single column
+  to believe. Two rows at one strike keep a two-way only when both had one —
+  a bid from one quote beside an offer from another is not a market anybody
+  made.
 - The arbitrage check runs in **moneyness, per unit of forward**. In raw
   strike units the second difference of a yen future's prices is small enough
   that rounding reads as arbitrage; the test pins this at four forwards.
