@@ -94,7 +94,7 @@ REQUIRED_SOURCES = [
 USER_DATA = [
     # The workbook, which now carries the settings too: the peg bands, the
     # kACE pillars and widths, and the holidays no rule derives are tabs of
-    # it (PEG_BANDS, KACE_SPREADS, HOLIDAYS -- see volkit/configsheets.py),
+    # it (PEG_BANDS, SPREADS, HOLIDAYS -- see volkit/configsheets.py),
     # not four loose CSVs a desk can copy three of.
     "files/vol_marks.xlsx",
     "files/market_feed.csv",

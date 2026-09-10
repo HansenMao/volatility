@@ -399,6 +399,26 @@ tr.sep td{border-top:1px solid var(--line);color:var(--muted);font-size:10.5px;
 
 /* ---- market maker ---- */
 .mmbar{display:flex;gap:9px;align-items:flex-end;flex-wrap:wrap;margin-bottom:12px}
+/* The export screen's pair picker: a dropdown of checkboxes, because a
+   multi-select box hides its own state and a row of forty checkboxes is not
+   a bar. The summary line says which are ticked, so it reads closed. */
+.mmpick{position:relative;width:auto}
+.mmpick summary{list-style:none;cursor:pointer;padding:5px 7px;font-size:12px;
+  border:1px solid var(--line);border-radius:6px;background:var(--field);color:var(--ink);
+  min-width:150px;max-width:260px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.mmpick summary::-webkit-details-marker{display:none}
+.mmpick summary::after{content:" \25BE";color:var(--muted)}
+.mmpicklist{position:absolute;z-index:20;top:100%;left:0;margin-top:3px;min-width:180px;
+  max-height:260px;overflow-y:auto;padding:6px 8px;background:var(--panel,var(--bg));
+  border:1px solid var(--line);border-radius:6px;box-shadow:0 6px 18px rgba(0,0,0,.15)}
+.mmpicklist label{display:flex;align-items:center;gap:6px;margin:0;width:auto;font-size:12px;
+  padding:2px 0;cursor:pointer}
+.mmpicklist label input{width:auto}
+.mmpicklist .mmpickall{border-bottom:1px solid var(--line);margin-bottom:4px;padding-bottom:4px;
+  color:var(--muted)}
+.mmchk{display:flex;align-items:center;gap:6px;margin:0;width:auto;font-size:12px;
+  padding:5px 0;color:var(--ink)}
+table.mmxr td{padding:2px 6px}
 .mmbar .f label{margin:0 0 3px}
 .mmbar .f input,.mmbar .f select{padding:5px 7px;font-size:12px}
 .mmbar .acts{display:flex;gap:8px;align-items:center}
@@ -485,6 +505,7 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
     <button data-p="monitor">Monitor</button>
     <button data-p="listed">Exchange traded</button>
     <button data-p="analysis">Analysis</button>
+    <button data-p="export">Vol bulk processing</button>
     <button data-p="mm">Market maker</button>
   </div>
   <button class="ghost" style="width:auto" id="cfgopen"
@@ -1371,11 +1392,121 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
 </div>
 
 <!-- ========================= MARKET MAKER ========================= -->
-<div class="wrap hide" id="p-mm">
+<!-- ======================= VOL BULK PROCESSING ======================= -->
+<!-- Bulk publishing, in two halves.  INPUT: an outside file read into an
+     overlay, compared against the book, and -- pair by pair, only where
+     ticked -- written over the book.  OUTPUT: every channel the marks go out
+     on, each pair read from the book or from the overlay as chosen, with the
+     preflight, the export-policy tables and the log.  The single-pair
+     workbench stays the kACE feed sub-tab on the Vol marking screen
+     (claude/publishing-channels-design.md, claude/screen-export.md). -->
+<div class="wrap hide" id="p-export">
   <div class="mmbar">
-    <div class="f"><label>Pair</label><select id="mmpair" style="width:118px"></select></div>
-    <div class="f"><label>Cut</label><select id="mmcut" style="width:72px"></select></div>
-    <div class="f"><label>Interp</label><select id="mmmethod" style="width:92px"></select></div>
+    <div class="meta" id="xbadge"></div>
+    <div class="grow"></div>
+    <div class="meta" id="xstatus"></div>
+  </div>
+  <div class="mmgrid" style="grid-template-columns:minmax(340px,1fr) minmax(560px,1.9fr)">
+    <div class="mmleft">
+      <section class="card"><h2>Input <small>an outside file, read into an overlay</small></h2>
+        <div class="row" style="flex-wrap:wrap;gap:6px">
+          <input id="xovpath" placeholder="path to a CSV or xlsx of pair, tenor, atm, rr25, rr10, bf25, bf10" style="flex:1;min-width:200px">
+          <button class="ghost" id="xovload" style="width:auto;padding:5px 12px;font-size:12px">Load</button>
+        </div>
+        <details class="hint" style="margin-top:6px"><summary>or paste the rows</summary>
+          <textarea id="xovtext" spellcheck="false" style="width:100%;height:110px;margin-top:6px;font:11.5px/1.4 ui-monospace,Menlo,Consolas,monospace"
+            placeholder="pair,tenor,atm,rr25,rr10,bf25,bf10&#10;AUDHKD,1M,8.30,0.10,0.20,0.30,0.90&#10;USDJPY,1M,,-2.50,,,   (blank cells fall through to the book)"></textarea>
+          <button class="ghost" id="xovpaste" style="width:auto;padding:4px 11px;font-size:11px;margin-top:4px">Load the pasted rows</button></details>
+        <div id="xovinfo" class="meta" style="margin-top:8px"></div>
+        <!-- One line per pair the file carries: whether the book holds it,
+             and a tick to write it over the book.  Ticked pairs go on as
+             ordinary overwrites behind a session snapshot; the rest stay in
+             the overlay for the Output side to read. -->
+        <div id="xovpairs" style="margin-top:8px"></div>
+        <div class="row" style="flex-wrap:wrap;gap:6px;margin-top:8px" id="xovacts"></div>
+        <div class="hint" style="margin-top:8px">Loaded, the overlay changes nothing: every other screen, the kACE feed sub-tab included, shows the marks as they were, and the Output side reads it only for the pairs set to <b>overlay</b> there. <b>Overwrite book</b> puts the ticked pairs&rsquo; rows onto the book itself (an ATM overwrite and typed quotes, the same as marking them by hand) after saving the session as it was (<code>pre-overlay-&lt;stamp&gt;.json</code>); <b>Revert</b> puts that back, whole. While anything is overwritten, <b>Write to workbook</b> refuses and a session save writes only the rows inside the book and says what it left out.</div>
+      </section>
+
+      <section class="card"><h2>Compare <small>book against overlay, mids and both sides</small></h2>
+        <div class="row" style="flex-wrap:wrap;gap:8px;align-items:flex-end">
+          <div class="f" title="whose widths and shades the two-ways are compared at -- the same tier, market width and shade on both sides"><label>At the widths of</label><select id="xcmpchan" style="width:150px"></select></div>
+          <div class="f" title="the largest move, in vol points, to colour as a warning"><label>Flag above</label><input id="xcmptol" value="0.5" style="width:60px"></div>
+          <button id="xcmpgo" style="width:auto;padding:6px 14px;font-size:12px">Compare</button>
+          <label class="mmchk" title="also the four wings, mid and both sides"><input type="checkbox" id="xcmpwings"> wings too</label>
+        </div>
+        <div id="xcmp" style="margin-top:8px"><div class="etoempty">Load an overlay and press <b>Compare</b>.</div></div>
+      </section>
+    </div>
+
+    <div class="mmright">
+      <section class="card"><h2>Output <small>where the marks go, and which source each pair is read from</small></h2>
+        <div class="row" style="flex-wrap:wrap;gap:8px;align-items:flex-end">
+          <div class="f"><label>Destination</label><select id="xchan" style="width:150px"></select></div>
+          <div class="f" title="which of the channel's pairs go, and from where: the channel's own list is the EXPORT_PAIRS table below; a pair the overlay carries can be read from it or from the book">
+            <label>Pairs and sources</label>
+            <details class="mmpick" id="xpick"><summary id="xpicksum">every pair</summary>
+              <div class="mmpicklist" id="xpairs" style="min-width:300px"></div></details></div>
+          <div class="f" id="xsrcall" title="set every pair the overlay carries to be read from it, or every pair to the book">
+            <label>Overlay pairs</label>
+            <div class="row" style="gap:4px"><button class="ghost" id="xallov" style="width:auto;padding:4px 9px;font-size:11px">from overlay</button>
+              <button class="ghost" id="xallbook" style="width:auto;padding:4px 9px;font-size:11px">from book</button></div></div>
+        </div>
+        <div class="meta" id="xchanwhat" style="margin-top:6px"></div>
+        <div id="xsrcline" class="meta" style="margin-top:6px"></div>
+        <div class="row" style="flex-wrap:wrap;gap:8px;align-items:flex-end;margin-top:8px">
+          <div class="f" id="xtierf" title="which spreading tier's widths go out -- a column of the SPREADS table below"><label>Tier</label><select id="xtier" style="width:100px"></select></div>
+          <div class="f" id="xmultf" title="multiply the widths by this; the mid does not move"><label>Width &times;</label><input id="xmult" value="1" style="width:56px"></div>
+          <div class="f" title="the quoted marks, or what the fitted surface returns at each pillar"><label>Wings</label><select id="xwings" style="width:84px"></select></div>
+          <div class="f" id="xscnf" title="the kACE scenario the vols are posted into"><label>Scenario</label><input id="xscn" style="width:80px"></div>
+          <div class="f" id="xtolf" title="the largest move, in vol points, an overlay pair may make against a book value before the run is refused; blank warns only"><label>Tolerance</label><input id="xtol" placeholder="off" style="width:60px"></div>
+          <div class="f" id="xdatef" title="the date the file name carries; blank is the book's valuation date"><label>File date</label><input id="xdate" placeholder="book's" style="width:104px"></div>
+        </div>
+        <div class="mmknob" style="margin-top:8px">
+          <label id="xkeyl" title="post each pillar's ATM two-way and wings alone, and no calendar-day ATM nodes"><input type="checkbox" id="xkey"> key tenors only</label>
+          <label id="xinterpl" title="a day between two pillars takes a width read across between them"><input type="checkbox" id="xinterp"> interpolate widths</label>
+          <label id="xconfl" title="write the file even though its date and this machine's disagree (a book loaded as of yesterday, a file built after midnight)"><input type="checkbox" id="xconfirmdate"> date as the book</label>
+          <label title="build and show, send nothing, log nothing"><input type="checkbox" id="xdry"> dry run</label>
+        </div>
+        <div class="row" style="flex-wrap:wrap;gap:8px;margin-top:10px">
+          <button id="xbuild" style="width:auto;padding:6px 14px;font-size:12px" title="build the export from the chosen sources and show exactly what would go">Build</button>
+          <button id="xsend" style="width:auto;padding:6px 14px;font-size:12px" disabled title="post the messages, or write the file into the export folder; asks once">Send</button>
+          <span id="xdl" class="hide row" style="gap:12px;align-items:center;flex-wrap:wrap" title="the built file, downloaded rather than written into the export folder; a destination that writes two files offers each of them"></span>
+        </div>
+        <div id="xconfirm" class="hide" style="display:flex;gap:8px;align-items:center;margin-top:9px;padding:8px 10px;border:1px solid var(--line);border-radius:6px;flex-wrap:wrap"></div>
+        <div class="msg" id="xmsg" style="margin-top:6px"></div>
+      </section>
+
+      <section class="card"><h2>Preflight <small>what this run will and will not do</small></h2>
+        <div id="xpre"><div class="etoempty">Nothing built yet. Choose a channel, set each pair&rsquo;s source, and press <b>Build</b>.</div></div>
+      </section>
+
+      <section class="card"><h2>Configuration <small>export policy, edited here, read everywhere</small></h2>
+        <div class="hint">These tables live in the workbook like every other setting and are written into it with the marks (<b>Write to workbook</b> on the Vol marking screen). They are edited here rather than in the Config window because they are export policy. A blank cell falls through to its default; a pair a channel wants that <code>MARKET_WIDTHS</code> or <code>WING_WIDTHS</code> does not carry is refused by name.
+          <span id="xseedwrap"> <button class="ghost" id="xseed" style="width:auto;padding:3px 9px;font-size:11px" title="put the tables this workbook lacks into the session, seeded from the desk's own files of 2026-09-10: each channel's pairs in the file's order, the Bloomberg widths and wing widths, the shade and the add-ups">Seed the missing tables</button></span></div>
+        <div id="xcfgtabs"></div>
+        <div id="xcfgconfirm" class="hide" style="display:flex;gap:8px;align-items:center;margin-top:9px;padding:8px 10px;border:1px solid var(--line);border-radius:6px"></div>
+        <div class="msg" id="xcfgmsg"></div>
+      </section>
+
+      <section class="card"><h2>Log <small id="xloghead"></small></h2>
+        <div class="row" style="gap:8px;align-items:center;margin-bottom:6px">
+          <select id="xlogchan" style="width:auto"><option value="">every channel</option></select>
+          <button class="ghost" id="xlogrefresh" style="width:auto;padding:3px 9px;font-size:11px">Refresh</button>
+        </div>
+        <div id="xlog"></div>
+      </section>
+    </div>
+  </div>
+</div>
+
+<div class="wrap hide" id="p-mm">
+  <!-- No pair, cut or interpolation on this bar.  The pair is named in the
+       boxes -- on the line or as a heading -- so one sheet prices several at
+       once; the one selector on the tab is the marking agent card's, because
+       a fit is of one curve.  The cut and the interpolation are the Vol
+       marking tab's: the cut as chosen there, the interpolation that tab's
+       for the pair it shows and each other pair's own default. -->
+  <div class="mmbar">
     <div class="f"><label>&ldquo;fly&rdquo; means</label><select id="mmfly" style="width:120px"></select></div>
     <div class="f"><label>Vol unit</label><select id="mmunit" style="width:86px"></select></div>
     <div class="f"
@@ -1426,12 +1557,12 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
     <div class="mmleft">
       <section class="card"><h2>The market <small>paste the run, one quote a line</small></h2>
         <textarea id="mmtext" spellcheck="false" style="height:250px"
-          placeholder="1M ATM 8.20/8.60 in 100mm vega&#10;3M 25d RR 0.35/0.55 eur call over&#10;2M 25d fly 0.20/0.28&#10;6M 1.1000 call 7.90/8.40&#10;1M/3M ATM spread 0.30/0.55&#10;6M 1.10 call vs 1.15 call 0.35/0.55&#10;30sep26 1.1000 call 125/135 pips live&#10;6M 1.2500 live 12/14bp   (no side: read from the moneyness)&#10;fri ATM 8.15/8.55   (a weekday: the next Friday from today)&#10;USDJPY 1M ATM 9.0/9.4   (another pair: passed over)&#10;&#10;or as columns — time, expiry, strike, bid/offer:&#10;09:15, 1M, ATM,  8.20/8.60&#10;09:15, 3M, 1.0900, 8.10/8.50&#10;09:41, 1M, ATM,  8.25/8.65"></textarea>
+          placeholder="eur 1M ATM 8.20/8.60 in 100mm vega&#10;eur 3M 25d RR 0.35/0.55 eur call over&#10;eur 2M 25d fly 0.20/0.28&#10;eur 6M 1.1000 call 7.90/8.40&#10;eur 1M/3M ATM spread 0.30/0.55&#10;eur 6M 1.10 call vs 1.15 call 0.35/0.55&#10;&#10;cnh   (one currency names the pair; on a line of its own it is a heading)&#10;29 Sep 6.6600 call 125/135 pips live   (a date with the spaces left in)&#10;6M 6.9000 live 12/14bp   (no side: read from the moneyness)&#10;fri ATM 4.15/4.55   (a weekday: the next Friday from today)&#10;&#10;or as columns — time, expiry, strike, bid/offer:&#10;09:15, 1M, ATM,  4.20/4.60&#10;09:15, 3M, 6.9000, 4.10/4.50&#10;09:41, 1M, ATM,  4.25/4.65"></textarea>
         <div class="msg" id="mmparse"></div></section>
 
       <section class="card"><h2>What we are asked for <small>one instrument a line, no prices</small></h2>
         <textarea id="mqtext" spellcheck="false" style="height:150px"
-          placeholder="1M ATM in 100mm&#10;3M 25d RR&#10;2M 25d fly&#10;6M 1.1000 call&#10;1M/3M ATM spread&#10;6M 1.10 call vs 1.15 call&#10;3M 1.0900 put live in pips&#10;fri ATM&#10;&#10;the same words as the market box, with the price left off"></textarea>
+          placeholder="eur 1M ATM in 100mm&#10;eur 3M 25d RR&#10;eur 2M 25d fly&#10;eur 6M 1.1000 call&#10;eur 1M/3M ATM spread&#10;eur 6M 1.10 call vs 1.15 call&#10;cnh 29 Sep 6.6600 put live in pips&#10;cnh fri ATM&#10;&#10;the same words as the market box, with the price left off"></textarea>
         <div class="msg" id="mqparse"></div></section>
 
       <section class="card hide" id="mmtargetcard">
@@ -1460,6 +1591,7 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
 
       <section class="card"><h2>Marking agent <small id="markhead"></small></h2>
         <div class="mmbar" style="margin:0 0 10px">
+          <div class="f" title="the one pair this card marks. A fit is of one curve, so the pair lives here and nowhere else on the tab: the check and the quote take theirs from the boxes, and the cards under the sheet show every pair."><label>Pair</label><select id="markpair" style="width:118px"></select></div>
           <div class="f"><label>Target ATM curve</label><select id="mmsource" style="width:150px"></select></div>
           <div class="f"><label>Journal lookback (d)</label><input id="marklook" value="365" style="width:104px"></div>
           <div class="f"><label>Min instances</label><input id="markmin" value="5" style="width:88px"></div>
@@ -1936,7 +2068,10 @@ const api=async(p,o)=>{const r=await fetch(p,o);const j=await r.json();
    marks and the quote refuses a stale one whatever the browser believed. */
 const MARKING_ROUTES=['/api/overwrite','/api/curve','/api/events','/api/events/weights',
   '/api/band','/api/atm/bump','/api/reload','/api/session/load','/api/config/save',
-  '/api/config/pair','/api/workbook/restore','/api/mm/mark/fit','/api/mm/mark/record'];
+  '/api/config/pair','/api/workbook/restore','/api/mm/mark/fit','/api/mm/mark/record',
+  /* The export overlay applied to (or reverted off) the session, and the
+     export tables seeded into it: both put marks on the book or rebuild it. */
+  '/api/export/overlay','/api/export/seed'];
 const post=async(p,b)=>{
   const j=await api(p,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});
   if(MARKING_ROUTES.indexOf(String(p).split('?')[0])>=0)bookMoved();
@@ -1968,7 +2103,7 @@ let STATE={}, PANEL='pricing', TAB='smile', LEGS=[], RESULT=null, MARKS=null;
    without a tab (build_exe.py --exclude-tab) and then its routes are refused,
    so the page must not show it, boot it, or leave it as the open tab. */
 const PANELROOT={pricing:'#p-pricing',marking:'#p-marking',monitor:'#p-monitor',
-                 listed:'#p-listed',analysis:'#p-analysis',mm:'#p-mm'};
+                 listed:'#p-listed',analysis:'#p-analysis',export:'#p-export',mm:'#p-mm'};
 let SCREENS=Object.keys(PANELROOT);
 const has=n=>SCREENS.indexOf(n)>=0;
 
@@ -3588,6 +3723,17 @@ function kaceWidths(r){
     ((isFinite(m)&&m&&m!==1)?' &times;'+esc(String(+m.toFixed(6))):'')+
     ((r&&r.interpolate)?', interpolated':'');
 }
+/* Which numbers this single-pair post goes out on, when the Vol exporting
+   bulk screen holds an overlay.  Export only: the marks, not the overlay --
+   the right way round, and worth a line here because the two screens are
+   one book.  Applied to the session: the overlay is the book now. */
+function kaceOverlayNote(){
+  const O=((STATE.export||{}).overlay)||{};
+  if(!O.loaded)return '';
+  return '<div class="'+(O.applied?'etowarn':'etonote')+'" style="margin-top:8px">'+
+    (O.applied?'! the overlay '+esc(O.name)+' is written over the book for '+esc((O.applied_pairs||[]).join(', '))+', so a post of one of those pairs goes out on it -- it is the book until Revert on the Vol bulk processing screen'
+              :'· an overlay ('+esc(O.name)+') is loaded on the Vol bulk processing screen, export only: this post goes out on the marks, not on it')+'</div>';
+}
 async function drawKace(){
   const p=$('#panes');p.innerHTML='<div class="meta"><span class="spin"></span> building the feed…</div>';
   const o=mq(),K=STATE.kace||{},scn=kaceScenario(),tier=kaceTier(),
@@ -3622,6 +3768,7 @@ async function drawKace(){
       <tbody>${d.pillars.map(r=>`<tr><td>${esc(r.tenor)}</td><td>${esc(r.expiry)}</td><td>${num(r.spread,2)}</td><td>${vnum(r.bid)}</td><td>${vnum(r.offer)}</td>
         <td>${vnum(r.rr25)}</td><td>${vnum(r.rr10)}</td><td>${vnum(r.fly25)}</td><td>${vnum(r.fly10)}</td><td class="meta">${esc(r.wings)}</td></tr>`).join('')}</tbody></table></div>
     ${d.notes.length?`<div class="meta" style="margin-top:8px">${d.notes.map(n=>'· '+esc(n)).join('<br>')}</div>`:''}
+    ${kaceOverlayNote()}
     <details class="hint" style="margin-top:8px"><summary>Where the widths come from, and where a post goes</summary>Spread table: ${esc(K.spreads||'')}, tier <b>${esc(d.tier)}</b> of ${(K.tiers||[]).map(esc).join(', ')} &mdash; a tier is a column of that tab and is added, edited or removed in the <b>Config</b> window; the pillars are its rows and are the same whichever tier is posted. The <b>&times;</b> box multiplies every one of that tier's widths on the way out &mdash; the mid of each two-way does not move &mdash; and <b>interpolate</b> reads a day between two pillars straight across between their widths instead of taking the last pillar's, which is what the spreadsheet did and is still the default. Both are the morning's, like the tier, and both are recorded with the post. RR is the base-currency call vol minus the put vol; S is the butterfly.
       ${K.url?`Posts go to <b>${esc(K.url)}</b>${K.insecure?' (certificate not checked)':''}, the way the XML poster page sends them, and are recorded in ${esc(K.log||'')}.`:'No post address is set (kace-url in volkit.cfg, or --kace-url): copy or download the message and paste it into the kACE XML poster.'}</details>
     ${(K.posts||[]).length?`<div class="scroll" style="margin-top:8px"><table style="width:100%"><thead><tr><th>Posted</th><th>Pair</th><th>Scenario</th><th>Widths</th><th>What</th><th>Nodes</th><th>Outcome</th></tr></thead>
@@ -5547,7 +5694,7 @@ async function loadConfig(){
     b.onclick=()=>cfgConfirm('Take <b>'+esc(b.dataset.pair)+'</b> out of the workbook\'s pair list? '+
       'Its column and its sheet stay where they are.','Remove',
       ()=>post('/api/config/pair',{action:'remove',pair:b.dataset.pair}));});
-  cfgPaintTabs();
+  cfgPaintTabs('config');
   loadVersions();
 }
 /* One tab's table, and the controls under it.  Painted from CFG rather than
@@ -5557,7 +5704,10 @@ async function loadConfig(){
 function cfgHarvest(i){
   const t=CFG.tabs[i]; if(!t||t.error)return;
   const rows=[];
-  $('#cfgtabs').querySelectorAll('input[data-tab="'+i+'"]').forEach(el=>{
+  /* Wherever the tab is painted -- the Config window or the export screen's
+     Configuration card -- the inputs carry the tab's index, so one harvest
+     reads either. */
+  document.querySelectorAll('input[data-tab="'+i+'"][data-col]').forEach(el=>{
     const r=+el.dataset.row; rows[r]=rows[r]||{};
     const v=el.value.trim();
     /* Typed as text and sent as a number where it reads as one: the tab
@@ -5604,9 +5754,20 @@ function cfgTabHtml(t,i){
       '" style="width:auto;padding:4px 11px;font-size:11px">Add '+esc(t.open)+'</button>':'')+
     '</div>'+(t.measure==='vega'?cfgVegaHtml(i):'')+'</div>';
 }
-function cfgPaintTabs(){
-  $('#cfgtabs').innerHTML=(CFG.tabs||[]).map(cfgTabHtml).join('');
-  $('#cfgtabs').querySelectorAll('.cfgsave').forEach(b=>{
+/* The two editors of the configuration tabs: the Config window shows the
+   tabs that configure the book, the export screen's Configuration card the
+   export-policy tables (`where` is the server's, from configsheets.EXPORT_TABS).
+   One painter, told which root and which tabs, so a column added on one
+   screen is added the way it is on the other. */
+const CFG_ROOTS={config:{root:'#cfgtabs',confirm:'#cfgconfirm',show:(m,b)=>cfgShow(m,b)},
+                 export:{root:'#xcfgtabs',confirm:'#xcfgconfirm',show:(m,b)=>xcfgShow(m,b)}};
+function cfgPaintTabs(where){
+  if(!where){cfgPaintTabs('config');if(has('export'))cfgPaintTabs('export');return}
+  const R=CFG_ROOTS[where], root=$(R.root);
+  if(!root||!CFG)return;
+  const mine=i=>((CFG.tabs[i].where||'config')===where);
+  root.innerHTML=(CFG.tabs||[]).map((t,i)=>mine(i)?cfgTabHtml(t,i):'').join('');
+  root.querySelectorAll('.cfgsave').forEach(b=>{
     b.onclick=()=>{
       const i=+b.dataset.tab, t=CFG.tabs[i];
       cfgHarvest(i);
@@ -5615,33 +5776,33 @@ function cfgPaintTabs(){
          two and repaints every screen. */
       cfgConfirm('Apply <b>'+esc(t.sheet)+'</b> to this session and read the book again on '+
         'it? The workbook is untouched until <b>Write to workbook</b>.','Apply',
-        ()=>post('/api/config/save',{sheet:t.sheet,rows:t.rows}));};});
-  $('#cfgtabs').querySelectorAll('.cfgaddcol').forEach(b=>{
+        ()=>post('/api/config/save',{sheet:t.sheet,rows:t.rows}),where);};});
+  root.querySelectorAll('.cfgaddcol').forEach(b=>{
     b.onclick=()=>{
       const i=+b.dataset.tab, t=CFG.tabs[i];
-      const box=$('#cfgtabs').querySelector('.cfgnewcol[data-tab="'+i+'"]');
+      const box=root.querySelector('.cfgnewcol[data-tab="'+i+'"]');
       const name=cfgColName(t.open,box.value||'');
-      if(!name){cfgShow('a column is a '+t.open+' -- '+(t.shape||''),true);return}
+      if(!name){R.show('a column is a '+t.open+' -- '+(t.shape||''),true);return}
       if(t.columns.map(c=>String(c).toLowerCase()).indexOf(name.toLowerCase())>=0){
-        cfgShow(name+' already has a column on '+t.sheet,true);return}
+        R.show(name+' already has a column on '+t.sheet,true);return}
       cfgHarvest(i);
       /* In front of any trailing note column, which is where the tab keeps
          it -- the server writes the columns back in the order it is sent. */
       const at=t.columns.indexOf('note');
       t.columns.splice(at<0?t.columns.length:at,0,name);
       box.value='';
-      cfgPaintTabs();
-      cfgShow(name+' has a column on '+t.sheet+' now; fill it in and press Apply '+t.sheet,false);};});
-  $('#cfgtabs').querySelectorAll('.cfgdropcol').forEach(b=>{
+      cfgPaintTabs(where);
+      R.show(name+' has a column on '+t.sheet+' now; fill it in and press Apply '+t.sheet,false);};});
+  root.querySelectorAll('.cfgdropcol').forEach(b=>{
     b.onclick=()=>{
       const i=+b.dataset.tab, t=CFG.tabs[i], name=b.dataset.col;
       cfgHarvest(i);
       t.columns=t.columns.filter(c=>c!==name);
       t.rows.forEach(r=>{delete r[name]});
-      cfgPaintTabs();
-      cfgShow(name+' is off '+t.sheet+' in this window; press Apply '+t.sheet+
+      cfgPaintTabs(where);
+      R.show(name+' is off '+t.sheet+' in this window; press Apply '+t.sheet+
         ' to take it off the book, and Write to workbook to take it out of the file',false);};});
-  cfgVegaBind();
+  if(where==='config')cfgVegaBind();
 }
 /* One added column's name, as the tab's reader will spell it -- or '' when it
    is not one.  The same rule as configsheets.open_column_ok, on the box the
@@ -5757,19 +5918,20 @@ function cfgVegaPaint(i){
          suggestion nobody can accept. */
       if(!row){row={tenor:x.tenor};t.rows.push(row);by[x.tenor]=row}
       row[into]=Math.round(x.beta*1e4)/1e4; n++;});
-    cfgPaintTabs();
+    cfgPaintTabs('config');
     cfgVegaPaint(i);
     cfgShow(n+' weight(s) suggested into the '+into+' column of '+t.sheet+
       '; check them and press Apply '+t.sheet,false);};
 }
-function cfgConfirm(html,label,run){
-  const c=$('#cfgconfirm');c.classList.remove('hide');
+function cfgConfirm(html,label,run,where){
+  const R=CFG_ROOTS[where||'config'];
+  const c=$(R.confirm);c.classList.remove('hide');
   c.innerHTML='<span>'+html+'</span><div class="grow"></div>'+
-    '<button id="cfggo" style="width:auto;padding:5px 12px;font-size:12px">'+esc(label)+'</button>'+
-    '<button id="cfgno" style="width:auto;padding:5px 12px;font-size:12px;background:transparent;color:var(--muted);border:1px solid var(--line)">Cancel</button>';
-  $('#cfgno').onclick=()=>c.classList.add('hide');
-  $('#cfggo').onclick=async()=>{
-    const go=$('#cfggo');go.disabled=true;go.textContent='working…';
+    '<button class="cfggo" style="width:auto;padding:5px 12px;font-size:12px">'+esc(label)+'</button>'+
+    '<button class="cfgno" style="width:auto;padding:5px 12px;font-size:12px;background:transparent;color:var(--muted);border:1px solid var(--line)">Cancel</button>';
+  c.querySelector('.cfgno').onclick=()=>c.classList.add('hide');
+  c.querySelector('.cfggo').onclick=async()=>{
+    const go=c.querySelector('.cfggo');go.disabled=true;go.textContent='working…';
     try{
       const r=await run();
       c.classList.add('hide');
@@ -5778,9 +5940,9 @@ function cfgConfirm(html,label,run){
          the state and every screen with it, and the tables here are rebuilt
          from what the book was built with rather than from what was typed
          into them. */
-      await boot(); await loadConfig(); await loadVersions();
-      cfgShow(said,false);
-    }catch(e){c.classList.add('hide');cfgShow(e.message,true)}
+      await boot(); await loadConfig(); await loadVersions(); await xLoadCfg();
+      R.show(said,false);
+    }catch(e){c.classList.add('hide');R.show(e.message,true)}
   };
 }
 
@@ -6211,7 +6373,7 @@ $('#molist').oninput=e=>{
    whole, so `volkit mm` reproduces a screen exactly.  The one thing the
    server does keep is the knowledge bank, because that is a file the desk
    owns rather than a screen. */
-let MM={}, MCR=null, MQR=null, MMRULES=[], _mmt=null, _mqt=null, MKR=null, MFR=null;
+let MM={}, MCR=null, MQR=null, _mmt=null, _mqt=null, MKR=null, MFR=null;
 /* The prices this sheet has filed as shown, by request line: the archive id
    the outcome buttons answer, the sign the row was asked in, and what was
    answered.  Browser state, like everything else on the panel; a new quote of
@@ -6230,18 +6392,26 @@ let HELD=null;
    reads would be a setting that silently does nothing on the button it sits
    next to.
 
+   No pair on the check or the quote: a sheet takes its pairs from the box
+   (one line, one pair, named on the line or under a heading), and prices
+   every one it finds. And no cut or interpolation anywhere on this tab: both
+   are the Vol marking tab's, read by mmCutMethods() and sent as `cut` and
+   `methods` (a pair to its interpolation -- the marking tab's for the pair
+   it shows; every other pair is read with its own default). The marking
+   card is the one place with a pair, because a fit is of one curve.
+
    MCF is the check, and it is short because a check has nothing to decide:
    which knobs may move, what the target curve is and whether to keep anything
    are the marking card's, and they are on MFF and MKF. */
 const MCF=[
- ['pair','#mmpair'],['cut','#mmcut'],['method','#mmmethod'],
  ['fly_convention','#mmfly'],['vol_unit','#mmunit'],
  ['text','#mmtext'],['near_edge','#mmtol'],
 ];
-/* The desk's own fit, on the marking card: the market and the target curve,
-   the knobs as ticked, and whether to leave the answer on the book. */
+/* The desk's own fit, on the marking card: the pair, the market and the
+   target curve, the knobs as ticked, and whether to leave the answer on the
+   book. */
 const MFF=[
- ['pair','#mmpair'],['cut','#mmcut'],['method','#mmmethod'],
+ ['pair','#markpair'],
  ['target_source','#mmsource'],['fly_convention','#mmfly'],['vol_unit','#mmunit'],
  ['text','#mmtext'],['target_text','#mmtarget'],['apply','#markapply'],
  /* The mean-reversion range: a marking judgement rather than a property of
@@ -6252,7 +6422,6 @@ const MFF=[
  ['reversion_lo','#mmrevlo'],['reversion_hi','#mmrevhi'],
 ];
 const MQF=[
- ['pair','#mmpair'],['cut','#mmcut'],['method','#mmmethod'],
  ['fly_convention','#mmfly'],['vol_unit','#mmunit'],['text','#mmtext'],
  ['request_text','#mqtext'],
  ['fallback_tier','#mmfallbacktier'],['fallback_multiplier','#mmfallbackmult'],
@@ -6276,7 +6445,7 @@ const MQF=[
    reads, the range it proposes in, and what it learns from. Read by
    marking.panel_from_request, and a test pins this list against it. */
 const MKF=[
- ['pair','#mmpair'],['cut','#mmcut'],['method','#mmmethod'],
+ ['pair','#markpair'],
  ['target_source','#mmsource'],['fly_convention','#mmfly'],['vol_unit','#mmunit'],
  ['text','#mmtext'],['target_text','#mmtarget'],
  ['reversion_lo','#mmrevlo'],['reversion_hi','#mmrevhi'],
@@ -6291,10 +6460,31 @@ function readFields(list){
   list.forEach(f=>{const el=$(f[1]);out[f[0]]=el.type==='checkbox'?el.checked:el.value});
   return out;
 }
+/* The cut and the interpolation this tab prices with: the Vol marking tab's.
+   The cut is the one chosen there. The interpolation is per pair -- that
+   tab's choice for the pair it shows, and for every other pair nothing, which
+   the server reads as the pair's own default (what the marking tab would show
+   the moment it was switched to it). A build without the marking screen has
+   no boxes to read and sends the house cut. */
+function mmCutMethods(){
+  const out={cut:'',methods:{}};
+  if(!has('marking'))return out;
+  out.cut=$('#mcut').value||'';
+  const p=$('#mpair').value, m=$('#mmethod').value;
+  if(p&&m)out.methods[p]=m;
+  return out;
+}
+/* The marking card's one pair, and its interpolation under the same rule. */
+function markPair(){return $('#markpair').value}
+function mmMarkMethod(pair){const cm=mmCutMethods();return cm.methods[pair]||''}
+/* One string for "what the two read-only stages were last run with", so a
+   sheet run before the marking tab's cut moved can be told from one run
+   after it. */
+function mmCmKey(){return JSON.stringify(mmCutMethods())}
 /* The check: the paste, the conventions, the tolerance, and the marks it is
    told to read against. Nothing about fitting, because it does not fit. */
 function mcPayload(){
-  const out=readFields(MCF);
+  const out=Object.assign(readFields(MCF),mmCutMethods());
   const m=mqMarks();
   if(m)out.marks=m;
   return out;
@@ -6305,6 +6495,7 @@ function mcPayload(){
    is one of them going stale. */
 function mfPayload(){
   const out=readFields(MFF);
+  out.cut=mmCutMethods().cut; out.method=mmMarkMethod(out.pair);
   out.free=[...$('#mmfree').querySelectorAll('input:checked')].map(x=>x.dataset.k);
   out.smile_free=[...$('#mmsmilefree').querySelectorAll('input:checked')].map(x=>x.dataset.k);
   out.fit_curve=out.free.length>0&&out.target_source!=='none';
@@ -6313,17 +6504,18 @@ function mfPayload(){
 }
 /* The marks are the whole hand-off from the marking card to the other two, and
    the browser is what holds them -- the server keeps no screen state. They go
-   over only when the box is ticked *and* the card has produced marks for this
-   pair; both servers say which of the two they read, so standing on a proposal
-   and standing on the book can never look the same. */
+   over only when the box is ticked *and* the card has produced marks for the
+   pair it is on; the sheets put them on that one pair and read every other
+   pair off the book, and say which, so standing on a proposal and standing on
+   the book can never look the same. */
 function mqMarks(){
   if(!$('#mqonmarks').checked||!HELD||!HELD.marks)return null;
-  if(HELD.marks.pair!==$('#mmpair').value)return null;
+  if(HELD.marks.pair!==markPair())return null;
   return HELD.marks;
 }
 function holdMarks(marks,from){HELD=marks?{marks:marks,from:from,stale:false}:null;mqAvailable()}
 function mqPayload(){
-  const out=readFields(MQF);
+  const out=Object.assign(readFields(MQF),mmCutMethods());
   const m=mqMarks();
   if(m)out.marks=m;
   return out;
@@ -6332,10 +6524,10 @@ const HELDFROM={agent:"the marking agent's accepted proposal",hand:'your own fit
 function mqAvailable(){
   /* A checkbox that can be ticked and then quietly does nothing is the same
      failure as a box that is filled in and ignored. */
-  const ok=!!(HELD&&HELD.marks&&HELD.marks.pair===$('#mmpair').value);
+  const ok=!!(HELD&&HELD.marks&&HELD.marks.pair===markPair());
   const stale=ok&&!!HELD.stale;
   $('#mqonmarks').disabled=!ok;
-  $('#mqonmarks').title=!ok?'the marking card has produced no marks for this pair yet — the check and the quote read the marks as they are'
+  $('#mqonmarks').title=!ok?'the marking card has produced no marks for its pair yet — the check and the quote read every pair\'s marks as they are'
     :stale?'the book has been re-marked since these marks were made — the check and the quote will read the marks as they are now and say so; propose or fit again to stand on them'
     :('standing on '+(HELDFROM[HELD.from]||'the marking card'));
 }
@@ -6347,6 +6539,9 @@ function loadMM(){
   if(!MM||typeof MM!=='object')MM={};
   MCF.concat(MFF,MQF,MKF).forEach(f=>{const el=$(f[1]),v=MM[f[0]];if(v==null)return;
     if(el.type==='checkbox')el.checked=!!v; else el.value=v;});
+  /* A remembered pair the book no longer builds must not leave the select on
+     nothing: the first pair is the honest fallback, and the knobs follow it. */
+  if(!$('#markpair').value&&$('#markpair').options.length)$('#markpair').selectedIndex=0;
   /* The browser owns panel state, so the disclosure comes back as it was left
      -- and mmRevVisible() then clears the boxes if it was closed, so a range
      can never be restored into a control nobody can see. */
@@ -6376,7 +6571,7 @@ function mmRevVisible(){
 
 /* -- which parameters the fit may move -------------------------------- */
 function mmKnobList(){
-  const S=STATE.marketmaker||{}, pair=$('#mmpair').value;
+  const S=STATE.marketmaker||{}, pair=markPair();
   const cross=(STATE.crosses||{})[pair]!=null;
   return {names:cross?(S.cross_knobs||[]):(S.backbone_knobs||[]),
           on:cross?(S.default_cross_free||[]):(S.default_free||[]),
@@ -6431,6 +6626,7 @@ async function runCheck(){
   const stop=busy('#mmstatus','checking the market…');
   try{
     MCR=await post('/api/mm/check',body);
+    MCR._cm=mmCmKey();
     stop();
     saveMM();
     paintCheck();
@@ -6457,6 +6653,7 @@ async function runMQ(){
   const stop=busy('#mmstatus','quoting…');
   try{
     MQR=await post('/api/mm/quote',body);
+    MQR._cm=mmCmKey();
     stop();
     saveMM();
     mqRecordKey(body);
@@ -6498,7 +6695,11 @@ function paintCheck(){
 
 function paintMQ(){
   const d=MQR; if(!d)return;
-  paintQuote(d); paintAxe(d); paintBank(d.bank); paintAgent();
+  paintQuote(d); paintAxe(d); paintAgent();
+  /* The bank card shows every pair off its own route; a quote only tells it
+     whether the file could be read. */
+  if(d.bank&&(d.bank.error||(d.bank.problems||[]).length))
+    $('#mmbankmsg').innerHTML='<span class="etowarn">! '+esc(d.bank.error||d.bank.problems.join('; '))+'</span>';
   const sh=d.sheet||{};
   $('#mqparse').innerHTML=(sh.notes||[]).map(n=>'<div class="etonote">· '+esc(n)+'</div>').join('')+
     (sh.skipped||[]).map(x=>'<div class="etowarn">! line '+x.line+' skipped ('+esc(x.why)+'): '+
@@ -6507,18 +6708,25 @@ function paintMQ(){
       esc(String(x.text).slice(0,70))+'</div>').join('');
 }
 
+/* Every pair's rules at once, each under its own heading, edited in place and
+   saved together. `BANK.rules` is the page's copy, pair by pair; the file is
+   the server's. */
+let BANK={pairs:[],rules:{},updated:{},problems:[]};
 function paintBank(b){
   if(!b)return;
-  MMRULES=(b.rules||[]).slice();
+  BANK={pairs:(b.shown||[]).slice(),rules:{},updated:{},problems:(b.problems||[]).slice()};
+  BANK.pairs.forEach(p=>{const blk=(b.by_pair||{})[p]||{};
+    BANK.rules[p]=(blk.rules||[]).slice();BANK.updated[p]=blk.updated||''});
   renderRules();
-  $('#mmbankhead').textContent=(b.path?b.path:'no file yet')+
-    (b.updated?' · updated '+b.updated.replace('T',' ').slice(0,16):'');
+  $('#mmbankhead').textContent=(b.path?b.path:'no file yet')+' · '+BANK.pairs.length+' pair(s)'+
+    (b.error?' · '+b.error:'');
 }
 /* The bank is a file the desk keeps, not a result, so the card fills without
    anything having been run: a rule cannot be edited on a screen that will only
    show it after a price has been made. */
 async function loadBank(){
-  try{paintBank(await api('/api/mm/bank?'+qs({pair:$('#mmpair').value})))}catch(e){}
+  try{paintBank(await api('/api/mm/bank'))}catch(e){
+    $('#mmbankmsg').innerHTML='<span style="color:var(--bad)">'+esc(e.message)+'</span>'}
 }
 
 const MMTAG={'inside':'in','below':'out','above':'out'};
@@ -6604,10 +6812,10 @@ function paintMarket(d){
   /* The time column only appears when the paste was timed. A column of
      dashes on a run nobody timestamped is noise in a table already this wide. */
   const timed=sh.rows.some(r=>r.timestamp)||((sh.superseded||[]).length>0);
-  const ncol=(timed?9:8);
+  const ncol=(timed?10:9);
   let withwhy=0;
   let h='<div class="mmwide"><table><thead><tr>'+
-    '<th>Quote</th>'+(timed?'<th>Time</th>':'')+
+    '<th>Pair</th><th>Quote</th>'+(timed?'<th>Time</th>':'')+
     '<th>Size</th><th>Their bid</th><th>Their ask</th><th>Marked</th><th>Gap</th>'+
     '<th>Widths</th>'+
     '<th>Verdict</th></tr></thead><tbody>';
@@ -6616,7 +6824,7 @@ function paintMarket(d){
     /* A mark inside the market is nought from outside it; printing that as
        +0.0000 reads like a measurement rather than "not outside". */
     const out=r.position==='above'||r.position==='below';
-    h+='<tr class="mmline'+(why?' haswhy':'')+'"><td>'+esc(r.describe)+
+    h+='<tr class="mmline'+(why?' haswhy':'')+'"><td><b>'+esc(r.pair||'')+'</b></td><td>'+esc(r.describe)+
        (r.label?' <small>'+esc(r.label)+'</small>':'')+'</td>'+
        (timed?'<td class="mmv">'+esc(r.timestamp||'—')+'</td>':'')+
        '<td class="mmv">'+(r.size==null?'—':num(r.size,0)+'mm')+'</td>'+
@@ -6635,7 +6843,7 @@ function paintMarket(d){
   const al=sh.alerts||[];
   if(al.length)h+='<div class="'+(sh.through?'etowarn':'etonote')+'">'+(sh.through?'! ':'· ')+
     al.length+' line(s) '+(sh.through?'off the curve':'near the edge of their market')+': '+
-    al.map(a=>esc(a.describe)+' — '+esc(a.verdict)+
+    al.map(a=>esc((a.pair?a.pair+' ':'')+a.describe)+' — '+esc(a.verdict)+
       (a.gap?' by '+vnum(Math.abs(a.gap))+(a.widths==null?'':
         ' ('+num(Math.abs(a.widths),2)+' widths)'):'')).join('; ')+
     '. Nothing here moves a mark — propose on the marking agent card to re-mark.</div>';
@@ -6643,8 +6851,25 @@ function paintMarket(d){
     'comfortably inside its market.</div>';
   if(withwhy)h+='<div class="etonote">· '+withwhy+' line(s) carry a message; hover a line to '+
     'read it, click to keep it open.</div>';
+  h+=mmPairLines(d);
   host.innerHTML=h;
   wireWhy(host);
+}
+/* What each pair on a sheet was read with, and what went wrong for the ones
+   that could not be: a pair the book does not build, an expiry in the past.
+   One line per pair, under the table, because a sheet of three pairs is three
+   curves and the reader should be told which. */
+function mmPairLines(d){
+  const bp=d.by_pair||{}, ps=d.pairs||[];
+  if(!ps.length)return '';
+  return ps.map(p=>{const b=bp[p]||{};
+    if(b.error)return '<div class="etowarn">! '+esc(p)+': '+esc(b.error)+'</div>';
+    const mk=b.marks||{};
+    return '<div class="etonote">· '+esc(p)+': '+esc(b.cut||'')+' cut, '+esc(b.method||'')+
+      (mk.on_the_marks?', <b>on the marking card\'s marks</b>':'')+
+      ((mk.stale||[]).length?' <span class="etowarn">(held marks dropped: '+esc(mk.stale.join(', '))+')</span>':'')+
+      '</div>'}).join('')+
+    ((d.bare||[]).length?'<div class="etowarn">! '+d.bare.length+' line(s) name no pair and were not read: write the pair on the line or as a heading above it.</div>':'');
 }
 
 /* -- our quote: the instruments somebody asked for ---------------------- */
@@ -6673,9 +6898,9 @@ function paintQuote(d){
     esc((cl.record||[]).length?cl.record.join('; '):(cl.reason||'no record yet'))+'</div>';
   if(!sh.rows.length){host.innerHTML='<div class="annone">Nothing could be read from the '+
     'request box.</div>';$('#mqrecord').disabled=true;return}
-  const ncol=17;
+  const ncol=18;
   let h='<div class="mmwide"><table><thead><tr>'+
-    '<th>Instrument</th><th>Size</th><th>Model</th>'+
+    '<th>Pair</th><th>Instrument</th><th>Size</th><th>Model</th>'+
     '<th>Fair</th><th>Axe</th><th>Flow</th><th>Client</th><th>Bank</th><th>Skew</th>'+
     '<th>Our bid</th><th>Our ask</th><th>Width</th>'+
     '<th>Archive</th><th>Agent</th>'+
@@ -6688,7 +6913,7 @@ function paintQuote(d){
     if(r.client_record)extra.push(r.client+': '+r.client_record+
       (r.client_widen?' — widened by '+vnum(r.client_widen):''));
     const why=mmWhy(r,extra)+mqTrace(r);
-    h+='<tr class="mmline'+(why?' haswhy':'')+'"><td>'+esc(r.describe)+
+    h+='<tr class="mmline'+(why?' haswhy':'')+'"><td><b>'+esc(r.pair||'')+'</b></td><td>'+esc(r.describe)+
        (r.label?' <small>'+esc(r.label)+'</small>':'')+'</td>'+
        '<td class="mmv">'+(r.size==null?'—':num(r.size,0)+'mm')+'</td>'+
        '<td class="mmv">'+vnum(r.model)+'</td>'+
@@ -6735,11 +6960,17 @@ function paintQuote(d){
   else h+='<div class="etonote">· no fallback tier: a quote no bank rule and no archive '+
     'evidence covers gets no bid and no offer.</div>';
   const fromArchive=sh.rows.filter(r=>r.width_rung==='archive').length;
+  /* The archive is read per pair; what the sheet says is the sum, and the
+     card under it says each pair's. */
+  const arps=(d.pairs||[]).map(p=>((d.by_pair||{})[p]||{}).archive||{});
+  const arw=arps.reduce((n,a)=>n+(a.widths||0),0), arc=arps.reduce((n,a)=>n+(a.counted||0),0);
+  const arwhy=arps.map(a=>a.reason).filter(Boolean)[0]||'';
   h+='<div class="'+(ar.available?'etonote':'etowarn')+'">'+(ar.available?'· ':'! ')+
     (ar.available?('archive on the width ladder: '+fromArchive+' row(s) took their width from it, '+
-      (ar.widths||0)+' width(s) held with enough behind them, '+(ar.counted||0)+
-      ' observation(s) counted'):esc(ar.reason||''))+'</div>';
+      arw+' width(s) held with enough behind them, '+arc+
+      ' observation(s) counted across '+(d.pairs||[]).length+' pair(s)'):esc(arwhy||ar.reason||'no archive'))+'</div>';
   if(ar.error)h+='<div class="etowarn">! '+esc(ar.error)+'</div>';
+  h+=mmPairLines(d);
   if(sh.leaned_by_client||sh.widened_by_client)h+='<div class="etonote">· '+esc(cl.name||'the client')+
     '’s record leaned '+(sh.leaned_by_client||0)+' row(s) and widened '+
     (sh.widened_by_client||0)+'; the Client column is the lean, the Width column shows the widening.</div>';
@@ -6777,7 +7008,7 @@ const OUTCOMES=[['traded_bid','hit bid','they sold to us on our bid'],
                 ['done_away','away','they dealt elsewhere; type the level'],
                 ['pulled','pulled','we pulled the price before they answered']];
 function mqRecordKey(body){
-  const key=[body.pair,body.request_text,body.client||''].join('');
+  const key=[body.cut,JSON.stringify(body.methods||{}),body.request_text,body.client||''].join('');
   if(MQREC.key!==key)MQREC={key:key,rows:{}};
 }
 function mqRecorded(line){return !!MQREC.rows[line]}
@@ -6842,10 +7073,15 @@ $('#mqrecord').onclick=recordQuote;
  * evidence, whether or not the lean is on -- reading the tape and leaning on
  * it are two decisions, and the first is worth having on its own. */
 function paintFlow(d){
-  const f=(d||{}).flow, host=$('#agenttape');
-  if(!f){host.innerHTML='';return}
+  const host=$('#agenttape'), ps=(d||{}).pairs||[], bp=(d||{}).by_pair||{};
+  let h='';
+  ps.forEach(p=>{const f=(bp[p]||{}).flow; if(f)h+=paintFlowFor(p,f)});
+  host.innerHTML=h;
+  wireWhy(host);
+}
+function paintFlowFor(pair,f){
   const on=f.weight>0, buckets=f.buckets||[];
-  let h='<div class="etonote" style="margin-top:10px"><b>The printed tape</b> · '+
+  let h='<div class="etonote" style="margin-top:10px"><b>The printed tape · '+esc(pair)+'</b> · '+
     (on?'leaning at weight '+num(f.weight,2):'read, leaning nothing')+
     ' · half-life '+num(f.half_life,0)+'d · '+num(f.lookback_days,0)+'d window · tolerance '+
     num(f.tolerance,3)+'</div>';
@@ -6893,8 +7129,7 @@ function paintFlow(d){
         ' &nbsp;·&nbsp; forward: '+esc(p.forward)+'</td></tr>').join('')+
       '</tbody></table></div></details>';
   }
-  host.innerHTML=h;
-  wireWhy(host);
+  return h;
 }
 
 function paintCurve(d){
@@ -6956,15 +7191,19 @@ function paintWings(d){
 }
 
 function paintAxe(d){
-  const a=d.axe||{}, f=d.fair||{};
-  const bits=[];
-  bits.push(a.available?('axe: '+Object.keys(a.profile).map(k=>k+' '+num(a.profile[k],0)).join(', ')+
-    ' against a scale of '+num(a.scale,0)):('axe: '+esc(a.reason||'off')));
-  bits.push(f.available?('fair value: '+f.rows.filter(r=>r.richness!=null).length+
-    ' tenor(s) of richness over a '+num(f.horizon_days,0)+'-day horizon'):
-    ('fair value: '+esc(f.reason||'off')));
+  const ps=d.pairs||[], bp=d.by_pair||{};
+  const bits=[], bad=[];
+  ps.forEach(p=>{
+    const b=bp[p]||{}, a=b.axe||{}, f=b.fair||{};
+    if(b.error)return;
+    bits.push(esc(p)+' axe: '+(a.available?(Object.keys(a.profile).map(k=>k+' '+num(a.profile[k],0)).join(', ')+
+      ' against a scale of '+num(a.scale,0)):esc(a.reason||'off')));
+    bits.push(esc(p)+' fair value: '+(f.available?(f.rows.filter(r=>r.richness!=null).length+
+      ' tenor(s) of richness over a '+num(f.horizon_days,0)+'-day horizon'):esc(f.reason||'off')));
+    (a.skipped||[]).forEach(x=>bad.push('line '+x.line+': '+esc(x.why)));
+  });
   $('#mmaxemsg').innerHTML=bits.map(x=>'<div class="etonote">· '+x+'</div>').join('')+
-    ((a.skipped||[]).map(x=>'<div class="etowarn">! line '+x.line+': '+esc(x.why)+'</div>').join(''));
+    bad.filter((x,i)=>bad.indexOf(x)===i).map(x=>'<div class="etowarn">! '+x+'</div>').join('');
 }
 
 /* -- the knowledge bank ------------------------------------------------ */
@@ -6982,42 +7221,72 @@ function renderRules(){
   const head='<tr><th>Kind</th><th>Value</th><th>Applies to</th><th>Tenor</th><th>&ge; days</th>'+
     '<th>&le; days</th><th>&le; size</th><th>Basis</th><th>Delta</th><th>Note / evidence</th>'+
     '<th></th></tr>';
-  const body=MMRULES.map((r,i)=>{
-    let row='<tr>';
-    RF.forEach(f=>{
-      const k=f[0],kind=f[1],w=f[2];
-      const a='data-r="'+i+'" data-k="'+k+'" style="width:'+w+'px"';
-      const cur=r[k]==null?'':r[k];
-      if(k==='kind')row+='<td><select '+a+'>'+ropt(S.rule_kinds||['spread'],cur)+'</select></td>';
-      else if(k==='instrument')row+='<td><select '+a+'>'+ropt(S.rule_instruments||['any'],cur)+'</select></td>';
-      else if(k==='size_basis')row+='<td><select '+a+'>'+ropt(S.size_bases||['any'],cur)+'</select></td>';
-      else row+='<td><input class="'+(kind==='n'?'n':'')+'" '+a+' value="'+esc(cur)+'"></td>';
-    });
-    return row+'<td><span class="rm" data-del="'+i+'">&times;</span></td></tr>';
-  }).join('');
-  $('#mmbank').innerHTML='<div class="mmwide"><table class="mmrules"><thead>'+head+'</thead><tbody>'+
-    (body||'<tr><td colspan="11" class="mmwhy">No rule for this pair yet. Nothing gets a width '+
-     'until one exists, or until a <b>fallback tier</b> is chosen above &mdash; the tool will '+
-     'not invent one. <b>Learn widths</b> proposes a ladder from what the archive has seen the '+
-     'market show, the run pasted above included.</td></tr>')+'</tbody></table></div>'+
-    (((MQR||{}).bank||{}).problems||[]).map(x=>'<div class="etowarn">! '+esc(x)+'</div>').join('');
+  /* One table per pair, every pair the book builds (and any the file holds
+     that it does not), each with its own + Rule; Save writes them all. A
+     pair's rules are the pair's, so the pair is on every input rather than
+     on a selector that could be moved between the edit and the save. */
+  let h='';
+  BANK.pairs.forEach(p=>{
+    const rules=BANK.rules[p]||[];
+    const body=rules.map((r,i)=>{
+      let row='<tr>';
+      RF.forEach(f=>{
+        const k=f[0],kind=f[1],w=f[2];
+        const a='data-p="'+esc(p)+'" data-r="'+i+'" data-k="'+k+'" style="width:'+w+'px"';
+        const cur=r[k]==null?'':r[k];
+        if(k==='kind')row+='<td><select '+a+'>'+ropt(S.rule_kinds||['spread'],cur)+'</select></td>';
+        else if(k==='instrument')row+='<td><select '+a+'>'+ropt(S.rule_instruments||['any'],cur)+'</select></td>';
+        else if(k==='size_basis')row+='<td><select '+a+'>'+ropt(S.size_bases||['any'],cur)+'</select></td>';
+        else row+='<td><input class="'+(kind==='n'?'n':'')+'" '+a+' value="'+esc(cur)+'"></td>';
+      });
+      return row+'<td><span class="rm" data-p="'+esc(p)+'" data-del="'+i+'">&times;</span></td></tr>';
+    }).join('');
+    h+='<div style="display:flex;align-items:center;gap:8px;margin:10px 0 4px"><b>'+esc(p)+'</b>'+
+      '<small class="etonote" style="margin:0">'+rules.length+' rule(s)'+
+      (BANK.updated[p]?' · updated '+esc(BANK.updated[p].replace('T',' ').slice(0,16)):'')+'</small>'+
+      '<button class="ghost mmaddrule" data-p="'+esc(p)+'" style="width:auto;padding:1px 8px;font-size:11px">+ Rule</button></div>'+
+      '<div class="mmwide"><table class="mmrules"><thead>'+head+'</thead><tbody>'+
+      (body||'<tr><td colspan="11" class="mmwhy">No rule for '+esc(p)+' yet. Nothing gets a width '+
+       'until one exists, or until a <b>fallback tier</b> is chosen above &mdash; the tool will '+
+       'not invent one.</td></tr>')+'</tbody></table></div>';
+  });
+  if(!BANK.pairs.length)h='<div class="annone">No pairs to hold rules for: the book has none built.</div>';
+  $('#mmbank').innerHTML=h+
+    (BANK.problems||[]).map(x=>'<div class="etowarn">! '+esc(x)+'</div>').join('');
 }
-$('#mmbank').addEventListener('input',e=>{const t=e.target;
-  if(t.dataset.r==null)return; MMRULES[+t.dataset.r][t.dataset.k]=t.value;});
-$('#mmbank').addEventListener('change',e=>{const t=e.target;
-  if(t.dataset.r==null)return; MMRULES[+t.dataset.r][t.dataset.k]=t.value;});
-$('#mmbank').addEventListener('click',e=>{const b=e.target.closest('[data-del]');
-  if(!b)return; MMRULES.splice(+b.dataset.del,1); renderRules();});
-$('#mmrule').onclick=()=>{MMRULES.push({kind:'spread',value:'',instrument:'any',tenor:'',
-  min_days:'',max_days:'',max_size:'',size_basis:'any',delta:'',text:''});renderRules()};
+function bankRuleAt(t){
+  const p=t.dataset.p, r=t.dataset.r;
+  if(p==null||r==null||!BANK.rules[p])return null;
+  return BANK.rules[p][+r]||null;
+}
+$('#mmbank').addEventListener('input',e=>{const t=e.target,r=bankRuleAt(t);
+  if(r)r[t.dataset.k]=t.value;});
+$('#mmbank').addEventListener('change',e=>{const t=e.target,r=bankRuleAt(t);
+  if(r)r[t.dataset.k]=t.value;});
+$('#mmbank').addEventListener('click',e=>{
+  const b=e.target.closest('[data-del]');
+  if(b){(BANK.rules[b.dataset.p]||[]).splice(+b.dataset.del,1);renderRules();return}
+  const a=e.target.closest('.mmaddrule');
+  if(a){bankAddRule(a.dataset.p)}});
+function bankAddRule(p){
+  if(!BANK.rules[p])BANK.rules[p]=[];
+  BANK.rules[p].push({kind:'spread',value:'',instrument:'any',tenor:'',
+    min_days:'',max_days:'',max_size:'',size_basis:'any',delta:'',text:''});
+  renderRules();
+}
+/* The bar's + Rule adds to the marking card's pair, the one pair the tab
+   names outright; each table has its own for the rest. */
+$('#mmrule').onclick=()=>{const p=markPair()||BANK.pairs[0];if(p)bankAddRule(p)};
 /* Learning a width is the archive's job, and this is the one pipeline for
    it: the same function as `volkit agent learn`, on the archive card's
    evidence settings, with the run pasted above counted *unfiled* -- it
-   teaches without being written, and File this run is the writing. The
-   payload is the file button's plus the evidence settings; read by
-   agent.learn_from_request, and a test pins this list against it. */
+   teaches without being written, and File this run is the writing. Every
+   pair on the card learns at once, each from the archive and its own lines
+   of the paste. The payload is the file button's plus the evidence settings
+   and the pairs; read by agent.learn_from_request, and a test pins this list
+   against it. */
 const LF=[
- ['pair','#mmpair'],['text','#mmtext'],['fly_convention','#mmfly'],['vol_unit','#mmunit'],
+ ['text','#mmtext'],['fly_convention','#mmfly'],['vol_unit','#mmunit'],
  ['counterparty','#agentcpty'],
  ['archive_half_life','#agenthalf'],['archive_min_effective','#agentmin'],
  ['archive_lookback_days','#agentlook'],['include_model_read','#agentmodel'],
@@ -7025,13 +7294,17 @@ const LF=[
 $('#mmlearn').onclick=async()=>{
   $('#mmbankmsg').innerHTML='<span class="spin"></span> reading the archive…';
   try{
-    const r=await post('/api/mm/learn',readFields(LF));
-    r.rules.forEach(x=>MMRULES.push(x));
+    const r=await post('/api/mm/learn',Object.assign(readFields(LF),{pairs:BANK.pairs}));
+    let n=0;
+    Object.keys(r.by_pair||{}).forEach(p=>{
+      if(!BANK.rules[p])BANK.rules[p]=[];
+      (r.by_pair[p].rules||[]).forEach(x=>{BANK.rules[p].push(x);n++})});
     renderRules();
-    $('#mmbankmsg').innerHTML=r.rules.length+' rule(s) proposed from '+r.counted+
-      ' archived observation(s)'+(r.from_paste?' ('+r.from_paste+' of them from the paste, '+
-      'counted without being filed)':'')+(r.rules.length?' — check them, then Save':'')+
-      (r.notes||[]).map(n=>'<div class="etonote">· '+esc(n)+'</div>').join('')+
+    $('#mmbankmsg').innerHTML=n+' rule(s) proposed from '+r.counted+
+      ' archived observation(s) across '+(r.pairs||[]).length+' pair(s)'+
+      (r.from_paste?' ('+r.from_paste+' of them from the paste, '+
+      'counted without being filed)':'')+(n?' — check them, then Save':'')+
+      (r.notes||[]).filter(x=>!/nothing has enough behind it/.test(x)).map(x=>'<div class="etonote">· '+esc(x)+'</div>').join('')+
       (r.skipped||[]).map(x=>'<div class="etowarn">! line '+x.line+' ('+esc(x.why)+'): '+
         esc(String(x.text).slice(0,60))+'</div>').join('')+
       (r.error?'<div class="etowarn">! '+esc(r.error)+'</div>':'');
@@ -7040,10 +7313,13 @@ $('#mmlearn').onclick=async()=>{
 $('#mmsave').onclick=async()=>{
   $('#mmbankmsg').innerHTML='<span class="spin"></span> saving…';
   try{
-    const r=await post('/api/mm/bank',{pair:$('#mmpair').value,rules:MMRULES});
+    const banks={};
+    BANK.pairs.forEach(p=>{banks[p]={rules:BANK.rules[p]||[]}});
+    const r=await post('/api/mm/bank',{banks:banks});
     if(!r.ok){$('#mmbankmsg').innerHTML='<span style="color:var(--bad)">'+
       esc(r.problems.join('; '))+'</span>';return}
     $('#mmbankmsg').textContent='saved to '+r.written;
+    paintBank(r);
     await runMQ();
   }catch(e){$('#mmbankmsg').innerHTML='<span style="color:var(--bad)">'+esc(e.message)+'</span>'}
 };
@@ -7081,7 +7357,7 @@ function mmTargetVisible(){
    who showed it.  Read by agent.paste_from_request, and a test pins this list
    against it. */
 const PF=[
- ['pair','#mmpair'],['text','#mmtext'],['fly_convention','#mmfly'],['vol_unit','#mmunit'],
+ ['text','#mmtext'],['fly_convention','#mmfly'],['vol_unit','#mmunit'],
  ['counterparty','#agentcpty'],
 ];
 function filePayload(){return readFields(PF)}
@@ -7152,51 +7428,68 @@ async function fileAgent(){
     const r=await post('/api/mm/agent/file',body);
     $('#agentmsg').className='msg ok';
     $('#agentmsg').innerHTML=r.added+' of '+r.read+' quote(s) filed to '+esc(r.path)+
+      ((r.pairs||[]).length?' for '+esc(r.pairs.join(', ')):'')+
       (r.already_held?' · '+r.already_held+' already held':'')+
       (r.refused||[]).map(x=>'<div class="etowarn">! '+esc(x)+'</div>').join('')+
+      (r.skipped||[]).map(x=>'<div class="etowarn">! line '+x.line+' ('+esc(x.why)+'): '+
+        esc(String(x.text).slice(0,60))+'</div>').join('')+
       (r.notes||[]).map(n=>'<div class="etonote">· '+esc(n)+'</div>').join('');
     await requote();
   }catch(e){$('#agentmsg').className='msg bad';$('#agentmsg').textContent=e.message}
 }
 
-/* What the archive holds for this pair, off the last quote's answer: the
-   file, its size and age, the widths it has enough behind, and the clients
-   it knows.  Nothing here is computed on the page. */
+/* What the archive holds for every pair on the sheet, off the last quote's
+   answer: the file, its size and age, the widths it has enough behind, and
+   the clients it knows -- one block per pair, because the archive files by
+   pair and a width is a width of one instrument on one pair. Nothing here is
+   computed on the page. */
 function paintAgent(){
   const d=MQR; if(!d)return;
-  const a=d.archive||{};
-  const age=a.age_days==null?'nothing yet':
-    (a.age_days<1?'newest today':'newest '+num(a.age_days,0)+' days ago');
-  $('#agenthead').textContent=(a.path||'no archive file yet')+' · '+(a.records||0)+
-    ' record(s) for '+d.pair+' · '+age+
-    (a.model_read?' · '+a.model_read+' read by a model':'')+
-    (a.shown?' · '+a.shown+' price(s) shown, '+(a.outcome||0)+' answered':'');
+  const ps=d.pairs||[], bp=d.by_pair||{};
+  const top=d.archive||{};
+  const records=ps.reduce((n,p)=>n+(((bp[p]||{}).archive||{}).records||0),0);
+  $('#agenthead').textContent=(top.path||'no archive file yet')+' · '+records+
+    ' record(s) for '+(ps.join(', ')||'no pair')+
+    (ps.length>1?' · '+ps.length+' pairs':'');
   const folders=[].concat((d.folders||{}).chats||[],(d.folders||{}).sdr||[]);
-  const w=a.held||[];
-  let g=w.length?('<div class="mmstat"><span>half-life <b>'+num(a.half_life,0)+
-      '</b> days</span><span>floor <b>'+num(a.min_effective,1)+
-      '</b> age-weighted</span><span>window <b>'+num(a.lookback_days,0)+
-      '</b> days</span></div><div class="mmwide"><table><thead><tr><th>Instrument</th>'+
-      '<th>Tenors</th><th>Width</th><th>Quartiles</th><th>Obs</th><th>Brokers</th>'+
-      '<th>Newest</th></tr></thead><tbody>'+
-    w.map(x=>'<tr><td>'+esc((x.delta!=null?num(x.delta*100,0)+'d ':'')+
-        x.instrument.toUpperCase())+'</td><td>'+esc(x.bucket)+'</td>'+
-      '<td class="mmv">'+(x.enough?'<b>'+vnum(x.median)+'</b>':'—')+'</td>'+
-      '<td class="mmv">'+vnum(x.low)+' – '+vnum(x.high)+'</td>'+
-      '<td class="mmv">'+x.observations+'</td><td class="mmv">'+x.sources+'</td>'+
-      '<td class="mmv">'+(x.newest_days<1?'today':num(x.newest_days,0)+'d')+'</td></tr>'+
-      (x.enough?'':'<tr><td class="mmwhy" colspan="7">'+esc(x.why_not)+'</td></tr>')).join('')+
-    '</tbody></table></div>'):
-    (a.available?'<div class="annone">The archive holds no widths for '+esc(d.pair)+' yet.</div>':
-     '<div class="etowarn">! '+esc(a.reason||'no archive')+'</div>');
-  const known=((d.client||{}).known)||[];
-  if(known.length)g+='<div class="etonote">· clients with a record on '+esc(d.pair)+': '+
-    known.map(esc).join(', ')+' — name one on the bar to quote for them.</div>';
+  let g='';
+  ps.forEach(p=>{
+    const b=bp[p]||{}, a=b.archive||{};
+    const age=a.age_days==null?'nothing yet':
+      (a.age_days<1?'newest today':'newest '+num(a.age_days,0)+' days ago');
+    g+='<div style="display:flex;align-items:center;gap:8px;margin:8px 0 4px"><b>'+esc(p)+'</b>'+
+      '<small class="etonote" style="margin:0">'+(a.records||0)+' record(s) · '+age+
+      (a.model_read?' · '+a.model_read+' read by a model':'')+
+      (a.shown?' · '+a.shown+' price(s) shown, '+(a.outcome||0)+' answered':'')+'</small></div>';
+    if(b.error){g+='<div class="etowarn">! '+esc(b.error)+'</div>';return}
+    const w=a.held||[];
+    g+=w.length?('<div class="mmstat"><span>half-life <b>'+num(a.half_life,0)+
+        '</b> days</span><span>floor <b>'+num(a.min_effective,1)+
+        '</b> age-weighted</span><span>window <b>'+num(a.lookback_days,0)+
+        '</b> days</span></div><div class="mmwide"><table><thead><tr><th>Instrument</th>'+
+        '<th>Tenors</th><th>Width</th><th>Quartiles</th><th>Obs</th><th>Brokers</th>'+
+        '<th>Newest</th></tr></thead><tbody>'+
+      w.map(x=>'<tr><td>'+esc((x.delta!=null?num(x.delta*100,0)+'d ':'')+
+          x.instrument.toUpperCase())+'</td><td>'+esc(x.bucket)+'</td>'+
+        '<td class="mmv">'+(x.enough?'<b>'+vnum(x.median)+'</b>':'—')+'</td>'+
+        '<td class="mmv">'+vnum(x.low)+' – '+vnum(x.high)+'</td>'+
+        '<td class="mmv">'+x.observations+'</td><td class="mmv">'+x.sources+'</td>'+
+        '<td class="mmv">'+(x.newest_days<1?'today':num(x.newest_days,0)+'d')+'</td></tr>'+
+        (x.enough?'':'<tr><td class="mmwhy" colspan="7">'+esc(x.why_not)+'</td></tr>')).join('')+
+      '</tbody></table></div>'):
+      (a.available?'<div class="annone">The archive holds no widths for '+esc(p)+' yet.</div>':
+       '<div class="etowarn">! '+esc(a.reason||'no archive')+'</div>');
+    const known=((b.client||{}).known)||[];
+    if(known.length)g+='<div class="etonote">· clients with a record on '+esc(p)+': '+
+      known.map(esc).join(', ')+' — name one on the bar to quote for them.</div>';
+    (a.notes||[]).forEach(n=>{g+='<div class="etonote">· '+esc(n)+'</div>'});
+  });
+  if(!ps.length)g+='<div class="annone">Nothing asked for yet; the archive is read for the '+
+    'pairs the request box names.</div>';
   g+='<div class="etonote">· '+(folders.length?
       'Watching '+folders.map(esc).join(', '):
       'No folders are watched; start volkit with --chats and --sdr to scan from here')+'</div>';
-  (a.notes||[]).forEach(n=>{g+='<div class="etonote">· '+esc(n)+'</div>'});
-  if(a.error)g+='<div class="etowarn">! '+esc(a.error)+'</div>';
+  if(top.error)g+='<div class="etowarn">! '+esc(top.error)+'</div>';
   $('#agentwidths').innerHTML=g;
   paintFlow(d);
 }
@@ -7224,11 +7517,12 @@ $('#agentfile').onclick=fileAgent;
    the loaded book, in memory only. */
 function markPayload(){
   const out=readFields(MKF);
+  out.cut=mmCutMethods().cut; out.method=mmMarkMethod(out.pair);
   out.free=[...$('#mmfree').querySelectorAll('input:checked')].map(x=>x.dataset.k);
   out.smile_free=[...$('#mmsmilefree').querySelectorAll('input:checked')].map(x=>x.dataset.k);
   return out;
 }
-function markKey(b){return [b.pair,b.text,b.target_source,b.target_text].join('\u0001')}
+function markKey(b){return [b.pair,b.cut,b.method,b.text,b.target_source,b.target_text].join('\u0001')}
 /* A proposal is only a proposal about the paste it was computed from; the
    verdict buttons go away when the market box has moved on, for the same
    reason the quoting agent's columns do. */
@@ -7448,7 +7742,7 @@ $('#markfit').onclick=runFit;
    there, so the card and the widths never disagree about what the archive
    holds.  Nothing on this card can write anywhere. */
 const AK=[
- ['pair','#mmpair'],['text','#asktext'],['cut','#mmcut'],['method','#mmmethod'],
+ ['pair','#markpair'],['text','#asktext'],
  ['half_life','#agenthalf'],['min_effective','#agentmin'],['lookback_days','#agentlook'],
  ['include_model_read','#agentmodel'],['narrate','#asknarrate'],
 ];
@@ -7461,6 +7755,10 @@ function loadAsk(){
 function askPayload(){
   const out={};
   AK.forEach(f=>{const el=$(f[1]);out[f[0]]=el.type==='checkbox'?el.checked:el.value});
+  /* The pair is the one the question names; the marking card's is only what
+     a question with none falls back to, and the cut and interpolation are
+     the Vol marking tab's, as everywhere on this tab. */
+  out.cut=mmCutMethods().cut; out.method=mmMarkMethod(out.pair);
   out.transcript=ASKT.map(t=>({q:t.q,a:{ok:!!(t.a&&t.a.ok)}}));
   return out;
 }
@@ -7528,9 +7826,12 @@ $('#mqrun').onclick=runMQ;
    quote both read -- the pair, the cut, the interpolation, the market paste --
    re-runs both. Nothing here re-runs a *fit*: a fit moves a mark, and a mark
    does not move because somebody typed in a box. */
-$('#mmpair').onchange=()=>{setMethodSel('#mmmethod',$('#mmpair').value);
-  MM=mfPayload();renderKnobs();mqAvailable();loadBank();saveMM();scheduleMM();scheduleMQ()};
-['#mmcut','#mmmethod','#mmfly','#mmunit'].forEach(id=>{
+/* The marking card's pair: the knobs follow it, the held marks are only good
+   for it, and the two read-only stages re-run because the marks they may be
+   standing on have just changed pair. */
+$('#markpair').onchange=()=>{
+  MM=mfPayload();renderKnobs();mqAvailable();saveMM();scheduleMM();scheduleMQ()};
+['#mmfly','#mmunit'].forEach(id=>{
   $(id).onchange=()=>{saveMM();scheduleMM();scheduleMQ()}});
 $('#markapply').onchange=saveMM;
 $('#mqonmarks').onchange=()=>{saveMM();scheduleMM();scheduleMQ()};
@@ -7560,6 +7861,395 @@ $('#mmtol').onchange=()=>{saveMM();if((MCR||{}).market)runCheck()};
 ['#mqtext','#mmvega'].forEach(id=>{$(id).oninput=()=>{saveMM();scheduleMQ()}});
 MMKNOBS.forEach(id=>{$(id).addEventListener('change',()=>{MM=mfPayload();saveMM()})});
 
+/* ============================ VOL BULK PROCESSING ============================
+ * Bulk publishing, in two halves.  INPUT: an outside file read into an
+ * overlay, compared against the book, and written over the book pair by pair
+ * where ticked.  OUTPUT: a channel, its pairs each read from the book or the
+ * overlay as chosen, the preflight, and one Send.  The server owns the
+ * registry, the tables and the overlay; nothing here holds a number the
+ * server did not send -- a Build is a request and the answer is painted, and
+ * Send re-sends the same request, so what goes out is what was shown.
+ * Choices are remembered per browser, like every other panel's; the per-pair
+ * sources are not, because they belong to the overlay of the morning. */
+let XS=null;        /* /api/export/state */
+let XB=null;        /* the last build's answer */
+let XSEL={};        /* {channel: [pairs]} the picker holds, [] meaning every pair */
+let XSRC={};        /* {pair: 'book'|'overlay'} the Output side reads each pair from */
+let XSRCFOR='';     /* the overlay (sha) XSRC was set up against */
+function xcfgShow(msg,bad){const el=$('#xcfgmsg');el.className='msg'+(bad?' bad':' ok');el.textContent=msg}
+function xSaved(){let v={};try{v=JSON.parse(localStorage.getItem('volkit.export')||'{}')}catch(e){v={}}
+  return (v&&typeof v==='object')?v:{}}
+function xKeep(patch){const v=Object.assign(xSaved(),patch);
+  try{localStorage.setItem('volkit.export',JSON.stringify(v))}catch(e){}}
+function xChan(){return (XS&&XS.channels||[]).find(c=>c.key===$('#xchan').value)||null}
+function xOverlay(){return ((XS||{}).overlay)||{}}
+function xChosen(){
+  const ch=xChan(); if(!ch)return [];
+  const all=ch.pairs.map(p=>p.pair);
+  const on=XSEL[ch.key];
+  if(!on||!on.length)return all.slice();
+  return on.filter(p=>all.indexOf(p)>=0);
+}
+/* Which source a pair is read from.  Default: the overlay wherever the loaded
+   overlay carries the pair, the book everywhere else -- reset when the
+   overlay changes, because the choice was about that file. */
+function xSources(){
+  const O=xOverlay();
+  const key=O.loaded?String(O.sha256||''):'';
+  if(XSRCFOR!==key){XSRC={};XSRCFOR=key}
+  const out={};
+  (XS.channels||[]).forEach(c=>c.pairs.forEach(p=>{
+    if(!p.in_overlay){out[p.pair]='book';return}
+    out[p.pair]=XSRC[p.pair]||'overlay';}));
+  return out;
+}
+function xSetSource(pair,src){XSRC[pair]=src;xRenderPick();$('#xsend').disabled=true}
+function xSrcTag(src){return '<span class="mmtag '+(src==='overlay'?'out':'in')+'">'+src+'</span>'}
+function xRenderPick(){
+  const ch=xChan(); if(!ch){$('#xpairs').innerHTML='';$('#xpicksum').textContent='—';$('#xsrcline').innerHTML='';return}
+  const all=ch.pairs, on=xChosen(), src=xSources();
+  $('#xpairs').innerHTML='<label class="mmpickall"><input type="checkbox" id="xall"'+
+    (on.length===all.length?' checked':'')+'> every pair ('+all.length+')</label>'+
+    all.map(p=>'<div style="display:flex;align-items:center;gap:6px;padding:2px 0"><label style="flex:1" title="'+
+      esc(p.feed_from?('fed from '+p.feed_from):'')+(p.in_book?'':' (not in the book)')+'"><input type="checkbox" data-x="'+esc(p.pair)+'"'+
+      (on.indexOf(p.pair)>=0?' checked':'')+'> '+esc(p.pair)+
+      (p.label&&p.label!==p.pair?' <span class="meta">'+esc(p.label)+'</span>':'')+
+      (p.in_book?'':' <span class="etowarn" title="the book does not hold this pair">∅ book</span>')+'</label>'+
+      (p.in_overlay?'<select data-src="'+esc(p.pair)+'" style="width:auto;padding:1px 4px;font-size:11px" title="read this pair from the book or from the overlay">'+
+        '<option value="overlay"'+(src[p.pair]==='overlay'?' selected':'')+'>overlay</option>'+
+        '<option value="book"'+(src[p.pair]==='book'?' selected':'')+'>book</option></select>'
+       :'<span class="mmtag in" style="opacity:.6" title="the overlay has no rows for this pair">book</span>')+
+      '</div>').join('');
+  $('#xpicksum').textContent=!all.length?'no pairs listed':
+    (on.length===all.length?'every pair ('+all.length+')':
+     (on.length<=3&&on.length?on.join(', '):on.length+' of '+all.length));
+  const ov=on.filter(p=>src[p]==='overlay'), bk=on.filter(p=>src[p]!=='overlay');
+  $('#xsrcline').innerHTML=ov.length?
+    ('<span class="mmtag out">overlay</span> '+esc(ov.join(', '))+' &nbsp; <span class="mmtag in">book</span> '+
+     (bk.length?esc(bk.length<=8?bk.join(', '):bk.length+' pairs'):'none')):
+    (xOverlay().loaded?'<span class="mmtag in">book</span> every pair — the overlay is loaded but no chosen pair reads it':'');
+  $('#xsrcall').classList.toggle('hide',!xOverlay().loaded);
+}
+function xApplyChannel(){
+  const ch=xChan(); const K=(XS||{}).kace||{};
+  $('#xchanwhat').innerHTML=ch?(esc(ch.what)+(ch.error?' <span class="etoerr">'+esc(ch.error)+'</span>':'')+
+    (ch.tenors&&ch.tenors.length?' <span class="meta">· tenors '+ch.tenors.map(esc).join(' ')+'</span>':'')):'';
+  const tier=ch&&ch.width==='tier';
+  $('#xtierf').classList.toggle('hide',!tier);
+  $('#xmultf').classList.toggle('hide',!ch||ch.width==='none');
+  const kace=ch&&ch.key==='kace';
+  $('#xscnf').classList.toggle('hide',!kace);
+  $('#xkeyl').classList.toggle('hide',!kace);
+  $('#xinterpl').classList.toggle('hide',!kace);
+  const file=ch&&ch.kind==='file';
+  $('#xdatef').classList.toggle('hide',!file);
+  $('#xconfl').classList.toggle('hide',!file);
+  $('#xtolf').classList.toggle('hide',!xOverlay().loaded);
+  if(tier){
+    const tiers=((XS||{}).tables||{}).tiers||[];
+    const want=xSaved()['tier.'+ch.key]||ch.default_tier||K.tier||'';
+    $('#xtier').innerHTML=tiers.map(t=>'<option value="'+esc(t)+'"'+(t===want?' selected':'')+'>'+esc(t)+'</option>').join('');
+    if(tiers.indexOf(want)<0&&tiers.length)$('#xtier').value=tiers.indexOf(ch.default_tier)>=0?ch.default_tier:tiers[0];
+  }
+  xRenderPick();
+  $('#xsend').disabled=true; $('#xdl').classList.add('hide'); $('#xdl').innerHTML='';
+}
+function xPayload(){
+  const ch=xChan(); const cm=mmCutMethods(); const src=xSources();
+  const chosen=xChosen(); const sources={};
+  chosen.forEach(p=>{sources[p]=src[p]||'book'});
+  const body={channel:ch?ch.key:'',source:'book',sources:sources,pairs:chosen,
+    tier:$('#xtier').value||'',multiplier:$('#xmult').value||'1',wings:$('#xwings').value||'marks',
+    cut:cm.cut||'NY',methods:cm.methods,
+    tolerance:$('#xtol').value||'',file_date:$('#xdate').value||'',
+    pillars_only:$('#xkey').checked,interpolate:$('#xinterp').checked,
+    confirm_date:$('#xconfirmdate').checked,dry_run:$('#xdry').checked};
+  if(ch&&ch.key==='kace')body.scenario=$('#xscn').value||kaceScenario();
+  return body;
+}
+/* ---- the input side: the overlay ---------------------------------------- */
+function xPaintOverlay(){
+  const O=xOverlay();
+  const info=$('#xovinfo'), acts=$('#xovacts'), tbl=$('#xovpairs');
+  if(!O.loaded){info.innerHTML='<span class="meta">no overlay loaded</span>';acts.innerHTML='';tbl.innerHTML='';}
+  else{
+    const of=O.overflow||{};
+    info.innerHTML='<b>'+esc(O.name)+'</b> · '+O.rows+' rows · '+(O.pairs||[]).length+' pairs · tenors '+
+      (O.tenors||[]).map(esc).join(' ')+' · sha256 '+esc(String(O.sha256||'').slice(0,12))+
+      (O.two_way_rows?' · '+O.two_way_rows+' row(s) carry their own two-way':'')+
+      (of.message?'<br><span class="meta">'+esc(of.message)+'</span>':'')+
+      (O.applied?'<br><span class="etowarn">written over the book at '+esc(String(O.applied_at||'').replace('T',' ').slice(0,16))+
+        ': '+esc((O.applied_pairs||[]).join(', '))+' ('+O.applied_rows+' rows); the session before it is in '+esc(O.snapshot||'')+'. Write to workbook refuses until Revert.</span>':'')+
+      (O.notes||[]).map(n=>'<br><span class="meta">· '+esc(n)+'</span>').join('');
+    /* One line per pair, with the tick that writes it over the book. */
+    tbl.innerHTML='<div class="mmwide"><table class="mmxr"><thead><tr><th title="tick to write this pair\'s rows over the book">Overwrite</th><th>Pair</th><th>Rows</th><th>Tenors</th><th>In the book</th><th>Fields</th><th>State</th></tr></thead><tbody>'+
+      (O.per_pair||[]).map(e=>'<tr><td>'+(e.in_book&&(e.tenors_in_book||[]).length?'<input type="checkbox" data-ovp="'+esc(e.pair)+'" style="width:auto"'+(e.applied?' checked disabled':'')+'>':
+          '<span class="meta" title="the book does not hold this pair or these tenors, so there is nothing to overwrite; the Output side can still read it">—</span>')+
+        '</td><td><b>'+esc(e.pair)+'</b></td><td class="mmv">'+e.rows+'</td><td class="meta">'+(e.tenors||[]).map(esc).join(' ')+'</td>'+
+        '<td>'+(e.in_book?((e.tenors_in_book||[]).length===(e.tenors||[]).length?'<span class="mmtag in">yes</span>':
+          '<span class="mmtag out" title="tenors the book holds: '+esc((e.tenors_in_book||[]).join(' '))+'">partly</span>'):'<span class="mmtag none">no</span>')+'</td>'+
+        '<td class="meta">'+(e.fields||[]).map(esc).join(', ')+(e.two_way?' · two-way':'')+'</td>'+
+        '<td>'+(e.applied?'<span class="mmtag thru">overwrites the book</span>':'<span class="mmtag out">overlay only</span>')+'</td></tr>').join('')+
+      '</tbody></table></div>';
+    acts.innerHTML='<button class="ghost" id="xovapply" style="width:auto;padding:4px 11px;font-size:11px" title="write the ticked pairs\' rows over the book itself, after saving the session as it was; every screen then shows them and the kACE feed tab posts from them">Overwrite book for ticked</button>'+
+      (O.applied?'<button class="ghost" id="xovrevert" style="width:auto;padding:4px 11px;font-size:11px" title="put the saved session back: every pair as it was before the overlay">Revert</button>':'')+
+      '<button class="ghost" id="xovclear" style="width:auto;padding:4px 11px;font-size:11px">Clear</button>';
+    const act=async(body,label)=>{
+      const stop=busy('#xstatus',label);
+      try{const r=await post('/api/export/overlay',body);
+        $('#xmsg').className='msg ok';$('#xmsg').textContent=r.message||'';
+        if(body.action!=='load')await boot();
+        await xLoad();
+      }catch(e){$('#xmsg').className='msg bad';$('#xmsg').textContent=e.message}
+      finally{stop()}};
+    $('#xovapply').onclick=()=>{
+      const pairs=[...tbl.querySelectorAll('input[data-ovp]:checked:not(:disabled)')].map(el=>el.dataset.ovp);
+      if(!pairs.length){$('#xmsg').className='msg bad';$('#xmsg').textContent='tick the pairs to write over the book first';return}
+      const c=$('#xconfirm');c.classList.remove('hide');
+      c.innerHTML='<span>Write the overlay\'s rows for <b>'+esc(pairs.join(', '))+'</b> over the book? The session as it is now is saved first; <b>Revert</b> puts it back.</span><div class="grow"></div>'+
+        '<button id="xovgo" style="width:auto;padding:5px 12px;font-size:12px">Overwrite</button>'+
+        '<button id="xovno" style="width:auto;padding:5px 12px;font-size:12px;background:transparent;color:var(--muted);border:1px solid var(--line)">Cancel</button>';
+      $('#xovno').onclick=()=>c.classList.add('hide');
+      $('#xovgo').onclick=()=>{c.classList.add('hide');act({action:'apply',pairs:pairs},'writing the overlay over the book…')};};
+    const r=$('#xovrevert');if(r)r.onclick=()=>act({action:'revert'},'reverting…');
+    $('#xovclear').onclick=()=>act({action:'clear'},'clearing…');
+  }
+  /* The loud badge: an overlay is loaded, and whether it is on the book. */
+  $('#xbadge').innerHTML=O.loaded?('<span class="pill warn">overlay '+(O.applied?'written over the book for '+esc((O.applied_pairs||[]).join(', ')):'loaded, export only')+
+    ': '+O.rows+' rows from '+esc(O.name)+'</span>'):'';
+}
+async function xLoadOverlay(fromText){
+  const body={action:'load',path:$('#xovpath').value||''};
+  if(fromText)body.text=$('#xovtext').value||'';
+  const stop=busy('#xstatus','reading the overlay…');
+  try{const r=await post('/api/export/overlay',body);
+    $('#xmsg').className='msg ok';$('#xmsg').textContent=r.message||'';
+    xKeep({ovpath:$('#xovpath').value||''});
+    await xLoad();
+  }catch(e){$('#xmsg').className='msg bad';$('#xmsg').textContent=e.message}
+  finally{stop()}
+}
+/* ---- the input side: compare ------------------------------------------- */
+function xCell(v,d){return v==null?'—':num(v,d==null?VOLDP:d)}
+function xSgn(v,tol){if(v==null)return '—';const a=Math.abs(v);
+  return '<span class="'+(tol!=null&&a>tol?'etowarn':(a<1e-9?'mqunrec':''))+'">'+(v>0?'+':'')+num(v,VOLDP)+'</span>'}
+async function xCompare(){
+  const ch=(XS.channels||[]).find(c=>c.key===$('#xcmpchan').value)||xChan();
+  if(!xOverlay().loaded){$('#xcmp').innerHTML='<div class="etoempty">no overlay loaded</div>';return}
+  const body=Object.assign({},xPayload(),{channel:ch?ch.key:'',pairs:null});
+  delete body.pairs;
+  const stop=busy('#xstatus','comparing…');
+  try{
+    const r=await post('/api/export/compare',body);
+    const tol=parseFloat($('#xcmptol').value); const T=isFinite(tol)?tol:null;
+    const wings=$('#xcmpwings').checked;
+    const W=['rr25','rr10','bf25','bf10'];
+    let h='<div class="mmstat"><span>'+esc(r.label)+' widths'+(r.widths.tier?' · '+esc(r.widths.tier)+' tier':'')+'</span><span>'+r.pairs.length+' pair(s)</span>'+
+      '<span>overlay '+esc(String(r.overlay.sha256||'').slice(0,8))+'</span></div>';
+    h+='<div class="mmwide"><table class="mmxr"><thead><tr><th>Pair</th><th>Tenor</th><th colspan="3">Book bid / mid / ask</th><th colspan="3">Overlay bid / mid / ask</th><th>Δ mid</th><th>Δ bid</th><th>Δ ask</th>'+
+      (wings?W.map(w=>'<th>Δ '+esc(w)+'<br><span class="meta">mid · bid · ask</span></th>').join(''):'')+'<th></th></tr></thead><tbody>'+
+      r.rows.map(x=>{const a=x.book,b=x.overlay,d=x.diff||{};
+        if(!(a&&b))return '<tr><td><b>'+esc(x.pair)+'</b></td><td>'+esc(x.tenor)+'</td><td colspan="'+(wings?11:7)+'" class="meta" style="text-align:left">'+(a?'book only — the overlay has no '+esc(x.tenor)+' row':'overlay only — the book cannot supply '+esc(x.tenor))+'</td></tr>';
+        return '<tr><td><b>'+esc(x.pair)+'</b></td><td>'+esc(x.tenor)+'</td>'+
+          '<td class="mmv">'+xCell(a.bid)+'</td><td class="mmv">'+xCell(a.mid)+'</td><td class="mmv">'+xCell(a.ask)+'</td>'+
+          '<td class="mmv">'+xCell(b.bid)+'</td><td class="mmv">'+xCell(b.mid)+'</td><td class="mmv">'+xCell(b.ask)+'</td>'+
+          '<td class="mmv">'+xSgn(d.mid,T)+'</td><td class="mmv">'+xSgn(d.bid,T)+'</td><td class="mmv">'+xSgn(d.ask,T)+'</td>'+
+          (wings?W.map(w=>'<td class="mmv">'+xSgn(d[w],T)+' · '+xSgn(d[w+'_bid'],T)+' · '+xSgn(d[w+'_ask'],T)+'</td>').join(''):'')+
+          '<td class="meta" style="text-align:left">'+(x.same?'same':esc(x.origin||''))+'</td></tr>'}).join('')+
+      '</tbody></table></div>';
+    h+='<div class="meta" style="margin-top:6px">'+r.by_pair.map(p=>'<b>'+esc(p.pair)+'</b> '+p.compared+'/'+p.tenors+' compared, largest Δ mid '+num(p.max_mid,VOLDP)+', Δ side '+num(p.max_side,VOLDP)+
+      (p.book_only.length?', book only '+esc(p.book_only.join(' ')):'')+(p.overlay_only.length?', overlay only '+esc(p.overlay_only.join(' ')):'')).join('<br>')+'</div>';
+    if(r.book_refused.length||r.overlay_refused.length)h+='<div class="etowarn" style="margin-top:6px">'+r.book_refused.concat(r.overlay_refused).map(x=>'! '+esc(x)).join('<br>')+'</div>';
+    $('#xcmp').innerHTML=h;
+    $('#xstatus').innerHTML='<span class="etonote">· compared '+r.rows.length+' pillar(s)</span>';
+  }catch(e){$('#xcmp').innerHTML='<div class="out err"><div class="v">'+esc(e.message)+'</div></div>'}
+  finally{stop()}
+}
+/* ---- the output side: the preflight ------------------------------------ */
+function xPaintBuild(b){
+  XB=b;
+  const pf=b.preflight||{}, out=[];
+  if(b.refused&&b.refused.length)
+    out.push('<div class="out err"><div class="v"><b>Refused.</b> '+b.refused.map(esc).join('<br>')+'</div></div>');
+  const d=pf.date||{};
+  if(b.kind==='file'&&d.file&&!d.agree)
+    out.push('<div class="etowarn">! the file would be dated <b>'+esc(d.file)+'</b> (the book\'s valuation date) and this machine says '+esc(d.machine)+
+      ' — tick <b>date as the book</b> to write it anyway, or type a file date</div>');
+  const w=pf.wanted||{}, S=pf.sources||{book:[],overlay:[]};
+  out.push('<div class="mmstat"><span>'+esc(b.label)+'</span>'+
+    '<span>wants <b>'+(w.pairs||0)+'</b> pairs × <b>'+((w.tenors||[]).length)+'</b> tenors = '+(w.rows||0)+' rows</span>'+
+    '<span>'+xSrcTag('book')+' <b>'+(S.book||[]).length+'</b> pair(s) · '+(pf.from_book||0)+' rows</span>'+
+    '<span>'+xSrcTag('overlay')+' <b>'+(S.overlay||[]).length+'</b> pair(s) · '+(pf.from_overlay||0)+' rows'+(pf.fell_through?', '+pf.fell_through+' fell through to the book':'')+'</span>'+
+    (b.files||[]).map(f=>'<span>file <b>'+esc(f.name)+'</b> · '+f.bytes+' bytes · '+esc(String(f.sha256||'').slice(0,12))+(f.what?' · '+esc(f.what):'')+'</span>').join('')+
+    ((pf.widths||{}).source==='tier'?'<span>widths: '+esc(pf.widths.tier)+' tier'+(pf.widths.multiplier&&pf.widths.multiplier!==1?' ×'+pf.widths.multiplier:'')+'</span>':'')+
+    ((pf.widths||{}).source==='market'?'<span>widths: MARKET_WIDTHS + ADD_UPS, wings by WING_WIDTHS</span>':'')+
+    ((pf.widths||{}).source==='none'?'<span>bid equals ask</span>':'')+'</div>');
+  /* Coverage: a pair per row with its source, a tenor per column coloured by where the row came from. */
+  const tenors=w.tenors||[];
+  const cls={book:'in',overlay:'out',missing:'thru','no width':'thru'};
+  out.push('<details open><summary style="cursor:pointer">Coverage and sources — '+(pf.coverage||[]).filter(c=>c.missing&&c.missing.length).length+' pair(s) short</summary>'+
+    '<div class="mmwide"><table class="mmxr"><thead><tr><th>Pair</th><th>Source</th>'+tenors.map(t=>'<th>'+esc(t)+'</th>').join('')+'</tr></thead><tbody>'+
+    (pf.coverage||[]).map(c=>'<tr><td><b>'+esc(c.pair)+'</b>'+(c.feed_from?' <span class="meta">← '+esc(c.feed_from)+'</span>':'')+
+      (c.in_book?'':' <span class="meta" title="not in the book">∅</span>')+'</td>'+
+      '<td>'+xSrcTag(c.source)+((c.from||[]).length>1?' <span class="meta" title="some tenors fell through to the book">mixed</span>':'')+'</td>'+
+      tenors.map(t=>{const v=c.tenors[t];return '<td>'+(v==null?'':'<span class="mmtag '+(cls[v]||'none')+'" title="'+esc(v)+'">'+
+        (v==='book'?'b':v==='overlay'?'o':'✕')+'</span>')+'</td>'}).join('')+'</tr>').join('')+
+    '</tbody></table></div><div class="meta">b = book · o = overlay · ✕ = neither, refused by name</div></details>');
+  if(pf.left_on_book&&pf.left_on_book.length)
+    out.push('<div class="etonote">· '+pf.left_on_book.length+' overlay row(s) belong to pairs set to read the book and were not used: '+
+      esc(pf.left_on_book.slice(0,12).join(', '))+(pf.left_on_book.length>12?' …':'')+'</div>');
+  if(pf.ignored&&pf.ignored.length)
+    out.push('<div class="etonote">· '+pf.ignored.length+' overlay row(s) name a pair or tenor this channel does not publish and were ignored: '+
+      esc(pf.ignored.slice(0,12).join(', '))+(pf.ignored.length>12?' …':'')+'</div>');
+  if(pf.diffs&&pf.diffs.length)
+    out.push('<details open><summary style="cursor:pointer">Against the book — '+pf.diffs.length+' value(s) moved'+
+      (pf.tolerance!=null?', tolerance '+pf.tolerance:'')+'</summary><div class="mmwide"><table class="mmxr"><thead><tr><th>Pair</th><th>Tenor</th><th>Field</th><th>Book</th><th>Overlay</th><th>Move</th></tr></thead><tbody>'+
+      pf.diffs.slice(0,60).map(x=>'<tr><td>'+esc(x.pair)+'</td><td>'+esc(x.tenor)+'</td><td>'+esc(x.field)+'</td><td class="mmv">'+xCell(x.book)+
+        '</td><td class="mmv">'+xCell(x.overlay)+'</td><td class="mmv '+(pf.tolerance!=null&&Math.abs(x.move)>pf.tolerance?'etowarn':'')+'">'+(x.move>0?'+':'')+num(x.move,VOLDP)+'</td></tr>').join('')+
+      '</tbody></table></div></details>');
+  /* Every pillar's two-way and where each number came from. */
+  const q=b.quotes||[];
+  const two=(b.channels_two_way!=null)?b.channels_two_way:(q.length&&q[0].wing_widths&&Object.keys(q[0].wing_widths).length>0);
+  if(q.length)out.push('<details'+(q.length<=60?' open':'')+'><summary style="cursor:pointer">Widths and shades, resolved — '+q.length+' pillar(s)</summary>'+
+    '<div class="mmwide"><table class="mmxr"><thead><tr><th>Pair</th><th>Src</th><th>Tenor</th><th>Bid</th><th>Mid</th><th>Ask</th><th>25d RR</th><th>10d RR</th><th>25d BF</th><th>10d BF</th><th>Shade</th><th>Width</th><th>From</th></tr></thead><tbody>'+
+    q.map(x=>{const sd=x.sides||{};const wv=(i)=>two&&sd[i]?(xCell(sd[i][0])+' / '+xCell(sd[i][1])):xCell(x[i]);
+      return '<tr><td><b>'+esc(x.pair)+'</b></td><td>'+xSrcTag(x.source)+'</td><td>'+esc(x.tenor)+'</td><td class="mmv">'+xCell(x.bid)+'</td><td class="mmv">'+xCell(x.mid)+'</td><td class="mmv">'+xCell(x.ask)+
+      '</td><td class="mmv">'+wv('rr25')+'</td><td class="mmv">'+wv('rr10')+'</td><td class="mmv">'+wv('bf25')+'</td><td class="mmv">'+wv('bf10')+
+      '</td><td class="mmv">'+(x.shade?((x.shade>0?'+':'')+num(x.shade,2)):'—')+'</td><td class="mmv">'+num(x.width,2)+'</td>'+
+      '<td class="meta" style="text-align:left">'+esc(x.origin)+(x.width_from?' · '+esc(x.width_from):'')+(x.shade?' · '+esc(x.shade_from):'')+(x.wing_widths_from?' · '+esc(x.wing_widths_from):'')+
+      (x.notes||[]).map(n=>' · '+esc(n)).join('')+'</td></tr>'}).join('')+'</tbody></table></div></details>');
+  if(b.feeds)out.push('<details open><summary style="cursor:pointer">kACE messages — one per pair</summary><div class="mmwide"><table class="mmxr"><thead><tr><th>Pair</th><th>Days</th><th>Pillars</th><th>Nodes</th><th>Widths</th><th>Notes</th></tr></thead><tbody>'+
+    Object.keys(b.feeds).map(p=>{const f=b.feeds[p], m=(b.messages||{})[p]||{};return '<tr><td><b>'+esc(p)+'</b></td><td class="mmv">'+(f.pillars_only?'—':f.days)+'</td><td class="mmv">'+(f.pillars||[]).length+
+      '</td><td class="mmv">'+(m.error?'<span class="etoerr">'+esc(m.error)+'</span>':m.nodes)+'</td><td>'+kaceWidths(f)+(f.pillars_only?', key tenors only':'')+'</td><td class="meta" style="text-align:left">'+(f.notes||[]).map(esc).join('<br>')+'</td></tr>'}).join('')+
+    '</tbody></table></div></details>');
+  if(b.notes&&b.notes.length)out.push('<div class="meta" style="margin-top:6px">'+b.notes.map(n=>'· '+esc(n)).join('<br>')+'</div>');
+  $('#xpre').innerHTML=out.join('');
+  $('#xsend').disabled=!b.ok;
+  const dl=$('#xdl');
+  if(b.ok&&b.kind==='file'&&(b.files||[]).length){const pl=xPayload();
+    /* One link per file the destination writes: Murex writes two, and the
+       server is asked for one of them by name rather than handing back
+       whichever came first. */
+    const q='/api/export/file?'+qs(Object.assign({},pl,{pairs:pl.pairs.join(','),methods:'',sources:''}))+
+      '&'+Object.keys(pl.sources).map(k=>'sources.'+encodeURIComponent(k)+'='+pl.sources[k]).join('&');
+    dl.classList.remove('hide');
+    dl.innerHTML=b.files.map(f=>'<a href="'+esc(q)+'&file='+encodeURIComponent(f.name)+'" download="'+esc(f.name)+
+      '" style="color:var(--accent);font-weight:600;text-decoration:none;font-size:12px" title="'+esc(f.what||'')+'">&darr; '+esc(f.name)+'</a>').join('');}
+  else{dl.classList.add('hide');dl.innerHTML='';}
+}
+async function xBuild(){
+  const body=xPayload();
+  if(!body.channel){$('#xmsg').className='msg bad';$('#xmsg').textContent='choose a channel';return}
+  /* Refused here as well as on the server: an empty list would read as
+     "every pair" on the way in, which is the opposite of what unticking
+     them all meant. */
+  if(!body.pairs.length){$('#xmsg').className='msg bad';$('#xmsg').textContent='tick at least one pair';return}
+  const stop=busy('#xstatus','building…');
+  $('#xmsg').textContent='';
+  try{const b=await post('/api/export/build',body);xPaintBuild(b);
+    $('#xstatus').innerHTML='<span class="etonote">· built '+(b.rows||0)+' pillar(s)'+(b.ok?'':' — refused')+'</span>';}
+  catch(e){$('#xpre').innerHTML='';$('#xsend').disabled=true;$('#xmsg').className='msg bad';$('#xmsg').textContent=e.message}
+  finally{stop()}
+}
+function xSend(){
+  const b=XB; if(!b||!b.ok)return;
+  const body=xPayload();
+  const S=(b.preflight||{}).sources||{};
+  const c=$('#xconfirm');c.classList.remove('hide');
+  const what=b.kind==='file'?('Write '+(b.files||[]).map(f=>'<b>'+esc(f.name)+'</b>').join(' and ')+' ('+b.rows+' pillars, '+b.bytes+' bytes) into '+esc((XS||{}).export_dir||'the export folder')):
+    ('Post <b>'+Object.keys(b.feeds||{}).length+'</b> kACE message(s) into scenario <b>'+esc(b.scenario||'')+'</b> at '+esc(((XS||{}).kace||{}).url||'(no URL set)')+', one pair at a time');
+  c.innerHTML='<span>'+what+' — '+xSrcTag('book')+' '+((S.book||[]).length)+' pair(s), '+xSrcTag('overlay')+' '+((S.overlay||[]).length)+' pair(s)'+(body.dry_run?' — <b>dry run</b>, nothing leaves':'')+'?</span><div class="grow"></div>'+
+    '<button id="xgo" style="width:auto;padding:5px 12px;font-size:12px">'+(body.dry_run?'Dry run':'Send')+'</button>'+
+    '<button id="xno" style="width:auto;padding:5px 12px;font-size:12px;background:transparent;color:var(--muted);border:1px solid var(--line)">Cancel</button>';
+  $('#xno').onclick=()=>c.classList.add('hide');
+  $('#xgo').onclick=async()=>{
+    const go=$('#xgo');go.disabled=true;go.textContent='sending…';
+    const stop=busy('#xstatus','sending…');
+    try{const r=await post('/api/export/run',body);
+      c.classList.add('hide');
+      const lines=[];
+      if(r.results)lines.push('<div class="mmwide"><table class="mmxr"><thead><tr><th>Pair</th><th>Src</th><th>Nodes</th><th>Outcome</th></tr></thead><tbody>'+
+        r.results.map(x=>'<tr><td><b>'+esc(x.pair)+'</b></td><td>'+xSrcTag(x.source||'book')+'</td><td class="mmv">'+(x.nodes||0)+'</td><td class="'+(x.ok===false?'etowarn':'')+'">'+
+          (x.ok===false?'! ':x.ok?'✓ ':'· ')+esc(x.message||'')+'</td></tr>').join('')+'</tbody></table></div>');
+      $('#xmsg').className='msg '+(r.ok?'ok':'bad');
+      $('#xmsg').innerHTML=(r.ok?'✓ ':'! ')+esc(r.summary||(r.entry||{}).message||(r.refused||[]).join('; '))+lines.join('');
+      if(r.entries){XS.entries=r.entries;xPaintLog()}
+      if(!body.dry_run&&r.ok)$('#xsend').disabled=true;
+    }catch(e){c.classList.add('hide');$('#xmsg').className='msg bad';$('#xmsg').textContent=e.message}
+    finally{stop()}
+  };
+}
+/* ---- the log ----------------------------------------------------------- */
+function xPaintLog(){
+  const rows=((XS||{}).entries||[]).slice().reverse();
+  const want=$('#xlogchan').value;
+  const shown=rows.filter(r=>!want||(r.channel||'kace')===want);
+  $('#xloghead').textContent=((XS||{}).log||'')+' · '+shown.length+' shown';
+  if(!shown.length){$('#xlog').innerHTML='<div class="etoempty">nothing in the log yet</div>';return}
+  const src=r=>(r.source&&typeof r.source==='object')?('overlay '+esc(String(r.source.file||'').split(/[\\/]/).pop())+' '+esc(String(r.source.sha256||'').slice(0,8)))+
+    (r.sources&&r.sources.book&&r.sources.book.length?' · book '+r.sources.book.length:''):esc(r.source||'marks');
+  $('#xlog').innerHTML='<div class="mmwide"><table class="mmxr"><thead><tr><th>At</th><th>Channel</th><th>Source</th><th>What</th><th>Hash</th><th>Outcome</th></tr></thead><tbody>'+
+    shown.map(r=>'<tr><td>'+esc(String(r.at||'').replace('T',' ').slice(0,16))+'</td><td>'+esc(r.channel||'kace')+'</td><td class="meta">'+src(r)+'</td>'+
+      '<td>'+(r.pair?esc(r.pair)+(r.clear?' clear':' feed')+(r.nodes!=null?' · '+r.nodes+' nodes':''):
+              (r.file?esc(String(r.file).split(/[\\/]/).pop())+' · '+(r.rows||0)+' rows'+(r.what?' · '+esc(r.what):''):''))+(r.dry_run?' · dry run':'')+'</td>'+
+      '<td class="meta">'+esc(String(r.hash||'').slice(0,12))+'</td>'+
+      '<td style="color:'+(r.ok===false?'var(--bad)':'inherit')+'">'+esc(r.message||'')+'</td></tr>').join('')+'</tbody></table></div>';
+}
+/* ---- loading ----------------------------------------------------------- */
+async function xLoadCfg(){
+  if(!has('export'))return;
+  try{CFG=await api('/api/config')}catch(e){xcfgShow(e.message,true);return}
+  cfgPaintTabs('export');
+  const present=(((XS||{}).tables||{}).present)||{};
+  $('#xseedwrap').classList.toggle('hide',Object.keys(present).length>0&&Object.keys(present).every(k=>present[k]));
+}
+async function xLoad(){
+  if(!has('export'))return;
+  try{XS=await api('/api/export/state')}catch(e){$('#xmsg').className='msg bad';$('#xmsg').textContent=e.message;return}
+  const S=xSaved();
+  fillSel('#xchan',(XS.channels||[]).map(c=>c.key),S.channel||'kace');
+  $('#xchan').querySelectorAll('option').forEach(o=>{const c=(XS.channels||[]).find(x=>x.key===o.value);if(c)o.textContent=c.label});
+  fillSel('#xcmpchan',(XS.channels||[]).map(c=>c.key),S.cmpchan||'bloomberg');
+  $('#xcmpchan').querySelectorAll('option').forEach(o=>{const c=(XS.channels||[]).find(x=>x.key===o.value);if(c)o.textContent=c.label});
+  fillSel('#xwings',XS.wings||['marks','fitted'],S.wings||'marks');
+  $('#xlogchan').innerHTML='<option value="">every channel</option>'+(XS.channels||[]).map(c=>'<option value="'+esc(c.key)+'">'+esc(c.label)+'</option>').join('');
+  if(S.logchan)$('#xlogchan').value=S.logchan;
+  if(!$('#xscn').value)$('#xscn').value=S.scenario||(XS.kace||{}).scenario||kaceScenario();
+  if(!$('#xovpath').value&&S.ovpath)$('#xovpath').value=S.ovpath;
+  XSEL=S.sel||{};
+  xApplyChannel(); xPaintOverlay(); xPaintLog();
+  await xLoadCfg();
+}
+function xInit(){
+  $('#xchan').onchange=()=>{xKeep({channel:$('#xchan').value});xApplyChannel()};
+  $('#xcmpchan').onchange=()=>xKeep({cmpchan:$('#xcmpchan').value});
+  $('#xtier').onchange=()=>{const ch=xChan();if(ch)xKeep({['tier.'+ch.key]:$('#xtier').value})};
+  $('#xwings').onchange=()=>xKeep({wings:$('#xwings').value});
+  $('#xscn').onchange=()=>xKeep({scenario:$('#xscn').value});
+  $('#xlogchan').onchange=()=>{xKeep({logchan:$('#xlogchan').value});xPaintLog()};
+  $('#xlogrefresh').onclick=xLoad;
+  $('#xpairs').onchange=e=>{
+    const ch=xChan(); if(!ch)return;
+    if(e.target.dataset.src){xSetSource(e.target.dataset.src,e.target.value);return}
+    const all=ch.pairs.map(p=>p.pair);
+    if(e.target.id==='xall'){XSEL[ch.key]=e.target.checked?[]:['(none)'];}
+    else{const p=e.target.dataset.x; if(!p)return;
+      const on=xChosen();
+      const next=e.target.checked?on.concat([p]):on.filter(q=>q!==p);
+      XSEL[ch.key]=(next.length===all.length)?[]:(next.length?next:['(none)']);}
+    xKeep({sel:XSEL}); xRenderPick(); $('#xsend').disabled=true;};
+  $('#xallov').onclick=()=>{(XS.channels||[]).forEach(c=>c.pairs.forEach(p=>{if(p.in_overlay)XSRC[p.pair]='overlay'}));xRenderPick();$('#xsend').disabled=true};
+  $('#xallbook').onclick=()=>{(XS.channels||[]).forEach(c=>c.pairs.forEach(p=>{if(p.in_overlay)XSRC[p.pair]='book'}));xRenderPick();$('#xsend').disabled=true};
+  $('#xovload').onclick=()=>xLoadOverlay(false);
+  $('#xovpaste').onclick=()=>xLoadOverlay(true);
+  $('#xcmpgo').onclick=xCompare;
+  $('#xbuild').onclick=xBuild;
+  $('#xsend').onclick=xSend;
+  $('#xseed').onclick=()=>cfgConfirm('Put the export tables this workbook lacks into the session, seeded from the desk\'s own files of 2026-09-10 '+
+    '(each channel\'s pairs in the file\'s order, the Bloomberg widths and wing widths, the shade and the add-ups)? The book is read again on them; '+
+    'the workbook is untouched until <b>Write to workbook</b>.','Seed',()=>post('/api/export/seed',{}),'export');
+  ['#xmult','#xtol','#xdate','#xkey','#xinterp','#xconfirmdate','#xdry'].forEach(id=>{$(id).onchange=()=>{$('#xsend').disabled=true}});
+}
 
 /* ============================== SHELL ============================== */
 function applyScreens(){
@@ -7584,8 +8274,15 @@ function showPanel(name){
     if(MOR)paintMonitor(MOR); else runMonitor();
     if(CMPR)paintCompare(CMPR); else runCompare();}
   else if(PANEL==='mm'){if(MCR)paintCheck(); if(MFR)paintFit(); if(MQR)paintMQ();
-    if(MKR)paintMark(); if(!MQR)renderRules()}
+    if(MKR)paintMark(); if(!MQR)renderRules();
+    /* The cut and the interpolation are the Vol marking tab's; a sheet run
+       before they moved is a sheet of another cut, and is re-run rather than
+       left up looking current. */
+    const cm=mmCmKey();
+    if(MCR&&MCR._cm!==cm&&($('#mmtext').value||'').trim())runCheck();
+    if(MQR&&MQR._cm!==cm&&($('#mqtext').value||'').trim())runMQ();}
   else if(PANEL==='pricing')renderGrid();
+  else if(PANEL==='export'){if(!XS)xLoad();}
 }
 $('#nav').onclick=e=>{const b=e.target.closest('button');if(!b)return;showPanel(b.dataset.p);};
 $('#tabs').onclick=e=>{const b=e.target.closest('button');if(!b)return;
@@ -7660,9 +8357,10 @@ async function boot(){
   }
   if(has('mm')){
     const MMS=STATE.marketmaker||{};
-    fillSel('#mmpair',STATE.pairs||[]);
-    fillSel('#mmcut',cutList(),'NY');
-    setMethodSel('#mmmethod',$('#mmpair').value);
+    /* The one pair selector on the tab is the marking card's; the sheets
+       take theirs from the boxes. Filled before loadMM, which restores the
+       remembered choice into it. */
+    fillSel('#markpair',STATE.pairs||[]);
     fillSel('#mmsource',MMS.target_sources||['overwrites']);
     $('#mmfly').innerHTML=(MMS.fly_conventions||['market']).map(x=>
       '<option value="'+esc(x)+'">'+esc(x==='market'?'market strangle':'smile butterfly')+
@@ -7685,6 +8383,12 @@ async function boot(){
        number typed into the page. */
     if(MMS.near_edge!=null&&!$('#mmtol').value)$('#mmtol').value=MMS.near_edge;
     renderKnobs(); mmTargetVisible(); mmRevVisible(); renderRules(); mqAvailable(); loadBank();
+  }
+  if(has('export')){
+    if(!XS)xInit();
+    /* Re-read on every boot: the overlay and the tables are the book's
+       state, and the book has just been read again. */
+    xLoad();
   }
   const SS=STATE.session||{};
   $('#sesspath').value=SS.path||SS.default||'';

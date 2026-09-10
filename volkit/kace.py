@@ -33,7 +33,7 @@ Three things the sheet did are done differently here, on purpose:
   the last row the pillar's lookup was ``#N/A``, and the literal text ``#N/A``
   went into the XML.
 * **The spread table names the pillars, and a tier names the widths.** The
-  ``KACE_SPREADS`` tab of the workbook is a row per tenor and a **column per
+  ``SPREADS`` tab of the workbook is a row per tenor and a **column per
   spreading tier** -- ``default`` and whatever else the desk names ("wide",
   "thin", a client tier).  The tenors listed are exactly the pillars posted,
   whichever tier is chosen; the tier decides only how wide the ATM two-way is
@@ -121,8 +121,11 @@ from .atm import cut_datetime
 from .paths import app_dir
 from .timeutil import DAYS_IN_YEAR, UTC, tenor_to_years
 
-#: The workbook tab the spread table is maintained on.
-SPREADS_SHEET = "KACE_SPREADS"
+#: The workbook tab the spread table is maintained on.  It was ``KACE_SPREADS``
+#: until the tiers stopped being this feed's alone (the COS file's ladder is a
+#: column of the same table); a workbook still carrying the old name is read
+#: and renamed on its next write (``configsheets.LEGACY_NAMES``).
+SPREADS_SHEET = "SPREADS"
 #: Where the credentials may come from when they are not on the command line.
 ENV_USER = "VOLKIT_KACE_USER"
 ENV_PASSWORD = "VOLKIT_KACE_PASSWORD"
@@ -140,8 +143,16 @@ OVERNIGHT = "O/N"
 SOURCES = ("marks", "fitted")
 #: Where the message is posted, when it is not on the command line.
 ENV_URL = "VOLKIT_KACE_URL"
-#: The record of every post, beside the workbook.
-POST_LOG_FILENAME = "kace_posts.jsonl"
+#: The record of every post, beside the workbook.  One log for every channel
+#: the desk publishes on -- this feed, the Bloomberg sheet, the Murex files,
+#: the COS file (``publish.py``) -- each entry naming its ``channel``; "what
+#: did we send this morning" has one place to look.  It was ``kace_posts.jsonl``
+#: when kACE was the only channel; that file is read once and carried over,
+#: every entry marked ``channel: "kace"``, so the history is not lost.
+POST_LOG_FILENAME = "publish_log.jsonl"
+LEGACY_LOG_FILENAME = "kace_posts.jsonl"
+#: What this module's entries carry as their channel.
+CHANNEL = "kace"
 #: How long to wait for kACE.  The sheet's reply came back in a third of a
 #: second; a minute is generous and still a failure somebody sees.
 POST_TIMEOUT = 60.0
@@ -206,14 +217,14 @@ class SpreadTable:
 
     @classmethod
     def default_path(cls) -> Path:
-        """The workbook whose ``KACE_SPREADS`` tab holds the table."""
+        """The workbook whose ``SPREADS`` tab holds the table."""
         from . import configsheets
 
         return configsheets.default_workbook()
 
     @classmethod
     def load(cls, path: str | Path | None = None, *, overlay=None) -> "SpreadTable":
-        """Read the ``KACE_SPREADS`` tab.  A tab that is wrong is refused whole.
+        """Read the ``SPREADS`` tab.  A tab that is wrong is refused whole.
 
         ``path`` is the marks workbook: the pillars a message is posted at are
         maintained beside the marks that are posted at them, and one file
@@ -435,6 +446,11 @@ class Feed:
     #: Whether a day between two pillars takes a width read across between
     #: them (``True``) or the sheet's step rule (``False``, the default).
     interpolate: bool = False
+    #: Post the pillars alone -- the key tenors' ATM two-way and wings -- and
+    #: none of the calendar-day ATM nodes.  The daily series is still built
+    #: (a pillar's ATM is read off it) and still summarised; it is just not
+    #: written into the message.  The bulk export's *key tenors only*.
+    pillars_only: bool = False
     notes: list[str] = field(default_factory=list)
 
     @property
@@ -446,7 +462,7 @@ class Feed:
         return self.pair[3:6].upper()
 
     def node_count(self) -> int:
-        return len(self.daily) + 5 * len(self.pillars)
+        return (0 if self.pillars_only else len(self.daily)) + 5 * len(self.pillars)
 
     def summary(self) -> dict:
         days = sorted(self.daily)
@@ -454,7 +470,8 @@ class Feed:
             "pair": self.pair, "hor_date": self.hor_date.isoformat(), "cut": self.cut,
             "source": self.source, "tier": self.tier,
             "multiplier": self.multiplier, "interpolate": self.interpolate,
-            "days": len(days),
+            "pillars_only": self.pillars_only,
+            "days": 0 if self.pillars_only else len(days),
             "first_day": days[0].isoformat() if days else None,
             "last_day": days[-1].isoformat() if days else None,
             "nodes": self.node_count(),
@@ -474,7 +491,7 @@ class Feed:
         lines.append('    <data name="data1" format="NAME_VALUE">')
         pillars = sorted(self.pillars, key=lambda p: p.expiry)
         n = 0
-        for day, vol in sorted(self.daily.items()):
+        for day, vol in ([] if self.pillars_only else sorted(self.daily.items())):
             n += 1
             half = spread_for(day, pillars, interpolate=self.interpolate) / 2.0
             lines += _node(str(n), self.ccy, self.ctr, day, [
@@ -599,40 +616,111 @@ def credentials(user: str | None = None, password: str | None = None) -> tuple[s
 # ---------------------------------------------------------------------------
 def build(book, pair: str, spreads: SpreadTable, *, tier: str | None = None,
           cut: str = "NY", source: str = "marks", method: str = "SVI",
-          multiplier: float | str | None = None, interpolate: bool = False) -> Feed:
-    """The feed for one pair at one spreading tier, off the book as it is marked now."""
+          multiplier: float | str | None = None, interpolate: bool = False,
+          pillars_only: bool = False) -> Feed:
+    """The feed for one pair at one spreading tier, off the book as it is marked now.
+
+    ``pillars_only`` writes the key tenors alone -- each pillar's ATM two-way
+    and its four wing nodes -- and leaves the calendar-day ATM nodes out; the
+    default is the whole daily series, which is what the sheet posted.
+    """
+    pair = pair.upper()
+    chosen = spreads.resolve_tier(tier)
+    factor = spread_multiplier(multiplier)
+    widths = {t: w * factor for t, w in spreads.for_tier(chosen).items()}
+    notes: list[str] = []
+    if factor != 1.0:
+        notes.append(f"the ATM widths are the {chosen} tier's multiplied by {factor:g}; "
+                     f"the mid of every two-way is where it was")
+    if interpolate and not pillars_only:
+        notes.append("a day between two pillars takes a width read across between them "
+                     "rather than the nearer pillar's")
+    if pillars_only:
+        notes.append("key tenors only: the pillars' ATM two-way and wings are posted, and "
+                     "no calendar-day ATM nodes")
+
+    # The pillars are the spread table's tenors, in expiry order.
+    read = read_pillars(book, pair, sorted(widths, key=pillar_years), cut=cut,
+                        source=source, method=method, where=spreads.path)
+    notes.extend(read.notes)
+    pillars = [Pillar(tenor=t, expiry=read.expiries[t], spread=widths[t],
+                      atm=read.atm[t], rr25=read.wings[t][0], rr10=read.wings[t][1],
+                      fly25=read.wings[t][2], fly10=read.wings[t][3], wings=read.origin[t])
+               for t in read.tenors]
+    return Feed(pair=pair, hor_date=read.today, cut=cut.upper(), source=source,
+                daily=read.daily, pillars=pillars, tier=chosen, multiplier=factor,
+                interpolate=bool(interpolate), pillars_only=bool(pillars_only), notes=notes)
+
+
+@dataclass
+class PillarRead:
+    """One pair's marks at a list of pillars, before any width is put on them.
+
+    The half of :func:`build` that reads the book, kept apart from the half
+    that spreads and formats, because every publishing channel wants exactly
+    this and nothing about the XML (``publish.py``).  Volatilities in vol
+    points; ``wings[t]`` is ``(rr25, rr10, fly25, fly10)``.
+    """
+
+    pair: str
+    today: date
+    tenors: list[str]
+    expiries: dict[str, date]
+    daily: dict[date, float]
+    atm: dict[str, float]
+    wings: dict[str, tuple[float, float, float, float]]
+    origin: dict[str, str]
+    notes: list[str] = field(default_factory=list)
+
+
+def read_pillars(book, pair: str, tenors, *, cut: str = "NY", source: str = "marks",
+                 method: str = "SVI", where: str = "the pillar list") -> PillarRead:
+    """The book's ATM and wings at each pillar, refusing a pillar it cannot mark.
+
+    The ATM at a pillar is the calendar-day cumulative series read at the
+    pillar's expiry -- the same number the daily message carries on that day
+    -- and the wings are the quoted marks (``source="marks"``: the sheet's,
+    **with this session's typed quotes on them**) or the fitted smile's.  O/N
+    borrows the shortest quoted tenor's wings and says so.
+
+    A pillar past the last quoted tenor is refused under either source: the
+    curve would extrapolate an ATM and the smile a wing, and publishing that
+    as a quoted mark is the quiet fiction this tool exists to remove.  Under
+    ``marks`` every pillar but O/N has to be quoted itself.
+    """
     pair = pair.upper()
     if source not in SOURCES:
         raise KaceError(f"unknown wing source {source!r}; expected one of {SOURCES}")
     surface = book[pair]
     today = book.clock.now.date()
-    chosen = spreads.resolve_tier(tier)
-    factor = spread_multiplier(multiplier)
-    widths = {t: w * factor for t, w in spreads.for_tier(chosen).items()}
-    marks = {canonical_tenor(m.tenor): m for m in surface.marks}
+    tenors = [canonical_tenor(t) for t in tenors]
+    tenors = sorted(dict.fromkeys(tenors), key=pillar_years)
+    # The session's quotes on top of the sheet's: a quote typed on the marking
+    # screen (or put there by an applied overlay) is the mark, and a feed that
+    # read ``surface.marks`` posted the file's number over the desk's.
+    marks = {canonical_tenor(m.tenor): m for m in surface.quoted_marks()}
     notes: list[str] = []
-    if factor != 1.0:
-        notes.append(f"the ATM widths are the {chosen} tier's multiplied by {factor:g}; "
-                     f"the mid of every two-way is where it was")
-    if interpolate:
-        notes.append("a day between two pillars takes a width read across between them "
-                     "rather than the nearer pillar's")
-
-    # The pillars are the spread table's tenors, in expiry order.  Each needs
-    # a mark behind it, except O/N, which borrows the shortest quoted wings.
-    tenors = sorted(widths, key=pillar_years)
-    unmarked = [t for t in tenors if t != OVERNIGHT and t not in marks]
-    if unmarked:
-        raise KaceError(f"{spreads.path} lists {', '.join(unmarked)}, but the {pair} sheet "
-                        f"quotes no wings there (it has {', '.join(sorted(marks, key=pillar_years))}); "
+    quoted = [t for t in tenors if t != OVERNIGHT]
+    if not quoted:
+        raise KaceError(f"{where} lists only O/N; at least one quoted tenor is needed to "
+                        f"carry the wings")
+    have = sorted(marks, key=pillar_years)
+    unmarked = [t for t in quoted if t not in marks]
+    if source == "marks" and unmarked:
+        raise KaceError(f"{where} lists {', '.join(unmarked)}, but the {pair} sheet "
+                        f"quotes no wings there (it has {', '.join(have)}); "
                         f"a pillar with no mark behind it cannot be posted. A tenor the pair sheet "
                         f"quotes and CONFIG's TENORS column does not list is not read, so check "
                         f"that too; --wings fitted posts the smile's own wings at any pillar")
-    quoted = [t for t in tenors if t != OVERNIGHT]
-    if not quoted:
-        raise KaceError(f"{spreads.path} lists only O/N; at least one quoted tenor "
-                        f"is needed to carry the wings")
     expiries = {t: book.calendars.expiry_date(pair, calendar_tenor(t), today) for t in tenors}
+    if have:
+        last_quoted = book.calendars.expiry_date(pair, calendar_tenor(have[-1]), today)
+        beyond = [t for t in quoted if expiries[t] > last_quoted]
+        if beyond:
+            raise KaceError(f"{where} lists {', '.join(beyond)}, past the last tenor the "
+                            f"{pair} sheet quotes ({have[-1]}); an ATM and a wing out there "
+                            f"would be extrapolated, and are not published as marks. Mark "
+                            f"the tenor, or supply it from an overlay file")
 
     # The daily series runs to the last pillar, whatever the horizon setting
     # says -- the pillar has to be a row of it.
@@ -655,30 +743,30 @@ def build(book, pair: str, spreads: SpreadTable, *, tier: str | None = None,
                         f"({', '.join(expiries[t].isoformat() for t in missing)}); the last "
                         f"day it holds is {max(daily):%Y-%m-%d}")
 
-    pillars: list[Pillar] = []
+    atm: dict[str, float] = {}
+    wings: dict[str, tuple[float, float, float, float]] = {}
+    origin: dict[str, str] = {}
     for t in tenors:
         expiry = expiries[t]
         if source == "marks":
+            # O/N borrows the shortest *posted* tenor's wings, as the sheet did.
             src = t if t in marks else quoted[0]
             m = marks[src]
-            wings = (m.rr_25 * 100.0, m.rr_10 * 100.0, m.st_25 * 100.0, m.st_10 * 100.0)
-            origin = "marks" if src == t else f"marks at {src}"
+            wings[t] = (m.rr_25 * 100.0, m.rr_10 * 100.0, m.st_25 * 100.0, m.st_10 * 100.0)
+            origin[t] = "marks" if src == t else f"marks at {src}"
             if src != t:
                 notes.append(f"{t} has no quoted wings; the {src} marks are posted there")
         else:
             when = cut_datetime(datetime.combine(expiry, datetime.min.time()).replace(tzinfo=UTC),
                                 cut, surface.atm.dst_aware_cuts)
-            wings = (surface.risk_reversal(when, 0.25, method, cut) * 100.0,
-                     surface.risk_reversal(when, 0.10, method, cut) * 100.0,
-                     surface.strangle(when, 0.25, method, cut) * 100.0,
-                     surface.strangle(when, 0.10, method, cut) * 100.0)
-            origin = "fitted"
-        pillars.append(Pillar(tenor=t, expiry=expiry, spread=widths[t], atm=daily[expiry],
-                              rr25=wings[0], rr10=wings[1], fly25=wings[2], fly10=wings[3],
-                              wings=origin))
-    return Feed(pair=pair, hor_date=today, cut=cut.upper(), source=source,
-                daily=daily, pillars=pillars, tier=chosen, multiplier=factor,
-                interpolate=bool(interpolate), notes=notes)
+            wings[t] = (surface.risk_reversal(when, 0.25, method, cut) * 100.0,
+                        surface.risk_reversal(when, 0.10, method, cut) * 100.0,
+                        surface.strangle(when, 0.25, method, cut) * 100.0,
+                        surface.strangle(when, 0.10, method, cut) * 100.0)
+            origin[t] = "fitted"
+        atm[t] = daily[expiry]
+    return PillarRead(pair=pair, today=today, tenors=tenors, expiries=expiries, daily=daily,
+                      atm=atm, wings=wings, origin=origin, notes=notes)
 
 
 # ---------------------------------------------------------------------------
@@ -1065,16 +1153,61 @@ class PostLog:
 
     @classmethod
     def at(cls, path: str | Path | None = None) -> "PostLog":
-        return cls(path=str(Path(path) if path else cls.default_path()))
+        log = cls(path=str(Path(path) if path else cls.default_path()))
+        log.carry_over()
+        return log
+
+    def carry_over(self) -> int:
+        """Bring the old ``kace_posts.jsonl`` beside this log into it, once.
+
+        Every entry the old file holds is appended with ``channel: "kace"``
+        (it had no channel field: kACE was the only one), and the old file is
+        left where it is under ``kace_posts.jsonl.migrated`` so nothing is
+        deleted.  Returns how many entries were carried; zero when there is
+        no old file, when this log already exists, or when the log is named
+        ``kace_posts.jsonl`` itself.  Trouble reading or renaming is not an
+        error here: a log that could not be migrated is a log with less
+        history in it, and the tab still works.
+        """
+        p = Path(self.path)
+        old = p.parent / LEGACY_LOG_FILENAME
+        if p.name == LEGACY_LOG_FILENAME or p.exists() or not old.exists():
+            return 0
+        n = 0
+        try:
+            lines = paths.read_text(old).splitlines()
+            with p.open("a", encoding="utf-8") as fh:
+                for line in lines:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    row.setdefault("channel", CHANNEL)
+                    fh.write(json.dumps(row, default=str) + "\n")
+                    n += 1
+            old.rename(old.with_name(old.name + ".migrated"))
+        except OSError:
+            return n
+        return n
 
     def record(self, entry: dict) -> dict:
         entry = dict(entry)
+        entry.setdefault("channel", CHANNEL)
         with Path(self.path).open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(entry, default=str) + "\n")
         return entry
 
-    def entries(self, pair: str | None = None, limit: int = 20) -> list[dict]:
-        """The last ``limit`` entries, newest last; a line that will not parse is skipped."""
+    def entries(self, pair: str | None = None, limit: int = 20,
+                channel: str | None = None) -> list[dict]:
+        """The last ``limit`` entries, newest last; a line that will not parse is skipped.
+
+        ``channel`` narrows to one channel's; the kACE feed tab reads its own
+        and the export screen's log card reads them all.  An entry with no
+        channel field is a kACE one from before there were others.
+        """
         p = Path(self.path)
         if not p.exists():
             return []
@@ -1089,6 +1222,8 @@ class PostLog:
                 continue
             if pair and str(row.get("pair", "")).upper() != pair.upper():
                 continue
+            if channel and str(row.get("channel") or CHANNEL).lower() != channel.lower():
+                continue
             out.append(row)
         return out[-limit:]
 
@@ -1096,15 +1231,23 @@ class PostLog:
 def post_feed(xml_text: str, *, pair: str, scenario: str, clear: bool, hor_date: date,
               nodes: int, url: str, log: PostLog | None, when: datetime, opener=None,
               ca: str | None = None, insecure: bool = False, dry_run: bool = False,
-              tier: str = "", multiplier: float = 1.0, interpolate: bool = False) -> dict:
+              tier: str = "", multiplier: float = 1.0, interpolate: bool = False,
+              pillars_only: bool = False, source: dict | str | None = None) -> dict:
     """Post one message and write the record; the record is the return value.
 
     A refused post is recorded too -- with what refused it -- because the
     question the log answers is "what happened this morning", and "nothing
     reached kACE" is an answer.  A dry run records nothing and sends
     nothing: it says what *would* go, and where.
+
+    ``source`` is where the numbers came from: ``"marks"`` (the default, and
+    what the feed tab posts), or the export overlay's record -- ``{"file",
+    "sha256", "rows", ...}`` -- so a message built from outside numbers can
+    never be mistaken a week later for one built from the book.
     """
-    entry = {"at": when.isoformat(timespec="seconds"), "pair": pair.upper(),
+    entry = {"at": when.isoformat(timespec="seconds"), "channel": CHANNEL,
+             "pair": pair.upper(),
+             "source": source if source else "marks",
              "scenario": scenario, "clear": bool(clear), "hor_date": hor_date.isoformat(),
              # Which spreading tier's widths went out.  A clear carries none,
              # and the log says so rather than naming a tier nothing used.
@@ -1114,6 +1257,8 @@ def post_feed(xml_text: str, *, pair: str, scenario: str, clear: bool, hor_date:
              # across or stepped.  A tier alone no longer says what went.
              "multiplier": float(multiplier or 1.0),
              "interpolate": bool(interpolate),
+             # Whether the calendar-day nodes were left out (key tenors only).
+             "pillars_only": bool(pillars_only),
              "nodes": nodes, "hash": message_hash(xml_text), "bytes": len(form_body(xml_text)),
              "url": url or ""}
     if dry_run:

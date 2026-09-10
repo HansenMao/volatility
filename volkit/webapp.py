@@ -44,8 +44,8 @@ from .knowledge import KnowledgeBank, KnowledgeError, RULE_INSTRUMENTS, RULE_KIN
 from .marketmaker import (BACKBONE_KNOBS, CROSS_KNOBS, DEFAULT_BACKBONE_FREE,
                           DEFAULT_CROSS_FREE, MEAN_REVERSION_RANGE, NEAR_EDGE,
                           SEVERITIES, TARGET_SOURCES)
-from .marketmaker import check_panel_from_request as mm_check_panel_from_request
-from .marketmaker import quote_panel_from_request as mm_quote_panel_from_request
+from .marketmaker import check_sheet_from_request as mm_check_sheet_from_request
+from .marketmaker import quote_sheet_from_request as mm_quote_sheet_from_request
 from .marketmaker import rules_from_request
 from .quotes import FLY_CONVENTIONS
 from .quotes import VOL_UNITS as QUOTE_VOL_UNITS
@@ -69,6 +69,8 @@ from .marking import SCREEN_VERDICTS as MARK_VERDICTS
 from .smile import INTERPOLATORS
 from .timeutil import UTC, Clock, parse_datetime, tenor_to_years
 from . import kace as kace_mod
+from . import overlay as overlay_mod
+from . import publish
 
 STATIC_DIR = Path(__file__).parent / "web"
 
@@ -95,7 +97,8 @@ class BookService:
                  kace_user: str | None = None, kace_password: str | None = None,
                  kace_scenario: str = kace_mod.DEFAULT_SCENARIO, kace_url: str | None = None,
                  kace_ca: str | None = None, kace_insecure: bool = False,
-                 kace_log_path: str | None = None, kace_tier: str | None = None):
+                 kace_log_path: str | None = None, kace_tier: str | None = None,
+                 export_dir: str | None = None):
         self.path = path
         self.clock = clock or Clock.utcnow()
         self.feed_path = feed_path
@@ -242,6 +245,14 @@ class BookService:
         self.kace_log = kace_mod.PostLog.at(kace_log_path)
         # The network, replaceable: tests post into a function.
         self.kace_opener = None
+        # The bulk export (publish.py): where a file channel's files land,
+        # the export-policy tables read with the book, and the overlay --
+        # an outside file laid over the book for the export alone, or, when
+        # asked, applied to the session with the snapshot that undoes it.
+        self.export_dir = str(export_dir) if export_dir else None
+        self.export_tables = publish.ExportTables(path=str(path))
+        self.overlay: overlay_mod.Overlay | None = None
+        self.overlay_applied: dict | None = None
         self._load_kace_spreads()
         self.reload()
         if session_path:
@@ -276,6 +287,14 @@ class BookService:
             self.kace_spreads = kace_mod.SpreadTable(
                 path=f"{Path(path).name}!{kace_mod.SPREADS_SHEET}")
             self.kace_error = str(exc)
+        # The export-policy tables come off the same workbook and the same
+        # session overlay, for the same reason: a width edited on the export
+        # screen is the width the next build uses.
+        self.export_tables = publish.ExportTables.load(self.path, overlay=self.config_edits)
+        if own:
+            self.export_tables.spreads = (self.kace_spreads if not self.kace_error else None)
+            if self.kace_error:
+                self.export_tables.errors["SPREADS"] = self.kace_error
 
     def reload(self, discard: bool = False) -> dict:
         """Read the workbook again.
@@ -289,6 +308,10 @@ class BookService:
         with self._lock:
             if discard:
                 self.config_edits = {}
+                # An applied overlay lived on the book that is being thrown
+                # away; the file stays loaded for the export, the snapshot
+                # stays on disk, and nothing is applied any more.
+                self.overlay_applied = None
             # Read before the load, not after: a workbook saved *while* it was
             # being read would otherwise be stamped with the time of the copy
             # the tool never saw, and the watcher would never pick it up.
@@ -436,6 +459,12 @@ class BookService:
                     "greeks": [{"key": k, "unit": u} for k, u in GREEK_FIELDS],
                 },
                 "session": {**self.session_state(), "error": self.session_error},
+                # The bulk export: whether an overlay sits on the session,
+                # said on every screen's state rather than one's, because
+                # the kACE feed tab posts from the book and the book may be
+                # carrying outside numbers.
+                "export": {"overlay": self.overlay_state(),
+                           "tables": self.export_tables.summary()},
                 "valuation": self.book.clock.now.isoformat(),
                 "source": str(self.path),
                 "warnings": self.book.all_problems(),
@@ -1635,6 +1664,11 @@ class BookService:
                 # The columns the tab must always have, so the window knows
                 # which of the ones it is showing can be taken away again.
                 entry["fixed"] = list(configsheets.EDITABLE[sheet][0])
+                # Which editor the tab belongs to.  The export-policy tables
+                # are edited on the Vol bulk processing screen, beside the
+                # thing they govern; the Config window shows the rest.
+                entry["where"] = ("export" if sheet in configsheets.EXPORT_TABS
+                                  else "config")
                 # What the screen can measure for this tab, rather than the
                 # tab's name: the page keys off the capability so a second
                 # measurable tab is a line here and not a name in the
@@ -1882,9 +1916,27 @@ class BookService:
             # having been saved is what clears it.
             if not pairs:
                 self.dirty = False
-            return {"ok": True, "written": written,
-                    "pairs": (pairs if pairs else self.book.pairs),
-                    **self.session_state({"path": written})}
+            out = {"ok": True, "written": written,
+                   "pairs": (pairs if pairs else self.book.pairs),
+                   **self.session_state({"path": written})}
+            # An applied overlay is on the book and so in the file -- the
+            # rows the book could hold.  The rest were never on the book, so
+            # the save takes the intersection, and says so rather than
+            # letting a full file be mistaken for a saved one.
+            if self.overlay_applied is not None and self.overlay is not None:
+                report = overlay_mod.overflow_report(self.overlay, self.book)
+                out["overlay"] = report
+                out["note"] = (f"saved {report['inside']} of {report['rows']} overlay rows"
+                               + (f" · {report['outside']} outside the book, ignored: "
+                                  + "; ".join(x for x in (
+                                      f"pairs {', '.join(report['pairs'])}"
+                                      if report["pairs"] else "",
+                                      f"tenor {', '.join(report['tenors'])}"
+                                      if report["tenors"] else "") if x)
+                                  if report["outside"] else "")
+                               + f" · the overlay file ({self.overlay.name}, sha256 "
+                                 f"{self.overlay.sha256[:16]}) stays as the record of the rest")
+            return out
 
     def session_export(self, payload: dict) -> dict:
         """Write a session file into the workbook it was marked against.
@@ -1909,6 +1961,16 @@ class BookService:
         with self._lock:
             if self.book is None:
                 raise ValueError(self.load_error or "no workbook is loaded")
+            # The rule that keeps the book of record clean: an overlay is by
+            # definition not marked, and letting one leak into the workbook
+            # through a routine write is the single worst thing the export
+            # overlay could do.  Refused by name, pointing at Revert.
+            if self.overlay_applied is not None:
+                raise ValueError(
+                    f"the overlay {self.overlay_applied['file']} is applied to this session, "
+                    f"and an overlay is not marked: the workbook is not written while it is "
+                    f"on the book. Revert it on the Vol bulk processing screen first -- a "
+                    f"number that should be marked is reverted, typed and marked")
             raw = (payload.get("pairs") or None)
             pairs = [raw] if isinstance(raw, str) and raw.strip() else raw
             path = (payload.get("path") or "").strip() or (
@@ -2216,7 +2278,14 @@ class BookService:
 
     # -- market maker -----------------------------------------------------
     def bank_state(self, q: dict | None = None) -> dict:
-        """What is in the knowledge bank, and where it came from."""
+        """What is in the knowledge bank, and where it came from.
+
+        With a pair, that pair's rules as before.  Without one, **every**
+        pair's, under ``by_pair`` -- the book's pairs first, in the workbook's
+        order, then any the file holds that the book does not build -- because
+        the bank card shows them all at once (§11) and a card that only shows
+        the pair some selector happens to be on is a card that hides the rest.
+        """
         with self._lock:
             out = {
                 "path": self.bank.path,
@@ -2226,13 +2295,19 @@ class BookService:
             }
             pair = (q or {}).get("pair")
             if pair:
-                pk = self.bank.for_pair(pair)
-                out["pair"] = pair.upper()
-                out["rules"] = [asdict(r) for r in pk.rules]
-                out["describe"] = [r.describe() for r in pk.rules]
-                out["updated"] = pk.updated
-                out["source_note"] = pk.source_note
+                out.update(self._bank_block(pair))
+                return out
+            shown = list(self.book.pairs) if self.book is not None else []
+            shown += [p for p in sorted(self.bank.pairs) if p not in shown]
+            out["shown"] = shown
+            out["by_pair"] = {p: self._bank_block(p) for p in shown}
             return out
+
+    def _bank_block(self, pair: str) -> dict:
+        pk = self.bank.for_pair(pair)
+        return {"pair": pair.upper(), "rules": [asdict(r) for r in pk.rules],
+                "describe": [r.describe() for r in pk.rules],
+                "updated": pk.updated, "source_note": pk.source_note}
 
     def mm_check(self, payload: dict) -> dict:
         """Check a pasted market against the curve.  It moves nothing at all.
@@ -2251,8 +2326,9 @@ class BookService:
         with self._lock:
             if self.book is None:
                 raise ValueError(self.load_error or "no workbook is loaded")
-            panel = mm_check_panel_from_request(payload)
-            return panel.run(self.book)
+            # A sheet, not a panel: every pair the market box names, each
+            # against its own curve (§11).
+            return mm_check_sheet_from_request(payload).run(self.book)
 
     def mm_quote(self, payload: dict) -> dict:
         """Price the instruments in the request box.  It fits nothing.
@@ -2265,10 +2341,9 @@ class BookService:
         with self._lock:
             if self.book is None:
                 raise ValueError(self.load_error or "no workbook is loaded")
-            panel = mm_quote_panel_from_request(payload)
-            hist = None
-            if self.history is not None and panel.pair in self.history:
-                hist = self.history[panel.pair]
+            # A sheet: one quote panel per pair the request box names, each
+            # with its own history sheet if the book has one (§11).
+            sheet = mm_quote_sheet_from_request(payload)
             # The archive is the quoting agent's file and the quote's third rung
             # (§17): read under its own lock, like the agent card reads it.
             with self._archive_lock:
@@ -2276,8 +2351,8 @@ class BookService:
                 # KACE_SPREADS table the feed posts from -- one ladder on the
                 # workbook, read by both, so a width shown to a client and a
                 # width posted to the platform cannot quietly differ.
-                out = panel.run(self.book, bank=self.bank, hist=hist, archive=self.archive,
-                                spreads=self.kace_spreads)
+                out = sheet.run(self.book, bank=self.bank, hists=self.history,
+                                archive=self.archive, spreads=self.kace_spreads)
             out["bank"]["error"] = self.bank_error
             out["archive"]["error"] = self.archive_error
             # For the archive card under the sheet: where more can come from.
@@ -2566,13 +2641,44 @@ class BookService:
                               counterparty=str(payload.get("counterparty") or "").strip())
 
     def mm_save_bank(self, payload: dict) -> dict:
-        """Replace one pair's rules and write the file.
+        """Replace one pair's rules -- or every pair's -- and write the file.
 
         The whole set is posted and validated together; a set with a bad rule
         in it is rejected whole rather than saved half applied, so the file on
-        disk is never a state the screen never showed.
+        disk is never a state the screen never showed.  ``banks`` maps a pair
+        to ``{rules, source_note}`` and is the bank card's way of saving all
+        its tables at once: every pair is checked before any is set, and one
+        bad rule on one pair saves nothing, for the same reason.
         """
+        from .knowledge import PairKnowledge
         with self._lock:
+            banks = payload.get("banks")
+            if banks is not None:
+                if not isinstance(banks, dict) or not banks:
+                    raise ValueError("banks must map each pair to its rules")
+                staged: dict[str, PairKnowledge] = {}
+                problems: list[str] = []
+                for pair, block in banks.items():
+                    pair = str(pair or "").strip().upper()
+                    if not pair:
+                        raise ValueError("a currency pair is required to save knowledge against")
+                    block = block if isinstance(block, dict) else {"rules": block}
+                    pk = PairKnowledge(rules=rules_from_request(block),
+                                       updated=self.clock.now.replace(microsecond=0).isoformat(),
+                                       source_note=str(block.get("source_note") or ""))
+                    problems.extend(f"{pair}: {p}" for p in pk.problems())
+                    staged[pair] = pk
+                if problems:
+                    # The validation problems last: ``bank_state`` has a
+                    # ``problems`` of its own (what the *file* said when it was
+                    # read), and spreading it over them replaced the answer to
+                    # "why was this refused" with a note about the file.
+                    return {"ok": False, **self.bank_state(), "problems": problems}
+                for pair, pk in staged.items():
+                    self.bank.pairs[pair] = pk
+                written = self.bank.save(self.bank_path)
+                self.bank_error = None
+                return {"ok": True, "problems": [], "written": written, **self.bank_state()}
             pair = str(payload.get("pair") or "").strip().upper()
             if not pair:
                 raise ValueError("a currency pair is required to save knowledge against")
@@ -2580,7 +2686,7 @@ class BookService:
             problems = self.bank.set_pair(pair, rules, self.clock.now,
                                           str(payload.get("source_note") or ""))
             if problems:
-                return {"ok": False, "problems": problems, **self.bank_state({"pair": pair})}
+                return {"ok": False, **self.bank_state({"pair": pair}), "problems": problems}
             written = self.bank.save(self.bank_path)
             self.bank_error = None
             return {"ok": True, "problems": [], "written": written,
@@ -2640,7 +2746,7 @@ class BookService:
                 "url": self.kace_url,
                 "insecure": self.kace_insecure,
                 "log": self.kace_log.path,
-                "posts": self.kace_log.entries(limit=10)}
+                "posts": self.kace_log.entries(limit=10, channel=kace_mod.CHANNEL)}
 
     def _kace_default_tier(self) -> str:
         """Which tier the screen starts on: the start-up one, else ``default``.
@@ -2676,9 +2782,443 @@ class BookService:
             when=when, opener=self.kace_opener, ca=self.kace_ca, insecure=self.kace_insecure,
             dry_run=bool(payload.get("dry_run")), tier=out.get("tier", ""),
             multiplier=out.get("multiplier", 1.0),
-            interpolate=bool(out.get("interpolate")))
-        entry["posts"] = self.kace_log.entries(limit=10)
+            interpolate=bool(out.get("interpolate")),
+            pillars_only=bool(out.get("pillars_only")))
+        entry["posts"] = self.kace_log.entries(limit=10, channel=kace_mod.CHANNEL)
         return entry
+
+    # -- the bulk export ----------------------------------------------------
+    def export_state(self, q: dict | None = None) -> dict:
+        """What the Vol bulk processing screen opens on: channels, tables, overlay, log."""
+        with self._lock:
+            tables = self.export_tables
+            channels = []
+            for ch in publish.CHANNELS.values():
+                entry = ch.summary()
+                try:
+                    ov_pairs = set(self.overlay.pairs) if self.overlay is not None else set()
+                    entry["pairs"] = [{"pair": e.pair, "label": e.label,
+                                       "feed_from": e.feed_from if e.feed_from != e.pair else "",
+                                       "last_tenor": e.last_tenor,
+                                       "in_book": (self.book is not None
+                                                   and e.feed_from in self.book),
+                                       # Whether the loaded overlay carries the
+                                       # pair: the screen's per-pair source
+                                       # toggle is offered only where it does.
+                                       "in_overlay": e.pair in ov_pairs}
+                                      for e in tables.pairs_for(ch.key, self.book)]
+                    entry["error"] = ""
+                except publish.PublishError as exc:
+                    entry["pairs"] = []
+                    entry["error"] = str(exc)
+                if ch.key == "kace":
+                    try:
+                        entry["tenors"] = ch.tenor_list(tables)
+                    except publish.PublishError:
+                        entry["tenors"] = []
+                channels.append(entry)
+            return {"channels": channels, "tables": tables.summary(),
+                    "sources": list(publish.SOURCES), "wings": list(kace_mod.SOURCES),
+                    "overlay": self.overlay_state(),
+                    "export_dir": str(publish.export_dir(self.export_dir)),
+                    "kace": {"url": self.kace_url, "credentials": bool(self.kace_user),
+                             "scenario": self.kace_scenario, "tier": self._kace_default_tier()},
+                    "log": self.kace_log.path,
+                    "entries": self.kace_log.entries(limit=int((q or {}).get("limit") or 30),
+                                                     channel=(q or {}).get("channel") or None),
+                    "session_dirty": self.dirty}
+
+    def overlay_state(self) -> dict:
+        out = {"loaded": self.overlay is not None,
+               "applied": self.overlay_applied is not None}
+        if self.overlay is not None:
+            out.update(self.overlay.summary())
+            if self.book is not None:
+                out["overflow"] = overlay_mod.overflow_report(self.overlay, self.book)
+                applied = set((self.overlay_applied or {}).get("pairs") or [])
+                for e in out["per_pair"]:
+                    e["in_book"] = e["pair"] in self.book
+                    e["tenors_in_book"] = [t for t in e["tenors"]
+                                           if e["in_book"] and overlay_mod._book_lists(
+                                               self.book, e["pair"], t)]
+                    e["applied"] = e["pair"] in applied
+        if self.overlay_applied is not None:
+            out["applied_at"] = self.overlay_applied["at"]
+            out["snapshot"] = self.overlay_applied["snapshot"]
+            out["applied_rows"] = self.overlay_applied["applied"]
+            out["applied_pairs"] = list(self.overlay_applied.get("pairs") or [])
+        return out
+
+    def export_overlay(self, payload: dict) -> dict:
+        """Load, clear, apply or revert the overlay.
+
+        ``load`` reads a file named by path, or CSV text pasted into the
+        box, and holds it for the export alone -- nothing on the book moves.
+        ``apply`` captures the session first (``pre-overlay-<stamp>.json``
+        beside the session file) and puts the rows the book can hold onto
+        it as ordinary overwrites; ``revert`` puts that snapshot back.
+        ``clear`` drops a loaded overlay, reverting first if it was applied.
+        """
+        action = str(payload.get("action") or "load").strip().lower()
+        with self._lock:
+            if action == "load":
+                if self.overlay_applied is not None:
+                    raise publish.PublishError(
+                        f"an overlay is applied to the session ({self.overlay.name}); revert "
+                        f"it before loading another")
+                path = str(payload.get("path") or "").strip()
+                text = str(payload.get("text") or "")
+                if text.strip():
+                    self.overlay = overlay_mod.parse(text, path=path)
+                elif path:
+                    self.overlay = overlay_mod.load(path)
+                else:
+                    raise publish.PublishError("name an overlay file, or paste its rows")
+                return {"ok": True, "message": f"overlay {self.overlay.name}: "
+                                               f"{len(self.overlay.rows)} rows, "
+                                               f"{len(self.overlay.pairs)} pairs",
+                        "overlay": self.overlay_state()}
+            if action == "clear":
+                out: dict = {}
+                if self.overlay_applied is not None:
+                    out = self._overlay_revert()
+                self.overlay = None
+                return {"ok": True, "message": "overlay cleared" + (
+                    f"; {out.get('message', '')}" if out else ""),
+                        "overlay": self.overlay_state()}
+            if action == "apply":
+                if self.overlay is None:
+                    raise publish.PublishError("no overlay is loaded")
+                if self.book is None:
+                    raise ValueError(self.load_error or "no workbook is loaded")
+                pairs = payload.get("pairs")
+                if pairs is not None:
+                    if not isinstance(pairs, (list, tuple)):
+                        raise publish.PublishError("pairs must be a list")
+                    pairs = [str(p).strip().upper() for p in pairs if str(p or "").strip()]
+                    if not pairs:
+                        raise publish.PublishError("tick at least one pair to overwrite the "
+                                                   "book with")
+                    unknown = sorted(set(pairs) - set(self.overlay.pairs))
+                    if unknown:
+                        raise publish.PublishError(f"the overlay has no rows for "
+                                                   f"{', '.join(unknown)}")
+                # The snapshot is taken once, before the first pair goes on;
+                # a second apply (more pairs ticked) lands on the same
+                # snapshot, so Revert puts the whole session back.
+                fresh = self.overlay_applied is None
+                if fresh:
+                    snapshot = session.capture(self.book,
+                                               note=f"before overlay {self.overlay.name}")
+                    base = Path(self.session_path or session.default_path())
+                    stamp = self.book.clock.now.strftime("%Y%m%d-%H%M%S")
+                    where = session.write(snapshot, base.parent / f"pre-overlay-{stamp}.json")
+                else:
+                    where = self.overlay_applied["snapshot"]
+                result = overlay_mod.apply_to_book(self.overlay, self.book, pairs)
+                if not result["pairs"]:
+                    # Nothing went on -- the ticked pairs are outside the book
+                    # -- so nothing is applied and the snapshot just taken is
+                    # not kept: a snapshot of an unchanged book would make
+                    # Revert look like it had something to undo.
+                    if fresh:
+                        Path(where).unlink(missing_ok=True)
+                    return {"ok": True, **result,
+                            "message": "nothing written over the book: the book holds none of "
+                                       f"{', '.join(pairs or self.overlay.pairs)}' rows "
+                                       f"(they stay in the overlay for the Output side)",
+                            "overlay": self.overlay_state()}
+                if fresh:
+                    self.overlay_applied = {
+                        "at": self.book.clock.now.isoformat(timespec="seconds"),
+                        "snapshot": where, "file": self.overlay.name,
+                        "sha256": self.overlay.sha256, "applied": 0, "pairs": []}
+                self.overlay_applied["applied"] += len(result["applied"])
+                self.overlay_applied["pairs"] = sorted(
+                    set(self.overlay_applied["pairs"]) | set(result["pairs"]))
+                self.dirty = True
+                return {"ok": not result["problems"], "wrote": where, **result,
+                        "message": f"{len(result['applied'])} row(s) of "
+                                   f"{', '.join(result['pairs']) or 'no pair'} written over "
+                                   f"the book; the session before the overlay is in "
+                                   f"{Path(where).name}. {result['message']}",
+                        "overlay": self.overlay_state(), **self.state()}
+            if action == "revert":
+                out = self._overlay_revert()
+                return {"ok": not out["problems"], **out, "overlay": self.overlay_state(),
+                        **self.state()}
+            raise publish.PublishError(f"unknown overlay action {action!r}; expected load, "
+                                       f"clear, apply or revert")
+
+    def _overlay_revert(self) -> dict:
+        if self.overlay_applied is None:
+            raise publish.PublishError("no overlay is applied to the session")
+        if self.book is None:
+            raise ValueError(self.load_error or "no workbook is loaded")
+        where = self.overlay_applied["snapshot"]
+        doc = session.load(where)
+        # What the snapshot holds is put back whole: every pair's marks as
+        # they were, which takes the applied rows off and restores whatever
+        # they replaced.
+        out = session.apply_document(self.book, doc)
+        self.overlay_applied = None
+        out["message"] = (f"reverted to {Path(where).name}: {len(out['applied'])} pair(s) "
+                          f"put back as they were before the overlay")
+        return out
+
+    def _export_request(self, payload: dict) -> dict:
+        """The build's arguments off a request, checked once for build and run."""
+        source = str(payload.get("source") or "book").strip().lower()
+        if source == "marks":
+            source = "book"
+        methods = payload.get("methods") or {}
+        if not isinstance(methods, dict):
+            raise publish.PublishError("methods must map a pair to its interpolation method")
+        pairs = payload.get("pairs")
+        if isinstance(pairs, str):
+            # A download is a GET, and a query string has no lists.
+            pairs = [p.strip() for p in pairs.split(",") if p.strip()]
+        if pairs is not None and not isinstance(pairs, (list, tuple)):
+            raise publish.PublishError("pairs must be a list")
+        if isinstance(pairs, (list, tuple)) and not pairs:
+            # An empty list is every pair unticked, not every pair.
+            raise publish.PublishError("name at least one pair to export")
+        file_date = None
+        if str(payload.get("file_date") or "").strip():
+            try:
+                file_date = date.fromisoformat(str(payload["file_date"]).strip())
+            except ValueError:
+                raise publish.PublishError(
+                    f"file_date {payload['file_date']!r} is not a date (YYYY-MM-DD)") from None
+        sources = payload.get("sources") or {}
+        if not isinstance(sources, dict):
+            # A download is a GET: the map arrives as sources.<PAIR>=<source>.
+            sources = {str(k)[8:]: v for k, v in payload.items()
+                       if str(k).startswith("sources.")}
+        if not isinstance(sources, dict):
+            raise publish.PublishError("sources must map a pair to book or overlay")
+        sources = {str(k).strip().upper(): str(v).strip().lower()
+                   for k, v in sources.items() if str(v or "").strip()}
+        return {"channel_key": str(payload.get("channel") or "").strip().lower(),
+                "source": source, "sources": sources, "pairs": pairs or None,
+                "tier": (str(payload.get("tier") or "").strip() or None),
+                "multiplier": payload.get("multiplier"),
+                "wings": str(payload.get("wings") or payload.get("wing_source") or "marks"),
+                "cut": str(payload.get("cut") or "NY"), "methods": methods,
+                "tolerance": payload.get("tolerance"),
+                "pillars_only": _flag(payload.get("pillars_only")),
+                "interpolate": _flag(payload.get("interpolate")),
+                "file_date": file_date}
+
+    def _export_build(self, req: dict):
+        """One build off a request, under the lock: the one reading of the sources.
+
+        A pair read from the overlay that is *applied* to the session is
+        already on the book, so it is built from the book and the note says
+        so -- the numbers are the same, and the provenance would otherwise
+        be wrong.  A pair the request sends to the overlay when none is
+        loaded is a refusal by name.
+        """
+        if self.book is None:
+            raise ValueError(self.load_error or "no workbook is loaded")
+        req = dict(req)
+        key = req.pop("channel_key")
+        sources = dict(req.pop("sources") or {})
+        default = req.pop("source")
+        needs = default == "overlay" or "overlay" in sources.values()
+        if needs and self.overlay is None:
+            raise publish.PublishError("a pair is to be read from the overlay, and no overlay "
+                                       "is loaded on the Input side")
+        applied = set((self.overlay_applied or {}).get("pairs") or [])
+        notes: list[str] = []
+        if applied and self.overlay is not None:
+            pairs = self.export_tables.pairs_for(key, self.book)
+            turned = []
+            for e in pairs:
+                want = sources.get(e.pair, default)
+                if want == "overlay" and e.pair in applied:
+                    sources[e.pair] = "book"
+                    turned.append(e.pair)
+            if turned:
+                notes.append(f"{', '.join(turned)}: the overlay is written over the book for "
+                             f"{'this pair' if len(turned) == 1 else 'these pairs'}, so the "
+                             f"book already carries its rows and is what is read")
+        b = publish.build(key, self.book, self.export_tables, source=default, sources=sources,
+                          overlay=self.overlay if needs else None, **req)
+        b.notes.extend(notes)
+        return b
+
+    def export_build(self, payload: dict) -> dict:
+        """Build one channel's export and its preflight.  Nothing leaves.
+
+        The answer is what the screen shows before *Send*: every pillar's
+        two-way and where each number came from, the coverage with each
+        pair's source, the diff against the book for the overlay pairs, and
+        every refusal by name.
+        """
+        req = self._export_request(payload)
+        with self._lock:
+            b = self._export_build(req)
+            out = b.summary()
+            if b.feeds:
+                out["messages"] = {}
+                scenario = self._kace_scenario(payload)
+                out["scenario"] = scenario
+                for pair, feed in b.feeds.items():
+                    try:
+                        out["messages"][pair] = {
+                            "nodes": feed.xml(self.kace_user, self.kace_password,
+                                              scenario=scenario,
+                                              timestamp=self.book.clock.now).count("<node "),
+                            "error": None}
+                    except kace_mod.KaceError as exc:
+                        out["messages"][pair] = {"nodes": 0, "error": str(exc)}
+            return out
+
+    def export_compare(self, payload: dict) -> dict:
+        """The book against the overlay for the channel's two-ways: mids and both sides."""
+        req = self._export_request(payload)
+        with self._lock:
+            if self.book is None:
+                raise ValueError(self.load_error or "no workbook is loaded")
+            if self.overlay is None:
+                raise publish.PublishError("no overlay is loaded on the Input side to compare")
+            return publish.compare(req["channel_key"], self.book, self.export_tables,
+                                   self.overlay, pairs=req["pairs"], tier=req["tier"],
+                                   multiplier=req["multiplier"], wings=req["wings"],
+                                   cut=req["cut"], methods=req["methods"])
+
+    def export_run(self, payload: dict) -> dict:
+        """Send: post the kACE messages one pair at a time, or write the file.
+
+        Built again here from the request, under the lock, from the same
+        book -- the page never sends bytes, so what goes out is exactly what
+        ``export_build`` showed.  A Murex or COS file whose date disagrees
+        with this machine's is refused until ``confirm_date`` says the person
+        has read the preflight's warning.
+        """
+        req = self._export_request(payload)
+        dry_run = _flag(payload.get("dry_run"))
+        with self._lock:
+            b = self._export_build(req)
+            when = self.book.clock.now
+            src_record = ("marks" if b.overlay is None else b.overlay.record(
+                rows_outside_book=b.preflight.get("outside")))
+            if not b.ok:
+                entry = {"at": when.isoformat(timespec="seconds"), "channel": b.channel.key,
+                         "source": src_record, "sources": b.preflight.get("sources"),
+                         "ok": False, "dry_run": dry_run,
+                         "message": "refused: " + "; ".join(b.refused), "refused": b.refused}
+                if not dry_run:
+                    self.kace_log.record(entry)
+                return {"ok": False, "refused": b.refused, "entry": entry,
+                        "entries": self.kace_log.entries(limit=30)}
+            if b.channel.kind == "file":
+                if not b.preflight["date"]["agree"] and not _flag(payload.get("confirm_date")):
+                    raise publish.PublishError(
+                        f"the file would be dated {b.file_date:%Y%m%d} (the book's valuation "
+                        f"date) and this machine says {b.preflight['date']['machine']}; tick "
+                        f"'date as the book' to write it anyway, or set the file date")
+                # A destination may write more than one file (Murex writes
+                # two): every one of them is written and logged, and the
+                # answer carries them all rather than the first.
+                written = publish.write_file(b, self.export_dir, log=self.kace_log, when=when,
+                                             dry_run=dry_run)
+                return {"ok": all(e.get("ok") is not False for e in written),
+                        "written": written, "entry": written[0],
+                        "files": [f.summary() for f in b.files],
+                        "paths": [e.get("file") for e in written],
+                        "summary": "; ".join(e.get("message", "") for e in written),
+                        "entries": self.kace_log.entries(limit=30)}
+            # kACE: one message per pair, each answered on its own line.
+            if not dry_run and not self.kace_url:
+                raise publish.PublishError("no kACE URL is set: start volkit with --kace-url "
+                                           f"(or {kace_mod.ENV_URL}) to post from the screen")
+            scenario = self._kace_scenario(payload)
+            per_pair_src = {q.pair: q.source for q in b.quotes}
+            results = []
+            for pair, feed in b.feeds.items():
+                row = {"pair": pair, "ok": None, "nodes": 0, "message": "",
+                       "notes": list(feed.notes), "pillars": len(feed.pillars),
+                       "pillars_only": feed.pillars_only,
+                       "source": per_pair_src.get(pair, "book")}
+                try:
+                    text = feed.xml(self.kace_user, self.kace_password, scenario=scenario,
+                                    timestamp=when)
+                except kace_mod.KaceError as exc:
+                    row.update({"ok": False, "message": f"not built: {exc}"})
+                    results.append(row)
+                    continue
+                row["nodes"] = text.count("<node ")
+                entry = kace_mod.post_feed(
+                    text, pair=pair, scenario=scenario, clear=False,
+                    hor_date=feed.hor_date, nodes=row["nodes"], url=self.kace_url,
+                    log=self.kace_log, when=when, opener=self.kace_opener, ca=self.kace_ca,
+                    insecure=self.kace_insecure, dry_run=dry_run, tier=feed.tier,
+                    multiplier=feed.multiplier, interpolate=feed.interpolate,
+                    pillars_only=feed.pillars_only,
+                    source=(src_record if row["source"] == "overlay" else None))
+                row.update({k: entry.get(k) for k in ("ok", "message", "hash", "bytes",
+                                                       "processing_time", "logged", "status")})
+                results.append(row)
+            sent = sum(1 for r in results if r["ok"])
+            failed = sum(1 for r in results if r["ok"] is False)
+            return {"ok": not failed, "dry_run": dry_run, "results": results,
+                    "sent": sent, "failed": failed, "url": self.kace_url or "",
+                    "sources": b.preflight.get("sources"),
+                    "summary": (f"dry run: {len(results)} message(s) would be posted to "
+                                f"{self.kace_url or '(no URL set)'}" if dry_run else
+                                f"{sent} of {len(results)} pair(s) posted to kACE"
+                                + (f", {failed} failed" if failed else "")),
+                    "entries": self.kace_log.entries(limit=30)}
+
+    def export_download(self, q: dict) -> tuple[str, bytes, str]:
+        """One built file as a download: ``(name, bytes, content type)``.
+
+        Built from the request like everything else, so the download is the
+        file the run would write, not a copy of something on disk.  A
+        destination that writes more than one file (Murex) is asked for one
+        of them by name -- ``file=`` -- and naming none of two is refused
+        rather than answered with the first.
+        """
+        req = self._export_request(q)
+        wanted = str(q.get("file") or "").strip()
+        with self._lock:
+            b = self._export_build(req)
+            if not b.ok:
+                raise publish.PublishError("refused: " + "; ".join(b.refused))
+            if b.channel.kind != "file":
+                raise publish.PublishError(f"{b.channel.label} is posted, not downloaded")
+            f = b.file(wanted or None)
+            kind = {"xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    "xls": "application/vnd.ms-excel", "csv": "text/csv"}
+            return f.name, f.body, kind.get(f.name.rsplit(".", 1)[-1],
+                                            "application/octet-stream")
+
+    def export_seed_tables(self, payload: dict) -> dict:
+        """Put the export tables a workbook lacks into this session, seeded.
+
+        The rows are the design note's (``publish.seed_tables``): the shades
+        and add-ups it states, an empty market-width ladder, and an
+        EXPORT_PAIRS header with example rows the desk replaces.  Applied to
+        the session like any other tab -- Write to workbook puts them in.
+        """
+        with self._lock:
+            present = self.export_tables.summary()["present"]
+            rows = publish.seed_tables(present)
+            if not rows:
+                return {"ok": True, "wrote": {"tabs": [], "notes": ["every export table is "
+                                                                    "already there"]},
+                        **self.state()}
+            tabs = dict(self.config_edits)
+            tabs.update(rows)
+            problems = self._rebuild(config=tabs)
+            return {"ok": True,
+                    "wrote": {"tabs": sorted(rows), "problems": problems, "pending": True,
+                              "notes": [f"{', '.join(sorted(rows))} seeded into this session; "
+                                        f"edit them on this screen and press Write to "
+                                        f"workbook to put them in the file"]},
+                    **self.state()}
 
     def _kace_feed(self, q: dict):
         if self.kace_error:
@@ -2691,7 +3231,9 @@ class BookService:
                               # scenario: a query string with neither is the
                               # tab's own ladder and the sheet's step rule.
                               multiplier=q.get("multiplier"),
-                              interpolate=_flag(q.get("interpolate")))
+                              interpolate=_flag(q.get("interpolate")),
+                              # The bulk export's key tenors only.
+                              pillars_only=_flag(q.get("pillars_only")))
 
     def _kace_scenario(self, q: dict) -> str:
         """The scenario the message posts into: the page's box, else the start-up default.
@@ -2917,6 +3459,16 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
+            elif url.path == "/api/export/state":
+                self._json(self.service.export_state(q))
+            elif url.path == "/api/export/file":
+                name, body, kind = self.service.export_download(q)
+                self.send_response(200)
+                self.send_header("Content-Type", kind)
+                self.send_header("Content-Disposition", f'attachment; filename="{name}"')
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
             elif url.path == "/api/export/daily":
                 body = self.service.export_daily(q).encode()
                 self.send_response(200)
@@ -2946,6 +3498,16 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self.service.reload(discard=True))
             elif url.path == "/api/kace/post":
                 self._json(self.service.kace_post(payload))
+            elif url.path == "/api/export/build":
+                self._json(self.service.export_build(payload))
+            elif url.path == "/api/export/compare":
+                self._json(self.service.export_compare(payload))
+            elif url.path == "/api/export/run":
+                self._json(self.service.export_run(payload))
+            elif url.path == "/api/export/overlay":
+                self._json(self.service.export_overlay(payload))
+            elif url.path == "/api/export/seed":
+                self._json(self.service.export_seed_tables(payload))
             elif url.path == "/api/overwrite":
                 self._json(self.service.overwrite(payload))
             elif url.path == "/api/vol":
@@ -3047,7 +3609,8 @@ def serve(path: str, host: str = "127.0.0.1", port: int = 8765,
           kace_password: str | None = None,
           kace_scenario: str = kace_mod.DEFAULT_SCENARIO, kace_url: str | None = None,
           kace_ca: str | None = None, kace_insecure: bool = False,
-          kace_log_path: str | None = None, kace_tier: str | None = None) -> None:
+          kace_log_path: str | None = None, kace_tier: str | None = None,
+          export_dir: str | None = None) -> None:
     """Start the local server (blocking)."""
     Handler.service = BookService(path, clock, feed_path, history_path, bank_path,
                                   session_path, auto_reload, archive_path,
@@ -3055,7 +3618,7 @@ def serve(path: str, host: str = "127.0.0.1", port: int = 8765,
                                   journal_path, rules_path, dtcc_direct,
                                   kace_spreads_path, kace_user, kace_password, kace_scenario,
                                   kace_url, kace_ca, kace_insecure, kace_log_path,
-                                  kace_tier)
+                                  kace_tier, export_dir)
     httpd = ThreadingHTTPServer((host, port), Handler)
     url = f"http://{host}:{port}/"
     print(f"volkit serving {path}\n  -> {url}\n  (Ctrl-C to stop)")
@@ -3087,6 +3650,10 @@ def serve(path: str, host: str = "127.0.0.1", port: int = 8765,
     elif not Handler.service.kace_error:
         print(f"  . kACE feed: no post URL (--kace-url or {kace_mod.ENV_URL}); the message "
               f"can be copied and downloaded, not posted")
+    if "export" in screens.enabled():
+        errs = Handler.service.export_tables.errors
+        print(f"  bulk export writes files to {publish.export_dir(Handler.service.export_dir)}"
+              + (f"; tables with trouble: {', '.join(sorted(errs))}" if errs else ""))
     watched_folders = Handler.service.agent_chats + Handler.service.agent_sdr
     if watched_folders:
         print(f"  quoting agent watching: {', '.join(watched_folders)}")

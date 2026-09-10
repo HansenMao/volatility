@@ -246,7 +246,7 @@ class Request:
     vega_scale: float = 0.0
 
     # The bottom rung of the width ladder: a spreading tier off the
-    # workbook's KACE_SPREADS tab, read at each row's own maturity.  See
+    # workbook's SPREADS tab, read at each row's own maturity.  See
     # `marketmaker.QuotePanel`.
     fallback_tier: str = ""
     fallback_multiplier: float = 1.0
@@ -413,7 +413,10 @@ def record_quote(archive: arch.Archive, sheet: dict, *, client: str = "",
     what lets a client's record on the risk reversal be one record.
     """
     when = at or datetime.now(timezone.utc)
-    pair = str(sheet.get("pair") or "").upper()
+    # A sheet may hold several pairs (§11), each row saying which; the
+    # sheet's own ``pair`` is a label then, and a row without one is filed
+    # under it as before.
+    sheet_pair = str(sheet.get("pair") or "").upper()
     client = _clean_name(client or (sheet.get("client") or {}).get("name"))
     wanted = None if lines is None else {int(x) for x in lines}
     written, refused = [], []
@@ -432,6 +435,11 @@ def record_quote(archive: arch.Archive, sheet: dict, *, client: str = "",
             notes.append(f"asked as {row.get('direction') or 'the other way round'}; filed "
                          f"in the book's convention, so lifted there is hit here")
         model_mid = row.get("model")
+        pair = str(row.get("pair") or sheet_pair).upper()
+        if len(pair) != 6 or not pair.isalpha():
+            refused.append(f"line {row.get('line')} ({row.get('describe')}) names no pair "
+                           f"to file under")
+            continue
         obs = arch.shown(
             pair, instrument=str(row.get("instrument") or "atm"),
             tenor=str(row.get("tenor") or ""), tenor_far=row.get("tenor_far"),
@@ -571,27 +579,56 @@ def _rounded(value, places: int = 6):
 
 @dataclass
 class Paste:
-    """The market on the screen, as the file button posts it."""
+    """The market on the screen, as the file button posts it.
 
-    pair: str
+    ``pair`` names the one pair the paste is read as (the command line's);
+    empty, the paste names its pairs itself -- on the line or under a heading
+    -- and a line naming none is refused rather than read as anybody's, which
+    is how the market-maker screen's box works now that it has no pair
+    selector (§11).
+    """
+
+    pair: str = ""
     text: str = ""
     fly_convention: str = "market"
     vol_unit: str = "auto"
 
 
 def paste_from_request(payload: dict) -> Paste:
-    """The paste as the browser posts it: the pair, the text and its conventions.
+    """The paste as the browser posts it: the pair (if one), the text and its conventions.
 
     The same discipline as every other reader (§4): the browser posts the
     panel whole, and a field it sends that is not read here is a setting that
     silently does nothing, so a test pins the page's list against this.
     """
-    pair = str(payload.get("pair") or "").strip().upper()
-    if not pair:
-        raise AgentError("the quoting agent needs a pair")
-    return Paste(pair=pair, text=str(payload.get("text") or ""),
+    return Paste(pair=str(payload.get("pair") or "").strip().upper(),
+                 text=str(payload.get("text") or ""),
                  fly_convention=str(payload.get("fly_convention") or "market"),
                  vol_unit=str(payload.get("vol_unit") or "auto"))
+
+
+def paste_runs(paste: Paste, *, today) -> tuple[list[tuple[str, object]], list[dict]]:
+    """The paste read once per pair: ``[(pair, ParsedRun)]`` and the lines naming none.
+
+    With a pair on the paste that is the one run, read as it always was.
+    Without one, the pairs are the paste's own (``marketmaker.pairs_named``)
+    and each is read with the other pairs' lines passed over and a bare line
+    refused -- the same reading the check and the quote sheets give the box.
+    """
+    from .marketmaker import pairs_named
+    from .quotes import parse_quotes
+    text = str(paste.text or "")
+    if paste.pair:
+        run_ = parse_quotes(text, pair=paste.pair, vol_unit=paste.vol_unit,
+                            fly_convention=paste.fly_convention, today=today)
+        return [(paste.pair, run_)], []
+    pairs, bare = pairs_named(text, today=today, fly_convention=paste.fly_convention)
+    runs = []
+    for pair in pairs:
+        runs.append((pair, parse_quotes(text, pair=pair, vol_unit=paste.vol_unit,
+                                        fly_convention=paste.fly_convention, today=today,
+                                        require_pair=True)))
+    return runs, bare
 
 
 @dataclass
@@ -626,8 +663,12 @@ def learn_widths(archive: arch.Archive, pair: str, *, clock, paste: Paste | None
     scratch = arch.Archive(path="")
     scratch.extend(archive.records)
     if paste is not None and str(paste.text or "").strip():
+        # This pair's lines of the paste.  A paste with no pair of its own is
+        # the screen's box, which names its pairs itself, so a bare line is
+        # refused here exactly as the sheet refuses it.
         run_ = parse_quotes(paste.text, pair=pair, vol_unit=paste.vol_unit,
-                            fly_convention=paste.fly_convention, today=clock.now.date())
+                            fly_convention=paste.fly_convention, today=clock.now.date(),
+                            require_pair=not paste.pair)
         # A line with no clock on it is stamped at the start of the valuation
         # day when it is *filed* (``file_paste``), so a run filed twice files
         # once; that stamp is used here only to ask whether a line is already
@@ -644,8 +685,14 @@ def learn_widths(archive: arch.Archive, pair: str, *, clock, paste: Paste | None
         rows = [now_ for was, now_ in zip(filed, fresh) if was not in archive]
         added, refused = scratch.extend(rows)
         out.from_paste = added
-        out.skipped = [{"line": n, "why": why, "text": text} for n, why, text in run_.skipped]
-        out.notes.extend(run_.notes)
+        # (line, text, why) is what the parser returns, and this used to
+        # unpack it as (line, why, text): the card showed the reason where the
+        # line should be and the line where the reason should be.
+        out.skipped = [{"line": n, "text": text, "why": why} for n, text, why in run_.skipped]
+        # On a paste that names its pairs itself the other pairs' lines are
+        # not "passed over", they are the other pairs'.
+        out.notes.extend(n for n in run_.notes
+                         if paste.pair or "quote another pair and were passed over" not in n)
         if added:
             out.notes.append(f"{added} quote(s) from the paste were counted without being "
                              f"filed; File this run to keep them")
@@ -667,8 +714,15 @@ def learn_widths(archive: arch.Archive, pair: str, *, clock, paste: Paste | None
 
 
 def learn_from_request(archive: arch.Archive, payload: dict, *, clock) -> dict:
-    """The bank card's *Learn widths* button.  Proposes; the person saves."""
-    from dataclasses import asdict
+    """The bank card's *Learn widths* button.  Proposes; the person saves.
+
+    One pair (``pair``) answers as it always did.  Several (``pairs``, the
+    bank card's every pair) answer one by one under ``by_pair``, each from
+    the archive and its own lines of the paste -- the paste keeps no pair of
+    its own then, so a bare line is refused rather than counted for every
+    pair in turn -- with the proposed rules carrying their pair so the card
+    can put each under its own table.
+    """
     paste = paste_from_request(payload)
 
     def number(name, default):
@@ -683,13 +737,53 @@ def learn_from_request(archive: arch.Archive, payload: dict, *, clock) -> dict:
     raw_flag = payload.get("include_model_read", True)
     flag = (raw_flag.strip().lower() not in ("", "0", "no", "off", "false")
             if isinstance(raw_flag, str) else bool(raw_flag))
-    got = learn_widths(archive, paste.pair, clock=clock, paste=paste,
-                       counterparty=str(payload.get("counterparty") or "").strip(),
-                       half_life=number("archive_half_life", syn.DEFAULT_HALF_LIFE),
-                       min_effective=number("archive_min_effective", syn.DEFAULT_MIN_EFFECTIVE),
-                       lookback_days=number("archive_lookback_days", 90.0),
-                       include_model_read=flag)
-    return {"pair": paste.pair, "rules": [asdict(r) for r in got.rules],
+    settings = dict(
+        counterparty=str(payload.get("counterparty") or "").strip(),
+        half_life=number("archive_half_life", syn.DEFAULT_HALF_LIFE),
+        min_effective=number("archive_min_effective", syn.DEFAULT_MIN_EFFECTIVE),
+        lookback_days=number("archive_lookback_days", 90.0),
+        include_model_read=flag)
+
+    wanted = payload.get("pairs")
+    if wanted is None:
+        if not paste.pair:
+            raise AgentError("the quoting agent needs a pair, or a list of pairs")
+        return _learned_json(paste.pair,
+                             learn_widths(archive, paste.pair, clock=clock, paste=paste,
+                                          **settings))
+    if not isinstance(wanted, (list, tuple)):
+        raise AgentError("pairs must be a list of currency pairs")
+    pairs = [str(p).strip().upper() for p in wanted if str(p or "").strip()]
+    if not pairs:
+        raise AgentError("pairs is empty: name the pairs to learn widths for")
+    # The paste is read per pair without a pair of its own, so its lines go
+    # to the pair they name and nowhere else.
+    shared = Paste(pair="", text=paste.text, fly_convention=paste.fly_convention,
+                   vol_unit=paste.vol_unit)
+    by_pair = {one: _learned_json(one, learn_widths(archive, one, clock=clock, paste=shared,
+                                                    **settings))
+               for one in pairs}
+    bare: list[dict] = []
+    if str(paste.text or "").strip():
+        from .marketmaker import pairs_named
+        _, bare = pairs_named(paste.text, today=clock.now.date(),
+                              fly_convention=paste.fly_convention)
+    return {
+        "pairs": pairs, "by_pair": by_pair,
+        "rules": [dict(r, pair=p) for p, one in by_pair.items() for r in one["rules"]],
+        "describe": [f"{p}: {d}" for p, one in by_pair.items() for d in one["describe"]],
+        "notes": [f"{p}: {n}" for p, one in by_pair.items() for n in one["notes"]]
+                 + ([f"{len(bare)} line(s) of the paste name no pair and were not counted"]
+                    if bare else []),
+        "counted": sum(one["counted"] for one in by_pair.values()),
+        "from_paste": sum(one["from_paste"] for one in by_pair.values()),
+        "skipped": bare,
+    }
+
+
+def _learned_json(pair: str, got: Learned) -> dict:
+    from dataclasses import asdict
+    return {"pair": pair, "rules": [asdict(r) for r in got.rules],
             "describe": [r.describe() for r in got.rules], "notes": got.notes,
             "counted": got.counted, "from_paste": got.from_paste, "skipped": got.skipped}
 
@@ -706,41 +800,62 @@ def file_paste(archive: arch.Archive, payload: dict, *, clock,
     day file it once, and the day is all the resolution an age weight
     measured in days can use anyway.
     """
-    from .quotes import parse_quotes
     panel = paste_from_request(payload)
     if not str(panel.text or "").strip():
         raise AgentError("there is nothing pasted to file")
-    run_ = parse_quotes(panel.text, pair=panel.pair, vol_unit=panel.vol_unit,
-                        fly_convention=panel.fly_convention, today=clock.now.date())
+    runs, bare = paste_runs(panel, today=clock.now.date())
+    if not runs:
+        raise AgentError("nothing in the paste names a pair; write it on the line or as a "
+                         "heading line above the quotes")
     day = clock.now.replace(hour=0, minute=0, second=0, microsecond=0)
-    observations = arch.from_quotes(
-        run_, pair=panel.pair, source="chat", origin="pasted on the market-maker screen",
-        counterparty=counterparty, via="hand", default_time=day)
-    # The broker's name is part of what makes an observation distinct -- the
-    # same width from three brokers is stronger evidence than three quotes
-    # from one -- so filing the same run again under a different name is a
-    # genuinely new record and not a duplicate.  It is also the obvious way
-    # to double a width by accident, so it is counted and said out loud.
-    anonymous = {replace(o, counterparty="").id
-                 for o in archive.query(pair=panel.pair, kinds="quote")}
-    under_another_name = sum(1 for o in observations
-                             if o.id not in archive._ids
-                             and replace(o, counterparty="").id in anonymous)
+    observations: list[arch.Observation] = []
+    notes: list[str] = []
+    skipped: list[dict] = []
+    seen_lines: set[int] = set()
+    under_another_name = 0
+    for pair, run_ in runs:
+        rows = arch.from_quotes(
+            run_, pair=pair, source="chat", origin="pasted on the market-maker screen",
+            counterparty=counterparty, via="hand", default_time=day)
+        # The broker's name is part of what makes an observation distinct --
+        # the same width from three brokers is stronger evidence than three
+        # quotes from one -- so filing the same run again under a different
+        # name is a genuinely new record and not a duplicate.  It is also the
+        # obvious way to double a width by accident, so it is counted and said
+        # out loud.
+        anonymous = {replace(o, counterparty="").id
+                     for o in archive.query(pair=pair, kinds="quote")}
+        under_another_name += sum(1 for o in rows
+                                  if o.id not in archive._ids
+                                  and replace(o, counterparty="").id in anonymous)
+        observations.extend(rows)
+        prefix = f"{pair}: " if len(runs) > 1 or not panel.pair else ""
+        notes.extend(prefix + n for n in run_.notes
+                     if "quote another pair and were passed over" not in n)
+        for n, text, why in run_.skipped:
+            if n not in seen_lines:
+                seen_lines.add(n)
+                skipped.append({"line": n, "text": text, "why": why})
+    for x in bare:
+        if x["line"] not in seen_lines:
+            seen_lines.add(x["line"])
+            skipped.append({"line": x["line"], "why": x["why"], "text": x["text"]})
+    skipped.sort(key=lambda x: x["line"])
     added, refused = archive.extend(observations)
     written = archive.flush()
-    notes = list(run_.notes)
     if under_another_name:
         notes.append(
             f"{under_another_name} of these quote(s) are already in the archive under a "
             f"different broker name and have been filed again; that is right when two brokers "
             f"really showed the same market, and doubles the evidence behind a width when it "
             f"was the same run filed twice")
+    pairs = [p for p, _ in runs]
     return {
-        "pair": panel.pair, "read": len(observations), "added": added,
+        "pair": ", ".join(pairs), "pairs": pairs,
+        "read": len(observations), "added": added,
         "already_held": len(observations) - added - len(refused),
         "under_another_name": under_another_name,
         "refused": refused, "written": written, "path": archive.path,
         "notes": notes,
-        "skipped": [{"line": n, "why": why, "text": text}
-                    for n, why, text in run_.skipped],
+        "skipped": skipped,
     }

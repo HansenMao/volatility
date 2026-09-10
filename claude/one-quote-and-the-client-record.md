@@ -189,7 +189,7 @@ the same width, so a single box was either far too wide at the front or far
 too tight at the back, and the honest thing to do with it was leave it empty —
 which is what it was mostly left as.
 
-It is a **spreading tier** now: a column of the workbook's `KACE_SPREADS` tab,
+It is a **spreading tier** now: a column of the workbook's `SPREADS` tab,
 the same ladder the kACE feed posts from, chosen on the bar beside a
 multiplier and a stepped/interpolated switch, and read at **each row's own
 maturity**.

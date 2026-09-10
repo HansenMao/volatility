@@ -17,4 +17,4 @@ port = 8765
 
 # Extra holiday dates are no longer a file: they are the workbook's HOLIDAYS
 # tab, read with the marks they move the expiries of.  The peg bands and the
-# kACE pillars are the PEG_BANDS and KACE_SPREADS tabs of the same workbook.
+# kACE pillars are the PEG_BANDS and SPREADS tabs of the same workbook.

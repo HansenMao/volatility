@@ -65,7 +65,8 @@ settings that go with them:
 | Tab | What it is |
 |---|---|
 | `PEG_BANDS` | managed/pegged trading bands: `pair, lower, upper, note` |
-| `KACE_SPREADS` | the kACE feed: which tenors are posted, and the ATM width each spreading **tier** posts at them |
+| `SPREADS` | the pillars posted and the ATM width each spreading **tier** posts at them (kACE, and the `cos` ladder for the COS file); was `SPREADS`, and the old name is still read |
+| `MARKET_WIDTHS`, `ADD_UPS`, `SHADES`, `EXPORT_PAIRS` | the bulk export's policy: the Bloomberg widths, the mid shades, and which pairs each channel publishes — edited on the **Vol bulk processing** tab, not here |
 | `HOLIDAYS` | holiday dates no rule derives: `country, date, remove` |
 | `CONVENTIONS` | a pair's quoting conventions where they differ from the market's: `pair, premium, atmf beyond, delta` |
 
@@ -116,12 +117,12 @@ that line to take the new workbook and lose them.
 
 ## 2. The tabs
 
-They run **Pricing, Vol marking, Monitor, Exchange traded, Analysis, Market
-maker**. Monitor sits second from the left, right behind Vol marking, because
-those two are what a morning starts on: what has moved, and then what to do
-about it.
+They run **Pricing, Vol marking, Monitor, Exchange traded, Analysis, Vol
+exporting bulk, Market maker**. Monitor sits second from the left, right
+behind Vol marking, because those two are what a morning starts on: what has
+moved, and then what to do about it.
 
-A build does not always have all six. One can be made without any of them
+A build does not always have all seven. One can be made without any of them
 (see the packaging notes in `README.md`), and then the tab is simply not
 there: nothing is greyed out, and the command line for that screen is gone
 too. Whatever the build has is what the tab bar shows.
@@ -1290,6 +1291,40 @@ The other tabs tell you what something is worth. This one tells you what to
 show. It runs in three stages and each reports separately, so one that cannot
 run leaves the others alone — and **only one of the three moves a mark**.
 
+**There is no pair selector on this tab.** Write the pair on the line, or put
+it on a line of its own above a block of quotes, and the check and the quote
+answer every pair in the box at once:
+
+```
+EURUSD 1M ATM 8.20/8.60
+EURUSD 3M 25d RR 0.35/0.55 eur call over
+USDJPY
+1M ATM 9.00/9.40
+3M ATM 9.20/9.60
+```
+
+**One currency is enough**, on the line or as the heading: `cnh` is USDCNH and
+`eur` is EURUSD, the dollar going where the market puts it. The block above
+could as well be written `eur` and `jpy`, and the row says which pair each
+shorthand was read as.
+
+Every row on both sheets says which pair it is, and the rows stay in the order
+you wrote them. The one selector left is on the **Marking agent** card, because
+a fit is of one curve; the cards under the sheet — the knowledge bank, the
+archive, the printed tape — show every pair.
+
+**A line that names no pair is refused**, with the reason, and is not priced.
+There is nothing on the screen saying which pair you meant, and answering it
+against whichever pair the marking card happens to show is exactly the sort of
+quiet guess this tool does not make. Write the pair on the line, or put a
+heading above it.
+
+**The cut and the interpolation come from the Vol marking tab.** They were two
+boxes here; a cut is chosen where the curve is marked, and having it in two
+places means one of them going stale. The interpolation is per pair: the pair
+the marking tab is showing uses that tab's choice, and every other pair uses
+its own default. Change either there and the check and the quote here re-run.
+
 **Check Market** reads the market box and tells you where you are marked
 against it: through their bid, through their offer, near a side, or in line,
 with the distance in vol points and in units of their own width. It changes
@@ -1314,6 +1349,11 @@ go with the request and are used for that one call. Untick it, or run nothing
 on the card, and both read the marks as they are. Each card says which of the
 two it was, every time. Either way nothing is left on the book — that is **keep
 the marks**, on the marking card, and it is a separate decision.
+
+Those marks are **one pair's**, so they reach that pair's rows and no others:
+on a sheet of three currencies, the pair the marking card is on stands on the
+proposal and the other two read the book. A line under the table says which,
+pair by pair.
 
 **What Check Market flags.** A mark outside the quoted two-way is an alert, with
 how far outside it is both in vol points and as a fraction of the market's own
@@ -1364,7 +1404,14 @@ says two things it takes the more exact one and tells you:
 * **a strike beats a delta.** `6M 25d 1.1200 call` is the 1.12 strike; the
   delta is dropped and the row says so;
 * **a date beats a tenor.** `1M 30sep26 ATM` is the 30 September expiry.
-  Dates can be written `30sep26`, `30-Sep-2026`, `2026-09-30` or `2026/09/30`;
+  Dates can be written `30sep26`, `30-Sep-2026`, `2026-09-30` or `2026/09/30`
+  — **or with the spaces left in**: `29 Sep`, `Sep 29`, `29 September`, `29
+  Sep 2026`. Written that way it is still one expiry, so `29 Sep 6.66` is the
+  29 September option struck at 6.66 and not the numbers 29 and 6.66. A
+  **two-digit year on its own** is the one shape not taken: `29 Sep 26` is 29
+  September at the 26 strike as readily as it is 2026, so the line is listed
+  underneath rather than read one of the two ways — write `29 Sep 2026` or
+  glue it on as `29Sep26`;
 * **a weekday is an intra-week expiry.** `fri atm 8.10/8.50` is the next
   Friday from today, `mon 1.1000 call` the next Monday — the day names in
   full or from three letters (`thu`, `thur`, `thurs`, `thursday`). Always
@@ -1398,10 +1445,21 @@ says two things it takes the more exact one and tells you:
   the row says which it read and why. Write the word if you mean the other
   side; and if the strike turns out to be near the money, the row warns that
   a forty-delta option is not what this rule is for;
-* **another pair's lines are passed over.** `USDJPY 1M ATM 9.0/9.4` in a
-  EURUSD paste, or everything under a heading that is just `GBPUSD`, is
-  listed as passed over with the pair it named. It is not an error, and it
-  does not go into the fit;
+* **every pair in the paste is read.** `USDJPY 1M ATM 9.0/9.4` beside a
+  EURUSD line, and everything under a heading that is just `GBPUSD`, is that
+  pair's and is checked and quoted against that pair's curve. A line that
+  names **no** pair is listed underneath with the reason and is not priced;
+* **one currency names the pair.** `cnh` is USDCNH, `hkd` is USDHKD, `jpy` is
+  USDJPY, and `eur`, `gbp`, `aud`, `nzd`, `xau` and `xag` are the other way
+  round — the dollar goes where the market puts it, so `cnh 1M ATM 5.0/5.4`
+  and `eur 1M ATM 8.2/8.6` are USDCNH and EURUSD. It works as a heading too:
+  a line that is just `cnh` opens a USDCNH block. The row says which pair a
+  shorthand was read as, because the dollar's side is a convention. `usd` on
+  its own names no pair. A currency the line is already using for something
+  else is left alone: the direction of a risk reversal (`eur call over`), the
+  currency of a premium (`0.0125/0.0135 usd`) and the currency of a size (`in
+  100mm eur`) all keep their word, and only a currency nothing else claimed
+  becomes the pair;
 * **structures of more than one leg.** Separate legs with `vs` (or `buy` /
   `sell`); a leg that leaves out its tenor or instrument takes it from the leg
   beside it:
@@ -1659,8 +1717,11 @@ them.
 
 ### The knowledge bank
 
-The bottom card is the pair's own file of desk knowledge, kept in
-`mm_knowledge.json` beside the workbook. Four kinds of entry:
+The bottom card is the desk's file of knowledge, kept in `mm_knowledge.json`
+beside the workbook. It shows **every pair, one table each** — the tab prices
+several at once, so the card that holds their widths does too. Each table has
+its own **+ Rule**; **Save bank** writes them all, and if one rule anywhere is
+wrong nothing is saved and the card says which. Four kinds of entry:
 
 | Kind | Effect |
 |---|---|
@@ -1681,7 +1742,7 @@ and says so. Choose a **fallback tier** on the bar if you want one anyway; the
 row will say it came from the tier rather than from a rule.
 
 **The fallback is a ladder, not a number.** The tier list is the columns of the
-workbook's `KACE_SPREADS` tab — the same ladder the kACE feed posts from — and
+workbook's `SPREADS` tab — the same ladder the kACE feed posts from — and
 the width a quote falls back on is that tier's width **at the quote's own
 maturity**. A tenor the tab names (`1W`, `1M`, `3M`) reads its own row exactly;
 anything in between takes the nearer tenor's width, or, with **Between
@@ -1696,7 +1757,8 @@ rather than an invented one. Because it is the feed's own tab, a width shown to
 a client and a width posted to the platform cannot quietly differ; tiers are
 edited in the **Config** window.
 
-**Learn widths** proposes a ladder measured from the widths the market has
+**Learn widths** proposes a ladder, for **every pair on the card at once**
+(each from its own lines of the paste), measured from the widths the market has
 actually been shown at — the archive's own two-ways, age-weighted, bucketed by
 tenor, with the count, the sources and the range in each rule's note, and the
 run pasted in the market box counted as if it were filed (it is not filed by
@@ -1740,7 +1802,7 @@ column, including anything the market-maker tab shifted).
 
 Three things to know:
 
-* **The `KACE_SPREADS` tab decides what is posted.** One row per tenor —
+* **The `SPREADS` tab decides what is posted.** One row per tenor —
   those are the pillars — and **one column per spreading tier**. A row
   `1W | 0.8 | 1.2` under the headings `tenor | default | wide` means the 1W
   pillar is posted with a 0.8 vol-point ATM width on the `default` tier and
@@ -1756,7 +1818,7 @@ Three things to know:
   end is two cells rather than a whole ladder. The browser remembers which
   tier you last posted, `kace-tier =` in `volkit.cfg` sets what it starts as,
   and `--kace-tier` does the same for `volkit kace`. Tiers are added, renamed
-  and removed on the `KACE_SPREADS` table in the **Config** window, like any
+  and removed on the `SPREADS` table in the **Config** window, like any
   other configuration tab. The post log records which tier went out.
 * **The `×` box widens the whole tier at once.** Type a multiple beside the
   tier and press Enter: every one of that tier's widths is multiplied by it on
@@ -1812,7 +1874,7 @@ reply is read the way the poster page shows it: a `gfi_message` with a
 anything else — a login page, an error element, an HTTP failure — is shown
 in red with the first line of what came back, and nothing is assumed.
 
-Every post, taken or refused, is one line in `kace_posts.jsonl` beside the
+Every post, taken or refused, is one line in `publish_log.jsonl` beside the
 workbook: when, pair, scenario, the widths (tier, multiplier, and whether the
 days between pillars were interpolated), feed or clear, node count, a hash of
 the message, and the outcome. The last ten show under the table, so *did we
@@ -1834,12 +1896,162 @@ exactly as a browser would, which changes nothing about certificate
 checking; and only if the server has nothing else, one at OpenSSL's lowest
 security level. The step that worked is kept for the session and shown
 after the post's message, e.g. *(TLS without finite-field Diffie-Hellman, as
-a browser would)*, and recorded in `kace_posts.jsonl`. A certificate
+a browser would)*, and recorded in `publish_log.jsonl`. A certificate
 problem is never stepped around — that is still the `kace-ca` message.
 
 On the command line: `volkit kace USDCNH --post` (add `--dry-run` to see
 what would be sent and where without sending it). The exit code is non-zero
 when kACE did not take the message.
+
+**Sending several pairs at once.** The feed tab posts the one pair the marking
+screen is on. When the morning's marks are done and the whole book has to go
+out — to kACE, and to the other channels — that is the **Vol bulk processing**
+tab, described after *Saving your marks* below.
+
+**Key tenors only** posts each pillar's ATM two-way and its four wing nodes and
+leaves out the calendar-day nodes — 45 nodes instead of four hundred-odd. The
+pillars posted are identical either way; what is left out is the day-by-day ATM
+curve between them. Unticked, the whole daily series goes, which is what the
+feed tab posts. `volkit kace PAIR --pillars-only` does the same from the shell,
+and the post log says which kind of message went.
+
+### Vol bulk processing
+
+The desk's marks go out on four destinations: the kACE feed above, one pair at
+a time from its tab, and three more that used to be spreadsheet chains — the
+**Bloomberg** contribution workbook (the DCAP add-in publishes the marks to
+the *BCFO Vol Surface* page when the sheet is refreshed), **Murex**, which is
+one destination writing two files (`DRV_MktData_FX_Vol_<date>.xls` with the
+ATM and `DRV_MktData_FX_Broker_<date>.xls` with the risk reversals and
+butterflies, off one pair list, one source choice and one date, written
+together or not at all), and the **COS** file (`COS_86830_Bid.csv`, the ATM
+bid alone at five tenors). This tab does all of them, many pairs at once,
+from one place. The kACE feed tab keeps every function it has; this tab is
+for *bulk*.
+
+The tab is two halves: **Input** on the left, **Output** on the right.
+
+**Input — an outside file, read into an overlay.** Some mornings the numbers a
+file has to carry are not the book's: a client run, a pair nobody has marked,
+a 3Y row nobody has a market for. Type the path of a CSV or xlsx with a header
+of `pair, tenor, atm, rr25, rr10, bf25, bf10` (the workbook's `RR 25D`, `ST
+25D`, `RR 10D`, `ST 10D` headings work as well; the strangle *is* the
+butterfly the files carry), in vol points, or paste the rows into the box, and
+press **Load**. A row may give `atm_bid` and `atm_ask` instead of a mid, and
+then the tier is not used for that row. A blank cell falls through to the
+book. The file **is not confined to the pairs and tenors the book holds**: a
+row for `AUDHKD`, or a `3Y` row, is a perfectly good row, and a full file goes
+out on a morning the book marks two thirds of it.
+
+Loaded, the overlay changes nothing: a badge at the top says so, every other
+screen — the kACE feed tab included — still shows and posts the marks, and
+the Output side reads it only for the pairs you set to *overlay* there. Under
+the file is one line per pair it carries: how many rows, which tenors,
+whether the book holds them, and a tick. **Overwrite book for ticked** writes
+those pairs' rows over the book itself — an ATM overwrite and typed quotes,
+the same as marking them by hand — after saving the session as it was
+(`pre-overlay-<stamp>.json` beside your session file); every screen then
+shows them and the kACE feed tab posts from them. Tick more later and they go
+on behind the same snapshot. **Revert** puts the saved session back, whole.
+While any pair is written over, **Write to workbook** refuses by name — an
+overlay is by definition not marked, and the workbook is the book of record —
+and **Save marks** writes only the rows inside the book and says how many it
+left out and which pairs and tenors they were. A number that should be marked
+is reverted, typed and marked.
+
+**Compare — book against overlay.** Choose whose widths to compare at (a
+channel: its tier or market width, its shade, its wing widths, the same on
+both sides) and press **Compare**: for every pair the overlay carries and
+every tenor, the book's bid / mid / ask beside the overlay's, the difference
+in mid, bid and ask, and — with *wings too* ticked — the same for each risk
+reversal and butterfly. Moves above the *flag above* box are coloured; a
+tenor one side cannot supply is listed as book-only or overlay-only rather
+than dropped.
+
+**Output — where the marks go, and which source each pair is read from.** The
+destination, and the pair picker: every pair the channel publishes, with a
+tick to include it and — beside every pair the overlay carries — a
+**book / overlay** select. The default is the overlay wherever it has rows for
+the pair and the book everywhere else; *from overlay* / *from book* set all of
+them at once. So a run is not all from one source or all from the other, and
+the line under the picker says which pairs are read from where. Then the
+**tier** and **width ×** where the channel uses a tier (kACE, COS), the
+**wings** (the quoted marks, or the fitted smile's), the **scenario** for
+kACE, a **tolerance** — the largest move in vol points an overlay pair may
+make against a book value before the run is refused rather than just shown —
+the **file date** for a Murex or COS file, **key tenors only** and
+**interpolate widths** for kACE, and **dry run**. **Build** builds it and
+shows everything; **Send** asks once — naming how many pairs come from the
+book and how many from the overlay — and then posts the kACE messages one
+pair at a time, each answered on its own line with its source, or writes the
+file — both of them, for Murex — into the `exports` folder beside the
+workbook (the folder is named on the card; `export-dir` in `volkit.cfg`
+changes it), each with its own line in the log. Every file can also be
+downloaded straight from the card, one link each.
+
+The file name carries the book's valuation date. If that is not today — a
+book loaded as of yesterday, a file built after midnight — the preflight says
+so and the run refuses until you tick **date as the book** or type a file
+date. Nothing else about the Murex files changes but the numbers: the loader
+on the other side is a black box, so the names, the sheet name, the header
+row, the pair order, the slashes, `O/N`, two decimals and bid equal to ask are
+all exactly what has always worked — the desk's own files of 2026-09-10 are in
+`files/reference/`, and the tests put them through the tool and get them back
+grid for grid.
+
+**Preflight** — what this run will and will not do, before it does it:
+
+* **Coverage and sources**: a row per pair with the source it reads
+  (<b>book</b> green, <b>overlay</b> orange), a column per tenor, each cell
+  saying whether that row is the book's, the overlay's, or nobody's. A pillar
+  the channel wants that neither source has is **refused by name** and nothing
+  is written — a short file written silently is the failure this card exists
+  to kill. So is a pair `MARKET_WIDTHS` or `WING_WIDTHS` does not carry, a tier
+  the table does not have, and a tenor past the last one the sheet quotes.
+  Overlay rows for a pair set to read the book are listed as unused rather
+  than silently dropped.
+* **Against the book**, for the overlay pairs: every value the file moves,
+  largest first, and whether it is inside the tolerance.
+* **Widths and shades, resolved**: every pillar's source, bid, mid and ask, its
+  wings (bid / ask where the channel publishes them two-way), and in words
+  where each number came from — `marks`, `fitted`, `overlay`, `overlay (bf10
+  from the book)`, `default tier ×1.5`, `market 0.5 + default other add-up
+  0.2`, `bloomberg default shade`, `WING_WIDTHS AUDUSD 1M`.
+
+**Configuration** — the export-policy tables. They are tabs of the workbook
+like every other setting and reach it the same way (**Write to workbook** on
+the Vol marking tab, with the marks); they are edited here rather than in the
+Config window because they belong beside the thing they govern.
+
+| Table | What it holds |
+|---|---|
+| `SPREADS` | tenor rows, a column per tier: `default`, `wide`, `thin`, and **`cos`**, the COS file's width ladder. Was `KACE_SPREADS`; the old name is read and renamed on the next write |
+| `MARKET_WIDTHS` | tenor rows, a column per pair: the **observed market** ATM two-way, in vol points. What the Bloomberg feed goes out at, plus the add-up. Typed by hand — nothing refreshes it — and a pair not here is refused |
+| `ADD_UPS` | the policy on top of `MARKET_WIDTHS`: a `default` row (`overnight`, `other`), a `crosses` row, and a row per pair that differs; the most specific wins. Today: 0 overnight, 0.2 otherwise, crosses 0, the HKD legs 0.2 |
+| `WING_WIDTHS` | the **two-way width of each wing** on the Bloomberg feed — `rr25`, `rr10`, `bf25`, `bf10` per pair and tenor, with `default` and `crosses` rows; the most specific wins. A wing goes out at its mark less and plus half of this; it is never shaded |
+| `SHADES` | the ATM **mid shift** in vol points by channel, with a row per pair that differs. `bloomberg` is 0.2 under the mark on both sides. A shade is not a width — it moves the mid, and the width goes around it |
+| `EXPORT_PAIRS` | which pairs each channel publishes, **in the file's order**: `channel`, `pair`, `label` (as the file writes it — `AUD/USD`, `USD/CNY`), `feed_from` (the curve it is read from when that is another pair — COS's CNY rows are fed the CNH curves; a pair marked the other way up is inverted and says so), `last_tenor` (XAUUSD stops at 1Y on Bloomberg). kACE with no rows of its own publishes every pair the book builds |
+
+**Seed the missing tables** (or `volkit export --init-tables`) writes what the
+desk's own files of 2026-09-10 say — the 33 Bloomberg pairs in block order,
+the 32 Murex pairs and 25 COS pairs in row order with their labels, the
+Bloomberg ATM and wing widths cell for cell, the shade and the add-ups — into
+the session; only the `cos` tier is left for you to type, because the COS
+file's widths are not a ladder anything can derive.
+
+**Log** — `publish_log.jsonl` beside the workbook: every export on every
+channel, sent or refused, with its source (`marks`, or the overlay's file
+name, hash and row count, and how many pairs came from each), a hash of what
+went, and the outcome. The kACE feed tab's posts are in the same file; the old
+`kace_posts.jsonl` was carried over once and left beside it as `.migrated`.
+
+From the shell: `volkit export murex` (both Murex files; the old
+`murex_vol` and `murex_broker` still name it), `volkit export bloomberg --overlay
+run.csv --book-pairs USDJPY EURUSD --tolerance 0.5`, `volkit export bloomberg
+--overlay run.csv --compare`, `volkit export kace --pairs USDCNH USDJPY
+--pillars-only` (posts, with the same `--kace-url` / `--kace-user` options
+`volkit kace` takes), `--dry-run` to see the preflight and send or write
+nothing, `--out-dir` for the folder.
 
 ### Saving your marks
 
@@ -1976,7 +2188,7 @@ morning.
   what those cells mean there) and an empty quote sheet to mark on. Remove one
   and it comes out of `CONFIG` only: its column and its sheet stay where they
   are, so adding it back finds what it had.
-* **The configuration tabs** — `PEG_BANDS`, `KACE_SPREADS`, `HOLIDAYS`,
+* **The configuration tabs** — `PEG_BANDS`, `SPREADS`, `HOLIDAYS`,
   `CONVENTIONS`, `WING_RATIOS` and `Vega Weights` — edited as tables and
   applied whole. A tab this session holds is marked *held in this session*
   until it is written. The prose and `#` comment lines above each header are
@@ -1987,7 +2199,7 @@ morning.
   is **cell by cell** — a pair column with a blank 2Y takes the default at 2Y —
   so a view about the front end of one pair does not commit you to its back
   end. It is one of the two tabs whose columns are yours rather than the
-  tool's — `KACE_SPREADS` is the other, with a column per kACE spreading tier
+  tool's — `SPREADS` is the other, with a column per kACE spreading tier
   — so it has an **Add pair** box beside its Apply button; type a pair and
   fill the column in. A column you added carries a `✕` on its own heading that
   takes it off again; the fixed columns do not, because the tab's reader looks
@@ -2242,14 +2454,14 @@ curve directly rather than on the implied factor, which is the same statement
 as "the default is a USD CSA" made the other way round. See the **CSA** row
 under *Pricing*; it reaches the premium and nothing else.
 
-**`KACE_SPREADS`** (a tab of the workbook) — `tenor`, then a column per
+**`SPREADS`** (a tab of the workbook) — `tenor`, then a column per
 spreading **tier** (`default`, plus whatever else you name): the pillars the
 kACE feed posts and the ATM bid/offer width each tier posts at them, in
 volatility points. The tenor rows are the pillars whichever tier is chosen; a
 blank cell in a tier takes `default`. The tier is picked on the kACE feed tab.
 See *Sending the marks to kACE* above.
 
-**`kace_posts.jsonl`** — every message posted to kACE, one JSON line each,
+**`publish_log.jsonl`** — every message posted to kACE, one JSON line each,
 written by the tool: when, pair, scenario, tier, feed or clear, node count, a hash
 of the message, and what kACE said. Read by the kACE feed tab; safe to
 archive or delete.
@@ -2280,12 +2492,16 @@ volkit daily  USDJPY --horizon 1 --out USDJPY_daily_vol
 volkit vega   USDCNH                      the Vega Weights tab as this pair reads it
 volkit vega   USDCNH --anchor 1M --move 0.25   ... and the curve that move bumps it to
 volkit vega   EURUSD --realized --history vol_history.xlsx --lookback 180
+volkit export murex --confirm-date        both Murex files into exports/
+volkit export bloomberg --overlay run.csv --tolerance 0.5 --dry-run
+volkit export --init-tables               seed the export tables the workbook lacks
                                           the same shape measured off the historical book
 volkit kace   USDCNH --out usdcnh_kace.xml   the kACE RATE_FEED message, to paste into the poster
 volkit kace   USDCNH --clear --out clear.xml the clearRate message for the pair
 volkit kace   USDCNH --source fitted         wings off the fitted surface instead of the marks
 volkit kace   USDCNH --post --kace-url https://pfcshkwapp01:8500/xmlposter   send it the way the poster page does
 volkit kace   USDCNH --post --dry-run        what would be sent, and where, sending nothing
+volkit kace   USDCNH --pillars-only          key tenors only: the pillars and no calendar-day nodes
 volkit events USDJPY                      the EVENTS sheet, through one pair's legs
 volkit events USDJPY --weights            ... and every event's weight on every currency
 volkit events USDJPY --set FOMC:JPY=0.3   mark a weight for this run (the Weights card)
@@ -2347,6 +2563,8 @@ volkit mark fit EURUSD --file run.txt --out-marks m.json
                                           the hand fit -- the only thing here that moves a mark
 volkit mm EURUSD --file run.txt --request ask.txt --marks m.json
                                           check and quote off what that fit arrived at
+volkit mm --file run.txt --request ask.txt   no pair: every line names its own, as the screen's
+                                          boxes do, and each is answered against its own curve
 volkit agent learn EURUSD --file run.txt  propose bank widths from the archive, the paste counted; --save writes them
 ```
 
@@ -2443,9 +2661,10 @@ use; the desk-wide record is still in `volkit agent evidence`, in words.
 
 ### The archive card
 
-Under the tape is the archive itself: what it holds for this pair, the widths
-it has enough behind, the clients it knows, and the four ways to put more into
-it.
+Under the tape is the archive itself: what it holds for **each pair the quote
+sheet is pricing**, one block a pair — the widths it has enough behind, the
+clients it knows — and the four ways to put more into it. The printed tape
+above it reads the same way, a block a pair.
 
 - **Record as shown**, on the quote sheet — see the quote table above. This
   is where a client's record starts.
@@ -2461,7 +2680,9 @@ it.
   on the page, because a path a web page can name is a path anything reaching
   that page can read.
 - **File this run** -- put the market you are looking at into the archive, so
-  the next quote's widths know about it. Put the broker's name in the
+  the next quote's widths know about it. **Every pair in the box is filed
+  under itself**, and a line that names no pair is listed with the reason
+  rather than filed under somebody. Put the broker's name in the
   Broker box first: filing the same run twice under one name files it once,
   and under two names it counts twice, which is right when two brokers really
   showed it and is worth knowing when they did not. The card says which

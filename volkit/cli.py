@@ -13,7 +13,7 @@ import dataclasses
 import json
 import math
 import sys
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 # archive, llm and synthesis are imported at module level because
@@ -414,7 +414,7 @@ def _fallback_spreads(args):
     """The spreading tier table the quote's bottom width rung reads, or None.
 
     Only loaded when a tier is actually named: a workbook with no
-    ``KACE_SPREADS`` tab is an ordinary workbook, and a command that is not
+    ``SPREADS`` tab is an ordinary workbook, and a command that is not
     using a fallback must not fail because of a tab it never asked about.  A
     tab that *is* asked for and cannot be read is an error here rather than
     an empty rung, which is the same rule the feed follows.
@@ -448,7 +448,8 @@ def cmd_kace(args) -> int:
         feed = kace.build(book, args.pair, table, tier=args.kace_tier,
                           cut=args.cut, source=args.source, method=args.method,
                           multiplier=args.spread_multiplier,
-                          interpolate=bool(args.interpolate_spreads))
+                          interpolate=bool(args.interpolate_spreads),
+                          pillars_only=bool(args.pillars_only))
         s = feed.summary()
         # What was done to the tier's widths belongs in the one line that says
         # what went: a multiplied ladder read back as the tab's is the kind of
@@ -458,6 +459,8 @@ def cmd_kace(args) -> int:
             widths += f" x{s['multiplier']:g}"
         if s['interpolate']:
             widths += ", interpolated between pillars"
+        if s['pillars_only']:
+            widths += ", key tenors only"
         print(f"{s['pair']}: {s['days']} days {s['first_day']} to {s['last_day']}, "
               f"{len(s['pillars'])} pillars, {s['nodes']} nodes; horDate {s['hor_date']}, "
               f"{s['cut']} cut, wings from {s['source']}, {widths}, "
@@ -482,6 +485,7 @@ def cmd_kace(args) -> int:
                            tier="" if args.clear else feed.tier,
                            multiplier=1.0 if args.clear else feed.multiplier,
                            interpolate=False if args.clear else feed.interpolate,
+                           pillars_only=False if args.clear else feed.pillars_only,
                            hor_date=book.clock.now.date(), nodes=text.count("<node "),
                            url=kace.settings(args.kace_url), log=kace.PostLog.at(args.kace_log),
                            when=book.clock.now, ca=args.kace_ca, insecure=args.kace_insecure,
@@ -1374,10 +1378,19 @@ def cmd_mm(args) -> int:
         # so `--out-marks` and a saved `--json` run are both usable.
         marks = held.get("marks") if isinstance(held, dict) and "marks" in held else held
 
+    # With a pair, one panel each, as it always was.  Without one, the boxes
+    # name their pairs -- the market-maker screen has no pair selector any
+    # more (§11) -- and the sheets run one panel per pair the paste names.
     common = {
         "pair": args.pair, "cut": args.cut, "method": args.method,
         "vol_unit": args.vol_unit, "fly_convention": args.fly, "text": market_text,
     }
+    if not args.pair:
+        common.pop("pair")
+        common.pop("method")
+        if args.method:
+            print("  ! --method names one pair's interpolation and needs a pair; without one "
+                  "each pair is read with its own", file=sys.stderr)
     check_payload = {**common, "near_edge": args.tolerance, "marks": marks}
     quote_payload = {
         **common,
@@ -1415,7 +1428,7 @@ def cmd_mm(args) -> int:
               "instruments to quote (--request)", file=sys.stderr)
         return 2
 
-    book = _book(args, [args.pair])
+    book = _book(args, [args.pair] if args.pair else None)
     if args.feed:
         # The screen has a feed loaded, so this must be able to have one too:
         # a quote written against an absolute strike needs the outright forward
@@ -1423,25 +1436,57 @@ def cmd_mm(args) -> int:
         # comes back unavailable.
         _feed(book, args.feed)
     hist = None
+    hists = None
     if args.history:
         from .history import load_history
         loaded = load_history(args.history)
-        if args.pair in loaded:
-            hist = loaded[args.pair]
-        else:
-            print(f"  ! {args.history} has no sheet for {args.pair}", file=sys.stderr)
+        hists = loaded
+        if args.pair:
+            if args.pair in loaded:
+                hist = loaded[args.pair]
+            else:
+                print(f"  ! {args.history} has no sheet for {args.pair}", file=sys.stderr)
 
     warnings = 0
     if do_check:
-        checked = mm.check_panel_from_request(check_payload).run(book)
+        checked = (mm.check_panel_from_request(check_payload).run(book) if args.pair
+                   else mm.check_sheet_from_request(check_payload).run(book))
         _print_check(checked)
         warnings += len(checked["warnings"])
     if do_quote:
-        out = mm.quote_panel_from_request(quote_payload).run(
-            book, bank=bank, hist=hist, archive=arc, spreads=_fallback_spreads(args))
+        if args.pair:
+            out = mm.quote_panel_from_request(quote_payload).run(
+                book, bank=bank, hist=hist, archive=arc, spreads=_fallback_spreads(args))
+        else:
+            out = mm.quote_sheet_from_request(quote_payload).run(
+                book, bank=bank, hists=hists, archive=arc, spreads=_fallback_spreads(args))
         _print_quote(out, float(args.skew_cap))
         warnings += len(out["warnings"])
     return 1 if warnings else 0
+
+
+def _heading(r: dict) -> str:
+    """One line naming what was read: one pair and its method, or several.
+
+    A panel answers for one pair and carries ``method``; a sheet answers for
+    every pair the box named and carries ``methods``, one each, because the
+    interpolation is per pair.
+    """
+    if r.get("method"):
+        return f"{r['pair']}  cut {r['cut']}  {r['method']}"
+    methods = r.get("methods") or {}
+    return (f"{r['pair'] or 'no pair'}  cut {r['cut']}  "
+            + ", ".join(f"{p} {m}" for p, m in methods.items()))
+
+
+def _print_pairs(r: dict) -> None:
+    """What each pair on a sheet was read with, and what stopped the rest."""
+    for pair in r.get("pairs") or []:
+        block = (r.get("by_pair") or {}).get(pair) or {}
+        if block.get("error"):
+            print(f"  ! {pair}: {block['error']}")
+    for row in r.get("bare") or []:
+        print(f"  ! line {row['line']} ({row['why']}): {row['text'][:60]}")
 
 
 def _cell(value, width=10, dp=4, signed=False):
@@ -1507,9 +1552,9 @@ def _print_hand_fit(r: dict) -> None:
 def _print_check(r: dict) -> None:
     """The check: where the marks sit against every quote the run held."""
     market = r["market"]
-    print(f"{r['pair']}  cut {r['cut']}  {r['method']}  "
-          f"valuation {r['valuation'][:16].replace('T', ' ')}Z")
+    print(_heading(r) + f"  valuation {r['valuation'][:16].replace('T', ' ')}Z")
     print(f"  . {r['marks']['note']}")
+    _print_pairs(r)
 
     print(f"\n  {market['n_quotes']} quote(s) read, {market['checked']} checked: "
           f"{market['inside']} inside their market, {market['through']} through it, "
@@ -1518,7 +1563,10 @@ def _print_check(r: dict) -> None:
     # on a run nobody timestamped is noise in a table that is already wide.
     timed = any(row.get("timestamp") for row in market["rows"]) or bool(market.get("superseded"))
     stamp_w = max([5] + [len(row.get("timestamp") or "") for row in market["rows"]]) + 2
-    head = f"  {'quote':<26}"
+    # The pair only appears when there is more than one: a column of the same
+    # six letters is noise, and its absence says the sheet is one pair's.
+    many = len(r.get("pairs") or []) > 1
+    head = ("  " + f"{'pair':<8}" if many else "  ") + f"{'quote':<26}"
     if timed:
         head += f"{'time':>{stamp_w}}"
     print(head + f"{'their bid':>10}{'their ask':>10}{'marked':>10}{'gap':>9}{'widths':>8}"
@@ -1532,7 +1580,8 @@ def _print_check(r: dict) -> None:
         # that as +0.0000 reads like a measurement rather than "not outside".
         gap = None if row["position"] != "above" and row["position"] != "below" else row["gap"]
         wid = None if gap is None else row["widths"]
-        print(f"{flag} {row['describe']:<26}{stamp}{_cell(row['market_bid'])}"
+        print(f"{flag} " + (f"{row.get('pair', ''):<8}" if many else "")
+              + f"{row['describe']:<26}{stamp}{_cell(row['market_bid'])}"
               f"{_cell(row['market_ask'])}{_cell(row['model'], 10)}"
               f"{_cell(gap, 9, 4, True)}{_cell(wid, 8, 2, True)}"
               f"  {row['verdict']}")
@@ -1560,8 +1609,9 @@ def _print_check(r: dict) -> None:
               + ("off the curve:" if market["through"] else
                  "near the edge of their market:"))
         for a in alerts:
-            print(f"  {'!' if a['severity'] == 'through' else '.'} {a['describe']}: "
-                  f"{a['verdict']}"
+            print(f"  {'!' if a['severity'] == 'through' else '.'} "
+                  + (f"{a['pair']} " if many and a.get("pair") else "")
+                  + f"{a['describe']}: {a['verdict']}"
                   + ("" if a["gap"] in (None, 0.0) else
                      f" by {abs(a['gap']):.4f} vol pts"
                      + ("" if a["widths"] is None else f" ({abs(a['widths']):.2f} widths)")))
@@ -1579,7 +1629,16 @@ def _print_quote(r: dict, panel_cap: float) -> None:
     print(f"\n  {sheet['n_quotes']} instrument(s) asked for, {sheet['priced']} with a width, "
           f"{sheet['matched']} also quoted in the market paste")
     print(f"  . {r['marks']['note']}")
+    _print_pairs(r)
     ar = r.get("archive") or {}
+    if r.get("by_pair"):
+        # A sheet reads the archive per pair; the counts belong to the pairs.
+        blocks = [(p, (r["by_pair"].get(p) or {}).get("archive") or {})
+                  for p in r.get("pairs") or []]
+        ar = {"available": any(b.get("available") for _, b in blocks),
+              "widths": sum(b.get("widths") or 0 for _, b in blocks),
+              "counted": sum(b.get("counted") or 0 for _, b in blocks),
+              "reason": next((b.get("reason") for _, b in blocks if b.get("reason")), "")}
     print("  . " + (f"archive on the width ladder: {ar.get('widths', 0)} width(s) held "
                     f"with enough behind them, {ar.get('counted', 0)} observation(s) counted"
                     if ar.get("available") else ar.get("reason", "")))
@@ -1587,7 +1646,9 @@ def _print_quote(r: dict, panel_cap: float) -> None:
     if cl.get("name"):
         print(f"  . for {cl['name']}: " + ("; ".join(cl.get("record") or [])
                                           or cl.get("reason") or "no record yet"))
-    print(f"  {'instrument':<26}{'their bid':>10}{'their ask':>10}{'model':>9}{'skew':>9}"
+    many = len(r.get("pairs") or []) > 1
+    print("  " + (f"{'pair':<8}" if many else "")
+          + f"{'instrument':<26}{'their bid':>10}{'their ask':>10}{'model':>9}{'skew':>9}"
           f"{'our bid':>9}{'our ask':>10}{'width':>8}  verdict / agent")
     capped = 0
     for row in sheet["rows"]:
@@ -1595,7 +1656,8 @@ def _print_quote(r: dict, panel_cap: float) -> None:
         # further than a quote is allowed to be moved.
         if row["skew_capped"]:
             capped += 1
-        print(f"  {row['describe']:<26}{_cell(row['market_bid'])}{_cell(row['market_ask'])}"
+        print("  " + (f"{row.get('pair', ''):<8}" if many else "")
+              + f"{row['describe']:<26}{_cell(row['market_bid'])}{_cell(row['market_ask'])}"
               f"{_cell(row['model'], 9)}{_cell(row['skew_total'], 8, 3, True)}"
               f"{'*' if row['skew_capped'] else ' '}"
               f"{_cell(row['our_bid'], 9)}{_cell(row['our_ask'])}{_cell(row['width'], 8, 3)}"
@@ -1851,8 +1913,139 @@ def cmd_serve(args) -> int:
           kace_ca=getattr(args, "kace_ca", None),
           kace_insecure=bool(getattr(args, "kace_insecure", False)),
           kace_log_path=getattr(args, "kace_log", None),
-          kace_tier=getattr(args, "kace_tier", None))
+          kace_tier=getattr(args, "kace_tier", None),
+          export_dir=getattr(args, "export_dir", None))
     return 0
+
+
+def cmd_export(args) -> int:
+    """The bulk export: one channel, many pairs, from the book or an overlay.
+
+    The same ``publish.build`` the Vol bulk processing screen runs, so a file
+    written from a batch job is the file the screen would have written.  The
+    preflight goes to stderr; a refusal is a non-zero exit and no file, never
+    a short one.  ``--init-tables`` writes the export tabs the workbook lacks
+    (seeded from the design note) and stops.
+    """
+    from . import overlay as overlay_mod
+    from . import publish
+    from . import session as session_mod
+
+    if args.init_tables:
+        tables = publish.ExportTables.load(args.workbook)
+        rows = publish.seed_tables(tables.summary()["present"])
+        if not rows:
+            print("every export table is already in the workbook")
+            return 0
+        out = session_mod.write_config_tabs(args.workbook, rows)
+        print(f"wrote {', '.join(out['tabs'])} into {out['written']} (backup {out['backup']})")
+        for note in out["notes"]:
+            print(f"  . {note}")
+        print("  EXPORT_PAIRS holds example rows only: type each channel's pairs in the "
+              "file's own order, then MARKET_WIDTHS for the Bloomberg pairs and a cos tier "
+              "on SPREADS")
+        return 0
+
+    book = _book(args)
+    tables = publish.ExportTables.load(args.workbook)
+    ov = None
+    if args.overlay:
+        ov = overlay_mod.load(args.overlay)
+        print(f"overlay {ov.name}: {len(ov.rows)} rows, {len(ov.pairs)} pairs, sha256 "
+              f"{ov.sha256[:16]}", file=sys.stderr)
+    if args.compare:
+        if ov is None:
+            raise ValueError("--compare needs --overlay: it is the book against the overlay")
+        cmp = publish.compare(args.channel, book, tables, ov, pairs=args.pairs or None,
+                              tier=args.tier, multiplier=args.multiplier, wings=args.wings,
+                              cut=args.cut)
+        print(f"{cmp['label']}: book against overlay {ov.name}, {len(cmp['pairs'])} pair(s)")
+        print(f"  {'pair':<7}{'tenor':<5}{'book bid':>9}{'book mid':>9}{'book ask':>9}"
+              f"{'ov bid':>9}{'ov mid':>9}{'ov ask':>9}{'d mid':>8}{'d bid':>8}{'d ask':>8}"
+              f"{'d rr25':>8}{'d bf25':>8}")
+        for r in cmp["rows"]:
+            x, y, d = r["book"], r["overlay"], r["diff"]
+            if not (x and y):
+                side = "book only" if x else "overlay only"
+                print(f"  {r['pair']:<7}{r['tenor']:<5}  {side}")
+                continue
+            print(f"  {r['pair']:<7}{r['tenor']:<5}{x['bid']:>9.4f}{x['mid']:>9.4f}{x['ask']:>9.4f}"
+                  f"{y['bid']:>9.4f}{y['mid']:>9.4f}{y['ask']:>9.4f}{d['mid']:>+8.3f}"
+                  f"{d['bid']:>+8.3f}{d['ask']:>+8.3f}{d['rr25']:>+8.3f}{d['bf25']:>+8.3f}")
+        for r in cmp["book_refused"]:
+            print(f"  ! book: {r}")
+        for r in cmp["overlay_refused"]:
+            print(f"  ! overlay: {r}")
+        return 0
+    sources = {p.strip().upper(): "book" for p in (args.book_pairs or []) if p.strip()}
+    b = publish.build(args.channel, book, tables,
+                      source="overlay" if ov is not None else "book", overlay=ov,
+                      sources=sources,
+                      pairs=args.pairs or None, tier=args.tier, multiplier=args.multiplier,
+                      wings=args.wings, cut=args.cut, tolerance=args.tolerance,
+                      pillars_only=bool(args.pillars_only),
+                      interpolate=bool(args.interpolate_spreads),
+                      file_date=(date.fromisoformat(args.file_date) if args.file_date else None))
+    pf = b.preflight
+    if pf["sources"]["overlay"]:
+        print(f"  from the overlay: {', '.join(pf['sources']['overlay'])}; from the book: "
+              f"{', '.join(pf['sources']['book']) or 'none'}", file=sys.stderr)
+    print(f"{b.channel.label}: {pf['wanted']['pairs']} pair(s) x {len(pf['wanted']['tenors'])} "
+          f"tenor(s) wanted; {pf['from_book']} from the book, {pf['from_overlay']} from the "
+          f"overlay, {pf['fell_through']} fell through", file=sys.stderr)
+    for c in pf["coverage"]:
+        if c["missing"]:
+            print(f"  ! {c['pair']}: no {', '.join(c['missing'])}", file=sys.stderr)
+    if pf["ignored"]:
+        print(f"  . {len(pf['ignored'])} overlay row(s) this channel does not publish, "
+              f"ignored: {', '.join(pf['ignored'][:10])}", file=sys.stderr)
+    for d in pf["diffs"][:10]:
+        print(f"  . {d['pair']} {d['tenor']} {d['field']}: book {d['book']:.4f} -> overlay "
+              f"{d['overlay']:.4f} ({d['move']:+.4f})", file=sys.stderr)
+    for q in b.quotes:
+        print(f"  {q.pair:<7}{q.tenor:<5}{q.bid:>9.4f}{q.mid:>9.4f}{q.ask:>9.4f}"
+              f"{q.rr25:>9.4f}{q.rr10:>9.4f}{q.bf25:>9.4f}{q.bf10:>9.4f}  "
+              f"{q.origin}{' · ' + q.width_from if q.width_from else ''}"
+              f"{' · shade %+g' % q.shade if q.shade else ''}", file=sys.stderr)
+    for note in b.notes:
+        print(f"  . {note}", file=sys.stderr)
+    if not b.ok:
+        print("refused:", file=sys.stderr)
+        for r in b.refused:
+            print(f"  ! {r}", file=sys.stderr)
+        return 1
+    when = book.clock.now
+    log = kace.PostLog.at(args.kace_log)
+    if b.channel.kind == "file":
+        if not pf["date"]["agree"] and not args.confirm_date and not args.file_date:
+            print(f"  ! the file would be dated {b.file_date:%Y%m%d} (the book's valuation "
+                  f"date) and this machine says {pf['date']['machine']}; pass --confirm-date "
+                  f"to write it anyway, or --file-date", file=sys.stderr)
+            return 1
+        written = publish.write_file(b, args.out_dir, log=log, when=when,
+                                     dry_run=bool(args.dry_run))
+        for entry in written:
+            print(entry["message"] + (f"  ({entry['what']})" if entry.get("what") else ""),
+                  file=sys.stderr)
+        return 0 if all(e.get("ok") is not False for e in written) else 1
+    user, password = kace.credentials(args.kace_user, args.kace_password)
+    scenario = args.kace_scenario or kace.DEFAULT_SCENARIO
+    failed = 0
+    for pair, feed in b.feeds.items():
+        text = feed.xml(user, password, scenario=scenario, timestamp=when)
+        entry = kace.post_feed(text, pair=pair, scenario=scenario, clear=False,
+                               hor_date=feed.hor_date, nodes=text.count("<node "),
+                               url=kace.settings(args.kace_url), log=log, when=when,
+                               ca=args.kace_ca, insecure=args.kace_insecure,
+                               dry_run=bool(args.dry_run), tier=feed.tier,
+                               multiplier=feed.multiplier, interpolate=feed.interpolate,
+                               pillars_only=feed.pillars_only,
+                               source=None if ov is None else ov.record(
+                                   rows_outside_book=pf.get("outside")))
+        print(f"{pair}: {entry['message']}", file=sys.stderr)
+        if entry.get("ok") is False:
+            failed += 1
+    return 1 if failed else 0
 
 
 def _agent_model(args):
@@ -2766,6 +2959,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_migrate_wings)
 
     s = add_command("serve", parents=[common, kace_opts], help="run the local web interface")
+    s.add_argument("--export-dir", help="where the Vol bulk processing screen writes a "
+                                        "channel's file (default: exports/ beside the workbook)")
     s.add_argument("--host", default="127.0.0.1")
     s.add_argument("--port", type=int, default=8765)
     s.add_argument("--no-browser", action="store_true")
@@ -2805,7 +3000,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = add_command("mm", parents=[common],
                        help="check a market against the curve, and quote what is asked for")
-    s.add_argument("pair")
+    s.add_argument("pair", nargs="?",
+                   help="one pair, read as the screen's boxes were read before the pair "
+                        "selector moved onto the marking card. Leave it out and every line "
+                        "names its own pair -- on the line or under a heading -- and each "
+                        "one is checked and quoted against its own curve; a line naming no "
+                        "pair is refused")
     s.add_argument("--file", help="the market: a pasted broker run, checked against the curve "
                                   "(default: stdin, when --request is not given)")
     s.add_argument("--request", help="the options to be quoted, one an instrument a line and no "
@@ -3176,6 +3376,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="a day between two pillars takes a width read across between them "
                         "rather than the nearer pillar's -- the default is the step rule the "
                         "spreadsheet posted")
+    s.add_argument("--pillars-only", action="store_true",
+                   help="key tenors only: post each pillar's ATM two-way and wings and "
+                        "none of the calendar-day ATM nodes (the market-maker bar's bulk "
+                        "export ticks this); the default is the whole daily series")
     s.add_argument("--post", action="store_true",
                    help="send the message to --kace-url the way the poster page does, and "
                         "record the outcome in the post log; the message is still written "
@@ -3183,6 +3387,47 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--dry-run", action="store_true",
                    help="with --post: say what would be sent and where, and send nothing")
     s.set_defaults(func=cmd_kace)
+
+    s = add_command("export", parents=[common, kace_opts],
+                       help="the bulk export: one channel, many pairs, from the book or an "
+                            "overlay file -- what the Vol bulk processing screen sends")
+    s.add_argument("channel", nargs="?", default="kace",
+                   help="kace, bloomberg, murex (both Murex files) or cos; the old "
+                        "murex_vol and murex_broker still name it")
+    s.add_argument("--pairs", nargs="*", help="a subset of the channel's EXPORT_PAIRS list")
+    s.add_argument("--overlay", metavar="FILE",
+                   help="an outside file of pair, tenor, atm, rr25, rr10, bf25, bf10 laid "
+                        "over the book for this export; not confined to the book's pairs "
+                        "and tenors, blank cells fall through to the book")
+    s.add_argument("--book-pairs", nargs="*", metavar="PAIR",
+                   help="with --overlay: pairs read from the book all the same, so a run "
+                        "is not all from one source or all from the other")
+    s.add_argument("--compare", action="store_true",
+                   help="with --overlay: print the book against the overlay -- mids and "
+                        "both sides at the channel's widths -- and stop")
+    s.add_argument("--tier", help="the spreading tier (kACE, COS)")
+    s.add_argument("--multiplier", metavar="X", help="multiply the widths; the mid stays")
+    s.add_argument("--wings", default="marks", choices=list(kace.SOURCES),
+                   help="the quoted marks, or the fitted smile's wings")
+    s.add_argument("--cut", default="NY")
+    s.add_argument("--tolerance", metavar="VOL",
+                   help="refuse when the overlay moves a book value by more than this")
+    s.add_argument("--pillars-only", action="store_true",
+                   help="kACE: key tenors only, no calendar-day nodes")
+    s.add_argument("--interpolate-spreads", action="store_true",
+                   help="kACE: read a day's width across between pillars")
+    s.add_argument("--file-date", metavar="YYYY-MM-DD",
+                   help="the date a Murex or COS file name carries (default: the book's)")
+    s.add_argument("--confirm-date", action="store_true",
+                   help="write the file although its date and this machine's disagree")
+    s.add_argument("--out-dir", help="where a file channel's file is written (default: "
+                                     "exports/ beside the workbook)")
+    s.add_argument("--dry-run", action="store_true",
+                   help="build, show the preflight, send and write nothing")
+    s.add_argument("--init-tables", action="store_true",
+                   help="write the export tables the workbook lacks (SHADES, ADD_UPS, "
+                        "MARKET_WIDTHS, EXPORT_PAIRS), seeded, and stop")
+    s.set_defaults(func=cmd_export)
 
     s = add_command("band", parents=[common, band_opts],
                        help="the managed-band read-out for a pegged pair")

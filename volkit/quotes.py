@@ -32,7 +32,28 @@ strike and a delta on one line is a strike quote: the strike names the option
 exactly and the delta only names it through the marks, so the delta is
 dropped and the line says so.
 
-Five things are easy to get wrong and are therefore handled explicitly.
+Two of the conventions are about *how a line is written* rather than what it
+means, and both exist because a desk writes less than it says.
+
+*The three-letter shorthand.*  A run says ``cnh`` and means USDCNH; it says
+``eur`` and means EURUSD.  One currency names a pair because the dollar is on
+the side convention puts it, which is written down once in ``_USD_BEHIND`` --
+getting that side wrong would quote the pair upside down, and every sign on
+the line with it.  It is read **last**, after every other rule has had the
+token, because a currency word on a run is more often something else: the
+direction of a risk reversal, the currency a premium is quoted in, the
+currency of a size.  Only a currency nothing else claimed becomes the pair,
+and the row says which pair it was read as.  ``usd`` names no pair on its own.
+
+*A date with the spaces left in.*  ``29 Sep``, ``Sep 29``, ``29 September
+2026``: :func:`timeutil.parse_datetime` reads every one of these already, and
+what it never sees is the line, which is split on whitespace long before it.
+So they are glued back together before anything else looks at the tokens, day
+first whichever way round they were written.  A **bare two-digit year** is the
+one shape not taken -- ``29 Sep 26`` is 29 September at the 26 strike as
+readily as it is 2026, and there is nothing in the line to say which.
+
+Five more things are easy to get wrong and are therefore handled explicitly.
 
 *Units.*  ``8.20`` is a volatility in points and ``0.0820`` is the same
 volatility as a decimal.  The unit is decided **once for the whole paste**
@@ -407,6 +428,17 @@ _CCY = frozenset((
 _PAIR = re.compile(r"^([a-z]{3})[/\-]?([a-z]{3}):?$")
 #: A whole line that is nothing but a pair: a heading over the lines below it.
 _PAIR_LINE = re.compile(r"^([a-z]{3})\s*[/\-]?\s*([a-z]{3})\s*:?$")
+#: The same heading in the three-letter shorthand: a line that is one currency
+#: and nothing else.
+_SHORT_PAIR_LINE = re.compile(r"^([a-z]{3})\s*:?$")
+#: The currencies quoted with the dollar **behind** them.  Every other
+#: currency in ``_CCY`` is quoted with the dollar in front, and that is what
+#: turns the desk's three-letter shorthand into a pair: "cnh" is USDCNH, "eur"
+#: is EURUSD.  It is market convention rather than a choice -- a run writing
+#: "cnh" and getting CNHUSD back would be quoted upside down, and every sign
+#: on the line with it -- and this is the one place the side is written down.
+#: ``usd`` is in neither list: it names no pair on its own.
+_USD_BEHIND = frozenset(("eur", "gbp", "aud", "nzd", "xau", "xag"))
 _STRADDLE = ("straddle", "straddles", "strad", "dn", "deltaneutral")
 _MID = ("mid", "mids", "choice", "chc")
 _DROP = ("vol", "vols", "volatility", "in", "on", "of", "the", "for", "at", "px", "prices",
@@ -472,6 +504,35 @@ _DATEISH = re.compile(
     r"^(?:\d{1,2}[-./]?[a-z]{3,9}[-./]?\d{2,4}|\d{4}[-./]\d{1,2}[-./]\d{1,2}"
     r"|\d{1,2}/\d{1,2}/\d{4}|[a-z]{3,9}[-./ ]?\d{1,2}[-./,]?\d{4}"
     r"|\d{1,2}[-./]?[a-z]{3,9}|[a-z]{3,9}[-./]?\d{1,2})$")
+
+#: A month name in the spellings ``timeutil.parse_datetime`` reads, and only
+#: those: the three-letter abbreviation and the word in full.  "Sept" is
+#: deliberately absent -- ``strptime``'s ``%b`` does not read it, so joining
+#: it would turn a line that fails one way into a line that fails another.
+#: A join that cannot be a date is not made.
+_MONTH_WORD = (r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?"
+               r"|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?"
+               r"|dec(?:ember)?)")
+_DAY_NUM = r"(3[01]|[12]\d|0?[1-9])"
+_YEAR_NUM = r"((?:19|20)\d{2})"
+#: A date written with the spaces in it: "29 Sep", "Sep 29", "29 September
+#: 2026".  ``parse_datetime`` reads every one of these already -- what it
+#: never sees is the line, which is split on whitespace long before it gets
+#: there, so "29 Sep 6.66" arrives as the number 29 and the word "sep" and the
+#: quote loses its expiry to the price.  They are glued back together here,
+#: **day first whichever way round they were written**, so that one spelling
+#: reaches the date parser and nothing downstream has to know a spaced date
+#: from a written one.
+#: The day is bounded to 1-31 and the year to a 19xx/20xx, because a join that
+#: cannot be a date is worse than no join: it turns two numbers the line may
+#: have meant into one token that is neither.  A **bare two-digit** year is
+#: deliberately not taken -- "29 Sep 26" is 29 September at the 26 strike as
+#: readily as it is 2026, and there is nothing in the line to say which, so
+#: the year is written in full or glued on ("29Sep26").
+_SPACED_DATE_DM = re.compile(r"(?<![\w./-])" + _DAY_NUM + r"\s+(" + _MONTH_WORD + r")"
+                             r"(?:\s+" + _YEAR_NUM + r")?(?![\w.])")
+_SPACED_DATE_MD = re.compile(r"(?<![\w./-])(" + _MONTH_WORD + r")\s+" + _DAY_NUM +
+                             r"(?:\s+" + _YEAR_NUM + r")?(?![\w.])")
 
 #: Words a column header is made of.  A pasted run out of a spreadsheet brings
 #: one, and a header reported as a line that could not be read is noise on top
@@ -588,6 +649,38 @@ def _pair_of(token: str) -> str | None:
     return None
 
 
+def _shorthand_pair(word: str) -> str | None:
+    """``USDCNH`` for ``cnh``, ``EURUSD`` for ``eur``; ``None`` for the rest.
+
+    The shorthand a desk actually writes: one currency, and the dollar on the
+    side convention puts it (:data:`_USD_BEHIND`).  ``usd`` names no pair on
+    its own and comes back ``None``, as does any word that is not a currency.
+
+    It says nothing about *where* the word may be read this way.  That is
+    decided by the caller, and deliberately last: a currency word on a run is
+    more often something else -- see :func:`_consume_tokens`.
+    """
+    if word not in _CCY or word == "usd":
+        return None
+    return (word + "usd").upper() if word in _USD_BEHIND else ("usd" + word).upper()
+
+
+def _join_spaced_dates(line: str) -> str:
+    """Glue "29 Sep" and "Sep 29 2026" into one token, day first.
+
+    Written before the line is split, so that everything downstream reads the
+    one spelling ``timeutil`` has always read.  Month-first is turned round
+    here rather than downstream: "%b-%d-%Y" is not a format the date parser
+    has, and adding one there to serve a shape only the paste produces would
+    put a second reading of a date into the package.
+    """
+    def dmy(day: str, month: str, year: str | None) -> str:
+        return f"{day}-{month}" + (f"-{year}" if year else "")
+
+    line = _SPACED_DATE_DM.sub(lambda m: dmy(m.group(1), m.group(2), m.group(3)), line)
+    return _SPACED_DATE_MD.sub(lambda m: dmy(m.group(2), m.group(1), m.group(3)), line)
+
+
 # ---------------------------------------------------------------------------
 # one line
 # ---------------------------------------------------------------------------
@@ -664,6 +757,11 @@ def _consume(line: str, state: _Line) -> None:
             state.label = inside
         line = line[:m.start()] + " " + line[m.end():]
 
+    # "29 Sep" is one expiry and not the number 29 beside a word.  Done first,
+    # because every rule below reads tokens and this is the one thing that
+    # changes what the tokens are.
+    line = _join_spaced_dates(line)
+
     # A two-legged tenor written without spaces: 1m/3m, 3m-1m, 1mx3m.
     def take_pair(mt):
         a, b = _as_expiry(mt.group(1), state.today), _as_expiry(mt.group(2), state.today)
@@ -724,6 +822,11 @@ def _consume_tokens(tokens: list[list], columns: int, state: _Line) -> None:
     rest: list[list] = []
     i = 0
     first = True
+    #: The index of the last token a currency word could belong to as the
+    #: currency *of the size*: "in 100mm eur" is a hundred million euros and
+    #: not a line about EURUSD.  Read by the shorthand rule at the bottom of
+    #: the loop, which is the only thing that would otherwise claim it.
+    size_at: int | None = None
     while i < len(tokens):
         tok, column = tokens[i]
         raw_tok = tok.strip()
@@ -859,15 +962,18 @@ def _consume_tokens(tokens: list[list], columns: int, state: _Line) -> None:
         if ms:
             scale = {"k": 1e-3, "m": 1.0, "mm": 1.0, "mio": 1.0, "mln": 1.0, "bn": 1e3, "b": 1e3}
             state.size = float(ms.group(1)) * scale[ms.group(2)]
+            size_at = i
             i += 1
             continue
 
         if word in ("vega", "veg"):
             state.size_basis = "vega"
+            size_at = i
             i += 1
             continue
         if word in ("notional", "not", "ccy"):
             state.size_basis = "notional"
+            size_at = i
             i += 1
             continue
 
@@ -998,6 +1104,30 @@ def _consume_tokens(tokens: list[list], columns: int, state: _Line) -> None:
             state.notes.append("written as a single mid, so there is no market width in it")
             i += 1
             continue
+
+        # The desk's three-letter shorthand for a pair: 'cnh' is USDCNH and
+        # 'eur' is EURUSD.  It is read **last**, after every other rule has
+        # had its chance at the token, because a currency word on a run is
+        # more often something else: the direction of a risk reversal ('eur
+        # call over'), the currency a premium is quoted in ('0.0125 usd'), or
+        # the currency of a size ('in 100mm eur').  Each of those is consumed
+        # above, and only a currency that nothing else claimed becomes the
+        # pair -- which is why a code that is also an English word (TRY, PEN)
+        # is no more dangerous here than it was before: the line has to have
+        # left it otherwise unread.
+        #
+        # A pair the line already named in full wins, so 'USDJPY ... jpy'
+        # stays USDJPY, and the row says which pair a shorthand was read as:
+        # the dollar's side is a convention and a convention is an inference.
+        if state.pair is None and nxt != "over" and (size_at is None or i != size_at + 1):
+            short = _shorthand_pair(word)
+            if short is not None:
+                state.pair = short
+                state.notes.append(f"{word!r} read as {short}: one currency names the pair the "
+                                   f"dollar convention puts it in")
+                i += 1
+                continue
+
         if word in _DROP or word == "":
             i += 1
             continue
@@ -1417,6 +1547,10 @@ def _resolve_sign(state: _Line, pair: str | None, notes: list[str]) -> float:
 
 def _build(state: _Line, pair: str | None, default_fly: str, line_no: int,
            raw: str) -> MarketQuote:
+    # The line's own pair first: read with no pair given (the market-maker
+    # screen's boxes name several), "eur call over" on a line that says
+    # EURUSD must resolve against EURUSD and not against nothing.
+    pair = state.pair or pair
     notes = list(state.notes)
     if state.legs and not _collapse_legs(state, notes):
         return _build_structure(state, pair, default_fly, line_no, raw, notes)
@@ -1508,6 +1642,7 @@ def _build(state: _Line, pair: str | None, default_fly: str, line_no: int,
 def _build_structure(state: _Line, pair: str | None, default_fly: str, line_no: int,
                      raw: str, notes: list[str]) -> MarketQuote:
     """A priced structure: the legs, and the price on the whole of it."""
+    pair = state.pair or pair
     legs, numbers = _structure_legs(state, pair, default_fly, notes, priced=True)
     if not numbers:
         raise ValueError("no price on the line")
@@ -1693,12 +1828,18 @@ def _resolve_conflicts(quotes: list[MarketQuote],
 
 
 def parse_quotes(text: str, *, pair: str | None = None, vol_unit: str = "auto",
-                 fly_convention: str = "market", today: date | None = None) -> ParsedRun:
+                 fly_convention: str = "market", today: date | None = None,
+                 require_pair: bool = False) -> ParsedRun:
     """Read a broker run.  Volatilities come back as decimals.
 
     Nothing is dropped quietly: every line that cannot be used is returned in
     ``skipped`` with the reason, and every inference the reader made is in
     ``notes`` or on the quote itself.
+
+    ``require_pair`` refuses a line that names no pair and sits under no pair
+    heading, even with ``pair`` given: the market-maker screen's boxes name
+    their pairs themselves (§11), and a bare line there belongs to nobody
+    rather than to whichever pair is being read.
     """
     if vol_unit not in VOL_UNITS:
         raise ValueError(f"unknown volatility unit {vol_unit!r}; expected one of {VOL_UNITS}")
@@ -1709,7 +1850,7 @@ def parse_quotes(text: str, *, pair: str | None = None, vol_unit: str = "auto",
     raw_quotes: list[MarketQuote] = []
     skipped: list[tuple[int, str, str]] = []
     headers: list[int] = []
-    blocks = _Blocks(pair)
+    blocks = _Blocks(pair, require_pair=require_pair)
     for n, raw in enumerate(text.splitlines(), start=1):
         body = raw.split("#")[0].split("//")[0]
         if not body.strip():
@@ -1788,6 +1929,14 @@ def parse_quotes(text: str, *, pair: str | None = None, vol_unit: str = "auto",
                      superseded=tuple(superseded), ignored=tuple(blocks.ignored))
 
 
+#: Why a bare line is refused when a pair is required: with the pair named in
+#: the box rather than on a selector, a line that names none has nobody to
+#: belong to, and reading it as whichever pair happens to be selected would be
+#: the silent default this tool exists to remove.
+NO_PAIR = ("names no pair: write it on the line (EURUSD 1M ATM 8.20/8.60) or as a heading "
+           "line above it (EURUSD on a line of its own)")
+
+
 class _Blocks:
     """Which pair each line is about, and which lines are somebody else's.
 
@@ -1800,8 +1949,9 @@ class _Blocks:
     and carries the pair it named.
     """
 
-    def __init__(self, pair: str | None):
+    def __init__(self, pair: str | None, require_pair: bool = False):
         self.pair = pair.upper()[:6] if pair else None
+        self.require_pair = bool(require_pair)
         self.block: str | None = None
         self.headings: list[tuple[int, str]] = []
         self.ignored: list[tuple[int, str, str]] = []
@@ -1809,16 +1959,26 @@ class _Blocks:
     def heading(self, n: int, norm: str) -> bool:
         m = _PAIR_LINE.match(norm)
         if m and m.group(1) in _CCY and m.group(2) in _CCY:
-            self.block = (m.group(1) + m.group(2)).upper()
-            self.headings.append((n, self.block))
-            return True
-        return False
+            block = (m.group(1) + m.group(2)).upper()
+        else:
+            # A heading in the three-letter shorthand: a line that is one
+            # currency and nothing else.  The note below names the pair it
+            # resolved to, so a block heading never has to be taken on trust.
+            short = _SHORT_PAIR_LINE.match(norm)
+            block = _shorthand_pair(short.group(1)) if short else None
+        if block is None:
+            return False
+        self.block = block
+        self.headings.append((n, self.block))
+        return True
 
     def foreign(self, n: int, raw: str, state: _Line) -> bool:
         named = state.pair or self.block
         if named and self.pair and named != self.pair:
             self.ignored.append((n, raw.strip(), f"quotes {named}, not {self.pair}"))
             return True
+        if not named and self.require_pair:
+            raise ValueError(NO_PAIR)
         state.pair = named or self.pair
         return False
 
@@ -1886,6 +2046,7 @@ def _build_request(state: _Line, pair: str | None, default_fly: str, line_no: in
     refusal in its place: whatever numbers are left have to be a strike, and
     anything else is a market that has been pasted into the wrong box.
     """
+    pair = state.pair or pair
     notes = list(state.notes)
     if state.legs and not _collapse_legs(state, notes):
         legs, _ = _structure_legs(state, pair, default_fly, notes, priced=False)
@@ -1971,7 +2132,7 @@ def _build_request(state: _Line, pair: str | None, default_fly: str, line_no: in
 
 def parse_requests(text: str, *, pair: str | None = None,
                    fly_convention: str = "market",
-                   today: date | None = None) -> ParsedRequests:
+                   today: date | None = None, require_pair: bool = False) -> ParsedRequests:
     """Read a list of instruments to be quoted.  No prices, and none accepted.
 
     Nothing is dropped quietly, exactly as :func:`parse_quotes` drops nothing:
@@ -1990,7 +2151,7 @@ def parse_requests(text: str, *, pair: str | None = None,
     requests: list[QuoteRequest] = []
     skipped: list[tuple[int, str, str]] = []
     headers: list[int] = []
-    blocks = _Blocks(pair)
+    blocks = _Blocks(pair, require_pair=require_pair)
     for n, raw in enumerate(text.splitlines(), start=1):
         body = raw.split("#")[0].split("//")[0]
         if not body.strip():

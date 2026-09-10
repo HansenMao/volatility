@@ -8,7 +8,7 @@ workbook onto a new machine gets a tool that does the same thing there.
 | Was | Is | Read by |
 |---|---|---|
 | `files/bands.csv` | `PEG_BANDS` tab | `banded.load_bands` -> `Book._default_bands` |
-| `files/kace_spreads.csv` | `KACE_SPREADS` tab | `kace.SpreadTable.load` |
+| `files/kace_spreads.csv` | `SPREADS` tab (was `KACE_SPREADS`) | `kace.SpreadTable.load` |
 | `files/holiday_overrides.csv` | `HOLIDAYS` tab | `CalendarSet.load_overrides_sheet` -> `Book._default_calendars` |
 | (never a file) | `CONVENTIONS` tab | `marketdata.load_conventions` -> `ExcelSource._load_conventions` -> `PairSpec.conventions` -> `VolSurface.conv` |
 
@@ -16,6 +16,22 @@ Two more were never files. `WING_RATIOS` came off the pair sheets' own
 formulas (`volkit migrate-wings`), and `Vega Weights` was already a tab of the
 desk's workbook -- one unheaded column of numbers under `USDCNH` that nothing
 read -- until `vegaweights.load_vega_weights` was written for it.
+
+Five more came with the bulk export (`claude/screen-export.md`) and are
+**export policy**: `MARKET_WIDTHS` (tenor rows, a column per pair -- the
+observed market ATM two-way), `ADD_UPS` (the policy add-up on top of it),
+`WING_WIDTHS` (the two-way width of each wing on the Bloomberg feed, per pair
+and tenor), `SHADES` (the ATM mid shift by channel, with per-pair rows) and
+`EXPORT_PAIRS` (which pairs each channel publishes, in the file's order). They
+are read and written exactly like the rest, but **edited on the Vol bulk
+processing screen rather than in the Config window** -- `configsheets.EXPORT_TABS` names them and
+the config route sends `where: "export"` for each -- because they belong beside
+the thing they govern. `KACE_SPREADS` was renamed `SPREADS` at the same time:
+the tiers are the COS file's ladder as well as the feed's, and a tab named after
+one channel holding another's policy is a name that lies. `LEGACY_NAMES` reads
+the old name when the new is absent and `write_rows` renames the tab, in place
+with its prose, the first time it is written; `renamed_tabs` reports which
+state a workbook is in.
 
 `market_feed.csv` stays a file on purpose: it is market data with an `asof`,
 overwritten daily, and a file is easier to overwrite than a tab in a workbook
@@ -99,14 +115,15 @@ done.
 ## A tab whose columns are the desk's
 
 Most tabs have exactly the columns `EDITABLE` declares, because a writer that
-guessed at them would reorder a desk's own columns on every save. Two are
+guessed at them would reorder a desk's own columns on every save. Three are
 listed in `configsheets.OPEN_COLUMNS`, which maps each to **what one of its
 extra columns is**:
 
 | Tab | Fixed columns | And one more per |
 |---|---|---|
 | `Vega Weights` | `tenor`, `default`, `note` | **pair** with its own curve shape |
-| `KACE_SPREADS` | `tenor`, `default`, `note` | **tier** — a kACE spreading policy |
+| `SPREADS` | `tenor`, `default`, `note` | **tier** — a spreading policy (kACE, COS, the fallback rung) |
+| `MARKET_WIDTHS` | `tenor`, `note` | **pair** — the observed market two-way, for Bloomberg |
 
 "Open" was never one rule, which is why the kind is stored rather than a flag:
 a pair column is six letters and is written back as a proper noun (`USDJPY`,

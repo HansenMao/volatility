@@ -899,12 +899,30 @@ class _FakeBook:
 
 class TestPasteReader(unittest.TestCase):
 
-    def test_a_pair_is_required(self):
-        from volkit.agent import AgentError, paste_from_request
-        with self.assertRaises(AgentError):
-            paste_from_request({"text": "1M ATM 8.2/8.6"})
+    def test_a_pair_is_optional_and_the_paste_may_name_its_own(self):
+        """It used to be required, because the screen had a pair selector.
+
+        The market-maker tab has none any more (§11): the box names its pairs
+        on the line or under a heading, so a paste with no pair of its own is
+        normal and every pair in it is read.  What is *not* allowed is a line
+        that names none, and that is refused by the parser rather than filed
+        under whichever pair happened to be selected.
+        """
+        from volkit.agent import paste_from_request, paste_runs
+        from volkit.timeutil import Clock
+        today = Clock(MORNING).now.date()
         p = paste_from_request({"pair": "eurusd", "text": "x"})
         self.assertEqual((p.pair, p.fly_convention, p.vol_unit), ("EURUSD", "market", "auto"))
+        bare = paste_from_request({"text": "EURUSD 1M ATM 8.2/8.6\nUSDJPY 1M ATM 9/9.4"})
+        self.assertEqual(bare.pair, "")
+        runs, refused = paste_runs(bare, today=today)
+        self.assertEqual([pair for pair, _ in runs], ["EURUSD", "USDJPY"])
+        self.assertEqual(refused, [])
+        # One quote each: the other pair's line is that pair's, not this one's.
+        self.assertEqual([len(run.quotes) for _, run in runs], [1, 1])
+        _, refused = paste_runs(paste_from_request({"text": "1M ATM 8.2/8.6"}), today=today)
+        self.assertEqual([x["line"] for x in refused], [1])
+        self.assertIn("names no pair", refused[0]["why"])
 
 
 class TestFilingThePaste(unittest.TestCase):
@@ -953,6 +971,36 @@ class TestFilingThePaste(unittest.TestCase):
         held = self.archive.query(pair="EURUSD")
         self.assertEqual(held[0].via, "hand")
         self.assertIn("market-maker screen", held[0].origin)
+
+    def test_a_paste_of_several_pairs_files_each_under_its_own(self):
+        """The screen's box names its pairs, so filing follows them.
+
+        With no pair on the payload every pair in the paste is filed under
+        itself; a line naming none is refused rather than filed under the
+        first, which is what a pair selector used to do by accident.
+        """
+        # The bare line comes first, before any heading: a line *under* a
+        # heading belongs to that heading's pair, which is the whole point of
+        # a heading.
+        self.payload = {"text": "2W ATM 7.00/7.40\nEURUSD 1M ATM 8.20/8.60\n"
+                                "USDJPY\n1M ATM 9.00/9.40\n",
+                        "fly_convention": "market", "vol_unit": "auto"}
+        out = self._file(counterparty="BrokerA")
+        self.assertEqual(out["pairs"], ["EURUSD", "USDJPY"])
+        self.assertEqual(out["added"], 2)
+        self.assertEqual([o.pair for o in self.archive.query(pair="EURUSD")], ["EURUSD"])
+        self.assertEqual([o.pair for o in self.archive.query(pair="USDJPY")], ["USDJPY"])
+        self.assertEqual([x["line"] for x in out["skipped"]], [1])
+        self.assertIn("names no pair", out["skipped"][0]["why"])
+        # And nothing says a line was "passed over": on a sheet that files
+        # both pairs, the other pair's lines are the other pair's.
+        self.assertFalse([n for n in out["notes"] if "passed over" in n], out["notes"])
+
+    def test_a_paste_that_names_no_pair_at_all_is_refused(self):
+        from volkit.agent import AgentError
+        self.payload = {"text": "1M ATM 8.20/8.60"}
+        with self.assertRaises(AgentError):
+            self._file()
 
 def _zipped(text: str, name: str = "CFTC_CUMULATIVE_FOREX_2026_08_25.csv") -> bytes:
     import zipfile

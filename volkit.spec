@@ -64,6 +64,8 @@ except Exception:
 
 hiddenimports = [
     "openpyxl", "openpyxl.cell._writer", "tzdata",
+    # The Murex .xls writer (the bulk export's two BIFF8 files).
+    "xlwt",
     "scipy.special._cdflib", "scipy._lib.array_api_compat.numpy.fft",
 ]
 # Every volkit module, including the ones reached only through a late import

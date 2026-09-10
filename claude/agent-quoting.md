@@ -57,7 +57,7 @@ Things decided once on the row, which must not be re-derived anywhere else:
   matches, so the archive is tested against `spread_rule` and not `spread`,
   or the fallback would beat it.
 - **The bottom rung is a ladder, not a number.** It is a **spreading tier** --
-  a column of the workbook's `KACE_SPREADS` tab, the same object the kACE feed
+  a column of the workbook's `SPREADS` tab, the same object the kACE feed
   posts from -- named on the bar (`fallback_tier`, `--fallback-tier`), scaled
   by `fallback_multiplier`, and read at *each row's own maturity*: a tenor the
   tab names takes that rung exactly, and anything in between is stepped or,

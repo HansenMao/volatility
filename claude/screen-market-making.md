@@ -17,6 +17,61 @@ learned from. So the fit moved: `marking.FitPanel` is the desk's own fit and
 `marking.MarkPanel` the agent's, both on that one card, and this module keeps
 the two things a desk does with a curve it is *not* changing.
 
+## One tab, several currencies (2026-09-09)
+
+**The pair selector has gone from the bar.** It was one currency at a time on a
+screen whose two read-only stages have no reason to be: a check reads a paste
+and a quote reads a request, and both are answered per line. What the selector
+actually served was the *fit*, which is of one curve -- so the pair moved onto
+the marking agent card, where the fit is, and everything else on the tab reads
+the pair off the line it is on.
+
+- **`CheckSheet` and `QuoteSheet` are the screen's two routes now**, and each is
+  a loop over the panel above it: `pairs_named` reads the box once with no pair
+  given, in order of first appearance, and one panel runs per pair with the
+  other pairs' lines passed over. The rows come back **in the order they were
+  written**, each carrying its `pair`, because a run is read down the page and
+  not currency by currency. Everything a pair's own panel said -- its bank, its
+  archive, its client record, its axe, its fair value, its tape, which marks it
+  stood on -- is under `by_pair` in full; the sheet's own blocks are the sums.
+  A sheet is not a second engine: a test pins a row on a three-pair sheet
+  against the row that pair's panel makes alone.
+- **A line that names no pair is refused**, and this is the whole reason the
+  selector could go. `parse_quotes(require_pair=True)` raises `quotes.NO_PAIR`
+  on it, so the line is `skipped` with the reason rather than priced. With one
+  selector left on the tab -- the marking card's, which is about a *fit* -- a
+  bare line has nobody to belong to, and reading it as whichever pair that card
+  happens to show would be a price against a curve nobody asked for. It is
+  reported **once**, not once per pair on the sheet.
+- **One pair's refusal is one pair's line.** A pair the book does not build, an
+  expiry in the past, a surface that will not read: caught per pair, put in
+  `by_pair[pair]["error"]` and in the warnings, and the rest of the sheet is
+  answered. A single panel raises and takes the screen with it, which is right
+  when the screen is one pair and wrong when one mistyped pair in a broker run
+  would blank a check of the other four.
+- **The cut and the interpolation are the Vol marking tab's.** They were two
+  boxes on this bar, which is two places to decide one thing; a cut is chosen
+  on the screen where the curve is marked. `cut` travels on every request and
+  `methods` maps a pair to its interpolation -- the marking tab's for the pair
+  it is showing, nothing for the rest, which the server reads as each pair's own
+  default. The page re-runs both stages when either moves, because a sheet run
+  at last night's cut must not sit on the screen looking current.
+- **Held marks reach their own pair only.** The marking card holds one pair's;
+  `_marks_for` hands them to that pair's panel and every other pair reads the
+  book. Laying a EURUSD fit over USDJPY's rows would be a wrong answer that
+  reads perfectly well, and refusing the whole sheet because one pair on it was
+  not fitted would make the card unusable beside it. Each pair's line says which
+  it was, and a stale stamp is still dropped and named -- with the pair in front
+  of it on the sheet's own note, because only one of several pairs went stale.
+- **The cards under the sheet show every pair.** The knowledge bank is one table
+  per pair with one **Save bank** over all of them (`/api/mm/bank` with `banks`,
+  every pair validated before any is set); **Learn widths** learns for every pair
+  on the card at once, each from the archive and its own lines of the paste; the
+  archive card and the printed tape are a block per pair; **File this run** files
+  every pair the paste names, under itself. *Ask the record* still takes one pair
+  -- a question is about one -- and falls back to the marking card's when the
+  question names none.
+
 **Those three stages are three panels, three routes and three buttons.**
 `marketmaker.CheckPanel` (`/api/mm/check`, **Check Market**) reads the market
 paste and says where the marks sit against it; `marketmaker.QuotePanel`
@@ -171,7 +226,7 @@ the quote fits nothing, and neither can dirty the book.
 - **The quote.** **The one pricing engine** (§17): the Quote button, `volkit
   mm --request` and `volkit agent quote` all arrive at `QuotePanel.run`. Width
   from the knowledge bank, then the archive, then a **spreading tier** off the
-  workbook's `KACE_SPREADS` tab read at the row's own maturity, then no
+  workbook's `SPREADS` tab read at the row's own maturity, then no
   price -- the row names the rung -- widened by what dealing with the named
   client has cost; mid shaded by fair-value richness, by the vega already on
   the book, by the printed tape when a weight says so, and by the client's
@@ -210,7 +265,7 @@ Things that are decided once and must not be re-derived per row:
 - **The bank invents nothing.** There is no built-in default width. A quote no
   rule matches gets no bid and no offer and says so; a **fallback tier**
   named on the bar is the only alternative, and the row reports which it was.
-  That tier is a column of the same `KACE_SPREADS` tab the feed posts from,
+  That tier is a column of the same `SPREADS` tab the feed posts from,
   optionally multiplied and optionally read across between its tenors, so a
   width shown to a client and a width posted to the platform cannot quietly
   differ. A ladder is
@@ -290,6 +345,21 @@ Each of these is a precedence stated once and said on the row:
   name is dropped with a note. Dates are read in the spellings
   `timeutil.parse_datetime` reads (`30sep26`, `30-Sep-2026`, `2026/09/30`),
   gated by shape so a number is never one.
+- **A date written with the spaces in it is still one expiry.** `29 Sep`, `Sep
+  29`, `29 September 2026`. `parse_datetime` reads all of these; what it never
+  sees is the line, which `_consume` splits on whitespace long before it, so
+  `29 Sep 6.66` arrived as the number 29 beside the word `sep` and the quote
+  lost its expiry to the price. `_join_spaced_dates` glues them back before
+  anything else looks at the tokens, **day first whichever way round they were
+  written** -- month-first is turned round here rather than downstream, because
+  `%b-%d-%Y` is not a format the date parser has and adding one there to serve
+  a shape only the paste produces would put a second reading of a date into the
+  package. The day is bounded to 1-31 and the year to a 19xx/20xx: a join that
+  cannot be a date is worse than no join, because it turns two numbers the line
+  may have meant into one token that is neither. A **bare two-digit year** is
+  deliberately not taken -- `29 Sep 26` is 29 September at the 26 strike as
+  readily as it is 2026, nothing in the line says which, and the line is
+  refused rather than read one of the two ways.
 - **A weekday name is an intra-week expiry** (`_WEEKDAYS`, `_next_weekday`):
   `fri`, `friday`, `thurs` and the rest are the next such day **strictly
   after** today -- one to seven days, never today, because a run quoting "Mon"
@@ -335,7 +405,37 @@ Each of these is a precedence stated once and said on the row:
   goes to `ParsedRun.ignored` with the pair it named (`quotes._Blocks`),
   and the panels, the CLI and the page show it as passed over. Not in
   `skipped`: nothing on it was wrong. Without a pair every line is read and
-  carries `pair`.
+  carries `pair` -- which is what the sheets above are built on, and why a
+  line's *own* pair, not the caller's, resolves its direction word and its
+  premium currency (`_build`, `_build_structure`, `_build_request`). On a
+  sheet every pair is priced, so nothing was "passed over" and the note is
+  dropped from the merged answer.
+  **One currency names the pair** (`_shorthand_pair`, `_USD_BEHIND`): `cnh` is
+  USDCNH and `eur` is EURUSD, on the line or as a heading of its own, because
+  the dollar sits where the market puts it. That side is the whole content of
+  the rule and is written down in one frozenset -- read it the other way and
+  the pair is quoted upside down, with every sign on the line. It is resolved
+  **last** in `_consume_tokens`, after every other rule has had the token: a
+  currency word on a run is more often a direction (`eur call over`), a premium
+  currency (`0.0125 usd`) or the currency of a size (`in 100mm eur`), each of
+  which is consumed above it, and only a currency nothing else claimed becomes
+  the pair. That ordering is also what makes a code that is an English word
+  (TRY, PEN) no more dangerous than it was: the line has to have left it
+  otherwise unread. A pair the line named in full wins over a shorthand, `usd`
+  names no pair at all, and the row carries a note saying which pair a
+  shorthand became -- the dollar's side is a convention, and a convention is an
+  inference. The size guard matters more than it looks: read as a pair under
+  another pair, `in 100mm eur` would send the whole line to `ignored` and it
+  would leave the sheet silently.
+  **One reading changes**, and it is the only one: a stray currency word that
+  used to land in `ignored '<ccy>'` on an otherwise complete line now names
+  that line's pair. Under a different pair the line is passed over rather than
+  quoted -- which is the right answer for a line that says `eur` under USDJPY,
+  and is worth knowing because the old reading quoted it.
+  **`require_pair=True` refuses a line that names none** (`quotes.NO_PAIR`),
+  which is the market-maker screen's reading and nobody else's: `volkit mm
+  EURUSD` names the pair on the command line and reads a bare line as it
+  always did.
 - **Legs split on `vs` (or `buy`/`sell`), and what a leg does not say it
   borrows** from the legs that did (`_merge_legs`): `1M vs 3M 25d RR`, `6M
   1.10 call vs 1.15 call`. Two legs of one instrument at two tenors fold

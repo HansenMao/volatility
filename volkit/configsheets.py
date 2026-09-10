@@ -53,7 +53,7 @@ WORKBOOK_FILENAME = "vol_marks.xlsx"
 #: which ones a workbook has without going looking for them.
 SHEETS: dict[str, str] = {
     "PEG_BANDS": "managed / pegged trading bands: pair, lower, upper, note",
-    "KACE_SPREADS": "the kACE pillars and the ATM width at each: tenor, then a column per spreading tier (default, and whatever else the desk names)",
+    "SPREADS": "the pillars posted and the ATM width at each: tenor, then a column per spreading tier (default, and whatever else the desk names -- cos is the COS file's ladder)",
     "HOLIDAYS": "holiday dates no rule derives: country, date, remove",
     "CONVENTIONS": "a pair's quoting conventions where they differ from the market's: "
                    "pair, premium (the currency it is paid in), atmf beyond (a tenor, "
@@ -62,7 +62,40 @@ SHEETS: dict[str, str] = {
                    "pair, tenor, st, rr",
     "Vega Weights": "how far each tenor moves when the anchor moves one vol point: "
                     "tenor, default, and a column per pair that needs its own",
+    # The export policy tables (claude/publishing-channels-design.md).  In the
+    # workbook like every other table -- it is the database -- but edited on
+    # the Vol bulk processing screen rather than in the Config window, because
+    # they are export policy and belong beside the thing they govern.
+    "MARKET_WIDTHS": "the observed market ATM two-way per pair and tenor, in vol points, "
+                     "typed by hand: tenor, then a column per pair (the Bloomberg feed's "
+                     "widths are these plus ADD_UPS)",
+    "ADD_UPS": "the policy add-up on top of MARKET_WIDTHS: pair (default, crosses, or a "
+               "pair), overnight, other, note -- the most specific row wins",
+    "SHADES": "the mid shift of the ATM in vol points, by channel, with per-pair "
+              "exceptions: channel, pair (blank for the channel's default), shade, note",
+    "WING_WIDTHS": "the two-way width of each wing on the Bloomberg feed, vol points: pair "
+                   "(default, crosses, or a pair), tenor, rr25, rr10, bf25, bf10 -- the most "
+                   "specific row wins",
+    "EXPORT_PAIRS": "which pairs each channel publishes, in the file's own order: channel, "
+                    "pair, label (as the file writes it), feed_from (the curve it is fed "
+                    "from when that is another pair), last_tenor (where the pair stops, "
+                    "blank for the channel's whole ladder), note",
 }
+
+#: Tabs edited on the Vol bulk processing screen rather than in the Config
+#: window.  Read and written exactly like the rest -- ``EDITABLE`` below --
+#: and only the editor differs: the Config window skips them and the export
+#: screen shows nothing else.
+EXPORT_TABS: tuple[str, ...] = ("SPREADS", "MARKET_WIDTHS", "ADD_UPS", "SHADES", "WING_WIDTHS",
+                                "EXPORT_PAIRS")
+
+#: The old names of tabs that were renamed, so a workbook that still carries
+#: the old name is read and, on the next write, written under the new one in
+#: the same place.  ``KACE_SPREADS`` became ``SPREADS`` when the tiers stopped
+#: being the kACE feed's alone: the COS file's ladder is a column of the same
+#: table, and a tab named after one channel holding another's policy was a
+#: name that lied.
+LEGACY_NAMES: dict[str, tuple[str, ...]] = {"SPREADS": ("KACE_SPREADS",)}
 
 #: The columns each tab is edited with, and which of them decide where its
 #: header is.  A tab the screens can edit has to have a fixed shape: the
@@ -73,11 +106,17 @@ SHEETS: dict[str, str] = {
 #: table it cannot write back.
 EDITABLE: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "PEG_BANDS": (("pair", "lower", "upper", "note"), ("pair", "lower", "upper")),
-    "KACE_SPREADS": (("tenor", "default", "note"), ("tenor", "default")),
+    "SPREADS": (("tenor", "default", "note"), ("tenor", "default")),
     "HOLIDAYS": (("country", "date", "remove"), ("country", "date")),
     "CONVENTIONS": (("pair", "premium", "atmf beyond", "delta"), ("pair",)),
     "WING_RATIOS": (("pair", "tenor", "st", "rr"), ("pair", "tenor")),
     "Vega Weights": (("tenor", "default", "note"), ("tenor", "default")),
+    "MARKET_WIDTHS": (("tenor", "note"), ("tenor",)),
+    "ADD_UPS": (("pair", "overnight", "other", "note"), ("pair",)),
+    "SHADES": (("channel", "pair", "shade", "note"), ("channel", "shade")),
+    "WING_WIDTHS": (("pair", "tenor", "rr25", "rr10", "bf25", "bf10", "note"), ("pair", "tenor")),
+    "EXPORT_PAIRS": (("channel", "pair", "label", "feed_from", "last_tenor", "note"),
+                     ("channel", "pair")),
 }
 
 #: Tabs that were configuration here and are not any more, and where the
@@ -104,7 +143,8 @@ RETIRED: dict[str, str] = {
 #: rule: a pair column is six letters and is written back as a proper noun, a
 #: tier column is a name the desk chose.  A checker that knew only the pair
 #: rule would refuse every tier.
-OPEN_COLUMNS: dict[str, str] = {"Vega Weights": "pair", "KACE_SPREADS": "tier"}
+OPEN_COLUMNS: dict[str, str] = {"Vega Weights": "pair", "SPREADS": "tier",
+                                "MARKET_WIDTHS": "pair"}
 
 #: What each kind of open column has to look like, in the words an error uses.
 OPEN_COLUMN_SHAPE: dict[str, str] = {
@@ -363,7 +403,35 @@ def match_sheet(names, sheet: str) -> str | None:
     for name in names:
         if normalise(name) == want:
             return name
+    # A tab under its old name is the same tab (``LEGACY_NAMES``).  Only when
+    # nothing carries the new one: a workbook holding both is read off the
+    # new, and ``renamed_tabs`` says the old one is now a stranded copy.
+    for old in LEGACY_NAMES.get(sheet, ()):
+        for name in names:
+            if name == old or normalise(name) == normalise(old):
+                return name
     return None
+
+
+def renamed_tabs(path: str | Path) -> list[str]:
+    """Tabs this workbook still carries under an old name, one line each."""
+    try:
+        names = sheet_names(path)
+    except (OSError, ValueError):
+        return []
+    out = []
+    for new, olds in LEGACY_NAMES.items():
+        for old in olds:
+            found = next((n for n in names if n == old or normalise(n) == normalise(old)), None)
+            if found is None:
+                continue
+            if any(n == new or normalise(n) == normalise(new) for n in names):
+                out.append(f"{found}: this tab is called {new} now and {new} is what is read; "
+                           f"the {found} tab is no longer read and can be deleted")
+            else:
+                out.append(f"{found}: this tab is called {new} now; it is read under the old "
+                           f"name and renamed the next time the workbook is written")
+    return out
 
 
 def rows_from_records(sheet: str, records) -> list[Row]:
@@ -493,12 +561,19 @@ def write_rows(wb, sheet: str, columns, rows, header=None) -> str:
     at = len(wb.sheetnames)
     found = match_sheet(wb.sheetnames, sheet)
     if found is not None:
-        sheet = found                       # keep the name the workbook has
+        # Keep the name the workbook has -- unless it is a retired spelling
+        # (``LEGACY_NAMES``), in which case this write is the rename: the tab
+        # comes back under its current name, in the same place, with its
+        # prose.  A workbook that went on saying KACE_SPREADS forever would be
+        # a workbook whose tab names lied about what read them.
+        legacy = {normalise(o) for o in LEGACY_NAMES.get(sheet, ())}
+        if normalise(found) not in legacy:
+            sheet = found
         # ...and its place in the tab bar.  The tab is replaced rather than
         # edited, and one recreated at the end of the workbook is a tab that
         # jumped on somebody every time a setting was saved.
-        at = wb.sheetnames.index(sheet)
-        old = wb[sheet]
+        at = wb.sheetnames.index(found)
+        old = wb[found]
         want = {normalise(c) for c in (header or columns)}
         for r in range(1, old.max_row + 1):
             first = old.cell(row=r, column=1).value
@@ -509,7 +584,7 @@ def write_rows(wb, sheet: str, columns, rows, header=None) -> str:
                 break                       # the header: everything below is data
             if text.startswith("#"):
                 keep.append(text)
-        del wb[sheet]
+        del wb[found]
     ws = wb.create_sheet(sheet, at)
     r = 1
     for line in keep:

@@ -106,6 +106,9 @@ class Book:
             return
         from . import configsheets
         self.warnings.extend(f"workbook: {line}" for line in configsheets.retired(path))
+        # And a tab still carried under a retired *name* (KACE_SPREADS for
+        # SPREADS): read anyway, and renamed the first time it is written.
+        self.warnings.extend(f"workbook: {line}" for line in configsheets.renamed_tabs(path))
 
     def _default_bands(self, path: str | Path | None) -> dict[str, Band]:
         """The managed bands to hand the surfaces, from the ``PEG_BANDS`` tab.

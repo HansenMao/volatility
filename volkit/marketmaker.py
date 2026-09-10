@@ -89,6 +89,7 @@ from .calendars import DEFAULT_CALENDARS
 from .cross import CrossAtmCurve
 from .knowledge import KnowledgeBank, PairKnowledge, Rule, rule_from_dict
 from .numerics import ConvergenceError
+from . import quotes as quotes_mod
 from .quotes import (FLY_CONVENTIONS, MarketQuote, QuoteError, VOL_UNITS,
                      instrument_key, parse_quotes, parse_requests, parse_vega_profile)
 from .sabr import SabrParams
@@ -1630,6 +1631,11 @@ class CheckPanel:
     #: which curve they are looking at.
     marks: dict | None = None
 
+    #: Refuse a line that names no pair rather than reading it as this pair's.
+    #: Off for a panel run on its own (``volkit mm PAIR`` names the pair); on
+    #: when a :class:`CheckSheet` runs one panel per pair the box names.
+    require_pair: bool = False
+
     notes: tuple[str, ...] = field(default_factory=tuple)
 
     # -- the run ----------------------------------------------------------
@@ -1646,7 +1652,8 @@ class CheckPanel:
 
         # -- the paste -----------------------------------------------------
         run_ = parse_quotes(self.text, pair=self.pair, vol_unit=self.vol_unit,
-                            fly_convention=self.fly_convention, today=clock.now.date())
+                            fly_convention=self.fly_convention, today=clock.now.date(),
+                            require_pair=self.require_pair)
         quotes = list(run_.quotes)
         expiries = resolve_expiries(clock, quotes, self.pair, book.calendars)
         stale = [k for k, (_, t) in expiries.items() if t <= 0]
@@ -1724,6 +1731,7 @@ class CheckPanel:
             _, t = expiries[_key(_row_expiry(q))]
             unit_scale = 100.0 if q.quote_kind == "vol" else 1.0
             row = {
+                "pair": self.pair.upper(),
                 "line": q.line, "raw": q.raw, "label": q.label, "describe": q.describe(),
                 "instrument": q.instrument, "leg": q.leg, "delta": q.delta,
                 "strike": q.strike, "is_call": q.is_call, "fly_kind": q.fly_kind,
@@ -1881,7 +1889,7 @@ class QuotePanel:
 
     # widths
     # The bottom rung of the width ladder: a **spreading tier** off the
-    # workbook's KACE_SPREADS tab, read at the row's own maturity.  It used to
+    # workbook's SPREADS tab, read at the row's own maturity.  It used to
     # be one typed number for every tenor on the screen, which is not a width
     # any desk shows -- a one-week two-way and a one-year two-way are not the
     # same width, and a single box made the fallback either far too wide at
@@ -1925,6 +1933,10 @@ class QuotePanel:
     #: counts.  Below it the record is shown and nothing moves.
     client_min: int = 4
 
+    #: As on :class:`CheckPanel`: a bare line is refused rather than read as
+    #: this pair's, when a sheet runs one panel per pair.
+    require_pair: bool = False
+
     notes: tuple[str, ...] = field(default_factory=tuple)
 
     def run(self, book, *, bank: KnowledgeBank | None = None, hist=None,
@@ -1946,7 +1958,7 @@ class QuotePanel:
 
         asked = parse_requests(self.request_text, pair=self.pair,
                                fly_convention=self.fly_convention,
-                               today=clock.now.date())
+                               today=clock.now.date(), require_pair=self.require_pair)
         requests = list(asked.requests)
 
         # The market, if there is one, for the comparison columns only.  A
@@ -1959,7 +1971,7 @@ class QuotePanel:
             try:
                 run_ = parse_quotes(self.text, pair=self.pair, vol_unit=self.vol_unit,
                                     fly_convention=self.fly_convention,
-                                    today=clock.now.date())
+                                    today=clock.now.date(), require_pair=self.require_pair)
                 market = {instrument_key(q): q for q in run_.quotes
                           if q.quote_kind == "vol"}
                 if any(q.quote_kind == "premium" for q in run_.quotes):
@@ -2276,6 +2288,9 @@ class QuotePanel:
         t = expiries[dt_key][1]
         days = t * DAYS_IN_YEAR
         row = {
+            # Which pair the row is: one sheet may hold several (§11), and a
+            # record filed off it is filed under the row's own.
+            "pair": self.pair.upper(),
             "line": q.line, "raw": q.raw, "label": q.label, "describe": q.describe(),
             "instrument": q.instrument, "leg": q.leg, "delta": q.delta,
             "strike": q.strike, "is_call": q.is_call, "fly_kind": q.fly_kind,
@@ -2884,6 +2899,38 @@ def _common(payload: dict) -> tuple[str, str, str | None, str, str]:
     return pair, cut, method, fly, vol_unit
 
 
+def _sheet_common(payload: dict) -> tuple[str, dict[str, str], str, str]:
+    """Cut, method per pair, butterfly convention and volatility unit -- no pair.
+
+    The sheets (§7 below) take their pairs from the boxes, so the one thing
+    :func:`_common` insists on is the one thing they must not: a pair on the
+    request would be a selector the screen no longer has.  ``cut`` is the vol
+    marking tab's; ``methods`` maps a pair to the interpolation the marking
+    tab has chosen for it, and a pair it does not name is read with its
+    surface's own -- the workbook's default for that pair, which is what the
+    marking tab shows the moment it is switched to it.
+    """
+    vol_unit = str(payload.get("vol_unit") or "auto").strip().lower()
+    if vol_unit not in VOL_UNITS:
+        raise ValueError(f"unknown volatility unit {vol_unit!r}; expected one of {VOL_UNITS}")
+    fly = str(payload.get("fly_convention") or "market").strip().lower()
+    if fly not in FLY_CONVENTIONS:
+        raise ValueError(f"unknown butterfly convention {fly!r}; "
+                         f"expected one of {FLY_CONVENTIONS}")
+    cut = str(payload.get("cut") or "NY").strip().upper()
+    raw = payload.get("methods") or {}
+    if not isinstance(raw, dict):
+        raise ValueError("methods must map a pair to its interpolation method, "
+                         "e.g. {\"EURUSD\": \"SVI\"}")
+    methods = {str(k).strip().upper(): str(v).strip() for k, v in raw.items()
+               if str(v or "").strip()}
+    for pair, method in methods.items():
+        if method not in INTERPOLATORS:
+            raise ValueError(f"{pair}: unknown interpolation method {method!r}; "
+                             f"expected one of {INTERPOLATORS}")
+    return cut, methods, fly, vol_unit
+
+
 def _reversion_from_request(lo, hi) -> tuple[float, float] | None:
     """The mean-reversion range a panel typed, or ``None`` for the house one.
 
@@ -2991,3 +3038,452 @@ def quote_panel_from_request(payload: dict) -> QuotePanel:
 
 def rules_from_request(payload: dict) -> list[Rule]:
     return [rule_from_dict(r) for r in (payload.get("rules") or [])]
+
+
+# ===========================================================================
+# 7. several pairs on one screen.  The two read-only stages are asked of one
+#    box each, and a box names its pairs itself: the sheet finds them, runs the
+#    one panel above per pair, and puts the rows back in the order they were
+#    written.  Nothing is priced here that a single panel would not price the
+#    same way -- a sheet is a loop and a merge, and the panels stay the one
+#    engine (§11, §17).
+# ===========================================================================
+
+#: Why a line with no pair on it is refused (the parser's own words).  With
+#: one selector on the tab -- the marking card's -- a bare line has nobody to
+#: belong to, and pricing it against whichever pair that selector happens to
+#: show would be the silent default this screen exists to remove.
+NO_PAIR = quotes_mod.NO_PAIR
+
+#: What a sheet catches per pair and reports, rather than letting one pair's
+#: refusal take the others down with it.  A pair the book does not build, an
+#: expiry in the past, a surface that cannot be read: each is that pair's
+#: message on the sheet, and the rest of the sheet is answered.
+_PAIR_ERRORS = (ValueError, ArithmeticError, ConvergenceError)
+
+
+def pairs_named(text: str, *, today, fly_convention: str = "market",
+                requests: bool = False) -> tuple[list[str], list[dict]]:
+    """Which pairs a box names, in order of first appearance, and the lines that name none.
+
+    Read once with no pair given, so every line carries the pair it named or
+    sat under.  A line that carries none is returned as a refusal with
+    :data:`NO_PAIR`; a line the grammar could not read at all is not reported
+    here -- the per-pair parse says so, once, on the sheet.
+    """
+    if not str(text or "").strip():
+        return [], []
+    if requests:
+        run_ = parse_requests(text, pair=None, fly_convention=fly_convention, today=today)
+        items = list(run_.requests)
+    else:
+        run_ = parse_quotes(text, pair=None, fly_convention=fly_convention, today=today)
+        items = list(run_.quotes) + list(run_.superseded)
+    pairs: list[str] = []
+    bare: list[dict] = []
+    for q in sorted(items, key=lambda q: q.line):
+        pair = str(q.pair or "").upper()
+        if not pair:
+            bare.append({"line": q.line, "text": q.raw, "why": NO_PAIR})
+        elif pair not in pairs:
+            pairs.append(pair)
+    return pairs, bare
+
+
+def _marks_for(marks: dict | None, pair: str) -> dict | None:
+    """The held marks, if they are this pair's; otherwise nothing.
+
+    The marking card holds one pair's marks.  Every other pair on the sheet
+    stands on the book, and says so, exactly as a single panel handed no marks
+    does.
+    """
+    if not marks or not isinstance(marks, dict):
+        return None
+    named = str(marks.get("pair") or "").strip().upper()
+    return marks if named == pair else None
+
+
+def _merged_lines(per_pair: dict[str, dict], key: str, extra=()) -> list[dict]:
+    """One list of ``{line, text, why}`` from every pair's, one entry per line.
+
+    A line the grammar refused is refused in every pair's parse, and a bare
+    line is refused by every pair's parse *and* by :func:`pairs_named`, so
+    each is reported once; a line another pair claimed is that pair's row and
+    is not "passed over" on a sheet that holds both.
+    """
+    seen: dict[int, dict] = {}
+    for pair, r in per_pair.items():
+        for x in (r.get(key) or []):
+            seen.setdefault(int(x["line"]), dict(x))
+    for x in extra:
+        seen.setdefault(int(x["line"]), dict(x))
+    return [seen[n] for n in sorted(seen)]
+
+
+def _merged_notes(per_pair: dict[str, list[str]]) -> list[str]:
+    """Every pair's parse notes, named -- less the ones a sheet makes untrue.
+
+    Each pair's parse passes over the other pairs' lines and says so; on a
+    sheet that prices all of them nothing was passed over, so that note goes.
+    A pair heading is one fact about the paste, not one per pair, and is kept
+    once.
+    """
+    out: list[str] = []
+    for pair, notes in per_pair.items():
+        for n in notes:
+            if "quote another pair and were passed over" in n:
+                continue
+            if n.startswith("pair heading"):
+                if n not in out:
+                    out.append(n)
+                continue
+            out.append(f"{pair}: {n}")
+    return out
+
+
+def _merged_marks(per_pair: dict[str, dict]) -> dict:
+    """The marks note for the whole sheet: each pair's, named, in one line."""
+    stale: list[str] = []
+    notes: list[str] = []
+    on = False
+    for pair, r in per_pair.items():
+        m = r.get("marks") or {}
+        if m.get("on_the_marks"):
+            on = True
+        stale.extend(f"{pair}: {x}" for x in (m.get("stale") or []))
+        if m.get("note"):
+            notes.append(f"{pair}: {m['note']}")
+    return {"on_the_marks": on, "stale": stale, "what": "", "stamp": "",
+            "note": "; ".join(notes)}
+
+
+def _empty_sheet(cut: str, label: str, clock, bare: list[dict], text: str) -> dict:
+    """A sheet with no pair on it: what was refused, and nothing else."""
+    return {
+        "pairs": [], "pair": "", "cut": cut, "methods": {}, "label": label,
+        "valuation": clock.now.isoformat(),
+        "notes": [], "warnings": ([f"{len(bare)} line(s) name no pair and were not read"]
+                                  if bare else []),
+        "unavailable": {}, "by_pair": {},
+        "empty": (f"nothing names a pair" if str(text or "").strip()
+                  else "nothing pasted"),
+        "bare": bare,
+    }
+
+
+@dataclass
+class CheckSheet:
+    """Every pair the market box names, each checked against its own curve.
+
+    One :class:`CheckPanel` per pair, the paste read once per pair (a line
+    naming another pair is that pair's), and the rows put back in the order
+    they were written.  The cut is the vol marking tab's and the interpolation
+    is per pair, the marking tab's for the pair it shows and the surface's own
+    for the rest -- there is no cut or method box on this screen any more.
+    The held marks go to the one pair they were made on.
+    """
+
+    cut: str = "NY"
+    methods: dict[str, str] = field(default_factory=dict)
+    label: str = ""
+    text: str = ""
+    vol_unit: str = "auto"
+    fly_convention: str = "market"
+    near_edge: float = NEAR_EDGE
+    marks: dict | None = None
+    notes: tuple[str, ...] = field(default_factory=tuple)
+
+    def panel(self, pair: str) -> CheckPanel:
+        return CheckPanel(pair=pair, cut=self.cut, method=self.methods.get(pair) or None,
+                          label=self.label, text=self.text, vol_unit=self.vol_unit,
+                          fly_convention=self.fly_convention, near_edge=self.near_edge,
+                          marks=_marks_for(self.marks, pair), notes=self.notes,
+                          require_pair=True)
+
+    def run(self, book) -> dict:
+        if book is None:
+            raise ValueError("the market-maker screen needs a loaded book")
+        clock = book.clock
+        pairs, bare = pairs_named(self.text, today=clock.now.date(),
+                                  fly_convention=self.fly_convention)
+        if not pairs:
+            out = _empty_sheet(self.cut, self.label, clock, bare, self.text)
+            out["market"] = {"rows": [], "notes": [], "skipped": bare, "ignored": [],
+                             "superseded": [], "n_quotes": 0, "checked": 0, "inside": 0,
+                             "through": 0, "edge": 0, "alerts": [], "vol_unit": "",
+                             "unit_evidence": "", "fly_convention": self.fly_convention,
+                             "near_edge": float(self.near_edge)}
+            out["marks"] = _merged_marks({})
+            return out
+
+        per_pair: dict[str, dict] = {}
+        errors: dict[str, str] = {}
+        for pair in pairs:
+            try:
+                per_pair[pair] = self.panel(pair).run(book)
+            except _PAIR_ERRORS as exc:
+                errors[pair] = f"{type(exc).__name__}: {exc}"
+
+        markets = {p: r["market"] for p, r in per_pair.items()}
+        rows = sorted((row for m in markets.values() for row in m["rows"]),
+                      key=lambda r: r["line"])
+        superseded = sorted(
+            (dict(x, pair=p) for p, m in markets.items() for x in m["superseded"]),
+            key=lambda r: r["line"])
+        skipped = _merged_lines(markets, "skipped", bare)
+        units = {p: m["vol_unit"] for p, m in markets.items()}
+        one_unit = len(set(units.values())) == 1
+        out = {
+            "pairs": pairs,
+            # A label, not a selector: the pair each row is on is the row's.
+            "pair": ", ".join(pairs),
+            "cut": self.cut, "label": self.label,
+            "methods": {p: r["method"] for p, r in per_pair.items()},
+            "valuation": clock.now.isoformat(),
+            "notes": list(self.notes),
+            "warnings": [f"{p}: {w}" for p, r in per_pair.items() for w in r["warnings"]]
+                        + [f"{p}: {e}" for p, e in errors.items()]
+                        + ([f"{len(bare)} line(s) name no pair and were not read"]
+                           if bare else []),
+            "unavailable": {},
+            "by_pair": {
+                **{p: {"error": None, "cut": r["cut"], "method": r["method"],
+                       "valuation": r["valuation"], "marks": r["marks"],
+                       "warnings": r["warnings"], "notes": r["market"]["notes"],
+                       "vol_unit": r["market"]["vol_unit"],
+                       "unit_evidence": r["market"]["unit_evidence"],
+                       "n_quotes": r["market"]["n_quotes"], "checked": r["market"]["checked"],
+                       "through": r["market"]["through"], "edge": r["market"]["edge"]}
+                   for p, r in per_pair.items()},
+                **{p: {"error": e, "cut": self.cut, "method": self.methods.get(p) or None,
+                       "marks": None, "warnings": [e], "notes": [], "n_quotes": 0,
+                       "checked": 0, "through": 0, "edge": 0}
+                   for p, e in errors.items()},
+            },
+            "bare": bare,
+            "marks": _merged_marks(per_pair),
+            "market": {
+                "rows": rows,
+                "vol_unit": (next(iter(units.values())) if one_unit and units else
+                             "; ".join(f"{p} {u}" for p, u in units.items())),
+                "unit_evidence": "; ".join(f"{p}: {m['unit_evidence']}"
+                                           for p, m in markets.items()),
+                "notes": _merged_notes({p: m["notes"] for p, m in markets.items()}),
+                "skipped": skipped,
+                "ignored": [],
+                "superseded": superseded,
+                "n_quotes": len(rows),
+                "checked": sum(m["checked"] for m in markets.values()),
+                "inside": sum(m["inside"] for m in markets.values()),
+                "through": sum(m["through"] for m in markets.values()),
+                "edge": sum(m["edge"] for m in markets.values()),
+                "alerts": sorted((dict(a, pair=p) for p, m in markets.items()
+                                  for a in m["alerts"]), key=lambda a: a["line"]),
+                "fly_convention": self.fly_convention,
+                "near_edge": float(self.near_edge),
+            },
+        }
+        return out
+
+
+@dataclass
+class QuoteSheet:
+    """Every pair the request box names, each quoted off its own curve.
+
+    One :class:`QuotePanel` per pair -- **the one pricing engine**, unchanged
+    -- so a two-way on a sheet of three pairs is the two-way that pair's panel
+    would have made alone.  The market box is read per pair for the comparison
+    columns, the bank and the archive are read per pair, and the client's
+    record is per pair too, because that is how the archive files it.
+    """
+
+    cut: str = "NY"
+    methods: dict[str, str] = field(default_factory=dict)
+    label: str = ""
+    request_text: str = ""
+    text: str = ""
+    vol_unit: str = "auto"
+    fly_convention: str = "market"
+    marks: dict | None = None
+    #: Everything else the panel takes, passed through untouched.
+    settings: dict = field(default_factory=dict)
+    notes: tuple[str, ...] = field(default_factory=tuple)
+
+    def panel(self, pair: str) -> QuotePanel:
+        return QuotePanel(pair=pair, cut=self.cut, method=self.methods.get(pair) or None,
+                          label=self.label, request_text=self.request_text, text=self.text,
+                          vol_unit=self.vol_unit, fly_convention=self.fly_convention,
+                          marks=_marks_for(self.marks, pair), notes=self.notes,
+                          require_pair=True, **self.settings)
+
+    def run(self, book, *, bank: KnowledgeBank | None = None, hists=None,
+            archive=None, spreads=None) -> dict:
+        if book is None:
+            raise ValueError("the market-maker screen needs a loaded book")
+        clock = book.clock
+        pairs, bare = pairs_named(self.request_text, today=clock.now.date(),
+                                  fly_convention=self.fly_convention, requests=True)
+        bank = bank if bank is not None else KnowledgeBank()
+        if not pairs:
+            out = _empty_sheet(self.cut, self.label, clock, bare, self.request_text)
+            out["sheet"] = {"rows": [], "notes": [], "skipped": bare, "ignored": [],
+                            "n_quotes": 0, "priced": 0, "matched": 0, "disagreeing": 0,
+                            "leaned_by_client": 0, "widened_by_client": 0,
+                            "fly_convention": self.fly_convention, "fallback": {},
+                            "tolerance": self.settings.get("tolerance", AGENT_TOLERANCE)}
+            out["marks"] = _merged_marks({})
+            out["client"] = {"name": str(self.settings.get("client") or ""), "known": [],
+                             "applied": False, "record": [],
+                             "reason": "nothing was asked for, so no client's record was read"}
+            out["bank"] = {"path": bank.path, "problems": list(bank.problems)}
+            out["archive"] = {"path": getattr(archive, "path", ""), "available": False,
+                              "reason": "nothing asked for"}
+            return out
+
+        per_pair: dict[str, dict] = {}
+        errors: dict[str, str] = {}
+        for pair in pairs:
+            hist = None
+            if hists is not None:
+                try:
+                    if pair in hists:
+                        hist = hists[pair]
+                except TypeError:
+                    hist = None
+            try:
+                per_pair[pair] = self.panel(pair).run(book, bank=bank, hist=hist,
+                                                      archive=archive, spreads=spreads)
+            except _PAIR_ERRORS as exc:
+                errors[pair] = f"{type(exc).__name__}: {exc}"
+
+        sheets = {p: r["sheet"] for p, r in per_pair.items()}
+        rows = sorted((row for sh in sheets.values() for row in sh["rows"]),
+                      key=lambda r: r["line"])
+        skipped = _merged_lines(sheets, "skipped", bare)
+        first = next(iter(sheets.values()), {})
+        known: list[str] = []
+        for r in per_pair.values():
+            for name in (r.get("client") or {}).get("known") or []:
+                if name not in known:
+                    known.append(name)
+        client_name = ""
+        record: list[str] = []
+        reasons: list[str] = []
+        for pair, r in per_pair.items():
+            block = r.get("client") or {}
+            client_name = block.get("name") or client_name
+            tag = f"{pair}: " if len(per_pair) > 1 else ""
+            record.extend(tag + line for line in block.get("record") or [])
+            if block.get("reason"):
+                reasons.append(tag + block["reason"])
+        out = {
+            "pairs": pairs,
+            "pair": ", ".join(pairs),
+            "cut": self.cut, "label": self.label,
+            "methods": {p: r["method"] for p, r in per_pair.items()},
+            "valuation": clock.now.isoformat(),
+            "notes": list(self.notes),
+            "warnings": [f"{p}: {w}" for p, r in per_pair.items() for w in r["warnings"]]
+                        + [f"{p}: {e}" for p, e in errors.items()]
+                        + ([f"{len(bare)} line(s) name no pair and were not read"]
+                           if bare else []),
+            "unavailable": {},
+            # Everything a pair's own panel said, minus its rows, which are on
+            # the sheet: the bank, the archive, the client's record, the axe,
+            # the fair value and the tape are all per pair, and are read per
+            # pair by the cards under the sheet.
+            "by_pair": {
+                **{p: {k: v for k, v in r.items() if k != "sheet"} | {
+                       "error": None, "notes": r["sheet"]["notes"],
+                       "n_quotes": r["sheet"]["n_quotes"], "priced": r["sheet"]["priced"]}
+                   for p, r in per_pair.items()},
+                **{p: {"error": e, "pair": p, "cut": self.cut,
+                       "method": self.methods.get(p) or None, "marks": None,
+                       "warnings": [e], "notes": [], "n_quotes": 0, "priced": 0,
+                       "bank": None, "archive": None, "client": None, "axe": None,
+                       "fair": None, "flow": None}
+                   for p, e in errors.items()},
+            },
+            "bare": bare,
+            "marks": _merged_marks(per_pair),
+            # A client's record is per pair, because the archive files it per
+            # pair: on a sheet of three the record is three records, each
+            # named, rather than one blended one.
+            "client": {"name": client_name or str(self.settings.get("client") or ""),
+                       "known": known, "record": record,
+                       "reason": "; ".join(reasons),
+                       "applied": any((r.get("client") or {}).get("applied")
+                                      for r in per_pair.values())},
+            "bank": {"path": bank.path, "problems": list(bank.problems)},
+            "archive": {"path": getattr(archive, "path", ""),
+                        "available": any((r.get("archive") or {}).get("available")
+                                         for r in per_pair.values())},
+            "sheet": {
+                "rows": rows,
+                "notes": _merged_notes({p: sh["notes"] for p, sh in sheets.items()}),
+                "skipped": skipped,
+                "ignored": [],
+                "n_quotes": len(rows),
+                "priced": sum(sh["priced"] for sh in sheets.values()),
+                "matched": sum(sh["matched"] for sh in sheets.values()),
+                "disagreeing": sum(sh["disagreeing"] for sh in sheets.values()),
+                "leaned_by_client": sum(sh["leaned_by_client"] for sh in sheets.values()),
+                "widened_by_client": sum(sh["widened_by_client"] for sh in sheets.values()),
+                "fly_convention": self.fly_convention,
+                # The bottom rung is one tier for the whole sheet: the same
+                # ladder however many pairs are on it.
+                "fallback": dict(first.get("fallback") or {}),
+                "tolerance": first.get("tolerance", self.settings.get("tolerance",
+                                                                        AGENT_TOLERANCE)),
+            },
+        }
+        return out
+
+
+def check_sheet_from_request(payload: dict) -> CheckSheet:
+    """The check, as the screen posts it: no pair, every pair the box names.
+
+    The same fields as :func:`check_panel_from_request` less ``pair`` and
+    ``method``, plus ``methods`` -- read by :func:`_sheet_common`.  ``marks``
+    is the marking card's, and names its own pair.
+    """
+    cut, methods, fly, vol_unit = _sheet_common(payload)
+    marks = payload.get("marks") or None
+    if marks is not None and not isinstance(marks, dict):
+        raise ValueError("the marks to check against must be the object the marking card "
+                         "handed back")
+    near = _opt_float(payload, "near_edge", NEAR_EDGE)
+    if not (0.0 <= near < 0.5):
+        raise ValueError(
+            f"the near-the-edge tolerance is a fraction of the quoted width, from zero "
+            f"(warn about nothing that is inside) up to but not including a half (the mid "
+            f"itself); {near:g} is not one")
+    return CheckSheet(
+        cut=cut, methods=methods, label=str(payload.get("label") or ""),
+        text=str(payload.get("text") or ""), vol_unit=vol_unit, fly_convention=fly,
+        near_edge=near, marks=marks)
+
+
+def quote_sheet_from_request(payload: dict) -> QuoteSheet:
+    """The quote, as the screen posts it: no pair, every pair the request box names.
+
+    Everything :func:`quote_panel_from_request` reads is read here the same
+    way, by building a panel for a stand-in pair and taking its settings, so
+    the two readers cannot drift apart: a field the panel takes is a field the
+    sheet takes.
+    """
+    cut, methods, fly, vol_unit = _sheet_common(payload)
+    marks = payload.get("marks") or None
+    if marks is not None and not isinstance(marks, dict):
+        raise ValueError("the marks to quote off must be the object a fit returned")
+    probe = quote_panel_from_request({**payload, "pair": "XXXYYY", "marks": None,
+                                      "cut": cut, "method": None})
+    skip = {"pair", "cut", "method", "label", "request_text", "text", "vol_unit",
+            "fly_convention", "marks", "notes", "require_pair"}
+    settings = {k: v for k, v in vars(probe).items()
+                if k not in skip and not k.startswith("_")}
+    return QuoteSheet(
+        cut=cut, methods=methods, label=str(payload.get("label") or ""),
+        request_text=str(payload.get("request_text") or ""),
+        text=str(payload.get("text") or ""), vol_unit=vol_unit, fly_convention=fly,
+        marks=marks, settings=settings)

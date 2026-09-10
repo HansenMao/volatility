@@ -32,14 +32,17 @@ sheet it was written against is kept as `files/vol_marks_legacy_format.xlsx`
 against it -- and the comparison still runs from `legacy/`. volkit reads
 either (§4).
 
-- ~35,000 lines across 50 modules, 1060 tests, `unittest` only (no pytest).
+- ~37,000 lines across 52 modules, 1090 tests, `unittest` only (no pytest).
   Tests live in `tests/test_volkit.py`, `tests/test_agent.py` (the desk
-  agent, §17) and `tests/test_marking.py` (the marking agent, §18).
-- Runtime deps: numpy, scipy, pandas, openpyxl. Plus `tzdata` on Windows.
+  agent, §17), `tests/test_marking.py` (the marking agent, §18) and
+  `tests/test_publish.py` (the bulk export, §22).
+- Runtime deps: numpy, scipy, pandas, openpyxl, xlwt (the Murex `.xls`
+  writer, pure Python). Plus `tzdata` on Windows.
 - Deliberately no `pysabr`, `xlrd`, `tkcalendar`, and no web framework.
-- **Six screens**, each with a command-line equivalent, in the order a desk
+- **Seven screens**, each with a command-line equivalent, in the order a desk
   reads them: Pricing, Vol marking, Monitor (`volkit monitor`), Exchange traded
-  (`volkit listed`), Analysis (`volkit analysis`), Market maker (`volkit mm`).
+  (`volkit listed`), Analysis (`volkit analysis`), Vol exporting bulk
+  (`volkit export`), Market maker (`volkit mm`).
   Monitor sits behind Vol marking because those are the two a morning starts
   on. `screens.SCREENS` is the one declaration of that order and a test pins
   the page's nav and panel map against it. One HTML file,
@@ -86,10 +89,13 @@ surface    ATM + smile, greeks, delta strikes, RR / fly
 exotics    digitals, one-touch / no-touch, overhedge buffers
 pricing    multi-leg strips, strike/expiry specs, per-leg error isolation, and
            the one-number reading of them the marking screen asks for
-configsheets the workbook's settings tabs -- PEG_BANDS, KACE_SPREADS,
-           HOLIDAYS, WING_RATIOS, Vega Weights -- read one way, with '#'
-           comment rows and a header found rather than assumed, and off the
-           session's own rows where it holds the tab (`overlay`). A new
+configsheets the workbook's settings tabs -- PEG_BANDS, SPREADS (was
+           KACE_SPREADS; the old name is read and renamed on write), HOLIDAYS,
+           WING_RATIOS, Vega Weights, and the export-policy tables
+           MARKET_WIDTHS, ADD_UPS, SHADES, WING_WIDTHS, EXPORT_PAIRS -- read one way,
+           with
+           '#' comment rows and a header found rather than assumed, and off
+           the session's own rows where it holds the tab (`overlay`). A new
            setting is a tab here, not a new file
 marketdata validated Excel reader; CONFIG is two columns and a cross
            names its own dollar legs, and its TENORS column is the pillar
@@ -122,8 +128,11 @@ marketmaker  two panels, neither of which moves a mark: the check (a pasted
            **the one pricing engine**: a two-way in each instrument asked for,
            off the bank, the archive, the leans and the client's record, with
            the trace that sums to it on every row. Both may stand on the marks
-           the marking card hands them. The two fitters live here as model
-           code; the only caller is `marking`
+           the marking card hands them. And two **sheets** over them, which is
+           what the screen posts: a box names its pairs itself, so one panel
+           runs per pair and the rows come back in the order they were
+           written. The two fitters live here as model code; the only caller
+           is `marking`
 archive    every observation the desk has kept: quotes shown, trades printed,
            prices we made and what became of them. Append-only, content-addressed
 dtcc       fetching the public dissemination files from DTCC: which URL, whether
@@ -163,12 +172,22 @@ cli        every screen has a command-line equivalent
 screens    which screens a build has, shown or hidden; the one reader of the
            build's manifest, and of --enable-tab
 kace       the marked surface as the kACE RATE_FEED message the desk's pricing
-           platform takes; replaces the XML_poster workbook (§20). The
-           KACE_SPREADS tab's rows are the pillars and its columns are the
+           platform takes; replaces the XML_poster workbook (§20). One pair
+           from the feed tab; several from the Vol exporting bulk screen. The
+           SPREADS tab's rows are the pillars and its columns are the
            spreading tiers -- a width is a quoting policy, not a currency.
            A tier may be multiplied on the way out, and the days between
            pillars read across instead of stepped; both are the morning's
-           choice, both are recorded with the post, and neither moves a mid
+           choice, both are recorded with the post, and neither moves a mid.
+           `read_pillars` is the one reader of the book's marks at a pillar
+           list, and `PostLog` (publish_log.jsonl) is every channel's record
+publish    every channel the marks go out on -- kACE, Bloomberg DCAP, the two
+           Murex files, COS -- as one payload of pillar quotes and a small
+           record per channel; the width and shade tables; refusal by name
+           of anything neither source supplies (§22)
+overlay    an outside file of pillar quotes laid over the book for the bulk
+           export -- not confined to the book's pairs and tenors -- and, when
+           asked, applied to the session behind a snapshot that reverts it
 session    the marks a session made, saved beside the workbook and put back
 config     the startup settings file a double-clicked exe reads
 paths      resource vs user-data paths (source and frozen), and the one
@@ -202,10 +221,13 @@ working in its area — not before.
 | `claude/agent-ask.md` (§19) | `ask.py` — the read-only question agent. |
 | `claude/kace-feed.md` (§20) | `kace.py` — the RATE_FEED message, posting, the spread table. |
 | `claude/vega-weights.md` (§21) | `vegaweights.py`, the workbook's `Vega Weights` tab, the ATM card's **bump**, and the realized weighting suggested in the Config window. |
-| `claude/config-tabs.md` | **Before adding a setting**, or anything about `PEG_BANDS`, `KACE_SPREADS`, `HOLIDAYS`, `configsheets.py`, or where the discount curves come from (`discount.py`, the feed's `<CCY>OIS` rows). |
+| `claude/config-tabs.md` | **Before adding a setting**, or anything about `PEG_BANDS`, `SPREADS`, `HOLIDAYS`, `configsheets.py`, or where the discount curves come from (`discount.py`, the feed's `<CCY>OIS` rows). |
+| `claude/screen-export.md` (§22) | `publish.py`, `overlay.py`, `exportseed.py` -- the Vol bulk processing screen (Input / Output), the four channels, the export tables, the overlay and what it may never do to the workbook. |
 
 Design notes that are not standing context: `claude/kace-export-design.md`,
-`claude/marking-agent-design.md`, `claude/one-quote-and-the-client-record.md`.
+`claude/marking-agent-design.md`, `claude/one-quote-and-the-client-record.md`,
+`claude/several-pairs-and-the-bulk-export.md` (its bulk bar is replaced by the
+export screen), `claude/publishing-channels-design.md`.
 
 ---
 
@@ -408,10 +430,25 @@ to safely amend.
 - **A fit, a check and a quote are separate calls, and the marks travel between
   them** in the browser (`capture_marks` / `applied_marks`). The book holds
   exactly what the panel shows — one number, one spelling.
+- **A box names its pairs; the tab has one pair selector and it is the marking
+  card's** (§11). `marketmaker.CheckSheet` and `.QuoteSheet` read the pairs off
+  the text -- on the line or under a heading -- and run **one panel per pair**,
+  so a morning's whole book is one paste; every row carries its `pair` and each
+  pair's own answer is under `by_pair`. A line naming no pair is **refused**
+  (`quotes.NO_PAIR`, `parse_quotes(require_pair=True)`): with no selector to
+  fall back on, pricing it against whichever pair a screen happened to show is
+  the silent default this tool exists to remove. One pair's failure is that
+  pair's line, never the sheet's. The cut is the marking screen's and the
+  interpolation is per pair (`methods`), that screen's for the pair it shows
+  and the surface's own for the rest -- there is no cut or interpolation box on
+  the market-maker tab, because two boxes for one decision is one of them going
+  stale. The marking card's held marks go to **their own pair** and every other
+  pair is read off the book, each saying which. `volkit mm PAIR` is still one
+  pair read as before; `volkit mm` with no pair is the sheets.
 - **One pricing engine** (§17). The Quote button, `volkit mm --request` and
   `volkit agent quote` all arrive at `marketmaker.QuotePanel.run`; nothing
   else makes a two-way. The width ladder is bank, then archive, then a
-  **spreading tier** off the workbook's `KACE_SPREADS` tab -- named on the
+  **spreading tier** off the workbook's `SPREADS` tab -- named on the
   bar, scaled by a multiplier, read at each row's own maturity (stepped or
   interpolated between the tab's tenors, `kace.width_at`) -- then no price,
   always, and every row names its rung. That bottom rung used to be one typed
@@ -423,8 +460,26 @@ to safely amend.
   nothing; **one client's record on one instrument** leans the mid by their
   side and widens by the move against us after their trades, counted with a
   minimum and capped with the other leans, and the archive keeps that record
-  in the book's convention. A second engine, a second grammar or a second
-  copy of the ladder is the bug this line was written after.
+  in the book's convention. A sheet is a loop over this one engine and never a
+  second one: a row on a sheet of three pairs is the row that pair's own panel
+  would have made alone, and a test pins it. A second engine, a second grammar
+  or a second copy of the ladder is the bug this line was written after.
+- **Everything bulk-published goes through `publish.build`, and a pillar
+  neither source supplies is refused by name** (§22). The book or the
+  overlay is a *source chosen per pair* (`sources`), never a global switch;
+  widths, shades, labels, formatting and the log are the same either way and
+  the coverage names which pair came from where. A channel's pair list, its
+  widths and its shades are tables in the workbook (`EXPORT_PAIRS`,
+  `MARKET_WIDTHS` + `ADD_UPS`, `WING_WIDTHS`, `SPREADS`, `SHADES`),
+  hand-typed, edited on the Vol bulk processing screen and read everywhere,
+  seeded once from the desk's own files (`exportseed.py`, `files/reference/`);
+  a shade moves the ATM mid and a width goes around it, never folded
+  together, and the wings are never shaded. **While an overlay is written
+  over the book for any pair the workbook write refuses by name** -- an
+  overlay is not marked -- and a session save writes the intersection and
+  reports the overflow. The single-pair kACE feed tab is unchanged and posts
+  the book; an overlay reaches it only for the pairs written over, and the
+  tab says which.
 - **Held marks are only good for the book they came from.** `FitPanel.run`
   stamps `marketmaker.mark_fingerprint` (a hash per part of
   `session.capture_pair`, plus the sheet's own quotes) onto the marks it hands
@@ -503,7 +558,7 @@ and what is reported instead** — read it before "fixing" one.
 rules.** The essentials:
 
 ```
-python -m unittest discover -s tests        # 1060 tests, ~20m
+python -m unittest discover -s tests        # 1090 tests, ~25m
 PYTHONUTF8=0 LC_ALL=C python -m unittest discover -s tests   # as a cp1252 box
 python -m volkit check                      # validate the workbook
 python -m volkit serve --feed files/market_feed.csv --history vol_history.xlsx

@@ -87,11 +87,12 @@ bump is its two legs' weights added together plus the pair's own cell on that
 row -- the adjustment on top. A workbook with no currency columns reads
 exactly as it always did, the cell being the whole bump.
 
-## The six panels
+## The seven panels
 
 The web interface separates the jobs the tool does. The tabs run **Pricing,
-Vol marking, Monitor, Exchange traded, Analysis, Market maker** — Monitor sits
-behind Vol marking because those two are what a morning starts on.
+Vol marking, Monitor, Exchange traded, Analysis, Vol bulk processing, Market
+maker** — Monitor sits behind Vol marking because those two are what a
+morning starts on.
 `screens.SCREENS` is the single declaration of that order; the page's nav and
 its panel map are pinned against it by a test, so a build that leaves a screen
 out cannot end up showing the rest in a different order.
@@ -862,6 +863,15 @@ The other panels answer *what is this worth*. This one answers *what do I
 show*, in three stages that report separately so one that cannot run leaves
 the others alone — and only one of the three moves a mark.
 
+**There is no pair on this bar.** A quote names its pair — on the line
+(`EURUSD 1M ATM 8.20/8.60`) or on a heading line above a block — so one paste
+and one request box carry a morning's whole book, and every row on both sheets
+says which pair it is. A line that names no pair is refused with the reason,
+because there is nothing left on the screen to say what was meant. The one pair
+selector is on the **marking agent** card, since a fit is of one curve; the cut
+and the interpolation come from the Vol marking tab, for the same reason a cut
+belongs where the curve is marked.
+
 **Check Market** reads the market box and says *where you are marked against
 it*: through their bid or their offer, near a side, or in line, with the
 distance in vol points and in units of their own width. It moves nothing.
@@ -1039,7 +1049,7 @@ and lists the rules that matched but lost.
 
 There is no built-in default width. A quote no rule matches gets no bid and no
 offer and says so; the only alternative is a **fallback tier** named on the bar
--- a column of the workbook's `KACE_SPREADS` tab, the same ladder the kACE feed
+-- a column of the workbook's `SPREADS` tab, the same ladder the kACE feed
 posts from, read at each quote's own maturity, optionally multiplied and
 optionally read across between the tab's tenors -- and the row reports which it
 was. **Learn widths** proposes a ladder measured from
@@ -1099,7 +1109,7 @@ tab is the check, **Copy XML** / **↓ feed XML** the message, **↓ clear XML**
 the `clearRate` message; the **scenario** box on the tab is the kACE
 scenario it all posts into (`--kace-scenario` on the command line).
 
-The workbook's `KACE_SPREADS` tab names the pillars posted — one row per
+The workbook's `SPREADS` tab names the pillars posted — one row per
 tenor, and the tenors listed *are* the pillars — and carries **one column per
 spreading tier** (`default`, plus whatever else the desk names) holding the
 ATM width each posts at them. The tier is chosen from a dropdown on the tab
@@ -1130,12 +1140,104 @@ through no proxy. The page posts the *request*, never the XML, so what
 reaches kACE is what the tool built. The reply is taken as success only in
 the one shape the poster page shows (a `gfi_message` with a `<response>`);
 anything else is a failure with the first line of what came back. Every
-post is a line in `kace_posts.jsonl` beside the workbook. `--kace-ca` /
+post is a line in `publish_log.jsonl` beside the workbook. `--kace-ca` /
 `--kace-insecure` for an internal certificate; `--dry-run` to see what would
 go. The server's 1024-bit DH key, which OpenSSL 3 refuses by default
 (`DH_KEY_TOO_SMALL`), is handled by stepping the handshake down as a browser
 would, and the post says which step it took. `claude/kace-export-design.md`
 has the history.
+
+The feed tab posts one pair. Several pairs, and every other channel the
+marks go out on, are the **Vol bulk processing** panel's, below. **Key tenors
+only** (`--pillars-only`) posts each pillar's ATM two-way and its four wing
+nodes and leaves the calendar-day nodes out; the pillars are identical either
+way, and the log says which kind of message went.
+
+### Vol bulk processing
+
+The desk's marks go out on three channels besides the feed tab's single-pair
+message, and each used to be its own spreadsheet chain: a **Bloomberg** DCAP
+contribution workbook (`PLContribFull` formulas the add-in publishes when
+the sheet is refreshed), **Murex** (one destination writing two BIFF8 uploads,
+`DRV_MktData_FX_Vol_<date>.xls` with the ATM and
+`DRV_MktData_FX_Broker_<date>.xls` with the wings, bid equal to ask, off one
+pair list and one date and written together or not at all) and a **COS** grid
+(`COS_86830_Bid.csv`, the ATM bid alone
+at five tenors, CNY-labelled rows fed from the CNH curves). They are one job:
+every channel carries the same payload — per pair, per tenor, an ATM two-way
+and the 25d/10d risk reversal and butterfly — and differs only in the
+container, the pair list, the tenor labels, the widths and the shade.
+`publish.py` builds that payload once and each channel is a small record whose
+writer returns the file or files it puts out;
+`claude/publishing-channels-design.md` is the design and
+`claude/screen-export.md` what was built. The desk's own files of 2026-09-10
+are in `files/reference/`: the tests put them through the tool and get them
+back grid for grid, and `exportseed.py` carries what they say — each
+channel's pairs in file order, the Bloomberg widths and wing widths.
+
+The panel has two halves. **Input**, on the left:
+
+* **An outside file → overlay.** A CSV or xlsx of `pair, tenor, atm, rr25,
+  rr10, bf25, bf10` (the workbook's `RR 25D` / `ST 25D` spellings work too,
+  and a row may carry `atm_bid` / `atm_ask` and bypass the tier), typed in as a
+  path or pasted. It is **not confined to the book's pairs and tenors** — a
+  full 33-pair, 11-tenor Bloomberg sheet can go out on a morning the book
+  marks 24 pairs to 1Y — and a blank cell falls through to the book. Loaded,
+  it changes nothing anywhere else. One line per pair says whether the book
+  holds it, with a tick; **Overwrite book for ticked** puts those pairs' rows
+  onto the book itself (an ATM overwrite and typed quotes, as if marked by
+  hand) after saving the session as it was (`pre-overlay-<stamp>.json`), and
+  **Revert** puts that back. While any pair is written over, **Write to
+  workbook** refuses — an overlay is not marked — and a session save writes
+  the intersection and says what it dropped.
+* **Compare.** The book against the overlay at a chosen channel's widths and
+  shades: bid, mid and ask for the ATM and each wing, pair by pair and tenor
+  by tenor, the largest moves flagged, and a tenor one side cannot supply
+  listed rather than dropped.
+
+**Output**, on the right:
+
+* **Channel and sources.** Destination, and the pair picker with a
+  **book / overlay** select beside every pair the overlay carries (default:
+  overlay where it has rows, book elsewhere; *from overlay* / *from book* set
+  them all). So a run is not all from one source or all from the other, and
+  the line under the picker says which pairs are read from where. Then the
+  tier and multiplier (kACE, COS), wings, scenario, a tolerance on how far an
+  overlay pair may move a book value, the file date, key tenors only, dry
+  run. **Build** shows everything; **Send** asks once, then posts the kACE
+  messages one pair at a time or writes the file into `exports/` beside the
+  workbook (`--export-dir`, `export-dir =` in `volkit.cfg`); a file can also
+  be downloaded.
+* **Preflight** — coverage per pair and tenor with each pair's source and
+  every cell coloured by where its row came from; whatever is **refused by
+  name** (a pillar neither source has, a pair `MARKET_WIDTHS` or
+  `WING_WIDTHS` does not carry, a tenor past the last quoted one); overlay
+  rows left unused because their pair reads the book; the diff against the
+  book for the overlay pairs; and every pillar's two-way with where each
+  number came from. A short file written silently is the failure this card
+  exists to kill.
+* **Configuration** — the export-policy tables, edited here and read
+  everywhere: `SPREADS` (the tiers; `cos` is the COS ladder), `MARKET_WIDTHS`
+  and `ADD_UPS` (the Bloomberg ATM width: an observed market two-way plus a
+  policy add-up), `WING_WIDTHS` (each wing's own two-way on Bloomberg),
+  `SHADES` (the ATM mid shift by channel — 0.2 under the mark on Bloomberg),
+  and `EXPORT_PAIRS` (which pairs each channel publishes, in the file's
+  order, with the file's label, the curve it is fed from and where it stops).
+  **Seed the missing tables** (`volkit export --init-tables`) writes what the
+  desk's files say; only the `cos` tier is left to type.
+* **Log** — `publish_log.jsonl` beside the workbook, every channel, every
+  export sent or refused, with its source (`marks`, or the overlay's file,
+  hash and row count, and the per-pair split) and a hash of what went. The
+  old `kace_posts.jsonl` is carried over once.
+
+`volkit export CHANNEL [--pairs ...] [--overlay FILE] [--book-pairs ...]
+[--compare] [--tier T] [--multiplier X] [--wings marks|fitted] [--tolerance V]
+[--file-date D] [--confirm-date] [--out-dir DIR] [--dry-run]` is the same
+build from the shell. The Bloomberg ticker rule (two-letter codes, base then
+quote, instrument letter, tenor with `O/N` as `1D`) has one exception — the 1M
+25d risk reversal is `<prefix>VRR` — kept as a table; a test walks all 3,610
+of the desk's formula cells through it. HKDJPY goes out with the same sign
+convention as USDJPY, no flip.
 
 ### Saving a session
 
@@ -1613,6 +1715,8 @@ the same clock always gives the same numbers.
 | `curves` | several volatility curves side by side, and the same curve on other dates |
 | `monitor` | small panels: what has moved between two points in time, one pair each |
 | `session` | the marks a session made, saved beside the workbook and put back |
+| `publish` | every channel the marks go out on — kACE, Bloomberg DCAP, the two Murex files, COS — as one payload of pillar quotes and a record per channel; the width and shade tables |
+| `overlay` | an outside file of pillar quotes laid over the book for the bulk export, and applied to the session behind a snapshot when asked |
 | `listed` | exchange traded options: paste parsing, least-squares SABR, comparison against the marked surface |
 | `moments` | risk-neutral distributions read off a smile; two of them combined into a cross |
 | `history` | historical spot / forwards / quotes, and realized volatility, skew and kurtosis |

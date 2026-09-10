@@ -3161,6 +3161,10 @@ class TestConfigurationTabs(unittest.TestCase):
         # CONVENTIONS is optional for the same reason: a pair with no row takes
         # the market's conventions, and most pairs never need a row.
         optional = {"WING_RATIOS", "CONVENTIONS"}
+        # The export-policy tables are optional too: a desk that publishes
+        # nothing has no business carrying them, and the channels refuse by
+        # name until they are typed (`volkit export --init-tables` seeds).
+        optional |= set(configsheets.EXPORT_TABS) - {"SPREADS"}
         needed = [s for s in configsheets.SHEETS if s not in optional]
         self.assertEqual([s for s in configsheets.present(WORKBOOK) if s not in optional],
                          needed)
@@ -3168,7 +3172,7 @@ class TestConfigurationTabs(unittest.TestCase):
     def test_an_open_tabs_extra_columns_are_pairs_on_one_tab_and_tiers_on_the_other(self):
         """"Open" was never one rule.
 
-        `Vega Weights` grows a column per pair and `KACE_SPREADS` one per kACE
+        `Vega Weights` grows a column per pair and `SPREADS` one per kACE
         spreading tier, so the *kind* is what `OPEN_COLUMNS` holds.  A checker
         that knew only the pair rule -- which is what it used to be -- would
         refuse every tier a desk named, and the tab would be unwritable.
@@ -3176,7 +3180,7 @@ class TestConfigurationTabs(unittest.TestCase):
         from volkit import configsheets as cs
 
         self.assertEqual(cs.OPEN_COLUMNS,
-                         {"Vega Weights": "pair", "KACE_SPREADS": "tier"})
+                         {"Vega Weights": "pair", "SPREADS": "tier", "MARKET_WIDTHS": "pair"})
         # A pair is six letters and is written as a proper noun; a tier is the
         # name the desk chose, written the way the reader spells it, so the
         # dropdown, --kace-tier and the heading are one string.
@@ -3188,13 +3192,13 @@ class TestConfigurationTabs(unittest.TestCase):
         self.assertFalse(cs.open_column_ok("tier", "2nd"))       # reads back as a number
         self.assertFalse(cs.open_column_ok("tier", "a/b"))
 
-        cs.check_open_columns("KACE_SPREADS", ("tenor", "default", "wide", "note"))
+        cs.check_open_columns("SPREADS", ("tenor", "default", "wide", "note"))
         cs.check_open_columns("Vega Weights", ("tenor", "default", "USDJPY"))
         with self.assertRaises(cs.ConfigSheetError) as ctx:
             cs.check_open_columns("Vega Weights", ("tenor", "default", "wide"))
         self.assertIn("six letters", str(ctx.exception))
         with self.assertRaises(cs.ConfigSheetError) as ctx:
-            cs.check_open_columns("KACE_SPREADS", ("tenor", "default", "a/b"))
+            cs.check_open_columns("SPREADS", ("tenor", "default", "a/b"))
         self.assertIn("tier", str(ctx.exception))
         # A tab whose columns are fixed takes whatever it is given here, and
         # is refused by its own writer instead.
@@ -3203,7 +3207,7 @@ class TestConfigurationTabs(unittest.TestCase):
         # `columns_for` puts the fixed ones first and keeps `note` last
         # however many tiers the tab grows.
         self.assertEqual(
-            cs.columns_for("KACE_SPREADS",
+            cs.columns_for("SPREADS",
                            [{"tenor": "1W", "default": 0.8, "Wide": 1.2, "note": "x"}]),
             ("tenor", "default", "wide", "note"))
 
@@ -6213,7 +6217,11 @@ def hist_point(curve, tenor):
 class TestMarketMakerApi(unittest.TestCase):
     """The endpoints, and the one piece of server state on the whole tool."""
 
-    RUN = ("1M ATM 6.05/6.35 in 100mm vega\n"
+    # The pair is named in the box, on a heading line, because the tab has no
+    # pair selector any more (§11): the check and the quote read every pair the
+    # box names and refuse a line that names none.
+    RUN = ("EURUSD\n"
+           "1M ATM 6.05/6.35 in 100mm vega\n"
            "3M ATM 6.25/6.55\n"
            "6M ATM 6.60/6.90\n"
            "1Y atm 7.00/7.30\n"
@@ -6281,7 +6289,7 @@ class TestMarketMakerApi(unittest.TestCase):
         import tempfile
         with tempfile.TemporaryDirectory() as tmp:
             out = self.service(tmp).mm_check(
-                {"pair": "EURUSD", "text": "1M ATM 5.831\n", "near_edge": "0.4"})
+                {"text": "EURUSD 1M ATM 5.831\n", "near_edge": "0.4"})
         row = out["market"]["rows"][0]
         self.assertEqual(row["market_bid"], row["market_ask"])
         self.assertIn(row["severity"], ("in line", "through"))
@@ -6333,7 +6341,7 @@ class TestMarketMakerApi(unittest.TestCase):
             self.assertTrue(Path(saved["written"]).exists())
             # The bank is the quote route's alone: a width is a property of
             # what we show, and neither the check nor a fit shows anything.
-            out = service.mm_quote({"pair": "EURUSD", "request_text": "1M ATM\n"})
+            out = service.mm_quote({"request_text": "EURUSD 1M ATM\n"})
             atm = next(r for r in out["sheet"]["rows"] if r["instrument"] == "atm")
             self.assertAlmostEqual(atm["width"], 0.28)
             # A note is advice, kept apart from the reader's own notes so it
@@ -6422,19 +6430,24 @@ class TestMarketMakerApi(unittest.TestCase):
             from volkit.webapp import BookService
             service = BookService(str(WORKBOOK), ASOF, bank_path=str(Path(tmp) / "bank.json"),
                                   archive_path=path)
-            ask = {"pair": "EURUSD", "request_text": "1M ATM\n1M 25d RR\n",
+            ask = {"request_text": "EURUSD 1M ATM\nEURUSD 1M 25d RR\n",
                    "fallback_tier": "default"}
-            off = service.mm_quote(dict(ask))
+            # The tape, the axe and the fair value are read per pair, and the
+            # sheet keeps each pair's answer under `by_pair`: a sheet may hold
+            # three currencies and there is no one tape across them.
+            quiet = service.mm_quote(dict(ask))
+            off = quiet["by_pair"]["EURUSD"]
             self.assertTrue(off["flow"]["buckets"], off["flow"]["reason"])
             self.assertIn("set a flow weight", off["flow"]["reason"])
-            self.assertEqual([r["skew_flow"] for r in off["sheet"]["rows"]], [0.0, 0.0])
+            self.assertEqual([r["skew_flow"] for r in quiet["sheet"]["rows"]], [0.0, 0.0])
 
-            on = service.mm_quote(dict(ask, flow_weight="0.5", flow_scale="100000"))
-            rows_on = {r["instrument"]: r for r in on["sheet"]["rows"]}
+            leaning = service.mm_quote(dict(ask, flow_weight="0.5", flow_scale="100000"))
+            on = leaning["by_pair"]["EURUSD"]
+            rows_on = {r["instrument"]: r for r in leaning["sheet"]["rows"]}
             # Paid means marked up, by half a weight of the half width.
             self.assertGreater(rows_on["atm"]["skew_flow"], 0.0)
             self.assertAlmostEqual(rows_on["atm"]["skew_flow"], 0.5 * 0.5 * 0.4, places=6)
-            self.assertGreater(rows_on["atm"]["our_bid"], off["sheet"]["rows"][0]["our_bid"])
+            self.assertGreater(rows_on["atm"]["our_bid"], quiet["sheet"]["rows"][0]["our_bid"])
             # And a risk reversal is left alone.
             self.assertEqual(rows_on["rr"]["skew_flow"], 0.0)
             # The tape's age weight and window are the archive card's, not a
@@ -6463,8 +6476,34 @@ class TestMarketMakerApi(unittest.TestCase):
             bad = service.mm_save_bank({"pair": "EURUSD",
                                         "rules": [{"kind": "spread", "value": "-3"}]})
             self.assertFalse(bad["ok"])
-            self.assertTrue(bad["problems"])
+            # And the refusal says why *this set* was refused.  `bank_state`
+            # carries a `problems` of its own -- what the file said when it
+            # was read -- and it used to be spread over these, so a bad rule
+            # came back as a note about the file.
+            self.assertTrue(any("positive width" in p for p in bad["problems"]),
+                            bad["problems"])
             self.assertEqual(len(self.service(tmp).bank.for_pair("EURUSD").rules), 1)
+
+            # Every pair at once, which is how the card saves: one bad rule on
+            # one pair saves nothing, and the pair is named.
+            both = service.mm_save_bank({"banks": {
+                "EURUSD": {"rules": [{"kind": "spread", "value": "0.30",
+                                      "instrument": "atm"}]},
+                "USDJPY": {"rules": [{"kind": "spread", "value": "0.50",
+                                      "instrument": "atm"}]}}})
+            self.assertTrue(both["ok"], both["problems"])
+            self.assertEqual(len(both["by_pair"]["USDJPY"]["rules"]), 1)
+            self.assertEqual(len(self.service(tmp).bank.for_pair("USDJPY").rules), 1)
+            half = service.mm_save_bank({"banks": {
+                "EURUSD": {"rules": [{"kind": "spread", "value": "0.40",
+                                      "instrument": "atm"}]},
+                "USDJPY": {"rules": [{"kind": "spread", "value": "-1"}]}}})
+            self.assertFalse(half["ok"])
+            self.assertTrue(any(p.startswith("USDJPY:") for p in half["problems"]),
+                            half["problems"])
+            # Nothing was written: EURUSD is still the value from the good save.
+            kept = self.service(tmp).bank.for_pair("EURUSD").rules
+            self.assertEqual([r.value for r in kept], [0.30])
 
     def test_learning_proposes_and_does_not_save_and_does_not_file(self):
         """A paste that happens to hold one wide quote must not be able to
@@ -6522,7 +6561,7 @@ class TestMarketMakerApi(unittest.TestCase):
             before = capture_pair(service.book, "EURUSD")
 
             def ask(size):
-                return {"pair": "EURUSD", "request_text": f"1M ATM in {size}mm",
+                return {"request_text": f"EURUSD 1M ATM in {size}mm",
                         "fallback_tier": "default", "client": "Client Q",
                         "client_weight": 0.5, "client_min": 4}
             first = service.mm_quote(ask(100))
@@ -6554,8 +6593,12 @@ class TestMarketMakerApi(unittest.TestCase):
             self.assertAlmostEqual(leaned["client_side"], 1.0)
             self.assertAlmostEqual(leaned["our_mid"], row["our_mid"] + 0.10, places=6)
             self.assertIn("Client Q", again["client"]["known"])
-            self.assertEqual(again["archive"]["shown"], 4)
-            self.assertEqual(again["archive"]["outcome"], 4)
+            # The archive is read per pair, and what it holds for this one is
+            # under that pair: a sheet of three currencies has three archives'
+            # worth of records and no one number across them.
+            held_here = again["by_pair"]["EURUSD"]["archive"]
+            self.assertEqual(held_here["shown"], 4)
+            self.assertEqual(held_here["outcome"], 4)
             # The file on disk is what was written.
             from volkit.archive import Archive
             held = Archive.load(str(Path(tmp) / "arc.jsonl"))
@@ -6714,7 +6757,7 @@ class TestWebAssets(unittest.TestCase):
         self.assertEqual(scan.bad, [])
         self.assertEqual(scan.stack, [])
         roots = [scan.depth[p] for p in ("p-pricing", "p-marking", "p-listed", "p-analysis",
-                                         "p-mm", "p-monitor")]
+                                         "p-export", "p-mm", "p-monitor")]
         self.assertEqual(len(set(roots)), 1, "the panel roots are not siblings")
 
     def test_the_nav_shows_the_tabs_in_the_order_screens_declares_them(self):
@@ -6913,8 +6956,14 @@ class TestWebAssets(unittest.TestCase):
         self.assertEqual(js.count("STATE.cuts"), 1)
         self.assertIn("const all=STATE.cuts||[];",
                       js.split("function cutList(){")[1].split("\n}")[0])
-        for sel in ("#mcut", "#ancut", "#mmcut", "#cmpcut"):
+        for sel in ("#mcut", "#ancut", "#cmpcut"):
             self.assertIn("fillSel('%s',cutList()," % sel, js)
+        # The market-maker tab has no cut selector of its own any more: it
+        # prices at the Vol marking tab's cut, read by `mmCutMethods`, because
+        # that tab is where a cut is chosen and two boxes for one decision is
+        # one of them going stale.
+        self.assertNotIn("#mmcut", js)
+        self.assertIn("out.cut=$('#mcut').value", js)
         # Cut moved onto each monitor panel instead of one screen-wide
         # selector -- the per-tile markup draws straight off the same list.
         self.assertIn("optlist(cutList().map(x=>[x,x]),t.cut)", js)
@@ -7072,15 +7121,17 @@ class TestWebAssets(unittest.TestCase):
         and it is called before each of the three things that redraw."""
         html = _source("volkit", "web", "index.html")
         js = html.split("<script>")[1].split("</script>")[0]
-        for fn in ("function cfgHarvest(i){", "function cfgPaintTabs(){",
+        # One painter for both editors -- the Config window and the export
+        # screen's Configuration card -- told which root it paints.
+        for fn in ("function cfgHarvest(i){", "function cfgPaintTabs(where){",
                    "function cfgTabHtml(t,i){"):
             self.assertIn(fn, js)
         # The save posts what CFG holds after the harvest, not the raw boxes.
-        save = js.split("$('#cfgtabs').querySelectorAll('.cfgsave')")[1].split("});")[0]
+        save = js.split("root.querySelectorAll('.cfgsave')")[1].split("});")[0]
         self.assertIn("cfgHarvest(i)", save)
         self.assertIn("rows:t.rows", save.replace(" ", ""))
         # Adding a column and accepting a suggestion both harvest first.
-        add = js.split("$('#cfgtabs').querySelectorAll('.cfgaddcol')")[1].split("cfgPaintTabs();")[0]
+        add = js.split("root.querySelectorAll('.cfgaddcol')")[1].split("cfgPaintTabs(where);")[0]
         self.assertIn("cfgHarvest(i)", add)
         use = js.split("use.onclick=()=>{")[1].split("cfgPaintTabs();")[0]
         self.assertIn("cfgHarvest(i)", use)
@@ -7093,7 +7144,7 @@ class TestWebAssets(unittest.TestCase):
         own reader looks for would be unreadable on the next load."""
         html = _source("volkit", "web", "index.html")
         js = html.split("<script>")[1].split("</script>")[0]
-        drop = js.split("$('#cfgtabs').querySelectorAll('.cfgdropcol')")[1].split("cfgPaintTabs();")[0]
+        drop = js.split("root.querySelectorAll('.cfgdropcol')")[1].split("cfgPaintTabs(where);")[0]
         self.assertIn("cfgHarvest(i)", drop)          # before the repaint, like the others
         self.assertIn("t.columns.filter", drop)
         # The cross is only on a column that is not one of the tab's fixed ones.
@@ -7317,7 +7368,8 @@ class TestWebAssets(unittest.TestCase):
         js = html.split("<script>")[1].split("</script>")[0]
         src = _source("volkit", "marketmaker.py")
         mark_src = _source("volkit", "marking.py")
-        common = src.split("def _common")[1].split("def _reversion_from_request")[0]
+        common = src.split("def _common")[1].split("def _sheet_common")[0]
+        sheet_common = src.split("def _sheet_common")[1].split("def _reversion_from_request")[0]
         rev = src.split("def _reversion_from_request")[1].split("def check_panel_from_request")[0]
 
         def sent(name):
@@ -7330,21 +7382,41 @@ class TestWebAssets(unittest.TestCase):
         # And nothing that would move a mark: those live on the marking card.
         for gone in ("target_source", "target_text", "apply", "reversion_lo"):
             self.assertNotIn(gone, check, f"the check panel still posts {gone!r}")
-        handler = src.split("def check_panel_from_request")[1].split(
-            "def quote_panel_from_request")[0]
-        for f in check | {"marks"}:
-            self.assertIn(f'"{f}"', handler + common, f"the check reader never reads {f!r}")
-
+        # And no pair, no cut and no interpolation: the box names the pairs,
+        # and the cut and the method are the Vol marking tab's, added by
+        # `mmCutMethods` rather than typed on this one.
         quote = sent("MQF")
+        for gone in ("pair", "cut", "method"):
+            self.assertNotIn(gone, check | quote,
+                             f"the market-maker tab still posts {gone!r} of its own")
+        self.assertIn("Object.assign(readFields(MCF),mmCutMethods())", js)
+        self.assertIn("Object.assign(readFields(MQF),mmCutMethods())", js)
+        handler = src.split("def check_sheet_from_request")[1].split(
+            "def quote_sheet_from_request")[0]
+        for f in check | {"marks", "cut", "methods"}:
+            self.assertIn(f'"{f}"', handler + sheet_common,
+                          f"the check reader never reads {f!r}")
+
         self.assertIn("request_text", quote)
         self.assertIn("fallback_tier", quote)
-        handler = src.split("def quote_panel_from_request")[1]
-        for f in quote | {"marks"}:
-            self.assertIn(f'"{f}"', handler + common, f"the quote reader never reads {f!r}")
+        # The sheet reads the quote's own settings through the panel reader,
+        # so both are checked -- a field the panel takes is a field the sheet
+        # takes, and that is the point of building the panel to read them.
+        handler = (src.split("def quote_sheet_from_request")[1]
+                   + src.split("def quote_panel_from_request")[1].split(
+                       "def quote_sheet_from_request")[0])
+        for f in quote | {"marks", "cut", "methods"}:
+            self.assertIn(f'"{f}"', handler + common + sheet_common,
+                          f"the quote reader never reads {f!r}")
 
         # The hand fit, on the marking card, and the one panel on this tab
-        # that may leave a mark on the book.
+        # that may leave a mark on the book.  It is also the one payload here
+        # with a pair on it, because a fit is of one curve.
         fit = sent("MFF")
+        self.assertIn("pair", fit)
+        self.assertIn("pair", sent("MKF"))
+        self.assertIn("['pair','#markpair']", js)
+        self.assertIn("out.cut=mmCutMethods().cut; out.method=mmMarkMethod(out.pair);", js)
         for f in ("target_source", "apply", "reversion_lo"):
             self.assertIn(f, fit, f"the hand fit does not post {f!r}")
         handler = mark_src.split("def fit_panel_from_request")[1]
@@ -7373,20 +7445,25 @@ class TestWebAssets(unittest.TestCase):
             self.assertNotIn(gone, agent_src, f"{gone} is still in agent.py")
         block = js.split("const PF=[")[1].split("];")[0]
         fields = set(_re.findall(r"\['([a-z_]+)'", block))
-        self.assertEqual(fields, {"pair", "text", "fly_convention", "vol_unit", "counterparty"})
-        reader = agent_src.split("def paste_from_request")[1].split("def file_paste")[0]
+        # No pair: the paste names its pairs itself, on the line or under a
+        # heading, and every one of them is filed.
+        self.assertEqual(fields, {"text", "fly_convention", "vol_unit", "counterparty"})
+        reader = agent_src.split("def paste_from_request")[1].split("def paste_runs")[0]
         for f in fields - {"counterparty"}:
             self.assertIn(f'"{f}"', reader, f"the paste reader never reads {f!r}")
         # Learn widths: the file button's list plus the evidence settings,
-        # read by the one learning function's reader.
+        # read by the one learning function's reader.  The pairs are the bank
+        # card's own list rather than a field, because the card shows them all.
         block = js.split("const LF=[")[1].split("];")[0]
         learn = set(_re.findall(r"\['([a-z_]+)'", block))
         self.assertTrue(fields <= learn, learn)
         self.assertIn("archive_half_life", learn)
-        reader = agent_src.split("def learn_from_request")[1].split("def file_paste")[0]
+        self.assertIn("{pairs:BANK.pairs}", js)
+        reader = agent_src.split("def learn_from_request")[1].split("def _learned_json")[0]
         for f in learn - fields:
             self.assertIn(f'"{f}"', reader, f"the learn reader never reads {f!r}")
         self.assertIn('"counterparty"', reader)
+        self.assertIn('"pairs"', reader)
         self.assertNotIn("def learn_from_panel", _source("volkit", "marketmaker.py"))
         self.assertNotIn("def suggest_rules", _source("volkit", "knowledge.py"))
         # The one field the reader does not take: it says who showed the
@@ -9292,11 +9369,11 @@ class TestConfigurationIsMarkedNotWritten(unittest.TestCase):
         self.assertTrue(svc.dirty)
 
     def test_a_kace_tier_added_on_the_window_is_posted_from_before_it_is_written(self):
-        """A tier is a column of `KACE_SPREADS`, so it is marked like a band:
+        """A tier is a column of `SPREADS`, so it is marked like a band:
         applied here, read again under the book, and offered by the feed tab
         straight away -- with the file still saying what it said."""
         svc, wb = self._service()
-        tab = {t["sheet"]: t for t in svc.config_tabs()["tabs"]}["KACE_SPREADS"]
+        tab = {t["sheet"]: t for t in svc.config_tabs()["tabs"]}["SPREADS"]
         self.assertEqual(tab["open"], "tier")
         self.assertEqual(tab["fixed"], ["tenor", "default", "note"])
         self.assertIn("wide", tab["columns"])
@@ -9304,7 +9381,7 @@ class TestConfigurationIsMarkedNotWritten(unittest.TestCase):
         for r in rows:
             r["client_a"] = None            # a tier that takes default everywhere
         rows[0]["client_a"] = 2.5           # except at its front pillar
-        svc.config_save({"sheet": "KACE_SPREADS", "rows": rows})
+        svc.config_save({"sheet": "SPREADS", "rows": rows})
         self.assertIn("client_a", svc.kace_spreads.names)
         self.assertIn("client_a", svc.state()["kace"]["tiers"])
         ladder, base = svc.kace_spreads.for_tier("client_a"), svc.kace_spreads.for_tier()
@@ -9314,7 +9391,7 @@ class TestConfigurationIsMarkedNotWritten(unittest.TestCase):
         # The workbook still holds the tiers it held.
         from volkit import kace as kace_mod
         self.assertNotIn("client_a", kace_mod.SpreadTable.load(wb).names)
-        self.assertEqual(svc.config_tabs()["pending"], ["KACE_SPREADS"])
+        self.assertEqual(svc.config_tabs()["pending"], ["SPREADS"])
 
     def test_the_marks_this_session_made_survive_a_tab_being_applied(self):
         """The reason this used to be refused.  Applying a setting re-reads
@@ -11655,7 +11732,7 @@ class TestPackaging(unittest.TestCase):
         # One flag may carry a list, and an unknown name is an error rather
         # than a screen that quietly stayed in the build.
         self.assertEqual(build_exe.choose_screens(None, ["mm,listed"]),
-                         (("pricing", "marking", "monitor", "analysis"), ()))
+                         (("pricing", "marking", "monitor", "analysis", "export"), ()))
         with self.assertRaises(screens.ScreenError):
             build_exe.choose_screens(None, ["markign"])
         with self.assertRaises(build_exe.BuildError):
@@ -12494,6 +12571,140 @@ class TestQuoteGrammar(unittest.TestCase):
         self.assertEqual(len(asked.requests[0].legs), 2)
 
 
+class TestPairShorthand(unittest.TestCase):
+    """One currency names a pair: 'cnh' is USDCNH and 'eur' is EURUSD.
+
+    Which side the dollar sits on is market convention, and the shorthand is
+    read **last**, so that everything else a currency word does on a run -- a
+    direction, a premium currency, the currency of a size -- keeps its token.
+    """
+
+    def test_the_dollar_goes_where_convention_puts_it(self):
+        self.assertEqual(quotes._shorthand_pair("cnh"), "USDCNH")
+        self.assertEqual(quotes._shorthand_pair("hkd"), "USDHKD")
+        self.assertEqual(quotes._shorthand_pair("jpy"), "USDJPY")
+        self.assertEqual(quotes._shorthand_pair("eur"), "EURUSD")
+        self.assertEqual(quotes._shorthand_pair("gbp"), "GBPUSD")
+        self.assertEqual(quotes._shorthand_pair("aud"), "AUDUSD")
+        self.assertEqual(quotes._shorthand_pair("xau"), "XAUUSD")
+        # The dollar names no pair on its own, and neither does a non-currency.
+        self.assertIsNone(quotes._shorthand_pair("usd"))
+        self.assertIsNone(quotes._shorthand_pair("atm"))
+
+    def test_a_shorthand_on_the_line_names_the_pair_and_says_so(self):
+        q = quotes.parse_quotes("cnh 1M atm 5.0/5.4\n").quotes[0]
+        self.assertEqual(q.pair, "USDCNH")
+        self.assertTrue(any("read as USDCNH" in n for n in q.notes))
+
+    def test_a_run_of_several_shorthands_carries_a_pair_a_line(self):
+        run = quotes.parse_quotes("eur 1M atm 8.0/8.4\n"
+                                  "hkd 1M atm 1.0/1.4\n"
+                                  "cnh 1M atm 5.0/5.4\n")
+        self.assertEqual([q.pair for q in run.quotes], ["EURUSD", "USDHKD", "USDCNH"])
+
+    def test_a_shorthand_heading_is_a_block_heading(self):
+        run = quotes.parse_quotes("cnh\n1M atm 5.0/5.4\n3M atm 5.2/5.6\n")
+        self.assertEqual([q.pair for q in run.quotes], ["USDCNH", "USDCNH"])
+        self.assertTrue(any("USDCNH" in n for n in run.notes))
+
+    def test_a_shorthand_naming_another_pair_is_passed_over_like_a_written_one(self):
+        run = quotes.parse_quotes("cnh 1M atm 5.0/5.4\n1M atm 8.2/8.6\n", pair="EURUSD")
+        self.assertEqual([q.pair for q in run.quotes], ["EURUSD"])
+        self.assertEqual([n for n, _, _ in run.ignored], [1])
+        self.assertIn("USDCNH", run.ignored[0][2])
+
+    def test_the_market_maker_reading_takes_it_as_a_named_pair(self):
+        """``require_pair`` refuses a line that names none; a shorthand names one."""
+        self.assertEqual(quotes.parse_quotes("cnh 1M atm 5.0/5.4\n",
+                                             require_pair=True).quotes[0].pair, "USDCNH")
+        bare = quotes.parse_quotes("1M atm 5.0/5.4\n", require_pair=True)
+        self.assertEqual(bare.quotes, ())
+        self.assertIn(quotes.NO_PAIR, bare.skipped[0][2])
+
+    def test_the_request_box_reads_it_too(self):
+        self.assertEqual(quotes.parse_requests("cnh 1M atm\n").requests[0].pair, "USDCNH")
+
+    def test_a_direction_word_keeps_its_currency(self):
+        """'jpy call over' is a direction, not a line about USDJPY."""
+        q = quotes.parse_quotes("3M 25d rr 0.40/0.60 jpy call over", pair="USDJPY").quotes[0]
+        self.assertEqual((q.pair, q.direction), ("USDJPY", "jpy"))
+        self.assertLess(q.bid, 0.0)
+        # And the two-word form, with nothing between the currency and 'over'.
+        other = quotes.parse_quotes("3M 25d rr 0.40/0.60 eur over", pair="EURUSD").quotes[0]
+        self.assertEqual((other.pair, other.direction), ("EURUSD", "eur"))
+
+    def test_a_premium_currency_keeps_its_currency(self):
+        q = quotes.parse_quotes("6M 1.10 call 0.0125/0.0135 usd", pair="EURUSD").quotes[0]
+        self.assertEqual((q.quote_kind, q.premium_unit, q.pair),
+                         ("premium", "price", "EURUSD"))
+
+    def test_a_size_keeps_its_currency(self):
+        """'in 100mm eur' is a hundred million euros, not a line about EURUSD.
+
+        Reading it as the pair would do worse than mislabel the row: under
+        another pair the whole line would go to ``ignored`` and disappear.
+        """
+        for text in ("1M atm 8.2/8.6 in 100mm eur",
+                     "1M atm 8.2/8.6 in 100mm vega eur"):
+            run = quotes.parse_quotes(text, pair="USDJPY")
+            self.assertEqual(run.ignored, (), text)
+            self.assertEqual(run.quotes[0].pair, "USDJPY", text)
+
+    def test_a_written_pair_beats_a_shorthand_on_the_same_line(self):
+        q = quotes.parse_quotes("usdjpy 1M atm 8.2/8.6 jpy call over").quotes[0]
+        self.assertEqual(q.pair, "USDJPY")
+
+
+class TestSpacedDates(unittest.TestCase):
+    """A date written with the spaces in it is one expiry.
+
+    ``timeutil.parse_datetime`` has read '29 Sep' all along; what it never saw
+    was the line, which is split on whitespace long before it gets there.
+    """
+
+    TODAY = date(2026, 9, 10)
+
+    def parse(self, text, **kw):
+        kw.setdefault("pair", "USDCNH")
+        kw.setdefault("today", self.TODAY)
+        return quotes.parse_quotes(text, **kw)
+
+    def test_every_spelling_lands_on_the_same_day(self):
+        for text in ("29 Sep atm 8.2/8.6", "Sep 29 atm 8.2/8.6",
+                     "29 September atm 8.2/8.6", "29 Sep 2026 atm 8.2/8.6",
+                     "September 29 2026 atm 8.2/8.6", "29 Sep-26 atm 8.2/8.6",
+                     "29-Sep-2026 atm 8.2/8.6"):
+            run = self.parse(text)
+            self.assertEqual(run.skipped, (), text)
+            self.assertEqual(str(run.quotes[0].expiry)[:10], "2026-09-29", text)
+
+    def test_a_strike_after_it_is_still_the_strike(self):
+        """The line the convention was asked for: 'cnh 29 Sep 6.66'."""
+        asked = quotes.parse_requests("cnh 29 Sep 6.66 call", today=self.TODAY).requests[0]
+        self.assertEqual(asked.pair, "USDCNH")
+        self.assertEqual(str(asked.expiry)[:10], "2026-09-29")
+        self.assertAlmostEqual(asked.strike, 6.66)
+
+    def test_a_bare_two_digit_year_is_not_taken(self):
+        """'29 Sep 26' is 29 September at the 26 strike as readily as 2026.
+
+        Nothing in the line says which, so it is refused rather than read one
+        of the two ways; the year is written in full or glued on.
+        """
+        self.assertEqual(self.parse("29 Sep 26 atm 8.2/8.6").quotes, ())
+        self.assertEqual(str(self.parse("29Sep26 atm 8.2/8.6").quotes[0].expiry)[:10],
+                         "2026-09-29")
+
+    def test_a_join_that_could_not_be_a_date_is_not_made(self):
+        """A day out of range, and a number that merely ends in one."""
+        self.assertNotIn("-sep", quotes._join_spaced_dates("45 sep atm 8.2/8.6"))
+        self.assertNotIn("-sep", quotes._join_spaced_dates("1.29 sep atm 8.2/8.6"))
+
+    def test_a_timestamp_and_a_tenor_read_as_they_did(self):
+        self.assertEqual(str(self.parse("mon 09:15 1M atm 8.2/8.6").quotes[0].expiry), "1M")
+        self.assertEqual(str(self.parse("1M/3M atm spread 0.30/0.55").quotes[0].expiry), "1M")
+
+
 class TestQuoteGrammarOnTheBook(unittest.TestCase):
     """The new grammar through the fit and the quote."""
 
@@ -13076,13 +13287,13 @@ class TestHeldFitGoesStale(unittest.TestCase):
         return svc.mm_mark_fit(payload)
 
     def check(self, svc, marks=None, pair="USDJPY"):
-        payload = {"pair": pair, "cut": "TK", "text": "1M ATM 8.0/8.6\n"}
+        payload = {"cut": "TK", "text": f"{pair} 1M ATM 8.0/8.6\n"}
         if marks is not None:
             payload["marks"] = marks
         return svc.mm_check(payload)
 
     def quote(self, svc, marks=None, pair="USDJPY"):
-        payload = {"pair": pair, "request_text": "1M atm", "cut": "TK",
+        payload = {"request_text": f"{pair} 1M atm", "cut": "TK",
                    "fallback_tier": "default"}
         if marks is not None:
             payload["marks"] = marks
@@ -13122,7 +13333,12 @@ class TestHeldFitGoesStale(unittest.TestCase):
         self.assertNotAlmostEqual(book_only, was, places=6)
         out = self.quote(svc, marks)
         self.assertFalse(out["marks"]["on_the_marks"])
-        self.assertEqual(out["marks"]["stale"], ["the curve parameters"])
+        # The sheet's own line names the pair, because a sheet may hold
+        # several and only one of them was fitted; the pair's own block says
+        # it plainly.
+        self.assertEqual(out["marks"]["stale"], ["USDJPY: the curve parameters"])
+        self.assertEqual(out["by_pair"]["USDJPY"]["marks"]["stale"],
+                         ["the curve parameters"])
         # ...and it is the marked number that is priced, not the fit's.
         self.assertAlmostEqual(out["sheet"]["rows"][0]["model"], book_only, places=12)
         self.assertTrue(any("re-marked since these marks were made" in w
@@ -13150,7 +13366,7 @@ class TestHeldFitGoesStale(unittest.TestCase):
                 marks = self.fit(svc)["marks"]
                 mark(svc)
                 out = self.quote(svc, marks)
-                self.assertEqual(out["marks"]["stale"], [name])
+                self.assertEqual(out["by_pair"]["USDJPY"]["marks"]["stale"], [name])
                 self.assertFalse(out["marks"]["on_the_marks"])
 
     def test_a_fit_that_kept_its_marks_is_not_stale_against_its_own_write(self):
@@ -13186,7 +13402,8 @@ class TestHeldFitGoesStale(unittest.TestCase):
         self.remark_curve(svc)
         stale = self.check(svc, marks)
         self.assertFalse(stale["marks"]["on_the_marks"])
-        self.assertEqual(stale["marks"]["stale"], ["the curve parameters"])
+        self.assertEqual(stale["by_pair"]["USDJPY"]["marks"]["stale"],
+                         ["the curve parameters"])
         # The marked number, not the dropped fit's.
         self.assertNotAlmostEqual(stale["market"]["rows"][0]["model"], on_marks, places=6)
         self.assertAlmostEqual(stale["market"]["rows"][0]["model"],
@@ -13600,7 +13817,7 @@ class TestMarketMakerPanel(unittest.TestCase):
             self.assertEqual(row["width_rung"], "bank")
         # And with no table loaded at all it says that instead.
         none = self.quote().run(self.book, bank=self.bank())
-        self.assertIn("KACE_SPREADS", none["sheet"]["fallback"]["error"])
+        self.assertIn("SPREADS", none["sheet"]["fallback"]["error"])
 
     def test_an_absolute_strike_without_a_feed_is_reported_not_priced_at_one(self):
         """Without a forward there is no moneyness, and pricing it at a forward
@@ -13718,6 +13935,227 @@ class TestSmileParameterShifts(unittest.TestCase):
         surface.set_param_shifts({"rho25": 1.4})
         self.assertLessEqual(abs(surface.params_at(0.25)["rho25"]), 0.999)
         self.assertTrue(any("clamped" in w for w in surface.shift_warnings()))
+
+
+from volkit import kace
+
+
+class TestSeveralPairsOnOneScreen(unittest.TestCase):
+    """The market-maker tab has no pair selector, so a box names its pairs.
+
+    The pair moved onto the marking agent card -- a fit is of one curve --
+    and everything else on the tab reads the pair off the line it is on, or
+    off the heading above it.  That makes one paste and one request box a
+    morning's whole book rather than one currency at a time, and it makes a
+    line that names *no* pair a refusal: with nothing on the screen saying
+    which pair is meant, pricing it against whichever one a selector happened
+    to show is exactly the silent default this tool exists to remove.
+    """
+
+    RUN = ("EURUSD 1M ATM 6.05/6.35\n"
+           "USDJPY\n"
+           "1M ATM 9.00/9.40\n"
+           "3M ATM 9.20/9.60\n")
+
+    def sheet(self, text=None, **kw):
+        from volkit import marketmaker as mm
+        book = Book.from_excel(WORKBOOK, ASOF).load_all(["EURUSD", "USDJPY"])
+        payload = {"text": self.RUN if text is None else text}
+        payload.update(kw)
+        return mm.check_sheet_from_request(payload).run(book), book
+
+    def test_every_pair_the_box_names_is_checked_against_its_own_curve(self):
+        out, book = self.sheet()
+        self.assertEqual(out["pairs"], ["EURUSD", "USDJPY"])
+        # Every row says which pair it is, and they come back in the order
+        # they were written rather than pair by pair: a run is read down the
+        # page.
+        self.assertEqual([(r["pair"], r["line"]) for r in out["market"]["rows"]],
+                         [("EURUSD", 1), ("USDJPY", 3), ("USDJPY", 4)])
+        self.assertEqual(out["market"]["n_quotes"], 3)
+        # And each was read at its own pair's interpolation, off the book,
+        # because the tab sends none.
+        self.assertEqual(out["methods"],
+                         {p: book[p].method for p in ("EURUSD", "USDJPY")})
+        # Nothing was "passed over": on a sheet that prices both, the other
+        # pair's lines are the other pair's.
+        self.assertFalse([n for n in out["market"]["notes"] if "passed over" in n])
+
+    def test_a_line_that_names_no_pair_is_refused_and_named(self):
+        out, _ = self.sheet("1M ATM 6.05/6.35\n" + self.RUN)
+        self.assertEqual([r["pair"] for r in out["market"]["rows"]],
+                         ["EURUSD", "USDJPY", "USDJPY"])
+        refused = out["market"]["skipped"]
+        self.assertEqual([x["line"] for x in refused], [1])
+        self.assertIn("names no pair", refused[0]["why"])
+        self.assertEqual(refused[0]["text"], "1M ATM 6.05/6.35")
+        self.assertTrue(any("name no pair" in w for w in out["warnings"]), out["warnings"])
+        # It is reported once, not once per pair the sheet holds.
+        self.assertEqual(len(refused), 1)
+
+    def test_a_box_that_names_nothing_is_an_empty_sheet_and_not_an_error(self):
+        out, _ = self.sheet("1M ATM 6.05/6.35\n")
+        self.assertEqual(out["pairs"], [])
+        self.assertEqual(out["market"]["rows"], [])
+        self.assertIn("nothing names a pair", out["empty"])
+
+    def test_one_pairs_refusal_does_not_take_the_others_down(self):
+        """A pair the book does not build is that pair's line, not the sheet's.
+
+        A single panel raises, and with one pair on the screen that was the
+        whole answer.  A sheet answers for every pair it can and says what
+        happened to the rest -- otherwise one mistyped pair in a broker run
+        blanks a screen that could have checked the other four.
+        """
+        out, _ = self.sheet(self.RUN + "GBPNOK 1M ATM 7.0/7.4\n")
+        self.assertEqual([r["pair"] for r in out["market"]["rows"]],
+                         ["EURUSD", "USDJPY", "USDJPY"])
+        self.assertIn("GBPNOK", out["by_pair"])
+        self.assertIn("not built in this book", out["by_pair"]["GBPNOK"]["error"])
+        self.assertTrue(any("GBPNOK" in w for w in out["warnings"]))
+
+    def test_the_marking_cards_marks_go_to_its_own_pair_and_nowhere_else(self):
+        """The card holds one pair's marks; the sheet holds several pairs.
+
+        Laying a EURUSD fit over USDJPY's rows would be a wrong answer that
+        reads perfectly well, and refusing the whole sheet because one pair on
+        it was not fitted would make the marking card unusable beside it.  So
+        the marks reach the pair they were made on and every other pair is
+        read off the book, and each pair's line says which it was.
+        """
+        from volkit.webapp import BookService
+        svc = BookService(str(WORKBOOK), ASOF)
+        fit = svc.mm_mark_fit({"pair": "EURUSD", "text": self.RUN,
+                               "target_source": "current",
+                               "free": ["initial_vol"], "fit_curve": True})
+        out = svc.mm_check({"text": self.RUN, "marks": fit["marks"]})
+        self.assertTrue(out["by_pair"]["EURUSD"]["marks"]["on_the_marks"])
+        self.assertFalse(out["by_pair"]["USDJPY"]["marks"]["on_the_marks"])
+        self.assertIn("EURUSD", out["marks"]["note"])
+        self.assertIn("USDJPY", out["marks"]["note"])
+        self.assertTrue(out["marks"]["on_the_marks"])
+
+    def test_the_quote_prices_each_pair_off_its_own_panel(self):
+        """A sheet is a loop over the one pricing engine, not a second one.
+
+        Every row a sheet produces has to be the row that pair's own panel
+        would have produced alone, or there are two pricing engines again --
+        which is the thing §17 exists to prevent.
+        """
+        from volkit import marketmaker as mm
+        book = Book.from_excel(WORKBOOK, ASOF).load_all(["EURUSD", "USDJPY"])
+        ask = {"request_text": "EURUSD 1M ATM\nUSDJPY 1M ATM\n",
+               "fallback_tier": "default"}
+        table = kace.SpreadTable.load(WORKBOOK)
+        sheet = mm.quote_sheet_from_request(ask).run(book, spreads=table)
+        self.assertEqual([r["pair"] for r in sheet["sheet"]["rows"]], ["EURUSD", "USDJPY"])
+        for pair in ("EURUSD", "USDJPY"):
+            alone = mm.quote_panel_from_request(
+                {"pair": pair, "request_text": f"{pair} 1M ATM\n",
+                 "fallback_tier": "default"}).run(book, spreads=table)
+            one = alone["sheet"]["rows"][0]
+            both = next(r for r in sheet["sheet"]["rows"] if r["pair"] == pair)
+            for field in ("model", "our_bid", "our_ask", "width", "width_rung"):
+                self.assertEqual(both[field], one[field], f"{pair} {field}")
+
+    def test_the_cut_and_the_interpolation_come_from_the_marking_tab(self):
+        """Two boxes for one decision is one of them going stale.
+
+        There is no cut or interpolation on this tab: the cut is the Vol
+        marking tab's, and the interpolation is that tab's for the pair it is
+        showing and each other pair's own default.  A method for a pair
+        nobody asked about is not an error; a method that is not a method is.
+        """
+        from volkit import marketmaker as mm
+        out, book = self.sheet(cut="TK", methods={"USDJPY": "VV25"})
+        self.assertEqual(out["cut"], "TK")
+        self.assertEqual(out["methods"]["USDJPY"], "VV25")
+        self.assertEqual(out["methods"]["EURUSD"], book["EURUSD"].method)
+        with self.assertRaises(ValueError):
+            mm.check_sheet_from_request({"text": self.RUN, "methods": {"EURUSD": "nope"}})
+        with self.assertRaises(ValueError):
+            mm.check_sheet_from_request({"text": self.RUN, "methods": "SVI"})
+
+    def test_the_sheet_readers_take_everything_the_panel_readers_take(self):
+        """The sheet builds a panel, so a panel's setting cannot go missing.
+
+        `quote_sheet_from_request` reads the payload through
+        `quote_panel_from_request` and keeps what it made, which is what stops
+        the two readers drifting apart -- a field added to the panel is a
+        field the sheet takes on the same day.
+        """
+        from volkit import marketmaker as mm
+        payload = {"request_text": "EURUSD 1M ATM", "client": "Fund A",
+                   "client_weight": "0.25", "client_min": "7", "skew_cap": "0.5",
+                   "flow_weight": "0.3", "fallback_tier": "default",
+                   "fallback_multiplier": "1.5", "tolerance": "0.2"}
+        sheet = mm.quote_sheet_from_request(payload)
+        panel = sheet.panel("EURUSD")
+        alone = mm.quote_panel_from_request({**payload, "pair": "EURUSD"})
+        for field in ("client", "client_weight", "client_min", "skew_cap", "flow_weight",
+                      "fallback_tier", "fallback_multiplier", "tolerance"):
+            self.assertEqual(getattr(panel, field), getattr(alone, field), field)
+        # And the panel a sheet builds refuses a bare line, where one run on
+        # its own does not: `volkit mm EURUSD` names the pair itself.
+        self.assertTrue(panel.require_pair)
+        self.assertFalse(alone.require_pair)
+
+
+class TestBulkExport(unittest.TestCase):
+    """Several pairs' marks out to the platform in one go.
+
+    The message per pair is the kACE feed tab's, built by the same function
+    from the same tab's settings.  The bulk path itself -- which pairs, which
+    channel, the overlay, the preflight -- is the Vol exporting bulk screen's
+    and is tested in `tests/test_publish.py`; what stays here is the key-tenors
+    message and the fact that the bar left the Market maker screen.
+    """
+
+    def test_key_tenors_only_posts_the_pillars_and_no_calendar_days(self):
+        """The daily series is still built -- a pillar's ATM is read off it --
+        and simply not written: five nodes a pillar and nothing else."""
+        book = Book.from_excel(WORKBOOK, ASOF).load_all(["USDCNH"])
+        table = kace.SpreadTable.load(WORKBOOK)
+        whole = kace.build(book, "USDCNH", table)
+        keys = kace.build(book, "USDCNH", table, pillars_only=True)
+        self.assertEqual(keys.node_count(), 5 * len(keys.pillars))
+        self.assertEqual(whole.node_count(), len(whole.daily) + 5 * len(whole.pillars))
+        text = keys.xml("feeuser", "pw")
+        self.assertEqual(text.count("<node "), keys.node_count())
+        # Every node is a pillar's: nothing is named "1", the daily numbering.
+        self.assertNotIn('<node name="1"', text)
+        self.assertIn('<node name="S1"', text)
+        # The pillars themselves are untouched -- same widths, same wings.
+        self.assertEqual([(p.tenor, p.bid, p.offer) for p in keys.pillars],
+                         [(p.tenor, p.bid, p.offer) for p in whole.pillars])
+        self.assertTrue(keys.summary()["pillars_only"])
+        self.assertEqual(keys.summary()["days"], 0)
+        self.assertTrue(any("key tenors only" in n for n in keys.notes))
+
+    def test_the_bulk_export_left_the_market_maker_tab_for_its_own_screen(self):
+        """The bar came off the Market maker screen and is not replaced there:
+        bulk publishing is the Vol exporting bulk screen's, with its own
+        routes, and the single-pair feed tab's routes stay the marking
+        screen's.  No back-compat for the bulk path, in the pattern of the
+        last two reorganisations."""
+        from volkit import screens
+        self.assertNotIn("/api/kace/bulk", screens.BY_NAME["mm"].routes)
+        self.assertIn("/api/kace", screens.BY_NAME["marking"].routes)
+        self.assertIn("/api/kace/post", screens.BY_NAME["marking"].routes)
+        for route in ("/api/export/build", "/api/export/run", "/api/export/overlay",
+                      "/api/export/state", "/api/export/file"):
+            self.assertIn(route, screens.BY_NAME["export"].routes)
+        py = _source("volkit", "webapp.py")
+        self.assertNotIn("/api/kace/bulk", py)
+        self.assertNotIn("BULK_DESTINATIONS", py)
+        html = _source("volkit", "web", "index.html")
+        self.assertNotIn("/api/kace/bulk", html)
+        self.assertNotIn('id="xbar"', html)
+        self.assertIn('id="p-export"', html)
+        # Between Analysis and Market maker, as the design note places it.
+        names = list(screens.ALL)
+        self.assertEqual(names.index("export"), names.index("analysis") + 1)
+        self.assertEqual(names.index("mm"), names.index("export") + 1)
 
 
 class TestKaceFeed(unittest.TestCase):
@@ -13886,6 +14324,61 @@ class TestKaceFeed(unittest.TestCase):
                        multiplier="0")
         self.assertIn("positive", str(ctx.exception))
 
+    def test_a_day_between_two_pillars_can_be_read_across_instead_of_stepped(self):
+        """The alternative to the sheet's rule: interpolate, and only between pillars."""
+        from volkit import kace
+        pillars = self._sheet_feed().pillars
+        cross = lambda d: kace.spread_for(d, pillars, interpolate=True)
+        # A pillar's own day is the pillar's width either way, and outside the
+        # ladder there is nothing to read across to.
+        self.assertEqual(cross(date(2026, 1, 1)), 1.0)                    # before O/N
+        self.assertEqual(cross(date(2026, 1, 23)), 1.0)                   # the O/N expiry
+        self.assertEqual(cross(date(2026, 1, 29)), 0.8)                   # the 1W expiry
+        self.assertEqual(cross(date(2027, 6, 1)), 0.2)                    # past 1Y
+        # Between them it is a straight line in date: O/N 23 Jan at 1.0 to
+        # 1W 29 Jan at 0.8 is six days, so 26 Jan is halfway.
+        self.assertAlmostEqual(cross(date(2026, 1, 26)), 0.9)
+        self.assertAlmostEqual(cross(date(2026, 1, 24)), 1.0 - 0.2 / 6)
+        # And it is monotone between two pillars, where the step rule is flat
+        # and then drops.
+        walk = [cross(date(2026, 1, 23) + timedelta(days=i)) for i in range(7)]
+        self.assertEqual(walk, sorted(walk, reverse=True))
+        self.assertEqual(kace.spread_for(date(2026, 1, 26), pillars), 1.0)  # still stepped
+
+    def test_the_multiplier_scales_the_width_and_leaves_the_mid_alone(self):
+        from volkit import kace
+        book = self._book()
+        plain = kace.build(book, "USDCNH", kace.SpreadTable.load(self.SPREADS))
+        wide = kace.build(book, "USDCNH", kace.SpreadTable.load(self.SPREADS),
+                          multiplier=1.5)
+        self.assertEqual(plain.multiplier, 1.0)
+        self.assertEqual(wide.multiplier, 1.5)
+        for a, b in zip(plain.pillars, wide.pillars):
+            self.assertAlmostEqual(b.spread, a.spread * 1.5, msg=a.tenor)
+            self.assertAlmostEqual(b.atm, a.atm)
+            # The two-way widens around the mark; it does not move it.
+            self.assertAlmostEqual((b.bid + b.offer) / 2.0, (a.bid + a.offer) / 2.0)
+        self.assertTrue(any("1.5" in n for n in wide.notes))
+        self.assertEqual(wide.summary()["multiplier"], 1.5)
+        # The daily nodes are written off the multiplied pillars too, so the
+        # screen and the message cannot show two different widths.
+        self.assertAlmostEqual(kace.spread_for(min(wide.daily), wide.pillars),
+                               kace.spread_for(min(plain.daily), plain.pillars) * 1.5)
+
+    def test_a_multiplier_that_is_not_a_positive_number_is_refused(self):
+        from volkit import kace
+        self.assertEqual(kace.spread_multiplier(None), 1.0)
+        self.assertEqual(kace.spread_multiplier(""), 1.0)
+        self.assertEqual(kace.spread_multiplier("  "), 1.0)
+        self.assertEqual(kace.spread_multiplier("2.5"), 2.5)
+        for bad in ("0", "-1", "wide", float("nan"), float("inf")):
+            with self.assertRaises(kace.KaceError):
+                kace.spread_multiplier(bad)
+        with self.assertRaises(kace.KaceError) as ctx:
+            kace.build(self._book(), "USDCNH", kace.SpreadTable.load(self.SPREADS),
+                       multiplier="0")
+        self.assertIn("positive", str(ctx.exception))
+
     def test_decimals_are_plain_and_dates_are_english(self):
         from volkit import kace
         self.assertEqual(kace._decimal(0.0175820980020178), "0.0175820980020178")
@@ -13932,7 +14425,7 @@ class TestKaceFeed(unittest.TestCase):
         """
         from volkit import kace
         table = kace.SpreadTable.load(self.SPREADS)
-        self.assertEqual(table.names, ["default", "wide", "thin"])
+        self.assertEqual(table.names, ["default", "wide", "thin", "test"])
         self.assertEqual(table.for_tier(),
                          {"O/N": 1.0, "1W": 0.8, "2W": 0.6, "1M": 0.4, "2M": 0.3, "3M": 0.3,
                           "6M": 0.2, "9M": 0.2, "1Y": 0.2})
@@ -14067,10 +14560,11 @@ class TestKaceFeed(unittest.TestCase):
         self.assertEqual(w1.wings, "marks")
         self.assertTrue(any("O/N" in n and "1W" in n for n in feed.notes))
         # The desk's convention: RR is the USD call over the put, in vol
-        # points, straight off the marks sheet; S is the strangle mark.
-        self.assertAlmostEqual(w1.rr25, 0.385)
-        self.assertAlmostEqual(w1.fly25, 0.1825)
-        self.assertAlmostEqual(feed.pillars[-1].rr10, 2.645)
+        # points, straight off the marks sheet; S is the strangle mark.  The
+        # numbers are the 2026-09-10 workbook's USDCNH sheet.
+        self.assertAlmostEqual(w1.rr25, -0.0875)
+        self.assertAlmostEqual(w1.fly25, 0.105)
+        self.assertAlmostEqual(feed.pillars[-1].rr10, -0.378)
 
     def test_fitted_wings_come_off_the_surface_near_the_marks(self):
         from volkit import kace
@@ -14107,7 +14601,7 @@ class TestKaceFeed(unittest.TestCase):
         service = BookService(str(WORKBOOK), ASOF, kace_spreads_path=str(self.SPREADS),
                               kace_user="feeuser", kace_password="pw")
         state = service.state()["kace"]
-        self.assertEqual(state["tiers"], ["default", "wide", "thin"])
+        self.assertEqual(state["tiers"], ["default", "wide", "thin", "test"])
         self.assertEqual(state["tier"], "default")
         self.assertTrue(state["credentials"])
         self.assertIsNone(state["error"])

@@ -125,6 +125,17 @@ SCREENS: tuple[Screen, ...] = (
         commands=("analysis",),
     ),
     Screen(
+        name="export", label="Vol bulk processing", panel="p-export",
+        # Bulk publishing: every channel the marks go out on, many pairs at a
+        # time, with the export-policy tables and the overlay beside it.  The
+        # single-pair kACE feed sub-tab stays the marking screen's and keeps
+        # its own routes; a build without this tab keeps them.
+        routes=("/api/export/state", "/api/export/build", "/api/export/run",
+                "/api/export/overlay", "/api/export/file", "/api/export/seed",
+                "/api/export/compare"),
+        commands=("export",),
+    ),
+    Screen(
         name="mm", label="Market maker", panel="p-mm",
         # The quoting agent is *inside* this screen rather than a screen of its
         # own: its answer is the Quote button's, its record is the sheet's
