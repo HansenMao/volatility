@@ -22,3 +22,9 @@ files/vol_marks.bak-*.xlsx
 
 # screenshots and scratch output written while working with Claude; not source
 Claude outputs/
+
+# The desk's own workbook and any backup an export leaves beside it.
+# The suite pins numbers off files/vol_marks.xlsx, so the sample stays the
+# sample -- an exported desk book must not replace it (see build_exe.check_workbook).
+files/vol_marks_desk_*.xlsx
+files/vol_marks.pre-*.xlsx

@@ -94,10 +94,14 @@ _WINGS = {t: {"rr_25": -1.5, "rr_10": -2.8, "st_25": 0.32, "st_10": 0.85}
 def _workbook(tmp: Path, *, cos_tier: bool = True) -> Path:
     """A copy of the shipped workbook with the export tables written in.
 
-    Two pairs are added the way the Config window adds them: HKDJPY, so the
+    Five pairs are added the way the Config window adds them: HKDJPY, so the
     sign convention can be pinned against the HKDJPY surface itself, and
     CNHHKD, which the COS channel publishes the other way up as HKD/CNY.
-    Both are crosses, so the level typed is a correlation.
+    Both are crosses, so the level typed is a correlation.  Then USDCHF,
+    XAUUSD and the CHFJPY cross USDCHF carries, which the Bloomberg block
+    publishes: the shipped workbook holds none of the three, and pairs this
+    module needs are added here rather than assumed, so the export tests do
+    not depend on which pairs the desk's workbook happens to carry that day.
     """
     wb = tmp / "vol_marks.xlsx"
     shutil.copy(WORKBOOK, wb)
@@ -106,6 +110,13 @@ def _workbook(tmp: Path, *, cos_tier: bool = True) -> Path:
     # back into CONFIG and leaves the quotes to the screen; here they are
     # typed straight into the sheet, in the workbook's own column order.
     session.add_pair(wb, "CNHHKD", atm=0.2)
+    # The Bloomberg block publishes these three and the shipped workbook has
+    # none of them; USDCHF comes first because it is the dollar leg CHFJPY is
+    # built from.  Volatility points for the two dollar pairs, a correlation
+    # for the cross.
+    session.add_pair(wb, "USDCHF", atm=7.0, quotes=_WINGS)
+    session.add_pair(wb, "XAUUSD", atm=12.0, quotes=_WINGS)
+    session.add_pair(wb, "CHFJPY", atm=0.55, quotes=_WINGS)
     import io
     import openpyxl
     blob = wb.read_bytes()
@@ -115,9 +126,20 @@ def _workbook(tmp: Path, *, cos_tier: bool = True) -> Path:
     cached = session._formula_cache(book, openpyxl.load_workbook(io.BytesIO(blob),
                                                                  data_only=True))
     ws = book["CNHHKD"]
-    ws.append(["expiry", "ST 10D", "ST 25D", "RR 25D", "RR 10D"])
-    for tenor, q in _WINGS.items():
-        ws.append([tenor, q["st_10"], q["st_25"], q["rr_25"], q["rr_10"]])
+    # Write from row 1 rather than appending.  The shipped CNHHKD sheet looks
+    # empty but carries ten blank formatted rows, so ``append`` put the header
+    # at row 11; a pair sheet's header is row 1, so the reader saw no quotes
+    # and every COS test failed with "HKDCNH: no 1W, 2W, 1M, 3M, 6M in the
+    # book".  Clearing first makes the fixture independent of how much blank
+    # formatting the sheet happens to carry.
+    if ws.max_row:
+        ws.delete_rows(1, ws.max_row)
+    rows = [["expiry", "ST 10D", "ST 25D", "RR 25D", "RR 10D"]]
+    rows += [[tenor, q["st_10"], q["st_25"], q["rr_25"], q["rr_10"]]
+             for tenor, q in _WINGS.items()]
+    for r, row in enumerate(rows, start=1):
+        for c, v in enumerate(row, start=1):
+            ws.cell(row=r, column=c, value=v)
     session._save_workbook(book, wb, cached)
     tabs = publish.seed_tables({})
     tabs["EXPORT_PAIRS"] = [dict(r) for r in PAIRS]
