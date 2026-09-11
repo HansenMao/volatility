@@ -49,7 +49,12 @@ Steps, in order, each one able to fail the build:
   1. preflight   the source tree is complete and the interpreter is new enough
   2. deps        requirements.txt, plus tzdata and pyinstaller
   3. tests       the full unittest suite -- a green build of broken code is
-                 worse than no build
+                 worse than no build.  CI skips this one step with
+                 ``--skip-tests``, because the suite has already run there in
+                 parallel on Linux (``.github/workflows/test.yml``), which
+                 ``build-windows.yml`` requires green before it starts.
+                 Running it here too put an hour in front of every exe.
+                 Nothing is skipped when this is run by hand
   4. build       pyinstaller volkit.spec
   5. stage       the user's data files, beside the exe
   6. smoke       run the thing that was just built and make it price something
@@ -267,7 +272,12 @@ def run_tests() -> None:
     # shell would otherwise turn a trimmed run into a green build.
     env = dict(os.environ)
     env.pop(screens.ENV_VAR, None)
-    run([sys.executable, "-m", "unittest", "discover", "-s", "tests"],
+    # ``-t .`` makes the repository root the top-level directory, so the modules
+    # import as ``tests.test_workbook`` rather than as bare top-level names.
+    # That is what lets them share ``tests/_support.py`` through a relative
+    # import; discovering with ``tests`` as the top level imports them
+    # unparented and every one of them fails to import.
+    run([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-t", "."],
         step="test suite", env=env)
 
 
@@ -441,7 +451,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--skip-deps", action="store_true",
                    help="do not touch pip (offline, or a prepared environment)")
     p.add_argument("--skip-tests", action="store_true",
-                   help="skip the unittest suite. Not for anything shipped")
+                   help="skip the unittest suite, because something else has "
+                        "already run it. This is what CI passes: the suite runs "
+                        "in test.yml on Linux and build-windows.yml will not "
+                        "start this build unless it was green. Passing it by "
+                        "hand means nothing ran the suite at all")
     p.add_argument("--no-clean", action="store_true",
                    help="reuse the previous PyInstaller work directory")
     p.add_argument("--zip", action="store_true",

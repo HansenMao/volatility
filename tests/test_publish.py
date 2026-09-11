@@ -25,7 +25,8 @@ from volkit import configsheets, kace, overlay, publish, session
 from volkit.book import Book
 from volkit.timeutil import UTC, Clock
 
-WORKBOOK = Path(__file__).resolve().parents[1] / "files" / "vol_marks.xlsx"
+from ._support import BOOK
+
 REFERENCE = Path(__file__).resolve().parents[1] / "files" / "reference"
 ASOF = Clock(datetime(2024, 2, 28, 12, 0, tzinfo=UTC))
 
@@ -104,7 +105,7 @@ def _workbook(tmp: Path, *, cos_widths: bool = True) -> Path:
     not depend on which pairs the desk's workbook happens to carry that day.
     """
     wb = tmp / "vol_marks.xlsx"
-    shutil.copy(WORKBOOK, wb)
+    shutil.copy(BOOK, wb)
     session.add_pair(wb, "HKDJPY", atm=0.95, quotes=_WINGS)
     # CNHHKD has an empty sheet in the shipped workbook, so add_pair puts it
     # back into CONFIG and leaves the quotes to the screen; here they are
@@ -184,12 +185,12 @@ class TestTables(_Fixture):
         """KACE_SPREADS became SPREADS.  The shipped workbook still says
         KACE_SPREADS, so the reader finds it under the old name and the
         first write of the tab renames it, in place, prose and all."""
-        names = configsheets.sheet_names(WORKBOOK)
+        names = configsheets.sheet_names(BOOK)
         self.assertIn("KACE_SPREADS", names)
         self.assertNotIn("SPREADS", names)
         self.assertEqual(configsheets.match_sheet(names, "SPREADS"), "KACE_SPREADS")
-        self.assertTrue(any("called SPREADS now" in x for x in configsheets.renamed_tabs(WORKBOOK)))
-        table = kace.SpreadTable.load(WORKBOOK)
+        self.assertTrue(any("called SPREADS now" in x for x in configsheets.renamed_tabs(BOOK)))
+        table = kace.SpreadTable.load(BOOK)
         self.assertEqual(table.for_tier()["1M"], 0.4)
         # After the fixture's write, which wrote the tab: renamed, same place.
         after = configsheets.sheet_names(self.wb)
@@ -240,7 +241,7 @@ class TestTables(_Fixture):
         self.assertIn("COS_WIDTHS", str(ctx.exception))
 
     def test_a_channel_with_no_pair_list_is_refused_by_name(self):
-        bare = publish.ExportTables.load(WORKBOOK)
+        bare = publish.ExportTables.load(BOOK)
         self.assertIsNone(bare.export_pairs)
         with self.assertRaises(publish.PublishError) as ctx:
             publish.build("murex", self.book, bare)
@@ -686,7 +687,7 @@ class TestReferenceFiles(unittest.TestCase):
     def setUpClass(cls):
         cls.tmp = Path(tempfile.mkdtemp())
         cls.wb = cls.tmp / "vol_marks.xlsx"
-        shutil.copy(WORKBOOK, cls.wb)
+        shutil.copy(BOOK, cls.wb)
         tabs = publish.seed_tables({})
         rows = configsheets.read_rows(cls.wb, "SPREADS", required=("tenor", "default"))
         tabs["SPREADS"] = [dict(r.cells, cos=0.8) for r in rows]
@@ -1251,7 +1252,7 @@ class TestExportScreen(unittest.TestCase):
         from volkit.webapp import BookService
         with tempfile.TemporaryDirectory() as tmp:
             wb = Path(tmp) / "vol_marks.xlsx"
-            shutil.copy(WORKBOOK, wb)
+            shutil.copy(BOOK, wb)
             svc = BookService(str(wb), ASOF)
             self.assertFalse(svc.export_tables.summary()["present"]["SHADES"])
             out = svc.export_seed_tables({})
@@ -1377,7 +1378,7 @@ class TestMarkedCorrelation(unittest.TestCase):
 
     def test_a_workbook_without_the_tab_fits_every_cross_as_before(self):
         from volkit.cross import CorrelationCurve
-        book = Book.from_excel(WORKBOOK, ASOF).load_all()
+        book = Book.from_excel(BOOK, ASOF).load_all()
         self.assertEqual(book.cross_correlations, {})
         crosses = [p for p in book.pairs if book.data.pairs[p].is_cross and p in book.surfaces]
         self.assertTrue(crosses)

@@ -1953,8 +1953,9 @@ and why.
 ## Tests
 
 ```bash
-python3 -m unittest discover -s tests -v      # 431 tests, no pytest needed
-PYTHONUTF8=0 LC_ALL=C python3 -m unittest discover -s tests   # as Windows sees it
+python3 -m unittest discover -s tests -t . -v   # 1145 tests, ~15m, no pytest
+python3 -m unittest tests.test_pricing          # one area, while working on it
+PYTHONUTF8=0 LC_ALL=C python3 -m unittest discover -s tests -t .  # as Windows sees it
 ```
 
 `pip install esprima` additionally enables a syntax check on the front-end

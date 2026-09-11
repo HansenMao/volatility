@@ -5,8 +5,12 @@ CLAUDE.md's original scheme and are unchanged. CLAUDE.md carries the one-line ru
 for the reasoning behind it. Read this file when working in the area above.
 
 ```
-python -m unittest discover -s tests        # 1050 tests, ~20m
-PYTHONUTF8=0 LC_ALL=C python -m unittest discover -s tests   # as a cp1252 Windows
+python -m unittest discover -s tests -t .   # 1145 tests, ~15m
+python -m unittest tests.test_workbook      # one area only, which is the loop
+                                           # to work in: the twelve modules
+                                           # split out of test_volkit.py are
+                                           # seconds each, not the whole suite
+PYTHONUTF8=0 LC_ALL=C python -m unittest discover -s tests -t .  # as a cp1252 Windows
                                            # box sees it: an ASCII locale is the
                                            # only way to catch an encoding bug
                                            # from a Mac before CI does

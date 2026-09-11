@@ -1667,16 +1667,20 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
           edited or fitted on the loaded book &mdash; still in memory only, and a reload discards
           it.</details></section>
 
-      <section class="card"><h2>At-the-money curve <small id="mmcurvehead"></small></h2>
-        <details class="hint"><summary>What fills this card</summary>What the last fit on the
-          card above arrived at. Filled by <b>Propose</b>&rsquo;s own fit and by <b>Fit my
-          way</b>; nothing else on this screen moves a curve.</details>
-        <div id="mmcurve"></div></section>
-      <section class="card"><h2>Wings <small id="mmwinghead"></small></h2>
-        <div id="mmwings"></div></section>
+      <!-- Where we are marked against the run comes first, because it is what
+           Check Market answers and what a morning reads before it looks at
+           what a fit arrived at.  The curve and the wings are the fit's own
+           output and sit under it. -->
       <section class="card"><h2>The market against the curve <small id="mmsheethead"></small></h2>
         <div class="meta" id="mmagainst"></div>
         <div id="mmsheet"></div></section>
+      <section class="card"><h2>At-the-money curve <small id="mmcurvehead"></small></h2>
+        <details class="hint"><summary>What fills this card</summary>What the last fit on the
+          <b>Marking agent</b> card arrived at. Filled by <b>Propose</b>&rsquo;s own fit and by
+          <b>Fit my way</b>; nothing else on this screen moves a curve.</details>
+        <div id="mmcurve"></div></section>
+      <section class="card"><h2>Wings <small id="mmwinghead"></small></h2>
+        <div id="mmwings"></div></section>
 
       <section class="card"><h2>Quoting agent&rsquo;s archive <small id="agenthead"></small></h2>
         <div class="mmbar" style="margin:0 0 10px">
@@ -1746,15 +1750,28 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
           marks. It takes the archive card&rsquo;s evidence settings above. Ask it to fetch, re-mark, record or quote and it names the button that
           does that. &ldquo;And the 1M?&rdquo; keeps the topic of the question before.</details></section>
 
-      <section class="card"><h2>Knowledge bank <small id="mmbankhead"></small></h2>
-        <div class="toolbar">
-          <button id="mmrule">+ Rule</button>
-          <button class="ghost" id="mmlearn" title="Propose spread rules from the widths the archive has seen, age-weighted, with the run pasted above counted as if it were filed. Proposed here, saved by you.">Learn widths</button>
-          <button id="mmsave">Save bank</button>
-          <div class="grow"></div>
-          <div class="meta" id="mmbankmsg"></div>
-        </div>
-        <div id="mmbank"></div></section>
+      <!-- Shut by default.  The bank is a file the desk keeps rather than
+           something a morning reads: most sessions price off it and never
+           open it, and the width it set is already named on the row it made.
+           A card may be shut but a mark may not be hidden
+           (claude/invariants.md), so the heading carries the rule count
+           whether the card is open or not, and says outright when there are
+           edits that have not been saved to the file. -->
+      <section class="card">
+        <h2><label style="margin:0;display:flex;align-items:center;gap:6px;width:auto;font-size:inherit;font-weight:inherit">
+            <input type="checkbox" id="mmbankshow" style="width:auto"> Knowledge bank</label>
+          <span class="grow"></span>
+          <span class="pill warn hide" id="mmbankdirty"></span>
+          <small id="mmbankhead"></small></h2>
+        <div id="mmbankbody" class="hide">
+          <div class="toolbar">
+            <button id="mmrule">+ Rule</button>
+            <button class="ghost" id="mmlearn" title="Propose spread rules from the widths the archive has seen, age-weighted, with the run pasted above counted as if it were filed. Proposed here, saved by you.">Learn widths</button>
+            <button id="mmsave">Save bank</button>
+            <div class="grow"></div>
+            <div class="meta" id="mmbankmsg"></div>
+          </div>
+          <div id="mmbank"></div></div></section>
     </div>
   </div>
 
@@ -6533,7 +6550,7 @@ function mqAvailable(){
 }
 function saveMM(){try{localStorage.setItem('volkit.mm',
   JSON.stringify(Object.assign({},mfPayload(),readFields(MCF),readFields(MQF),readFields(MKF),
-    {reversion_shown:$('#mmrevshow').checked})))}catch(e){}}
+    {reversion_shown:$('#mmrevshow').checked,bank_shown:$('#mmbankshow').checked})))}catch(e){}}
 function loadMM(){
   try{const r=localStorage.getItem('volkit.mm');if(r)MM=JSON.parse(r)}catch(e){MM={}}
   if(!MM||typeof MM!=='object')MM={};
@@ -6546,6 +6563,10 @@ function loadMM(){
      -- and mmRevVisible() then clears the boxes if it was closed, so a range
      can never be restored into a control nobody can see. */
   $('#mmrevshow').checked=!!MM.reversion_shown;
+  /* Shut unless this browser opened it: the bank is a file the desk edits
+     now and then, not a panel a morning reads. */
+  $('#mmbankshow').checked=!!MM.bank_shown;
+  bankVisible();
 }
 
 /* -- the mean-reversion range ------------------------------------------
@@ -6711,15 +6732,40 @@ function paintMQ(){
 /* Every pair's rules at once, each under its own heading, edited in place and
    saved together. `BANK.rules` is the page's copy, pair by pair; the file is
    the server's. */
-let BANK={pairs:[],rules:{},updated:{},problems:[]};
+let BANK={pairs:[],rules:{},updated:{},problems:[],dirty:false};
 function paintBank(b){
   if(!b)return;
-  BANK={pairs:(b.shown||[]).slice(),rules:{},updated:{},problems:(b.problems||[]).slice()};
+  BANK={pairs:(b.shown||[]).slice(),rules:{},updated:{},problems:(b.problems||[]).slice(),
+        dirty:false};
   BANK.pairs.forEach(p=>{const blk=(b.by_pair||{})[p]||{};
     BANK.rules[p]=(blk.rules||[]).slice();BANK.updated[p]=blk.updated||''});
   renderRules();
-  $('#mmbankhead').textContent=(b.path?b.path:'no file yet')+' · '+BANK.pairs.length+' pair(s)'+
-    (b.error?' · '+b.error:'');
+  BANK.path=b.path||''; BANK.error=b.error||'';
+  bankHead();
+}
+/* The card folds away and starts folded, so what it holds is said in its
+   heading either way: the file it came from, how many rules are in it, and --
+   in the warn pill, which is the one thing a shut card may not swallow --
+   that rules have been added, edited or learned and not yet saved.  A rule
+   is a width the quote will show a client, so an unsaved one out of sight is
+   exactly the silent state this tool exists to remove. */
+function bankRuleCount(){
+  return BANK.pairs.reduce((n,p)=>n+((BANK.rules[p]||[]).length),0);
+}
+function bankHead(){
+  $('#mmbankhead').textContent=(BANK.path?BANK.path:'no file yet')+' · '+
+    BANK.pairs.length+' pair(s) · '+bankRuleCount()+' rule(s)'+
+    (BANK.error?' · '+BANK.error:'');
+  const el=$('#mmbankdirty');
+  el.classList.toggle('hide',!BANK.dirty);
+  el.textContent='unsaved edits';
+  el.title='rules have been changed here and not written to the file — open the card and Save bank';
+}
+/* Every path that changes a rule goes through this, so nothing can be edited
+   without the heading knowing. */
+function bankTouched(){BANK.dirty=true;bankHead()}
+function bankVisible(){
+  $('#mmbankbody').classList.toggle('hide',!$('#mmbankshow').checked);
 }
 /* The bank is a file the desk keeps, not a result, so the card fills without
    anything having been run: a rule cannot be edited on a screen that will only
@@ -7260,12 +7306,12 @@ function bankRuleAt(t){
   return BANK.rules[p][+r]||null;
 }
 $('#mmbank').addEventListener('input',e=>{const t=e.target,r=bankRuleAt(t);
-  if(r)r[t.dataset.k]=t.value;});
+  if(r){r[t.dataset.k]=t.value;bankTouched()}});
 $('#mmbank').addEventListener('change',e=>{const t=e.target,r=bankRuleAt(t);
-  if(r)r[t.dataset.k]=t.value;});
+  if(r){r[t.dataset.k]=t.value;bankTouched()}});
 $('#mmbank').addEventListener('click',e=>{
   const b=e.target.closest('[data-del]');
-  if(b){(BANK.rules[b.dataset.p]||[]).splice(+b.dataset.del,1);renderRules();return}
+  if(b){(BANK.rules[b.dataset.p]||[]).splice(+b.dataset.del,1);renderRules();bankTouched();return}
   const a=e.target.closest('.mmaddrule');
   if(a){bankAddRule(a.dataset.p)}});
 function bankAddRule(p){
@@ -7273,6 +7319,7 @@ function bankAddRule(p){
   BANK.rules[p].push({kind:'spread',value:'',instrument:'any',tenor:'',
     min_days:'',max_days:'',max_size:'',size_basis:'any',delta:'',text:''});
   renderRules();
+  bankTouched();
 }
 /* The bar's + Rule adds to the marking card's pair, the one pair the tab
    names outright; each table has its own for the rest. */
@@ -7300,6 +7347,7 @@ $('#mmlearn').onclick=async()=>{
       if(!BANK.rules[p])BANK.rules[p]=[];
       (r.by_pair[p].rules||[]).forEach(x=>{BANK.rules[p].push(x);n++})});
     renderRules();
+    if(n)bankTouched(); else bankHead();
     $('#mmbankmsg').innerHTML=n+' rule(s) proposed from '+r.counted+
       ' archived observation(s) across '+(r.pairs||[]).length+' pair(s)'+
       (r.from_paste?' ('+r.from_paste+' of them from the paste, '+
@@ -7845,6 +7893,7 @@ $('#agentmodel').onchange=()=>{saveMM();scheduleMQ()};
    so it saves and shows its box and runs nothing. */
 $('#mmsource').onchange=()=>{mmTargetVisible();saveMM()};
 $('#mmrevshow').onchange=()=>{mmRevVisible();saveMM()};
+$('#mmbankshow').onchange=()=>{bankVisible();saveMM()};
 ['#mmrevlo','#mmrevhi','#marklook','#markmin','#markrounds'].forEach(id=>{$(id).oninput=saveMM});
 ['#mmfallbackmult','#mmscale','#mmfair','#mmaxe','#mmcap','#mmhorizon',
  '#mmflowwt','#mmflowscale','#mmflowtol'].forEach(id=>{

@@ -32,10 +32,15 @@ sheet it was written against is kept as `files/vol_marks_legacy_format.xlsx`
 against it -- and the comparison still runs from `legacy/`. volkit reads
 either (§4).
 
-- ~37,000 lines across 52 modules, 1090 tests, `unittest` only (no pytest).
-  Tests live in `tests/test_volkit.py`, `tests/test_agent.py` (the desk
-  agent, §17), `tests/test_marking.py` (the marking agent, §18) and
-  `tests/test_publish.py` (the bulk export, §22).
+- ~37,000 lines across 52 modules, 1145 tests, `unittest` only (no pytest).
+  Tests live in fifteen modules under `tests/`, sharing `tests/_support.py`:
+  `test_numerics`, `test_calendar`, `test_marketdata`, `test_pricing`,
+  `test_marks`, `test_workbook`, `test_marketmaker`, `test_quotegrammar`,
+  `test_screens`, `test_listed`, `test_analysis`, `test_kace`, plus
+  `test_agent.py` (the desk agent, §17), `test_marking.py` (the marking
+  agent, §18) and `test_publish.py` (the bulk export, §22). The first twelve
+  were one 15,008-line `test_volkit.py`; they are split so a change to one
+  area can be re-run on its own in seconds.
 - Runtime deps: numpy, scipy, pandas, openpyxl, xlwt (the Murex `.xls`
   writer, pure Python). Plus `tzdata` on Windows.
 - Deliberately no `pysabr`, `xlrd`, `tkcalendar`, and no web framework.
@@ -211,6 +216,7 @@ working in its area — not before.
 | `claude/screen-listed.md` (§8) | `listed.py`, exchange-traded options, the paste parser, positions and aggregated greeks. |
 | `claude/screen-analysis.md` (§9) | `analytics.py`, `moments.py`, `history.py`, `relvalue.py` — carry and roll, fair value, realized, the cross triangle, the relative-value grid. |
 | `claude/development.md` (§10) | The full command cookbook, `TestWebAssets`, PyInstaller and packaging rules, how to add a screen. |
+| `claude/test-suite.md` | **Before adding a test module, or pointing a test at `files/vol_marks.xlsx`.** The fifteen modules, the generated fixture workbook the suite owns instead of the spreadsheet, narrowing a class to the pairs it names, the SABR fit cache, and the two CI workflows. |
 | `claude/screen-market-making.md` (§11) | `quotes.py`, `knowledge.py`, `marketmaker.py` — Check Market, the quote, the paste grammar, the knowledge bank. |
 | `claude/screen-monitor.md` (§12) | `monitor.py`, `curves.py` — tiles and the curve-comparison panel. |
 | `claude/session-files.md` (§13) | `session.py` — saving marks beside the workbook, and the one deliberate export *into* it. |
@@ -558,8 +564,9 @@ and what is reported instead** — read it before "fixing" one.
 rules.** The essentials:
 
 ```
-python -m unittest discover -s tests        # 1090 tests, ~25m
-PYTHONUTF8=0 LC_ALL=C python -m unittest discover -s tests   # as a cp1252 box
+python -m unittest discover -s tests -t .   # 1145 tests, ~15m
+python -m unittest tests.test_workbook      # one area, while working on it
+PYTHONUTF8=0 LC_ALL=C python -m unittest discover -s tests -t .  # as a cp1252 box
 python -m volkit check                      # validate the workbook
 python -m volkit serve --feed files/market_feed.csv --history vol_history.xlsx
 ```

@@ -4,10 +4,19 @@ name: build-windows
 # needed. PyInstaller cannot cross-compile: it bundles the host interpreter
 # and host-compiled extension modules, so the build must happen on Windows.
 #
-# The whole build is build_exe.py -- dependencies, tests, PyInstaller, staging
-# the trader's data files and smoke-testing the result. Keeping the steps in
-# the script rather than in this file is what makes a local Windows build and
-# a CI build the same build.
+# The whole build is build_exe.py -- dependencies, PyInstaller, staging the
+# trader's data files and smoke-testing the result. Keeping the steps in the
+# script rather than in this file is what makes a local Windows build and a
+# CI build the same build.
+#
+# What is *not* here any more is the test suite. It used to be step 3 of
+# build_exe.py on this runner, which made every exe cost the suite: ninety
+# minutes to be told a test was pinned to the wrong workbook. The suite now
+# runs in test.yml, on Linux, one job per module, and this workflow calls it
+# and will not build unless it is green -- so nothing ships untested, and a
+# test failure is reported in minutes by the module it broke. The check that
+# genuinely has to happen on Windows, running the exe that was just built and
+# making it price something, is build_exe.py's own smoke step and still runs.
 
 on:
   workflow_dispatch:
@@ -28,7 +37,11 @@ on:
     tags: ["v*"]
 
 jobs:
+  tests:
+    uses: ./.github/workflows/test.yml
+
   windows-exe:
+    needs: tests
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -36,9 +49,13 @@ jobs:
         with:
           python-version: "3.12"
 
+      # --skip-tests because the tests job above just ran them on Linux. Every
+      # other step build_exe.py does is still done here: the workbook check,
+      # the preflight, PyInstaller, staging the data files beside the exe, and
+      # the smoke test that runs the exe and prices with it.
       - name: Build
         run: >-
-          python build_exe.py --zip
+          python build_exe.py --zip --skip-tests
           ${{ inputs.onefile && '--onefile' || '' }}
           ${{ inputs.exclude_tabs && format('--exclude-tab {0}', inputs.exclude_tabs) || '' }}
           ${{ inputs.hidden_tabs && format('--hidden-tab {0}', inputs.hidden_tabs) || '' }}

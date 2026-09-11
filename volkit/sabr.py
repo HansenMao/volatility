@@ -17,6 +17,7 @@ is handed to the optimiser.
 
 from __future__ import annotations
 
+import functools
 import math
 from dataclasses import dataclass
 
@@ -244,6 +245,14 @@ def smile_strike_and_vol(p: SabrParams, target_delta: float, t: float, is_call: 
     )
 
 
+#: How many distinct calibrations to remember.  Each entry is one frozen
+#: :class:`SabrCalibration`, so the cache is small; the number is well above a
+#: workbook's pair-count times tenor-count times the two wings, which is the
+#: working set a reload touches.
+CACHE_SIZE = 8192
+
+
+@functools.lru_cache(maxsize=CACHE_SIZE)
 def calibrate(
     atm_volatility: float,
     risk_reversal: float,
@@ -261,6 +270,19 @@ def calibrate(
     max_solutions: int = 1,
 ) -> SabrCalibration:
     """Fit SABR to an at-the-money vol, a risk reversal and a market strangle.
+
+    The result is memoised.  This is a pure function -- every argument is a
+    number, a bool, or a frozen dataclass, and :class:`SabrCalibration` and
+    :class:`SabrParams` are frozen with tuple fields, so a cached result cannot
+    be changed by whoever received it first.  The reason it is worth caching is
+    that a workbook reload refits *every* pair: re-reading a file to pick up one
+    edited cell recalibrated all of them, which is a few seconds of scipy per
+    reload on the desk and was 97% of the test suite's hour.  Identical quotes
+    now cost a dictionary lookup.
+
+    ``calibrate.cache_clear()`` empties it and ``calibrate.cache_info()``
+    reports hits and misses; neither is needed in normal use, because a changed
+    quote is a different key rather than a stale entry.
 
     Conventions, all in decimals:
 

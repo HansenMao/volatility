@@ -1,0 +1,86 @@
+name: tests
+
+# The suite, on Linux, one job per test module and per locale.
+#
+# It used to run only inside build_exe.py on the Windows runner, which meant
+# every exe build paid for it: an hour of tests in front of ten minutes of
+# PyInstaller, and a test pinned to the wrong workbook failed the build ninety
+# minutes after it was dispatched.  The suite is the same suite -- the modules
+# are the ones ``tests/`` holds, discovered the same way -- but here it is the
+# thing being run rather than a step inside something else, so it starts on
+# every push and the modules run beside each other instead of end to end.
+# Sequentially the suite is about fifteen minutes; the wall time here is
+# whichever module is slowest, which is under three.
+#
+# One job per module rather than a fixed number of shards: the module list is
+# the unit a person works in, so a failure names the area without anyone
+# decoding "shard 3", and adding a module means adding a line rather than
+# rebalancing a matrix.  Keep an eye on the slowest one -- it is the wall time.
+#
+# The cp1252 half of the matrix runs the same modules in an ASCII locale, which
+# is the only way to catch a text-encoding bug written on a Mac before the
+# Windows runner finds it.
+#
+# build-windows.yml calls this workflow and will not build an exe unless it is
+# green, so nothing is shipped untested -- the Windows job additionally runs
+# the smoke test against the exe it just built, which is the part that has to
+# happen on Windows.
+
+on:
+  push:
+  pull_request:
+  workflow_call:
+
+jobs:
+  suite:
+    runs-on: ubuntu-latest
+    strategy:
+      # Every module reports, rather than the first failure cancelling the
+      # rest: when a workbook or an interface changes it usually breaks several
+      # areas, and one run should show all of them.
+      fail-fast: false
+      matrix:
+        module:
+          - test_numerics
+          - test_calendar
+          - test_marketdata
+          - test_pricing
+          - test_marks
+          - test_workbook
+          - test_marketmaker
+          - test_quotegrammar
+          - test_screens
+          - test_listed
+          - test_analysis
+          - test_kace
+          - test_agent
+          - test_marking
+          - test_publish
+        locale: [utf8, cp1252]
+    name: ${{ matrix.module }} (${{ matrix.locale }})
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          # Not runtime dependencies, and deliberately not in requirements.txt:
+          # esprima parses the front-end JavaScript and xlrd reads back the
+          # Murex .xls the export writes.  Both tests skip when the package is
+          # absent, which is how the Murex round-trip quietly went untested.
+          python -m pip install esprima xlrd
+
+      - name: ${{ matrix.module }}
+        run: python -m unittest -v tests.${{ matrix.module }}
+        env:
+          # An ASCII locale in the second half of the matrix: this is the cp1252
+          # Windows box as far as text is concerned, and it is what turns an em
+          # dash in index.html into "'charmap' codec can't decode byte 0x81"
+          # here instead of at the end of a Windows build.
+          PYTHONUTF8: ${{ matrix.locale == 'cp1252' && '0' || '1' }}
+          LC_ALL: ${{ matrix.locale == 'cp1252' && 'C' || 'C.UTF-8' }}

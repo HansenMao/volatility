@@ -21,8 +21,9 @@ from volkit.book import Book
 from volkit.marketmaker import CurveTarget
 from volkit.timeutil import Clock, tenor_to_years
 
+from ._support import BOOK
+
 UTC = timezone.utc
-WORKBOOK = Path(__file__).resolve().parents[1] / "files" / "vol_marks.xlsx"
 ASOF = Clock(datetime(2024, 2, 28, 12, 0, tzinfo=UTC))
 NOW = ASOF.now
 
@@ -389,7 +390,7 @@ class _Book:
     @classmethod
     def get(cls):
         if cls._book is None:
-            cls._book = Book.from_excel(WORKBOOK, ASOF).load_all(["EURUSD"])
+            cls._book = Book.from_excel(BOOK, ASOF).load_all(["EURUSD"])
         return cls._book
 
 
