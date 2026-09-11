@@ -14425,7 +14425,7 @@ class TestKaceFeed(unittest.TestCase):
         """
         from volkit import kace
         table = kace.SpreadTable.load(self.SPREADS)
-        self.assertEqual(table.names, ["default", "wide", "thin", "test"])
+        self.assertEqual(table.names, ["default", "wide", "thin"])
         self.assertEqual(table.for_tier(),
                          {"O/N": 1.0, "1W": 0.8, "2W": 0.6, "1M": 0.4, "2M": 0.3, "3M": 0.3,
                           "6M": 0.2, "9M": 0.2, "1Y": 0.2})
@@ -14561,10 +14561,12 @@ class TestKaceFeed(unittest.TestCase):
         self.assertTrue(any("O/N" in n and "1W" in n for n in feed.notes))
         # The desk's convention: RR is the USD call over the put, in vol
         # points, straight off the marks sheet; S is the strangle mark.  The
-        # numbers are the 2026-09-10 workbook's USDCNH sheet.
-        self.assertAlmostEqual(w1.rr25, -0.0875)
-        self.assertAlmostEqual(w1.fly25, 0.105)
-        self.assertAlmostEqual(feed.pillars[-1].rr10, -0.378)
+        # numbers are the shipped workbook's own USDCNH sheet -- 1W quotes
+        # RR 25D 0.385 and ST 25D 0.1825, 1Y quotes RR 10D 2.645 -- so this
+        # pins the reading, not a book somebody happened to have open.
+        self.assertAlmostEqual(w1.rr25, 0.385)
+        self.assertAlmostEqual(w1.fly25, 0.1825)
+        self.assertAlmostEqual(feed.pillars[-1].rr10, 2.645)
 
     def test_fitted_wings_come_off_the_surface_near_the_marks(self):
         from volkit import kace
@@ -14601,7 +14603,7 @@ class TestKaceFeed(unittest.TestCase):
         service = BookService(str(WORKBOOK), ASOF, kace_spreads_path=str(self.SPREADS),
                               kace_user="feeuser", kace_password="pw")
         state = service.state()["kace"]
-        self.assertEqual(state["tiers"], ["default", "wide", "thin", "test"])
+        self.assertEqual(state["tiers"], ["default", "wide", "thin"])
         self.assertEqual(state["tier"], "default")
         self.assertTrue(state["credentials"])
         self.assertIsNone(state["error"])

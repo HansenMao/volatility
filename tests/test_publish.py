@@ -616,7 +616,11 @@ class TestMurexAndCos(_Fixture):
         rows = log.entries(channel="murex")
         self.assertEqual(len(rows), 2)
         self.assertEqual({r["source"] for r in rows}, {"marks"})
-        self.assertEqual([r["file"].split("/")[-1] for r in rows],
+        # Path().name, not split("/"): the log keeps the path the file was
+        # written at, which on Windows is backslash-separated, so splitting on
+        # "/" left the whole "C:\\Users\\...\\DRV_MktData_FX_Vol_20240228.xls"
+        # and this passed on macOS and failed on the build machine.
+        self.assertEqual([Path(r["file"]).name for r in rows],
                          [f.name for f in b.files])
 
 
