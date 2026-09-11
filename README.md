@@ -1210,21 +1210,25 @@ The panel has two halves. **Input**, on the left:
   be downloaded.
 * **Preflight** — coverage per pair and tenor with each pair's source and
   every cell coloured by where its row came from; whatever is **refused by
-  name** (a pillar neither source has, a pair `MARKET_WIDTHS` or
-  `WING_WIDTHS` does not carry, a tenor past the last quoted one); overlay
+  name** (a pillar neither source has, a pair `MARKET_WIDTHS`, `WING_WIDTHS`
+  or `COS_WIDTHS` does not carry, a tenor past the last quoted one); overlay
   rows left unused because their pair reads the book; the diff against the
   book for the overlay pairs; and every pillar's two-way with where each
   number came from. A short file written silently is the failure this card
   exists to kill.
 * **Configuration** — the export-policy tables, edited here and read
-  everywhere: `SPREADS` (the tiers; `cos` is the COS ladder), `MARKET_WIDTHS`
+  everywhere: `SPREADS` (the kACE tiers), `MARKET_WIDTHS`
   and `ADD_UPS` (the Bloomberg ATM width: an observed market two-way plus a
   policy add-up), `WING_WIDTHS` (each wing's own two-way on Bloomberg),
-  `SHADES` (the ATM mid shift by channel — 0.2 under the mark on Bloomberg),
+  `SHADES` (the ATM mid shift by channel — 0.2 under the mark on Bloomberg
+  for the G7 and G7 Cross pairs, nothing for the EM/PM four), `COS_WIDTHS`
+  (how far under the mid the COS bid sits, per pair and tenor, one-sided),
   and `EXPORT_PAIRS` (which pairs each channel publishes, in the file's
   order, with the file's label, the curve it is fed from and where it stops).
   **Seed the missing tables** (`volkit export --init-tables`) writes what the
-  desk's files say; only the `cos` tier is left to type.
+  desk's files say, `CROSS_CORR` included. COS starts from the marked mid
+  rather than the desk sheet's rounded-down market bid, on purpose: one
+  surface goes out on all four feeds.
 * **Log** — `publish_log.jsonl` beside the workbook, every channel, every
   export sent or refused, with its source (`marks`, or the overlay's file,
   hash and row count, and the per-pair split) and a hash of what went. The

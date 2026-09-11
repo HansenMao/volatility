@@ -1481,7 +1481,7 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
       </section>
 
       <section class="card"><h2>Configuration <small>export policy, edited here, read everywhere</small></h2>
-        <div class="hint">These tables live in the workbook like every other setting and are written into it with the marks (<b>Write to workbook</b> on the Vol marking screen). They are edited here rather than in the Config window because they are export policy. A blank cell falls through to its default; a pair a channel wants that <code>MARKET_WIDTHS</code> or <code>WING_WIDTHS</code> does not carry is refused by name.
+        <div class="hint">These tables live in the workbook like every other setting and are written into it with the marks (<b>Write to workbook</b> on the Vol marking screen). They are edited here rather than in the Config window because they are export policy. A blank cell falls through to its default; a pair a channel wants that <code>MARKET_WIDTHS</code>, <code>WING_WIDTHS</code> or <code>COS_WIDTHS</code> does not carry is refused by name. <code>COS_WIDTHS</code> is one-sided: the COS file carries a bid and no ask, so the width is the whole distance under the mid, which is the number on the desk's own Guideline sheet.
           <span id="xseedwrap"> <button class="ghost" id="xseed" style="width:auto;padding:3px 9px;font-size:11px" title="put the tables this workbook lacks into the session, seeded from the desk's own files of 2026-09-10: each channel's pairs in the file's order, the Bloomberg widths and wing widths, the shade and the add-ups">Seed the missing tables</button></span></div>
         <div id="xcfgtabs"></div>
         <div id="xcfgconfirm" class="hide" style="display:flex;gap:8px;align-items:center;margin-top:9px;padding:8px 10px;border:1px solid var(--line);border-radius:6px"></div>
@@ -2160,7 +2160,7 @@ function fillSel(id,list,dflt){
   list=list||[];
   const cur=el.value;
   const want=list.indexOf(cur)>=0?cur:(list.indexOf(dflt)>=0?dflt:list[0]);
-  el.innerHTML=list.map(x=>'<option'+(x===want?' selected':'')+'>'+esc(x)+'</option>').join('');
+  el.innerHTML=list.map(x=>'<option value="'+esc(x)+'"'+(x===want?' selected':'')+'>'+esc(x)+'</option>').join('');
   if(list.length)el.value=want;
 }
 function setMethodSel(id,pair){fillSel(id,methodsFor(pair))}
@@ -8083,6 +8083,7 @@ function xPaintBuild(b){
     (b.files||[]).map(f=>'<span>file <b>'+esc(f.name)+'</b> · '+f.bytes+' bytes · '+esc(String(f.sha256||'').slice(0,12))+(f.what?' · '+esc(f.what):'')+'</span>').join('')+
     ((pf.widths||{}).source==='tier'?'<span>widths: '+esc(pf.widths.tier)+' tier'+(pf.widths.multiplier&&pf.widths.multiplier!==1?' ×'+pf.widths.multiplier:'')+'</span>':'')+
     ((pf.widths||{}).source==='market'?'<span>widths: MARKET_WIDTHS + ADD_UPS, wings by WING_WIDTHS</span>':'')+
+    ((pf.widths||{}).source==='cos'?'<span>widths: COS_WIDTHS, one-sided under the mid</span>':'')+
     ((pf.widths||{}).source==='none'?'<span>bid equals ask</span>':'')+'</div>');
   /* Coverage: a pair per row with its source, a tenor per column coloured by where the row came from. */
   const tenors=w.tenors||[];

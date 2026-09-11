@@ -60,6 +60,9 @@ SHEETS: dict[str, str] = {
                    "never, or always), delta (spot or forward)",
     "WING_RATIOS": "how each tenor's 10-delta wings follow its 25-delta ones: "
                    "pair, tenor, st, rr",
+    "CROSS_CORR": "a cross's correlation typed per tenor, which takes the place of its "
+                  "fitted initial / long-term / mean-reversion where it is there: pair, "
+                  "tenor, correlation, note",
     "Vega Weights": "how far each tenor moves when the anchor moves one vol point: "
                     "tenor, default, and a column per pair that needs its own",
     # The export policy tables (claude/publishing-channels-design.md).  In the
@@ -76,6 +79,9 @@ SHEETS: dict[str, str] = {
     "WING_WIDTHS": "the two-way width of each wing on the Bloomberg feed, vol points: pair "
                    "(default, crosses, or a pair), tenor, rr25, rr10, bf25, bf10 -- the most "
                    "specific row wins",
+    "COS_WIDTHS": "how far under the mid the COS bid sits, in vol points, per pair and "
+                  "tenor: pair (default, crosses, or a pair), tenor, width, note -- the most "
+                  "specific row wins. One-sided: the file carries the bid alone",
     "EXPORT_PAIRS": "which pairs each channel publishes, in the file's own order: channel, "
                     "pair, label (as the file writes it), feed_from (the curve it is fed "
                     "from when that is another pair), last_tenor (where the pair stops, "
@@ -87,7 +93,7 @@ SHEETS: dict[str, str] = {
 #: and only the editor differs: the Config window skips them and the export
 #: screen shows nothing else.
 EXPORT_TABS: tuple[str, ...] = ("SPREADS", "MARKET_WIDTHS", "ADD_UPS", "SHADES", "WING_WIDTHS",
-                                "EXPORT_PAIRS")
+                                "COS_WIDTHS", "EXPORT_PAIRS")
 
 #: The old names of tabs that were renamed, so a workbook that still carries
 #: the old name is read and, on the next write, written under the new one in
@@ -110,11 +116,13 @@ EDITABLE: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "HOLIDAYS": (("country", "date", "remove"), ("country", "date")),
     "CONVENTIONS": (("pair", "premium", "atmf beyond", "delta"), ("pair",)),
     "WING_RATIOS": (("pair", "tenor", "st", "rr"), ("pair", "tenor")),
+    "CROSS_CORR": (("pair", "tenor", "correlation", "note"), ("pair", "tenor")),
     "Vega Weights": (("tenor", "default", "note"), ("tenor", "default")),
     "MARKET_WIDTHS": (("tenor", "note"), ("tenor",)),
     "ADD_UPS": (("pair", "overnight", "other", "note"), ("pair",)),
     "SHADES": (("channel", "pair", "shade", "note"), ("channel", "shade")),
     "WING_WIDTHS": (("pair", "tenor", "rr25", "rr10", "bf25", "bf10", "note"), ("pair", "tenor")),
+    "COS_WIDTHS": (("pair", "tenor", "width", "note"), ("pair", "tenor")),
     "EXPORT_PAIRS": (("channel", "pair", "label", "feed_from", "last_tenor", "note"),
                      ("channel", "pair")),
 }

@@ -47,6 +47,151 @@ class CorrelationCurve:
         return self.final - (self.final - self.initial) * np.exp(-self.decay * t)
 
 
+#: The workbook tab that overrides a cross's fitted correlation with marks.
+CROSS_CORR_SHEET = "CROSS_CORR"
+
+
+@dataclass
+class MarkedCorrelation:
+    """A correlation term structure typed rung by rung, not fitted.
+
+    The alternative to :class:`CorrelationCurve`'s three coefficients.  The
+    desk's own cross workbooks carry a correlation **per tenor** -- USDCNH
+    against AUDUSD is -0.700 out to 1M, then -0.675, -0.650, -0.625, -0.600 --
+    and an exponential fitted through that ladder reproduces none of its rungs
+    exactly.  Where the ``CROSS_CORR`` tab names a pair, these marks *are* the
+    correlation and that pair's ``initial`` / ``long_term`` / ``mean_reversion``
+    cells are not read: one correlation, in one place, rather than a fit and a
+    table that disagree about 6M.
+
+    Between two rungs the correlation is linear in time.  Before the first and
+    after the last it is flat, because a desk that stopped typing at 3Y meant
+    the last rung to keep applying, not to be extrapolated off a slope it
+    never drew.
+    """
+
+    years: tuple[float, ...]
+    rhos: tuple[float, ...]
+    #: The tenor labels the rungs were typed under, for the screen and errors.
+    tenors: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        self.years = tuple(float(y) for y in self.years)
+        self.rhos = tuple(float(r) for r in self.rhos)
+        self.tenors = tuple(str(t) for t in self.tenors)
+        if not self.years:
+            raise ValueError("a marked correlation needs at least one tenor")
+        if len(self.years) != len(self.rhos):
+            raise ValueError(
+                f"a marked correlation needs one correlation per tenor, got "
+                f"{len(self.years)} tenors and {len(self.rhos)} correlations")
+        if any(b <= a for a, b in zip(self.years, self.years[1:])):
+            raise ValueError("the tenors of a marked correlation must be distinct and "
+                             "in increasing order")
+        labels = self.tenors or tuple(f"{y:g}y" for y in self.years)
+        for label, rho in zip(labels, self.rhos):
+            if not -1.0 <= rho <= 1.0:
+                raise ValueError(f"correlation {rho:.6g} at {label} must lie in [-1, 1]")
+
+    def __call__(self, t):
+        t = np.asarray(t, dtype=float)
+        return np.interp(t, np.asarray(self.years, dtype=float),
+                         np.asarray(self.rhos, dtype=float))
+
+    @property
+    def marks(self) -> dict[str, float]:
+        """``{tenor: rho}`` as it was typed, for the screen."""
+        labels = self.tenors or tuple(f"{y:g}y" for y in self.years)
+        return dict(zip(labels, self.rhos))
+
+    # A marked ladder read as the three coefficients the marking screen and
+    # the session file carry for a cross: the first rung, the last rung, and
+    # no decay -- there is no exponential here to report.  They exist so a
+    # screen that has always shown three boxes still has something true to
+    # put in them, and for the moment somebody re-marks the pair by hand,
+    # which replaces the ladder with a fitted curve (``set_correlation``).
+    # Nothing reconstructs the rungs from them; the rungs are ``CROSS_CORR``'s.
+    @property
+    def initial(self) -> float:
+        return self.rhos[0]
+
+    @property
+    def final(self) -> float:
+        return self.rhos[-1]
+
+    @property
+    def decay(self) -> float:
+        return 0.0
+
+
+def marked_correlation(pair: str, marks) -> MarkedCorrelation:
+    """A :class:`MarkedCorrelation` from ``{tenor: rho}`` as the tab holds it.
+
+    Tenors are read in the workbook's own spellings (``1d``, ``O/N``, ``18M``)
+    and sorted by time; a tenor that names no length is refused by name rather
+    than dropped, because a rung nobody can place is a rung the curve would
+    silently be missing.
+    """
+    from .kace import canonical_tenor, pillar_years
+
+    rungs: list[tuple[float, str, float]] = []
+    for tenor, rho in marks.items():
+        if rho is None:
+            continue
+        try:
+            label = canonical_tenor(tenor)
+            years = pillar_years(label)
+        except (ValueError, KeyError) as exc:
+            raise ValueError(f"{pair}: {CROSS_CORR_SHEET} has a row for {tenor!r}, which is "
+                             f"not a tenor this reads ({exc})") from exc
+        rungs.append((float(years), label, float(rho)))
+    if not rungs:
+        raise ValueError(f"{pair}: {CROSS_CORR_SHEET} names the pair and gives it no "
+                         f"correlation at any tenor")
+    rungs.sort()
+    seen = {}
+    for years, label, rho in rungs:
+        if label in seen:
+            raise ValueError(f"{pair}: {CROSS_CORR_SHEET} gives {label} two correlations "
+                             f"({seen[label]:g} and {rho:g})")
+        seen[label] = rho
+    return MarkedCorrelation(years=tuple(r[0] for r in rungs),
+                             rhos=tuple(r[2] for r in rungs),
+                             tenors=tuple(r[1] for r in rungs))
+
+
+def load_cross_correlations(path, *, overlay=None) -> dict[str, dict[str, float]]:
+    """Read the workbook's ``CROSS_CORR`` tab: pair, tenor, correlation.
+
+    ``{PAIR: {TENOR: rho}}``, tenors left exactly as they were typed.  An
+    absent tab is ``{}`` -- every cross is then fitted from its three
+    coefficients, which is what every workbook did before this tab existed.
+    """
+    from . import configsheets
+
+    rows = configsheets.read_rows(path, CROSS_CORR_SHEET, required=("pair", "tenor"),
+                                  overlay=overlay)
+    if rows is None:
+        return {}
+    out: dict[str, dict[str, float]] = {}
+    bad: list[str] = []
+    for row in rows:
+        pair, tenor = row.text("pair").upper(), row.text("tenor")
+        if not pair or not tenor:
+            continue
+        rho = row.real("correlation")
+        if rho is None:
+            continue
+        if not -1.0 <= rho <= 1.0:
+            bad.append(f"{CROSS_CORR_SHEET} row {row.number}: {pair} {tenor} correlation "
+                       f"{rho:g} is outside [-1, 1]")
+            continue
+        out.setdefault(pair, {})[str(tenor)] = float(rho)
+    if bad:
+        raise ValueError("; ".join(bad))
+    return out
+
+
 @dataclass
 class CrossAtmCurve(AtmCurve):
     """ATM curve for a cross, from two leg curves and a correlation.
@@ -56,11 +201,18 @@ class CrossAtmCurve(AtmCurve):
     quoted against USD as USDXXX, or both as XXXUSD).  ``leg_signs`` flips a
     leg whose quotation is inverted, which is the case the legacy code left
     to the user to get right by hand.
+
+    ``correlation`` is a callable on time, so a cross is fitted from three
+    coefficients or read off the ``CROSS_CORR`` marks without this knowing
+    which.
     """
 
     leg_a: VolCurve | None = None
     leg_b: VolCurve | None = None
-    correlation: CorrelationCurve | None = None
+    #: Anything that returns a correlation for a time: the fitted
+    #: :class:`CorrelationCurve` or, where ``CROSS_CORR`` names the pair, a
+    #: :class:`MarkedCorrelation` typed rung by rung.
+    correlation: CorrelationCurve | MarkedCorrelation | None = None
     leg_signs: tuple[int, int] = (1, 1)
 
     def __post_init__(self) -> None:
@@ -88,7 +240,12 @@ class CrossAtmCurve(AtmCurve):
         return np.sqrt(np.maximum(var, 0.0)) + p.short_addon * np.exp(-p.short_decay * t)
 
     def set_correlation(self, initial: float, final: float, decay: float) -> list[str]:
-        """Re-mark the correlation term structure in place."""
+        """Re-mark the correlation term structure in place, as three coefficients.
+
+        A pair whose correlation came off ``CROSS_CORR`` is fitted again from
+        here: an explicit re-mark wins over the table for this session, and
+        the table is read again on the next build.
+        """
         try:
             curve = CorrelationCurve(initial, final, decay)
         except ValueError as exc:

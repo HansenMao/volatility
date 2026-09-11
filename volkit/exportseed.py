@@ -1,14 +1,19 @@
-"""The export tables as the desk's own files carried them on 2026-09-10.
+"""The export tables as the desk's own files carried them, 2026-09-10/11.
 
-Generated from ``BCFO Vols bbg output.xlsx``, ``DRV_MktData_FX_Vol_20260910.xls``,
-``DRV_MktData_FX_Broker_20260910.xls`` and ``COS_86830_Bid.csv`` -- the pair
-list of each channel in the file's own order, the Bloomberg ATM widths (the
-sheet's total width less the add-up the ``ADD_UPS`` rule assigns, so the rule
-reproduces the sheet), the Bloomberg wing widths, and the pairs the G7 tab
-gave the 0.2 add-up although they are crosses.  ``publish.seed_tables`` puts
-these into a workbook that lacks the tabs; after that the tables are the
-desk's and nothing here is read again.  Numbers, not policy: a width that
-changes is changed on the Vol bulk processing screen, not here.
+Generated from the desk's own chain: ``BCFO Vols bbg output.xlsx`` and
+``BCFO Vols bbg input EM PM.xlsx``, ``BCFO Vols spread DB.xlsx``,
+``DRV_MktData_FX_Vol_20260910.xls`` / ``DRV_MktData_FX_Broker_20260910.xls``
+and their ``vol data file for Uploading to Murex`` workbook,
+``COS_86830_Bid.csv`` with the ``Vol Sheet`` workbook behind it, and
+``CNH cross vols DB.xls`` -- the pair list of each channel in the file's own
+order, the Bloomberg ATM widths (the sheet's total width less the add-up the
+``ADD_UPS`` rule assigns, so the rule reproduces the sheet), the Bloomberg
+wing widths, the pairs the G7 tab gave the 0.2 add-up although they are
+crosses, the COS ladder off the ``Guideline`` sheet, and the CNH crosses'
+correlation rung by rung.  ``publish.seed_tables`` puts these into a workbook
+that lacks the tabs; after that the tables are the desk's and nothing here is
+read again.  Numbers, not policy: a width that changes is changed on the Vol
+bulk processing screen, not here.
 """
 
 from __future__ import annotations
@@ -93,3 +98,69 @@ WING_WIDTHS = {
     'HKDCNH': {'O/N': (0.5, 1, 0.4, 0.8), '1W': (0.4, 0.8, 0.3, 0.6), '2W': (0.35, 0.7, 0.25, 0.5), '1M': (0.3, 0.6, 0.2, 0.4), '2M': (0.3, 0.6, 0.2, 0.4), '3M': (0.3, 0.6, 0.2, 0.4), '6M': (0.3, 0.6, 0.2, 0.4), '9M': (0.3, 0.6, 0.2, 0.4), '1Y': (0.3, 0.6, 0.2, 0.4), '2Y': (0.7, 1.4, 0.45, 0.9), '3Y': (1.2, 2.4, 0.8, 1.6)},
     'XAUUSD': {'O/N': (2.8, 5.6, 2, 4), '1W': (1.2, 2.4, 0.8, 1.6), '2W': (0.7, 1.4, 0.55, 1.1), '1M': (0.4, 0.8, 0.325, 0.65), '2M': (0.4, 0.8, 0.325, 0.65), '3M': (0.4, 0.8, 0.325, 0.65), '6M': (0.4, 0.8, 0.325, 0.65), '9M': (0.4, 0.8, 0.325, 0.65), '1Y': (0.4, 0.8, 0.325, 0.65)},
 }
+
+
+#: The five tenors the COS grid carries, in the file's order.
+COS_LADDER_TENORS = ("1W", "2W", "1M", "3M", "6M")
+
+#: How far under the mid the COS bid sits, vol points, off the ``Guideline``
+#: sheet of the desk's ``Vol Sheet`` workbook (2026-09-11).  One-sided: the
+#: file carries the bid alone, so this is subtracted whole.  ``default`` is
+#: the shape most of the grid takes; the rest are the pairs that differ, and
+#: they are why the COS width cannot be a tier of ``SPREADS``.  ``HKDCNH`` is
+#: the desk's ``CNY/HKD`` row -- on the Guideline sheet, not in the 86830
+#: file, and kept under the spelling every channel publishes so it matches
+#: if the pair is ever added.
+COS_WIDTHS = {
+    'default': {'1W': 0.8, '2W': 0.6, '1M': 0.5, '3M': 0.5, '6M': 0.5},
+    'USDJPY': {'1W': 1.0, '2W': 0.8, '1M': 0.5, '3M': 0.5, '6M': 0.5},
+    'NZDUSD': {'1W': 0.9, '2W': 0.6, '1M': 0.5, '3M': 0.5, '6M': 0.5},
+    'USDCNH': {'1W': 0.5, '2W': 0.5, '1M': 0.5, '3M': 0.5, '6M': 0.5},
+    'AUDNZD': {'1W': 0.5, '2W': 0.5, '1M': 0.5, '3M': 0.5, '6M': 0.5},
+    'AUDJPY': {'1W': 0.9, '2W': 0.8, '1M': 0.5, '3M': 0.5, '6M': 0.5},
+    'CNHJPY': {'1W': 0.9, '2W': 0.7, '1M': 0.5, '3M': 0.5, '6M': 0.5},
+    'NZDJPY': {'1W': 0.9, '2W': 0.7, '1M': 0.5, '3M': 0.5, '6M': 0.5},
+    'HKDCNH': {'1W': 0.1, '2W': 0.1, '1M': 0.0, '3M': 0.1, '6M': 0.1},
+}
+
+#: Which pairs the COS ladder's own rows are for, in the desk's spelling, so
+#: a seeded row can say where it came from.
+COS_WIDTH_NOTES = {
+    'default': "the Guideline sheet's common ladder",
+    'USDJPY': "the Guideline sheet's JPY row",
+    'NZDUSD': "the Guideline sheet's NZD row",
+    'USDCNH': "the Guideline sheet's CNY row, flat across the grid",
+    'AUDNZD': "the Guideline sheet's AUD/NZD row, flat across the grid",
+    'AUDJPY': "the Guideline sheet's AUD/JPY row",
+    'CNHJPY': "the Guideline sheet's CNY/JPY row",
+    'NZDJPY': "the Guideline sheet's NZD/JPY row",
+    'HKDCNH': "the Guideline sheet's CNY/HKD row; not a pair the 86830 file carries",
+}
+
+#: The tenors the CNH cross workbook's correlation ladders are typed at.
+CROSS_CORR_TENORS = ("O/N", "1W", "2W", "1M", "2M", "3M", "6M", "9M", "1Y", "18M", "2Y", "3Y")
+
+#: Each CNH cross's correlation against its two dollar legs, rung by rung, off
+#: the per-cross sheets of the desk's ``CNH cross vols DB`` workbook -- the
+#: column between the two leg volatilities and the cross.  Reproduces that
+#: workbook's cross volatilities to four decimal places through the triangle
+#: in ``cross.py``; the sign convention is the legs' own (``infer_leg_signs``
+#: reads USDCNH against AUDUSD the other way from USDCNH against USDJPY), so
+#: these are the numbers exactly as the sheet holds them.
+CROSS_CORR = {
+    'AUDCNH': {'O/N': -0.7, '1W': -0.7, '2W': -0.7, '1M': -0.7, '2M': -0.675, '3M': -0.65, '6M': -0.625, '9M': -0.625, '1Y': -0.6, '18M': -0.6, '2Y': -0.6, '3Y': -0.6},
+    'CADCNH': {'O/N': 0.55, '1W': 0.55, '2W': 0.55, '1M': 0.55, '2M': 0.53, '3M': 0.53, '6M': 0.53, '9M': 0.53, '1Y': 0.5, '18M': 0.5, '2Y': 0.5, '3Y': 0.5},
+    'CHFCNH': {'O/N': 0.55, '1W': 0.55, '2W': 0.55, '1M': 0.55, '2M': 0.53, '3M': 0.53, '6M': 0.53, '9M': 0.53, '1Y': 0.5, '18M': 0.5, '2Y': 0.5, '3Y': 0.5},
+    'CNHJPY': {'O/N': 0.45, '1W': 0.45, '2W': 0.425, '1M': 0.4, '2M': 0.4, '3M': 0.4, '6M': 0.375, '9M': 0.35, '1Y': 0.35, '18M': 0.35, '2Y': 0.35, '3Y': 0.35},
+    'EURCNH': {'O/N': -0.65, '1W': -0.65, '2W': -0.625, '1M': -0.6, '2M': -0.575, '3M': -0.55, '6M': -0.525, '9M': -0.525, '1Y': -0.525, '18M': -0.525, '2Y': -0.525, '3Y': -0.525},
+    'GBPCNH': {'O/N': -0.6, '1W': -0.6, '2W': -0.575, '1M': -0.55, '2M': -0.525, '3M': -0.5, '6M': -0.475, '9M': -0.475, '1Y': -0.475, '18M': -0.475, '2Y': -0.475, '3Y': -0.475},
+    'NZDCNH': {'O/N': -0.475, '1W': -0.475, '2W': -0.475, '1M': -0.475, '2M': -0.475, '3M': -0.475, '6M': -0.425, '9M': -0.425, '1Y': -0.425, '18M': -0.425, '2Y': -0.425, '3Y': -0.425},
+    'CNHHKD': {'O/N': 0.325, '1W': 0.325, '2W': 0.325, '1M': 0.325, '2M': 0.325, '3M': 0.3, '6M': 0.2, '9M': 0.2, '1Y': 0.2, '18M': 0.2, '2Y': 0.2, '3Y': 0.2},
+}
+
+#: The desk spells the HKD/CNH cross both ways round; the workbook's own sheet
+#: is ``CNHHKD`` and the Bloomberg and Murex files publish ``HKDCNH``.  A
+#: correlation is a property of the two legs and is the same either way, so
+#: the seeded table carries both names rather than making the reader know
+#: which way the tab was typed.
+CROSS_CORR_ALIASES = {'CNHHKD': 'HKDCNH'}

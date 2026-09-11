@@ -76,11 +76,12 @@ and says *why*; this file says what is there and what must not be broken.
 
 | tab | shape | who reads it |
 |---|---|---|
-| `SPREADS` (was `KACE_SPREADS`) | tenor rows, a column per tier: `default`, `wide`, `cos`, ... | kACE (pillars and widths), COS (`cos` tier), the market-maker fallback tier |
+| `SPREADS` (was `KACE_SPREADS`) | tenor rows, a column per tier: `default`, `wide`, ... | kACE (pillars and widths), the market-maker fallback tier |
 | `MARKET_WIDTHS` | tenor rows, a column per pair: the observed market ATM two-way | Bloomberg |
 | `ADD_UPS` | `pair` (`default`, `crosses`, or a pair), `overnight`, `other` -- most specific row wins | Bloomberg, on top of `MARKET_WIDTHS` |
 | `WING_WIDTHS` | `pair` (`default`, `crosses`, or a pair), `tenor`, `rr25`, `rr10`, `bf25`, `bf10` -- most specific row wins | Bloomberg: each wing goes out two-way about its mark |
 | `SHADES` | `channel`, `pair` (blank = the channel's default), `shade` | every channel: the ATM mid shift, both sides, before the width |
+| `COS_WIDTHS` | `pair` (`default`, `crosses`, or a pair), `tenor`, `width` -- most specific row wins | COS: how far under the mid the bid sits, **one-sided** |
 | `EXPORT_PAIRS` | `channel`, `pair`, `label`, `feed_from`, `last_tenor`, `note`, in the file's order | every channel: which pairs it publishes and from which curve; kACE with no rows publishes the book's pairs |
 
 - **A shade is not a width, and the wings are never shaded.** The ATM mid
@@ -99,17 +100,32 @@ and says *why*; this file says what is there and what must not be broken.
   total ATM width less the add-up the `ADD_UPS` rule assigns (0 overnight,
   0.2 otherwise; 0 for crosses; the seven HKD legs the G7 tab carried get
   their own 0.2 rows), `WING_WIDTHS` is the sheet's `K..N` per pair and
-  tenor, `SHADES` is −0.2 for every Bloomberg ATM -- CHFJPY included, the
-  design note's zero was not what the file did.  The `cos` tier is **not**
-  seeded: the COS file's widths are not a ladder anything can derive.
+  tenor, `SHADES` is −0.2 for every Bloomberg ATM the G7 and G7 Cross sheets
+  carry -- CHFJPY included, the design note's zero was not what the file did --
+  and **0 for the four EM/PM pairs** (USDCNH, USDHKD, HKDCNH, XAUUSD), whose
+  block is a separate sheet on the desk's side and whose two-ways sit exactly
+  half the width either side of the mid.
+- **The COS width is its own table, not a tier.** `SPREADS` says a width is a
+  quoting policy and is pair-independent; the desk's `Guideline` sheet is not
+  -- 0.8/0.6/0.5/0.5/0.5 for most pairs, 1.0/0.8 at the front for USDJPY,
+  0.9/0.7 for the yen crosses, a flat 0.5 for USDCNH and AUDNZD, so no one
+  column reproduces it.  `COS_WIDTHS` is that sheet, pair by pair, and it is
+  **one-sided**: the file carries a bid and no ask, so the number on the tab
+  is the whole distance under the mid and is the number on the desk's sheet.
+- **What COS starts from is different, deliberately.** The desk's sheet takes
+  its base from a broker paste -- the market's delta-neutral *bid*, rounded
+  down to a tenth -- and subtracts the ladder from that.  Here the base is the
+  marked mid, book or overlay, like every other channel: one surface goes out
+  on all four feeds.  The numbers differ from the spreadsheet's by whatever
+  the book's mid differs from the market's bid.
 - **`KACE_SPREADS` is read under its old name** (`configsheets.LEGACY_NAMES`)
   and renamed to `SPREADS`, in place, the first time the tab is written.
 
 ## Invariants
 
 - **Refused by name, never short.** A pillar the channel wants that neither
-  the book nor the overlay supplies, a pair `MARKET_WIDTHS` or `WING_WIDTHS`
-  does not carry, a tier the tab does not have, a tenor past the last quoted
+  the book nor the overlay supplies, a pair `MARKET_WIDTHS`, `WING_WIDTHS` or
+  `COS_WIDTHS` does not carry, a tier the tab does not have, a tenor past the last quoted
   one (an ATM and a wing out there would be extrapolated): each is a refusal
   naming the pair and tenor, and no file is written and no message posted.
   A refused run is still logged.

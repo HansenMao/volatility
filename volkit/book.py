@@ -22,7 +22,8 @@ from .atm import AtmCurve, BackboneParams
 from .black import DeltaConvention
 from .banded import Band, load_bands
 from .calendars import CalendarSet, DEFAULT_CALENDARS
-from .cross import CorrelationCurve, CrossAtmCurve, infer_leg_signs
+from .cross import (CROSS_CORR_SHEET, CorrelationCurve, CrossAtmCurve, infer_leg_signs,
+                    load_cross_correlations, marked_correlation)
 from .events import EventBook, EventSchedule
 from .feed import MarketFeed
 from .marketdata import ExcelSource, MarketData, MarketDataError
@@ -62,6 +63,11 @@ class Book:
     # its 25-delta ones.  Read once for the book so a surface built later
     # cannot get a different answer from one built now.
     wing_ratios: dict[str, dict[str, WingRatio]] = field(default_factory=dict)
+    #: The ``CROSS_CORR`` tab, by pair: a correlation typed per tenor, which
+    #: takes the place of the pair's fitted three coefficients where it is
+    #: there.  Read once for the book, like the wing ratios, so a cross built
+    #: later cannot get a different correlation from one built now.
+    cross_correlations: dict[str, dict[str, float]] = field(default_factory=dict)
     #: The ``Vega Weights`` tab: how far each tenor moves when the anchor
     #: moves one vol point.  Not part of any surface -- nothing prices
     #: differently for it -- but read with the book so the marking screen and
@@ -88,6 +94,7 @@ class Book:
         book.events = book.data.events.copy()
         book.bands = book._default_bands(bands or path)
         book.wing_ratios = book._default_wing_ratios(path)
+        book.cross_correlations = book._default_cross_correlations(path)
         book.vega_weights = book._default_vega_weights(path)
         book.calendars = calendars if calendars is not None else book._default_calendars(path)
         book._retired_tabs(path)
@@ -145,6 +152,24 @@ class Book:
             return load_wing_ratios(path, overlay=self.config_tabs)
         except (OSError, ValueError) as exc:
             self.warnings.append(f"wing ratios: {exc}")
+            return {}
+
+    def _default_cross_correlations(self, path: str | Path | None) -> dict[str, dict[str, float]]:
+        """The ``CROSS_CORR`` tab, or nothing if the workbook has not got it.
+
+        Not having it is the ordinary case: every cross is then fitted from
+        its own initial / long-term / mean-reversion cells, which is what
+        every workbook did before the tab existed.  A tab that cannot be
+        *read* is a warning and no overrides -- a desk that typed a
+        correlation ladder meant it to apply, and finding out that it did not
+        beats a cross quietly built off the fit instead.
+        """
+        if path is None:
+            return {}
+        try:
+            return load_cross_correlations(path, overlay=self.config_tabs)
+        except (OSError, ValueError) as exc:
+            self.warnings.append(f"cross correlations: {exc}")
             return {}
 
     @property
@@ -484,6 +509,32 @@ class Book:
                 self.warnings.append(f"{name}: could not build curve ({exc})")
         return self
 
+    def _correlation_for(self, name: str, params):
+        """The correlation to build a cross with: the marks, else the fit.
+
+        ``CROSS_CORR`` is the override.  Where it names the pair, its rungs
+        are the correlation and the pair's three coefficients are not read for
+        it -- said once in the warnings, because a desk looking at the marking
+        screen's initial / long-term / mean-reversion boxes for that pair is
+        looking at numbers nothing is using.  A ladder that cannot be made
+        into a curve falls back to the fit and says so, rather than leaving
+        the cross unbuilt.
+        """
+        marks = self.cross_correlations.get(name.upper())
+        if marks:
+            try:
+                curve = marked_correlation(name.upper(), marks)
+            except ValueError as exc:
+                self.warnings.append(f"{name}: {exc}; the correlation is fitted from the "
+                                     f"pair's own coefficients instead")
+            else:
+                self.warnings.append(
+                    f"{name}: the correlation is {CROSS_CORR_SHEET}'s "
+                    f"{', '.join(f'{t} {r:+.3f}' for t, r in curve.marks.items())}, "
+                    f"not the fitted curve")
+                return curve
+        return CorrelationCurve(params.initial, params.long_term, params.mean_reversion)
+
     def _build_surface(self, name: str) -> VolSurface:
         spec = self.data.pairs[name]
         params = self.data.params.get(name)
@@ -521,7 +572,7 @@ class Book:
                     short_addon=params.short_addon, short_decay=params.short_decay,
                 ),
                 leg_a=leg_a, leg_b=leg_b,
-                correlation=CorrelationCurve(params.initial, params.long_term, params.mean_reversion),
+                correlation=self._correlation_for(name, params),
                 leg_signs=(1, 1) if self.legacy_cross_sign else infer_leg_signs(name, *spec.legs),
                 **common,
             )

@@ -46,13 +46,31 @@ exporting bulk screen and in the workbook (it is the database):
 * ``SHADES`` -- the mid shift in vol points, by channel, with per-pair
   exceptions.  **A shade is not a width**: it moves the ATM mid, both sides,
   before the width is put around it, so the two-way stays symmetric about a
-  mid the screen can show.
+  mid the screen can show.  Bloomberg's is -0.2 for the pairs the G7 and G7
+  Cross sheets carry and **zero for the EM/PM four** (USDCNH, USDHKD, HKDCNH,
+  XAUUSD), whose two-ways on the desk's sheet are exactly symmetric about the
+  mid.
+* ``COS_WIDTHS`` -- how far under the mid the COS bid sits, per pair and
+  tenor, with ``default`` and ``crosses`` rows.  Pair-dependent, and
+  **one-sided**: the COS file carries the bid alone, so the whole width is
+  subtracted from the mid rather than halved around it.  The desk's own
+  ladder is not one policy -- 0.8/0.6/0.5/0.5/0.5 for most pairs, 1.0/0.8 at
+  the front for USDJPY, 0.9/0.7 for the yen crosses, a flat 0.5 for USDCNH
+  and AUDNZD -- which is why COS cannot be a tier of ``SPREADS``.
 
-A channel names its width source: kACE and COS a tier, Bloomberg the market
-table, Murex neither (bid equals ask, and always has).  The pair list each
+A channel names its width source: kACE a tier, Bloomberg the market table,
+COS its own pair ladder, Murex neither (bid equals ask, and always has).  The pair list each
 channel publishes, in the file's own order, is the ``EXPORT_PAIRS`` tab --
 typed by hand like the rest, because which pairs a file carries is a fact
 about the file and the file is somebody else's.
+
+**What COS starts from.**  The desk's COS sheet takes its base from a broker
+paste -- the market's delta-neutral *bid*, rounded down to a tenth -- and
+subtracts the ladder from that.  Here the base is the marked mid, book or
+overlay, like every other channel: one surface goes out on all four feeds.
+The numbers therefore differ from the spreadsheet's by whatever the book's
+mid differs from the market's bid, and that is the intended change, not a
+rounding error.
 
 Every export, sent or refused, is appended to ``publish_log.jsonl`` beside the
 workbook (``kace.PostLog``) with the channel, the source and a hash of what
@@ -68,6 +86,7 @@ from datetime import date, datetime
 from pathlib import Path
 
 from . import configsheets, exportseed, kace, overlay as overlay_mod
+from . import cross as cross_mod
 from .cross import is_cross
 from .kace import KaceError, OVERNIGHT, canonical_tenor, pillar_years
 from .paths import app_dir
@@ -83,10 +102,14 @@ INSTRUMENT_LABELS = {"atm": "ATM", "rr25": "25d RR", "rr10": "10d RR",
 ELEVEN = ("O/N", "1W", "2W", "1M", "2M", "3M", "6M", "9M", "1Y", "2Y", "3Y")
 #: The five the COS file carries.
 COS_TENORS = ("1W", "2W", "1M", "3M", "6M")
+#: The Bloomberg workbook's EM / precious-metal block, which is a separate
+#: sheet on the desk's side and shades its ATM by nothing.  The G7 and G7
+#: Cross blocks take the −0.2; these four do not.
+EM_PM_PAIRS = ("USDCNH", "USDHKD", "HKDCNH", "XAUUSD")
 #: Where the numbers may come from.
 SOURCES = ("book", "overlay")
 #: What a channel's width may come from.
-WIDTH_SOURCES = ("tier", "market", "none")
+WIDTH_SOURCES = ("tier", "market", "cos", "none")
 #: The four wings, in the order the files carry them.
 WING_INSTRUMENTS_ORDER = ("rr25", "rr10", "bf25", "bf10")
 
@@ -106,6 +129,12 @@ class PillarQuote:
     after the width.  ``feed_from`` is the curve the numbers were read from
     when that is not the published pair (COS's CNY labels, an inverted
     cross), and ``flipped`` says the risk reversals changed sign on the way.
+
+    ``one_sided`` is the COS case: the file carries a bid and no ask, so the
+    width is the whole distance under the mid rather than half of it on each
+    side.  Written this way round so the number on ``COS_WIDTHS`` is the
+    number on the desk's own ladder and the two can be read against each
+    other.
     """
 
     pair: str
@@ -126,6 +155,8 @@ class PillarQuote:
     width_from: str = ""
     given_bid: float | None = None    # an overlay row's own two-way, tier bypassed
     given_ask: float | None = None
+    #: The width sits entirely below the mid (COS: a bid and no ask).
+    one_sided: bool = False
     #: The wings' own two-way widths (WING_WIDTHS), vol points, where the
     #: channel publishes them two-way; empty where it publishes one value.
     wing_widths: dict[str, float] = field(default_factory=dict)
@@ -153,12 +184,14 @@ class PillarQuote:
     def bid(self) -> float:
         if self.given_bid is not None:
             return self.given_bid + self.shade
-        return self.mid - self.width / 2.0
+        return self.mid - (self.width if self.one_sided else self.width / 2.0)
 
     @property
     def ask(self) -> float:
         if self.given_ask is not None:
             return self.given_ask + self.shade
+        if self.one_sided:
+            return self.mid
         return self.mid + self.width / 2.0
 
     def value(self, instrument: str) -> float:
@@ -173,7 +206,7 @@ class PillarQuote:
                 "origin": self.origin, "source": self.source, "feed_from": self.feed_from,
                 "flipped": self.flipped, "shade": self.shade, "shade_from": self.shade_from,
                 "width": (self.ask - self.bid), "width_from": self.width_from,
-                "two_way_given": self.given_bid is not None,
+                "two_way_given": self.given_bid is not None, "one_sided": self.one_sided,
                 "wing_widths": dict(self.wing_widths), "wing_widths_from": self.wing_widths_from,
                 "sides": {i: list(self.side(i)) for i in INSTRUMENTS},
                 "notes": list(self.notes)}
@@ -198,7 +231,12 @@ class ExportTables:
     add_ups: dict[str, dict[str, float | None]] | None = None    # key -> {overnight, other}
     shades: dict[str, dict[str, float]] | None = None            # channel -> pair|"" -> shade
     wing_widths: dict[str, dict[str, dict[str, float]]] | None = None  # key -> tenor -> inst -> w
+    cos_widths: dict[str, dict[str, float]] | None = None        # key -> tenor -> width
     export_pairs: dict[str, list["PairEntry"]] | None = None     # channel -> entries
+    #: Not an export-policy table: the ``CROSS_CORR`` marking tab, read here
+    #: only so the seeder can say whether the workbook already has it.  The
+    #: correlations themselves are the book's (``Book.cross_correlations``).
+    cross_corr: dict[str, dict[str, float]] | None = None
     errors: dict[str, str] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
 
@@ -214,6 +252,8 @@ class ExportTables:
                               ("ADD_UPS", _read_add_ups),
                               ("SHADES", _read_shades),
                               ("WING_WIDTHS", _read_wing_widths),
+                              ("COS_WIDTHS", _read_cos_widths),
+                              ("CROSS_CORR", _read_cross_corr),
                               ("EXPORT_PAIRS", _read_export_pairs)):
             try:
                 value = reader(p, overlay)
@@ -230,6 +270,8 @@ class ExportTables:
                             "ADD_UPS": self.add_ups is not None,
                             "SHADES": self.shades is not None,
                             "WING_WIDTHS": self.wing_widths is not None,
+                            "COS_WIDTHS": self.cos_widths is not None,
+                            "CROSS_CORR": self.cross_corr is not None,
                             "EXPORT_PAIRS": self.export_pairs is not None},
                 "tiers": self.spreads.names if self.spreads is not None else [],
                 "errors": dict(self.errors)}
@@ -305,6 +347,32 @@ class ExportTables:
             if rows and t in rows:
                 return dict(rows[t]), f"WING_WIDTHS {key} {t}"
         raise PublishError(f"WING_WIDTHS has no {t} row for {pair} (nor for "
+                           f"{'crosses or ' if is_cross(pair) else ''}default)")
+
+    def cos_width(self, pair: str, tenor: str, *, multiplier=None) -> tuple[float, str]:
+        """How far under the mid the COS bid sits, for one pair and tenor.
+
+        ``COS_WIDTHS`` is ``pair, tenor, width`` with ``default`` and
+        ``crosses`` as pair keys beside the pairs themselves, most specific
+        first -- the same shape as ``WING_WIDTHS``, because the desk's own
+        ladder is a mostly-common shape with a handful of pairs that widen at
+        the front.  The width is **one-sided**: it is subtracted whole, not
+        halved.  Refused by name when the tab is absent or names nothing for
+        the pair and tenor, rather than publishing the mid as a bid.
+        """
+        if self.cos_widths is None:
+            raise PublishError(self.errors.get("COS_WIDTHS") or configsheets.missing(
+                "COS_WIDTHS", self.path))
+        pair = pair.upper()
+        t = canonical_tenor(tenor)
+        factor = kace.spread_multiplier(multiplier)
+        keys = [pair] + (["crosses"] if is_cross(pair) else []) + ["default"]
+        for key in keys:
+            rows = self.cos_widths.get(key)
+            if rows and t in rows:
+                return rows[t] * factor, (f"COS_WIDTHS {key} {t}"
+                                          + (f" x{factor:g}" if factor != 1 else ""))
+        raise PublishError(f"COS_WIDTHS has no {t} row for {pair} (nor for "
                            f"{'crosses or ' if is_cross(pair) else ''}default)")
 
     def shade(self, channel: str, pair: str) -> tuple[float, str]:
@@ -462,6 +530,56 @@ def _read_wing_widths(p: Path, overlay) -> dict[str, dict[str, dict[str, float]]
     return out
 
 
+def _read_cos_widths(p: Path, overlay) -> dict[str, dict[str, float]] | None:
+    """``COS_WIDTHS``: pair, tenor, width -- one-sided, in vol points."""
+    rows = configsheets.read_rows(p, "COS_WIDTHS", required=("pair", "tenor"), overlay=overlay)
+    if rows is None:
+        return None
+    out: dict[str, dict[str, float]] = {}
+    bad: list[str] = []
+    for row in rows:
+        key = row.text("pair").strip().lower() or "default"
+        if key not in ("default", "crosses"):
+            key = key.upper()
+        try:
+            tenor = canonical_tenor(row.text("tenor"))
+        except (KaceError, ValueError, KeyError) as exc:
+            bad.append(f"COS_WIDTHS row {row.number}: {row.text('tenor')!r} is not a tenor "
+                       f"this reads ({exc})")
+            continue
+        width = row.real("width")
+        if width is None:
+            continue
+        if width < 0:
+            bad.append(f"COS_WIDTHS row {row.number}: {key} {tenor} width {width:g} is "
+                       f"negative, which would publish a bid above the mid")
+            continue
+        out.setdefault(key, {})[tenor] = float(width)
+    if bad:
+        raise PublishError("COS_WIDTHS could not be read:\n  " + "\n  ".join(bad))
+    return out
+
+
+def _read_cross_corr(p: Path, overlay) -> dict[str, dict[str, float]] | None:
+    """``CROSS_CORR``, read here only so the seeder knows it is there.
+
+    The book reads the same tab for itself (``Book.cross_correlations``); this
+    is presence, not policy, and a tab that cannot be read is that tab's
+    error and not an export's.
+    """
+    rows = configsheets.read_rows(p, cross_mod.CROSS_CORR_SHEET, required=("pair", "tenor"),
+                                  overlay=overlay)
+    if rows is None:
+        return None
+    out: dict[str, dict[str, float]] = {}
+    for row in rows:
+        pair, tenor = row.text("pair").upper(), row.text("tenor")
+        rho = row.real("correlation")
+        if pair and tenor and rho is not None:
+            out.setdefault(pair, {})[str(tenor)] = float(rho)
+    return out
+
+
 def _read_export_pairs(p: Path, overlay) -> dict[str, list[PairEntry]] | None:
     rows = configsheets.read_rows(p, "EXPORT_PAIRS", required=("channel", "pair"),
                                   overlay=overlay)
@@ -515,6 +633,9 @@ class Channel:
     precision: int                  # decimals written
     what: str                       # one line for the screen
     wings_two_way: bool = False     # the wings go out bid/ask (WING_WIDTHS) rather than one value
+    #: The ATM goes out one-sided: the width is the whole distance under the
+    #: mid rather than half of it either side.  COS carries a bid and no ask.
+    one_sided: bool = False
     #: The instruments the channel needs at every pillar.  A pillar short of
     #: one of these is refused by name; the others are carried when known
     #: and left out (NaN) when not -- the COS grid and the Murex ATM file
@@ -533,7 +654,7 @@ class Channel:
         return {"key": self.key, "label": self.label, "kind": self.kind,
                 "tenors": list(self.tenors), "width": self.width,
                 "default_tier": self.default_tier, "what": self.what,
-                "wings_two_way": self.wings_two_way}
+                "wings_two_way": self.wings_two_way, "one_sided": self.one_sided}
 
 
 CHANNELS: dict[str, Channel] = {
@@ -555,10 +676,11 @@ CHANNELS: dict[str, Channel] = {
              "ccy pair, Maturity, bid, ask; and DRV_MktData_FX_Broker_<date>.xls, the 10 "
              "and 25 delta butterfly and risk reversal. Bid equals ask in both"),
     "cos": Channel(
-        key="cos", label="COS", kind="file", tenors=COS_TENORS, width="tier",
-        default_tier="cos", precision=2, needs=("atm",),
+        key="cos", label="COS", kind="file", tenors=COS_TENORS, width="cos",
+        default_tier="", precision=2, needs=("atm",), one_sided=True,
         what="COS_86830_Bid.csv: the ATM bid alone, five tenors, CNY-labelled rows fed "
-             "from the CNH curves; the width is the cos tier"),
+             "from the CNH curves; the bid sits COS_WIDTHS under the mid, one-sided, "
+             "per pair and tenor"),
 }
 
 
@@ -935,13 +1057,15 @@ def build(channel_name: str, book, tables: ExportTables, *, source: str = "book"
                 q.notes.append(f"fed from the {entry.feed_from} curve")
             # The shade, then the width around the shaded mid.
             q.shade, q.shade_from = tables.shade(ch.key, entry.pair)
+            q.one_sided = ch.one_sided
             if q.given_bid is not None:
                 q.width_from = "the overlay's own two-way"
             elif ch.width == "tier":
                 q.width, q.width_from = tables.tier_width(chosen_tier, t, multiplier=factor)
-            elif ch.width == "market":
+            elif ch.width in ("market", "cos"):
+                read_width = (tables.market_width if ch.width == "market" else tables.cos_width)
                 try:
-                    q.width, q.width_from = tables.market_width(entry.pair, t, multiplier=factor)
+                    q.width, q.width_from = read_width(entry.pair, t, multiplier=factor)
                 except PublishError as exc:
                     refused.append(f"{entry.pair} {t}: {exc}")
                     row_src[t] = "no width"
@@ -957,7 +1081,8 @@ def build(channel_name: str, book, tables: ExportTables, *, source: str = "book"
                     continue
             if q.bid <= 0:
                 refused.append(f"{entry.pair} {t}: the ATM bid is {q.bid:.4f} -- the width "
-                               f"is wider than twice the volatility")
+                               + ("is wider than the volatility itself" if q.one_sided
+                                  else "is wider than twice the volatility"))
                 continue
             quotes.append(q)
         if pair_missing:
@@ -1469,22 +1594,34 @@ def write_file(b: Build, directory: str | Path | None, *, log: kace.PostLog | No
 def seed_tables(present: dict[str, bool]) -> dict[str, list[dict]]:
     """Rows for the export tabs a workbook does not have yet.
 
-    Seeded from the desk's own files as captured on 2026-09-10
+    Seeded from the desk's own files as captured on 2026-09-10/11
     (``exportseed.py``): each channel's pair list in the file's order, the
-    Bloomberg ATM and wing widths cell for cell, the −0.2 shade every
-    Bloomberg ATM carried (CHFJPY included -- the design note's zero was not
-    what the file did), and the add-ups that reproduce the sheet: 0 overnight
-    and 0.2 otherwise for the dollar pairs and the HKD legs the G7 tab
-    carried, 0 for the crosses.  The ``cos`` tier is not seeded: the COS
-    file's widths are not a ladder anything here can derive, so that column
-    of ``SPREADS`` stays hand-typed.
+    Bloomberg ATM and wing widths cell for cell, the −0.2 shade the G7 and G7
+    Cross sheets put on every ATM (CHFJPY included -- the design note's zero
+    was not what the file did) with **zero for the four EM/PM pairs**, whose
+    two-ways on that workbook are exactly symmetric about the mid, the
+    add-ups that reproduce the sheet (0 overnight and 0.2 otherwise for the
+    dollar pairs and the HKD legs the G7 tab carried, 0 for the crosses), the
+    COS ladder off the ``Guideline`` sheet, and the CNH crosses' correlation
+    rung by rung off the cross workbook.
+
+    ``CROSS_CORR`` is not an export table -- it is what the *book* builds a
+    cross with -- and is seeded here because it comes out of the same set of
+    desk files as the rest and a desk that has typed none of them wants all
+    of them.
     """
     out: dict[str, list[dict]] = {}
     if not present.get("SHADES"):
         out["SHADES"] = [
             {"channel": "bloomberg", "pair": "", "shade": -0.2,
-             "note": "every ATM two-way 0.2 under the marked mid, both sides (the 2026-09-10 "
-                     "sheet: CHFJPY too)"},
+             "note": "every G7 and G7 Cross ATM two-way 0.2 under the marked mid, both "
+                     "sides (the 2026-09-10 sheet: CHFJPY too)"},
+        ] + [
+            {"channel": "bloomberg", "pair": p, "shade": 0.0,
+             "note": "the EM PM sheet shades nothing: bid and offer sit exactly half the "
+                     "width either side of the mid"}
+            for p in EM_PM_PAIRS
+        ] + [
             {"channel": "kace", "pair": "", "shade": 0.0, "note": ""},
             {"channel": "cos", "pair": "", "shade": 0.0, "note": ""},
         ]
@@ -1513,6 +1650,26 @@ def seed_tables(present: dict[str, bool]) -> dict[str, list[dict]]:
                 rows.append({"pair": p, "tenor": t, "rr25": w[0], "rr10": w[1],
                              "bf25": w[2], "bf10": w[3], "note": ""})
         out["WING_WIDTHS"] = rows
+    if not present.get("COS_WIDTHS"):
+        out["COS_WIDTHS"] = [
+            {"pair": key, "tenor": t, "width": exportseed.COS_WIDTHS[key][t],
+             "note": exportseed.COS_WIDTH_NOTES.get(key, "") if t == "1W" else ""}
+            for key in exportseed.COS_WIDTHS
+            for t in exportseed.COS_LADDER_TENORS
+            if t in exportseed.COS_WIDTHS[key]]
+    if not present.get("CROSS_CORR"):
+        rows = []
+        for pair, ladder in exportseed.CROSS_CORR.items():
+            for name in (pair, exportseed.CROSS_CORR_ALIASES.get(pair)):
+                if name is None:
+                    continue
+                for t in exportseed.CROSS_CORR_TENORS:
+                    if t not in ladder:
+                        continue
+                    rows.append({"pair": name, "tenor": t, "correlation": ladder[t],
+                                 "note": ("the cross workbook's own ladder" if t == "O/N"
+                                          else "")})
+        out["CROSS_CORR"] = rows
     if not present.get("EXPORT_PAIRS"):
         rows = []
         for p in exportseed.BLOOMBERG_PAIRS:

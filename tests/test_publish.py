@@ -91,7 +91,7 @@ _WINGS = {t: {"rr_25": -1.5, "rr_10": -2.8, "st_25": 0.32, "st_10": 0.85}
           for t in ("1W", "2W", "1M", "2M", "3M", "6M", "9M", "1Y")}
 
 
-def _workbook(tmp: Path, *, cos_tier: bool = True) -> Path:
+def _workbook(tmp: Path, *, cos_widths: bool = True) -> Path:
     """A copy of the shipped workbook with the export tables written in.
 
     Five pairs are added the way the Config window adds them: HKDJPY, so the
@@ -150,9 +150,17 @@ def _workbook(tmp: Path, *, cos_tier: bool = True) -> Path:
                             "bf25": 0.3, "bf10": 0.6, "note": ""} for t in publish.ELEVEN]
     tabs["SHADES"] = [{"channel": "bloomberg", "pair": "", "shade": -0.2, "note": ""},
                       {"channel": "bloomberg", "pair": "CHFJPY", "shade": 0.0, "note": ""}]
-    if cos_tier:
-        rows = configsheets.read_rows(wb, "SPREADS", required=("tenor", "default"))
-        tabs["SPREADS"] = [dict(r.cells, cos=0.8) for r in rows]
+    # Rewrite SPREADS as it stands, so the fixture exercises the rename of
+    # the tab from its old KACE_SPREADS name the way a first write does.
+    tabs["SPREADS"] = [dict(r.cells) for r in
+                       configsheets.read_rows(wb, "SPREADS", required=("tenor", "default"))]
+    # One COS ladder for every pair, so the one-sided width is a known number
+    # in the tests rather than whichever rung the desk's own seed carries.
+    if cos_widths:
+        tabs["COS_WIDTHS"] = [{"pair": "default", "tenor": t, "width": 0.8, "note": ""}
+                              for t in publish.COS_TENORS]
+    else:
+        tabs.pop("COS_WIDTHS", None)
     session.write_config_tabs(wb, tabs)
     return wb
 
@@ -223,8 +231,13 @@ class TestTables(_Fixture):
         self.assertEqual(t.shade("bloomberg", "CHFJPY"), (0.0, "bloomberg CHFJPY shade"))
         self.assertEqual(t.shade("murex", "USDJPY")[0], 0.0)
         # A tier read at a tenor between its rungs, and a multiplier.
-        self.assertEqual(t.tier_width("cos", "1M")[0], 0.8)
         self.assertAlmostEqual(t.tier_width("default", "1M", multiplier=2)[0], 0.8)
+        # The COS ladder is pair-dependent and one-sided, so it is its own
+        # table rather than a column of SPREADS.
+        self.assertEqual(t.cos_width("USDCNH", "1M"), (0.8, "COS_WIDTHS default 1M"))
+        with self.assertRaises(publish.PublishError) as ctx:
+            t.cos_width("USDCNH", "2Y")
+        self.assertIn("COS_WIDTHS", str(ctx.exception))
 
     def test_a_channel_with_no_pair_list_is_refused_by_name(self):
         bare = publish.ExportTables.load(WORKBOOK)
@@ -259,13 +272,14 @@ class TestTables(_Fixture):
                              ["AUDUSD", "USDJPY"])
 
     def test_seeding_writes_only_what_is_missing_and_carries_the_desks_files(self):
-        """The seed is the desk's own files of 2026-09-10 (`exportseed.py`):
-        the pair lists in file order, the Bloomberg widths cell for cell, and
-        the add-ups that reproduce the sheet.  Not the COS ladder, which the
-        file does not let anything derive."""
+        """The seed is the desk's own files (`exportseed.py`): the pair lists
+        in file order, the Bloomberg widths cell for cell, the add-ups that
+        reproduce the sheet, the COS ladder off the Guideline sheet and the
+        CNH crosses' correlation off the cross workbook."""
         from volkit import exportseed
         rows = publish.seed_tables({"SHADES": True, "ADD_UPS": True})
-        self.assertEqual(sorted(rows), ["EXPORT_PAIRS", "MARKET_WIDTHS", "WING_WIDTHS"])
+        self.assertEqual(sorted(rows), ["COS_WIDTHS", "CROSS_CORR", "EXPORT_PAIRS",
+                                        "MARKET_WIDTHS", "WING_WIDTHS"])
         self.assertEqual(publish.seed_tables(self.tables.summary()["present"]), {})
         every = publish.seed_tables({})
         bbg = [r["pair"] for r in every["EXPORT_PAIRS"] if r["channel"] == "bloomberg"]
@@ -281,10 +295,33 @@ class TestTables(_Fixture):
         self.assertEqual(len(cos), 25)
         self.assertIn(("USDCNH", "USD/CNY"), cos)
         self.assertIn(("CNHJPY", "CNY/JPY"), cos)
-        # Every ATM two-way was 0.2 under the mark, CHFJPY included.
-        self.assertEqual([r for r in every["SHADES"] if r["channel"] == "bloomberg"],
-                         [{"channel": "bloomberg", "pair": "", "shade": -0.2,
-                           "note": every["SHADES"][0]["note"]}])
+        # Every G7 and G7 Cross ATM two-way was 0.2 under the mark, CHFJPY
+        # included -- and the four EM/PM pairs, whose block is a separate
+        # sheet on the desk's side, are shaded by nothing at all.
+        bbg_shades = [r for r in every["SHADES"] if r["channel"] == "bloomberg"]
+        self.assertEqual(bbg_shades[0]["pair"], "")
+        self.assertEqual(bbg_shades[0]["shade"], -0.2)
+        self.assertEqual({r["pair"]: r["shade"] for r in bbg_shades[1:]},
+                         {"USDCNH": 0.0, "USDHKD": 0.0, "HKDCNH": 0.0, "XAUUSD": 0.0})
+        # The COS ladder, one-sided, off the desk's Guideline sheet: a common
+        # shape and the handful of pairs that widen at the front, which is
+        # why it cannot be one tier of SPREADS.
+        cos_w = {(r["pair"], r["tenor"]): r["width"] for r in every["COS_WIDTHS"]}
+        self.assertEqual(cos_w[("default", "1W")], 0.8)
+        self.assertEqual(cos_w[("default", "6M")], 0.5)
+        self.assertEqual(cos_w[("USDJPY", "1W")], 1.0)
+        self.assertEqual(cos_w[("NZDJPY", "2W")], 0.7)
+        self.assertEqual(cos_w[("USDCNH", "1W")], 0.5)
+        self.assertEqual(sorted({p for p, _ in cos_w}), sorted(exportseed.COS_WIDTHS))
+        # The CNH crosses' correlation, rung by rung, under both spellings of
+        # the HKD/CNH cross.
+        corr = {(r["pair"], r["tenor"]): r["correlation"] for r in every["CROSS_CORR"]}
+        self.assertEqual(corr[("AUDCNH", "1M")], -0.7)
+        self.assertEqual(corr[("AUDCNH", "3Y")], -0.6)
+        self.assertEqual(corr[("CNHJPY", "6M")], 0.375)
+        self.assertEqual(corr[("CNHHKD", "1M")], 0.325)
+        self.assertEqual(corr[("HKDCNH", "1M")], 0.325)
+        self.assertEqual(len(every["CROSS_CORR"]), 9 * 12)
         # The HKD legs the G7 tab carried take the G7 add-up by name.
         self.assertIn({"pair": "AUDHKD", "overnight": 0.0, "other": 0.2,
                        "note": "an HKD leg the G7 tab carried, so it takes the G7 add-up"},
@@ -543,7 +580,12 @@ class TestMurexAndCos(_Fixture):
         self.assertEqual([ln.split(",")[0] for ln in lines[1:]],
                          ["USD/CNY", "EUR/CNY", "HKD/CNY"])
         q = next(q for q in b.quotes if q.pair == "USDCNH" and q.tenor == "1W")
-        self.assertEqual(q.width_from, "cos tier")
+        self.assertEqual(q.width_from, "COS_WIDTHS default 1W")
+        # One-sided: the whole width sits under the mid and there is no ask
+        # away from it, because the file carries a bid and nothing else.
+        self.assertTrue(q.one_sided)
+        self.assertAlmostEqual(q.ask, q.mid)
+        self.assertAlmostEqual(q.bid, q.mid - 0.8)
         self.assertAlmostEqual(q.ask - q.bid, 0.8)
         self.assertEqual(lines[1].split(",")[1], f"{q.bid:.2f}")
         # HKD/CNY is read off the CNHHKD sheet the other way up: the risk
@@ -555,13 +597,17 @@ class TestMurexAndCos(_Fixture):
         self.assertAlmostEqual(h.rr25, -marks["1W"].rr_25 * 100.0)
         self.assertAlmostEqual(h.bf25, marks["1W"].st_25 * 100.0)
 
-    def test_the_cos_tier_has_to_be_typed_before_the_channel_runs(self):
+    def test_the_cos_ladder_has_to_be_typed_before_the_channel_runs(self):
+        """No COS_WIDTHS is no file, by name.  A width that defaulted to zero
+        would publish the mid as a bid, which is the short file this refuses
+        to write."""
         with tempfile.TemporaryDirectory() as tmp:
-            wb = _workbook(Path(tmp), cos_tier=False)
+            wb = _workbook(Path(tmp), cos_widths=False)
             tables = publish.ExportTables.load(wb)
-            with self.assertRaises(kace.KaceError) as ctx:
-                publish.build("cos", self.book, tables)
-            self.assertIn("'cos'", str(ctx.exception))
+            self.assertIsNone(tables.cos_widths)
+            b = publish.build("cos", self.book, tables)
+            self.assertFalse(b.ok)
+            self.assertTrue(all("COS_WIDTHS" in r for r in b.refused), b.refused)
 
     def test_the_file_date_is_the_books_and_a_disagreement_is_said(self):
         b = publish.build("murex", self.book, self.tables)
@@ -1104,7 +1150,8 @@ class TestExportScreen(unittest.TestCase):
         bare.export_pairs.pop("kace")
         self.assertEqual([e.pair for e in bare.pairs_for("kace", svc.book)], svc.book.pairs)
         self.assertTrue(all(st["tables"]["present"].values()))
-        self.assertIn("cos", st["tables"]["tiers"])
+        # The COS width is COS_WIDTHS' now, not a tier of SPREADS.
+        self.assertEqual(st["tables"]["tiers"], ["default", "wide", "thin"])
         # The config route says which tabs the export screen edits.
         tabs = {t["sheet"]: t for t in svc.config_tabs()["tabs"]}
         for sheet in configsheets.EXPORT_TABS:
@@ -1208,10 +1255,15 @@ class TestExportScreen(unittest.TestCase):
             svc = BookService(str(wb), ASOF)
             self.assertFalse(svc.export_tables.summary()["present"]["SHADES"])
             out = svc.export_seed_tables({})
-            self.assertEqual(out["wrote"]["tabs"], ["ADD_UPS", "EXPORT_PAIRS", "MARKET_WIDTHS",
+            self.assertEqual(out["wrote"]["tabs"], ["ADD_UPS", "COS_WIDTHS", "CROSS_CORR",
+                                                    "EXPORT_PAIRS", "MARKET_WIDTHS",
                                                     "SHADES", "WING_WIDTHS"])
             self.assertTrue(svc.export_tables.summary()["present"]["SHADES"])
             self.assertEqual(svc.export_tables.shade("bloomberg", "CHFJPY")[0], -0.2)
+            self.assertEqual(svc.export_tables.shade("bloomberg", "USDCNH"),
+                             (0.0, "bloomberg USDCNH shade"))
+            self.assertEqual(svc.export_tables.cos_width("USDJPY", "1W")[0], 1.0)
+            self.assertEqual(svc.export_tables.cos_width("EURUSD", "1W")[0], 0.8)
             self.assertEqual(svc.export_tables.wing_width("AUDCAD", "O/N")[0],
                              {"rr25": 3, "rr10": 6, "bf25": 2.1, "bf10": 4.2})
             self.assertAlmostEqual(svc.export_tables.market_width("AUDHKD", "1M")[0], 0.75)
@@ -1241,6 +1293,96 @@ class TestExportScreen(unittest.TestCase):
             self.assertTrue(written.exists(), err.getvalue())
             self.assertEqual(written.read_bytes(), f.body)
         self.assertIn("Murex: 1 pair(s)", err.getvalue())
+
+
+class TestMarkedCorrelation(unittest.TestCase):
+    """`CROSS_CORR`: a cross's correlation typed rung by rung.
+
+    The desk's own CNH cross workbook carries a correlation per tenor between
+    the two leg volatilities and the cross -- USDCNH against AUDUSD is -0.700
+    out to 1M, then -0.675, -0.650, -0.625, -0.600 -- and an exponential
+    fitted through that ladder reproduces none of its rungs exactly.
+    """
+
+    def test_the_ladder_interpolates_in_time_and_is_flat_outside_it(self):
+        from volkit import cross
+        c = cross.marked_correlation("AUDCNH", {"1M": -0.7, "3M": -0.65, "1Y": -0.6})
+        self.assertEqual(c.marks, {"1M": -0.7, "3M": -0.65, "1Y": -0.6})
+        self.assertAlmostEqual(float(c(0.25)), -0.65)
+        # Between two rungs, linear in time; outside them, flat.
+        mid = float(c((1 / 12 + 0.25) / 2))
+        self.assertTrue(-0.7 < mid < -0.65, mid)
+        self.assertAlmostEqual(float(c(0.0)), -0.7)
+        self.assertAlmostEqual(float(c(30.0)), -0.6)
+        # One rung is a flat correlation, not an error.
+        self.assertAlmostEqual(float(cross.marked_correlation("X", {"1Y": 0.4})(5.0)), 0.4)
+
+    def test_a_ladder_that_cannot_be_placed_or_believed_is_refused_by_name(self):
+        from volkit import cross
+        for marks, word in (({"1M": 1.4}, "[-1, 1]"),
+                            ({"banana": 0.1}, "CROSS_CORR"),
+                            ({}, "no correlation")):
+            with self.assertRaises(ValueError) as ctx:
+                cross.marked_correlation("AUDCNH", marks)
+            self.assertIn(word, str(ctx.exception))
+
+    def test_the_seeded_ladders_reproduce_the_desks_cross_workbook(self):
+        """The rungs `exportseed.CROSS_CORR` carries, put through the triangle
+        in `cross.py` with the legs the desk's `Input` grid held on
+        2026-09-11, give that workbook's own cross volatilities."""
+        import math
+        from volkit import cross, exportseed
+        legs = {"AUDUSD": {"1M": 6.95, "1Y": 8.45}, "USDCAD": {"1M": 4.62, "1Y": 5.19},
+                "USDCHF": {"1M": 6.68, "1Y": 7.52}, "USDJPY": {"1M": 10.41, "1Y": 8.90},
+                "EURUSD": {"1M": 4.99, "1Y": 6.30}, "GBPUSD": {"1M": 5.28, "1Y": 7.26},
+                "NZDUSD": {"1M": 7.71, "1Y": 8.82}, "USDHKD": {"1M": 0.75, "1Y": 0.75},
+                "USDCNH": {"1M": 1.75, "1Y": 3.25}}
+        desk = {("AUDCNH", "1M"): 5.8598, ("AUDCNH", "1Y"): 7.0007,
+                ("CADCNH", "1M"): 3.9387, ("CADCNH", "1Y"): 4.5421,
+                ("CHFCNH", "1M"): 5.9013, ("CHFCNH", "1Y"): 6.5324,
+                ("CNHJPY", "1M"): 9.8416, ("CNHJPY", "1Y"): 8.3382,
+                ("EURCNH", "1M"): 4.1813, ("EURCNH", "1Y"): 5.3623,
+                ("GBPCNH", "1M"): 4.5582, ("GBPCNH", "1Y"): 6.3918,
+                ("NZDCNH", "1M"): 7.0490, ("NZDCNH", "1Y"): 7.9994,
+                ("CNHHKD", "1M"): 1.6649, ("CNHHKD", "1Y"): 3.1859}
+        for (pair, tenor), expected in desk.items():
+            a, b = cross.dollar_legs(pair)
+            sign = math.prod(cross.infer_leg_signs(pair, a, b))
+            rho = exportseed.CROSS_CORR[pair][tenor]
+            va, vb = legs[a][tenor], legs[b][tenor]
+            got = math.sqrt(va * va + vb * vb - 2.0 * sign * rho * va * vb)
+            self.assertAlmostEqual(got, expected, places=3, msg=f"{pair} {tenor}")
+
+    def test_the_book_takes_the_ladder_over_the_fit_and_says_so(self):
+        """A pair CROSS_CORR names is built off its rungs, and the warning
+        says so, because the marking screen's three correlation boxes are then
+        showing numbers nothing is using."""
+        from volkit.cross import CrossAtmCurve, MarkedCorrelation
+        with tempfile.TemporaryDirectory() as tmp:
+            wb = _workbook(Path(tmp))
+            book = Book.from_excel(wb, ASOF).load_all()
+            atm = book["CNHHKD"].atm
+            self.assertIsInstance(atm, CrossAtmCurve)
+            self.assertIsInstance(atm.correlation, MarkedCorrelation)
+            self.assertEqual(atm.correlation.marks["1M"], 0.325)
+            self.assertTrue(any("CNHHKD" in w and "CROSS_CORR" in w for w in book.warnings),
+                            book.warnings)
+            # Read as the three boxes the screen has always had: the first
+            # rung, the last, and no exponential to report.
+            self.assertEqual((atm.correlation.initial, atm.correlation.final,
+                              atm.correlation.decay), (0.325, 0.2, 0.0))
+            # A re-mark by hand replaces the ladder for the session.
+            self.assertEqual(atm.set_correlation(0.4, 0.4, 1.0), [])
+            self.assertNotIsInstance(atm.correlation, MarkedCorrelation)
+
+    def test_a_workbook_without_the_tab_fits_every_cross_as_before(self):
+        from volkit.cross import CorrelationCurve
+        book = Book.from_excel(WORKBOOK, ASOF).load_all()
+        self.assertEqual(book.cross_correlations, {})
+        crosses = [p for p in book.pairs if book.data.pairs[p].is_cross and p in book.surfaces]
+        self.assertTrue(crosses)
+        for pair in crosses:
+            self.assertIsInstance(book[pair].atm.correlation, CorrelationCurve)
 
 
 if __name__ == "__main__":

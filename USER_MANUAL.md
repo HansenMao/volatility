@@ -2006,7 +2006,7 @@ grid for grid.
   saying whether that row is the book's, the overlay's, or nobody's. A pillar
   the channel wants that neither source has is **refused by name** and nothing
   is written — a short file written silently is the failure this card exists
-  to kill. So is a pair `MARKET_WIDTHS` or `WING_WIDTHS` does not carry, a tier
+  to kill. So is a pair `MARKET_WIDTHS`, `WING_WIDTHS` or `COS_WIDTHS` does not carry, a tier
   the table does not have, and a tenor past the last one the sheet quotes.
   Overlay rows for a pair set to read the book are listed as unused rather
   than silently dropped.
@@ -2016,7 +2016,7 @@ grid for grid.
   wings (bid / ask where the channel publishes them two-way), and in words
   where each number came from — `marks`, `fitted`, `overlay`, `overlay (bf10
   from the book)`, `default tier ×1.5`, `market 0.5 + default other add-up
-  0.2`, `bloomberg default shade`, `WING_WIDTHS AUDUSD 1M`.
+  0.2`, `bloomberg default shade`, `WING_WIDTHS AUDUSD 1M`, `COS_WIDTHS USDJPY 1W`.
 
 **Configuration** — the export-policy tables. They are tabs of the workbook
 like every other setting and reach it the same way (**Write to workbook** on
@@ -2025,19 +2025,28 @@ Config window because they belong beside the thing they govern.
 
 | Table | What it holds |
 |---|---|
-| `SPREADS` | tenor rows, a column per tier: `default`, `wide`, `thin`, and **`cos`**, the COS file's width ladder. Was `KACE_SPREADS`; the old name is read and renamed on the next write |
+| `SPREADS` | tenor rows, a column per tier: `default`, `wide`, `thin`. Was `KACE_SPREADS`; the old name is read and renamed on the next write |
 | `MARKET_WIDTHS` | tenor rows, a column per pair: the **observed market** ATM two-way, in vol points. What the Bloomberg feed goes out at, plus the add-up. Typed by hand — nothing refreshes it — and a pair not here is refused |
 | `ADD_UPS` | the policy on top of `MARKET_WIDTHS`: a `default` row (`overnight`, `other`), a `crosses` row, and a row per pair that differs; the most specific wins. Today: 0 overnight, 0.2 otherwise, crosses 0, the HKD legs 0.2 |
 | `WING_WIDTHS` | the **two-way width of each wing** on the Bloomberg feed — `rr25`, `rr10`, `bf25`, `bf10` per pair and tenor, with `default` and `crosses` rows; the most specific wins. A wing goes out at its mark less and plus half of this; it is never shaded |
-| `SHADES` | the ATM **mid shift** in vol points by channel, with a row per pair that differs. `bloomberg` is 0.2 under the mark on both sides. A shade is not a width — it moves the mid, and the width goes around it |
+| `SHADES` | the ATM **mid shift** in vol points by channel, with a row per pair that differs. `bloomberg` is 0.2 under the mark on both sides for the G7 and G7 Cross pairs, and **zero for USDCNH, USDHKD, HKDCNH and XAUUSD** — the EM/PM block is a separate sheet on the desk's side and shades nothing. A shade is not a width — it moves the mid, and the width goes around it |
+| `COS_WIDTHS` | how far under the mid the **COS bid** sits, in vol points, per pair and tenor, with `default` and `crosses` rows; the most specific wins. **One-sided**: the COS file carries a bid and no ask, so this is the whole distance under the mid — the number on the desk's own `Guideline` sheet. Pair-dependent, which is why it is not a tier of `SPREADS`: the desk runs 0.8/0.6/0.5/0.5/0.5 for most pairs, 1.0/0.8 at the front for USDJPY, 0.9/0.7 for the yen crosses, a flat 0.5 for USDCNH and AUDNZD |
 | `EXPORT_PAIRS` | which pairs each channel publishes, **in the file's order**: `channel`, `pair`, `label` (as the file writes it — `AUD/USD`, `USD/CNY`), `feed_from` (the curve it is read from when that is another pair — COS's CNY rows are fed the CNH curves; a pair marked the other way up is inverted and says so), `last_tenor` (XAUUSD stops at 1Y on Bloomberg). kACE with no rows of its own publishes every pair the book builds |
 
 **Seed the missing tables** (or `volkit export --init-tables`) writes what the
-desk's own files of 2026-09-10 say — the 33 Bloomberg pairs in block order,
-the 32 Murex pairs and 25 COS pairs in row order with their labels, the
-Bloomberg ATM and wing widths cell for cell, the shade and the add-ups — into
-the session; only the `cos` tier is left for you to type, because the COS
-file's widths are not a ladder anything can derive.
+desk's own files say — the 33 Bloomberg pairs in block order, the 32 Murex
+pairs and 25 COS pairs in row order with their labels, the Bloomberg ATM and
+wing widths cell for cell, the shades and the add-ups, the COS ladder off the
+`Guideline` sheet, and the eight CNH crosses' correlation off the cross
+workbook (`CROSS_CORR`, which is not export policy but comes out of the same
+files) — into the session. Check them against the sheets before the first run.
+
+One thing COS does differently on purpose: the desk's sheet starts from a
+broker paste — the market's delta-neutral **bid**, rounded down to a tenth —
+and takes the ladder off that. Here it starts from the marked mid, like every
+other channel, so one surface goes out on all four feeds. The bids therefore
+differ from the spreadsheet's by whatever your mid differs from the market's
+bid.
 
 **Log** — `publish_log.jsonl` beside the workbook: every export on every
 channel, sent or refused, with its source (`marks`, or the overlay's file

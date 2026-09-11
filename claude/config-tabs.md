@@ -17,11 +17,13 @@ formulas (`volkit migrate-wings`), and `Vega Weights` was already a tab of the
 desk's workbook -- one unheaded column of numbers under `USDCNH` that nothing
 read -- until `vegaweights.load_vega_weights` was written for it.
 
-Five more came with the bulk export (`claude/screen-export.md`) and are
+Six more came with the bulk export (`claude/screen-export.md`) and are
 **export policy**: `MARKET_WIDTHS` (tenor rows, a column per pair -- the
 observed market ATM two-way), `ADD_UPS` (the policy add-up on top of it),
 `WING_WIDTHS` (the two-way width of each wing on the Bloomberg feed, per pair
-and tenor), `SHADES` (the ATM mid shift by channel, with per-pair rows) and
+and tenor), `SHADES` (the ATM mid shift by channel, with per-pair rows),
+`COS_WIDTHS` (how far under the mid the COS bid sits, per pair and tenor --
+one-sided, because that file carries a bid and no ask) and
 `EXPORT_PAIRS` (which pairs each channel publishes, in the file's order). They
 are read and written exactly like the rest, but **edited on the Vol bulk
 processing screen rather than in the Config window** -- `configsheets.EXPORT_TABS` names them and
@@ -32,6 +34,17 @@ one channel holding another's policy is a name that lies. `LEGACY_NAMES` reads
 the old name when the new is absent and `write_rows` renames the tab, in place
 with its prose, the first time it is written; `renamed_tabs` reports which
 state a workbook is in.
+
+`CROSS_CORR` is the newest, and it is **not** export policy: it is what the
+*book* builds a cross with.  `pair`, `tenor`, `correlation` -- a correlation
+typed rung by rung, which takes the place of that pair's fitted `initial` /
+`long_term` / `mean_reversion` wherever the tab names it (`cross.py`'s
+`MarkedCorrelation`; between rungs it is linear in time, outside them flat).
+The desk's own CNH cross workbook has always carried a correlation per tenor
+rather than three coefficients, and an exponential fitted through that ladder
+reproduces none of its rungs, so the tab is the ladder itself.  Edited in the
+Config window like the rest, and seeded with the desk's eight CNH crosses by
+the same command that seeds the export tables.
 
 `market_feed.csv` stays a file on purpose: it is market data with an `asof`,
 overwritten daily, and a file is easier to overwrite than a tab in a workbook

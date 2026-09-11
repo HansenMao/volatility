@@ -1942,8 +1942,9 @@ def cmd_export(args) -> int:
         for note in out["notes"]:
             print(f"  . {note}")
         print("  EXPORT_PAIRS holds example rows only: type each channel's pairs in the "
-              "file's own order, then MARKET_WIDTHS for the Bloomberg pairs and a cos tier "
-              "on SPREADS")
+              "file's own order, then MARKET_WIDTHS for the Bloomberg pairs. COS_WIDTHS "
+              "and CROSS_CORR are seeded with the desk's own numbers -- check them "
+              "against the sheets before the first run")
         return 0
 
     book = _book(args)
