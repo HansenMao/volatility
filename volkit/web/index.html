@@ -774,6 +774,18 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
             what the workbook's <code>WING_RATIOS</code> tab holds.</details>
           <div class="row" style="margin-top:8px"><button class="danger" id="mclearratio">Clear ratio changes</button></div>
         </div>
+        <details class="hint hide" id="mowpastehint" style="margin-top:7px"><summary>The
+          overwrite column takes a block paste too</summary>A column of marks out of a
+          spreadsheet lands here the way the quotes do: click the box the block starts in and
+          paste, and it fills down the tenors from there in one write. A leading
+          <b>tenor column</b> is matched by name rather than by position and a <b>header
+          row</b> is dropped, so a sheet whose rows are in another order still lands where it
+          should. A blank cell is left as it was &mdash; the way to take an overwrite off is
+          still to empty its box. A block dropped here <b>stays in this column</b>: an
+          overwrite is a mark laid over the fit and a quote is an input to it, so anything in
+          a column to the right of this one, or past the last tenor, is ignored and counted
+          rather than written as a quote. One cell that is not a number refuses the whole
+          block.</details>
         <div class="row hide" id="matmowrow" style="margin-top:9px"><button class="danger" id="mclearatm">Clear ATM overwrites</button></div>
         <!-- The bump.  A desk does not mark a term structure one tenor at a
              time: it has a view on one of them and the rest of the curve
@@ -3043,8 +3055,9 @@ function paintMarks(){
     :(QPASTE||(nq?`${nq} tenor${nq===1?'':'s'} re-quoted`:''));
   qn.className=QPROB.length?'msg bad':'meta';
   const qcols=$('#mquoteshow').checked, QF=qcols?quoteFields():[];
-  /* The paste note belongs to the quote columns and goes with them. */
+  /* Each paste note belongs to the column it describes and goes with it. */
   $('#mqpastehint').classList.toggle('hide',!qcols);
+  $('#mowpastehint').classList.toggle('hide',!ow);
   // Two columns want to sit beside each other; anything more wants the card.
   $('#matm').className='mark'+((ow||qcols)?'':' tight');
   $('#matm').innerHTML=`<thead><tr><th>Tenor</th><th>${esc(MARKS.cut)} cut %</th>`+
@@ -3466,15 +3479,24 @@ async function applyMark(el){
 }
 document.addEventListener('change',e=>{if(e.target.dataset&&e.target.dataset.m)applyMark(e.target)});
 
-/* ---- pasting a block of quotes ------------------------------------------
-   A marker keeps these four numbers in a spreadsheet and marks a pair by
-   moving the lot, so the table takes them the way the spreadsheet hands them
-   over: one paste, filling right and down from the box it starts in.  It is
-   the same edit as typing every box -- ordinary quote overwrites, refitted
-   and counted like the rest -- and it is posted whole rather than cell by
-   cell, because a block that failed at row nine is not something a person can
-   undo by hand.  What the paste last did is said beside the table; a cell it
-   could not use is named there rather than swallowed. */
+/* ---- pasting a block into the ATM table ---------------------------------
+   A marker keeps these numbers in a spreadsheet and marks a pair by moving
+   the lot, so the table takes them the way the spreadsheet hands them over:
+   one paste, filling right and down from the box it starts in.  It is the
+   same edit as typing every box -- ordinary overwrites, refitted and counted
+   like the rest -- and it is posted whole rather than cell by cell, because a
+   block that failed at row nine is not something a person can undo by hand.
+   What the paste last did is said beside the table; a cell it could not use
+   is named there rather than swallowed.
+
+   Two sets of columns take one: the four quotes, and the per-tenor ATM
+   overwrite beside them.  The block is read the same way for either -- the
+   same header row dropped, the same tenor column matched by name -- so it is
+   one reading, told apart by the box the block was dropped on.  A block
+   dropped on the overwrite column stays in it rather than filling on into the
+   quotes: an overwrite is a mark laid over the fit and a quote is an input to
+   it, and a paste that crossed from the one to the other would be writing two
+   different kinds of thing from one drag of a mouse. */
 let QPASTE='';
 /* Vol points as a sheet writes them: 8.20, "8.20", " 8.2 ", 1,234 or 8.2%.
    Blank comes back as '' and a word as null, and the two are not the same
@@ -3493,16 +3515,22 @@ function qpGrid(text){
   return String(text||'').replace(/\r\n?/g,'\n').replace(/\n+$/,'').split('\n')
     .map(l=>l.indexOf('\t')>=0?l.split('\t'):l.trim().split(/\s*,\s*|\s{2,}|\s+/));
 }
-function qpBox(tenor,field){
+/* The columns a block can fill, and what one is called, for the kind of box
+   it was dropped on.  The overwrite is a single column; the quotes are
+   however many the surface quotes. */
+function qpCols(kind){return kind==='atm'?['atm']:quoteFields()}
+function qpLabel(kind,f){return kind==='atm'?'overwrite':quoteLabel(f)}
+function qpBox(kind,tenor,field){
   return Array.prototype.slice.call(
-    document.querySelectorAll('#matm input[data-m="quote"]'))
-    .filter(b=>b.dataset.tenor===tenor&&b.dataset.field===field)[0]||null;
+    document.querySelectorAll('#matm input[data-m="'+kind+'"]'))
+    .filter(b=>b.dataset.tenor===tenor&&(kind==='atm'||b.dataset.field===field))[0]||null;
 }
 /* The block, read against the table it was dropped on.  Nothing is posted
    from here: it answers with the cells it would write and everything it could
    not, so the refusal and the note are decided in one place. */
 function qpPlan(el,text){
-  const QF=quoteFields(), tenors=(MARKS&&MARKS.atm||[]).map(r=>r.tenor);
+  const kind=el.dataset.m, QF=qpCols(kind),
+        tenors=(MARKS&&MARKS.atm||[]).map(r=>r.tenor);
   let g=qpGrid(text);
   const noNum=r=>r.every(c=>typeof qpNum(c)!=='number');
   const anyWord=r=>r.some(c=>qpNum(c)===null);
@@ -3527,14 +3555,15 @@ function qpPlan(el,text){
       if(f==null){out.past+=1;return}
       const v=qpNum(raw);
       if(v==='')  {out.blank+=1;return}
-      if(v===null){out.bad.push(tenor+' '+quoteLabel(f)+': '+String(raw).trim());return}
-      if(!qpBox(tenor,f)){out.derived.push(tenor+' '+quoteLabel(f));return}
+      if(v===null){out.bad.push(tenor+' '+qpLabel(kind,f)+': '+String(raw).trim());return}
+      if(!qpBox(kind,tenor,f)){out.derived.push(tenor+' '+qpLabel(kind,f));return}
       out.cells.push({tenor:tenor,field:f,value:v});
     });
   });
   return out;
 }
-async function quotePaste(el,text){
+async function blockPaste(el,text){
+  const kind=el.dataset.m, what=kind==='atm'?'overwrite':'quote';
   const plan=qpPlan(el,text);
   QPASTE='';
   if(plan.bad.length){
@@ -3545,17 +3574,24 @@ async function quotePaste(el,text){
   }
   if(!plan.cells.length){
     QPROB=[];
-    QPASTE='nothing in that paste landed on a quote box';
+    QPASTE='nothing in that paste landed on a '+what+' box';
     paintMarks();return;
   }
-  const note=[plan.cells.length+' quote(s) pasted'];
+  const note=[plan.cells.length+' '+what+'(s) pasted'];
   if(plan.blank)note.push(plan.blank+' blank cell(s) left as they were');
   if(plan.derived.length)note.push(plan.derived.length+' derived wing(s) skipped');
   if(plan.unknown.length)note.push('no tenor '+plan.unknown.slice(0,3).join(', '));
-  if(plan.past)note.push(plan.past+' value(s) past the table ignored');
+  if(plan.past)note.push(plan.past+' value(s) past the'+
+    (kind==='atm'?' overwrite column':' table')+' ignored');
   QPROB=[];
+  /* The overwrite column has no field to send: one column is one number a
+     tenor, and the server writes them against a snapshot the same way. */
+  const cells=kind==='atm'
+    ?plan.cells.map(c=>({tenor:c.tenor,value:c.value})):plan.cells;
   try{
-    const r=await post('/api/overwrite',{pair:mq().pair,kind:'quotes',cells:plan.cells});
+    const r=kind==='atm'
+      ?await post('/api/overwrite',{pair:mq().pair,kind:'atm_block',cells:cells})
+      :await post('/api/overwrite',{pair:mq().pair,kind:'quotes',cells:cells});
     QPROB=(r&&r.problems)||[];
     QPASTE=note.join(' · ');
   }catch(e){QPROB=[e.message]}
@@ -3565,12 +3601,12 @@ async function quotePaste(el,text){
    block: the browser's own paste does that better than we would. */
 document.addEventListener('paste',e=>{
   const el=e.target;
-  if(!el||!el.dataset||el.dataset.m!=='quote')return;
+  if(!el||!el.dataset||(el.dataset.m!=='quote'&&el.dataset.m!=='atm'))return;
   if(!el.closest||!el.closest('#matm'))return;
   const text=((e.clipboardData||window.clipboardData)||{getData:()=>''}).getData('text');
   if(!/[\t\n\r]/.test(String(text||'')))return;
   e.preventDefault();
-  quotePaste(el,text);
+  blockPaste(el,text);
 });
 $('#mclearatm').onclick=async()=>{await post('/api/overwrite',{pair:mq().pair,kind:'clear_atm'});
   await loadMarks();await redraw();schedulePrice()};

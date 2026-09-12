@@ -1385,6 +1385,40 @@ class BookService:
             refit = False
             if kind == "atm":
                 surface.atm.overwrite_tenor(q["tenor"], float(q["value"]) / 100.0)
+            elif kind == "atm_block":
+                # A column of ATM overwrites written together -- what a paste
+                # out of a spreadsheet is.  Not the single-tenor route in a
+                # loop: a block refused at row nine would leave the curve
+                # holding the rows before it and no way back to the shape it
+                # had, so every cell is written against a snapshot and the
+                # snapshot is put back if any one of them is refused.
+                #
+                # The tenor is checked against the table here, which the
+                # single-tenor route has no need to do: a box is typed into on
+                # a row that exists, but a pasted label is whatever the
+                # spreadsheet called it, and an overwrite at a tenor the curve
+                # has no pillar for is read by nobody -- a mark that silently
+                # does nothing is the thing this project exists to remove.
+                cells = q.get("cells")
+                if not isinstance(cells, list) or not cells:
+                    raise ValueError("a block of overwrites needs at least one cell")
+                known = {t.upper() for t in self._atm_tenors(surface)}
+                keep = dict(surface.atm.tenor_overwrites)
+                try:
+                    for cell in cells:
+                        tenor = str(cell.get("tenor") or "").strip()
+                        if tenor.upper() not in known:
+                            raise ValueError(
+                                f"{tenor or '(blank)'} is not a tenor on the ATM table")
+                        raw = cell.get("value")
+                        if raw is None or raw == "":
+                            surface.atm.clear_overwrite(tenor)
+                        else:
+                            surface.atm.overwrite_tenor(tenor, float(raw) / 100.0)
+                except Exception as exc:  # noqa: BLE001 - reported to the browser
+                    surface.atm.tenor_overwrites.clear()
+                    surface.atm.tenor_overwrites.update(keep)
+                    raise ValueError(f"nothing was written: {exc}") from None
             elif kind == "smile":
                 surface.overwrite_param(q["param"], q["tenor"], float(q["value"]))
             elif kind == "clear":

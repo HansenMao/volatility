@@ -165,6 +165,62 @@ class TestCurveMarking(unittest.TestCase):
         atm.set_events([(b, 0.02, "B")])
         self.assertEqual([e.label for e in atm.events.events], ["B"])
 
+    def test_a_block_of_atm_overwrites_is_written_as_one_edit(self):
+        """What a paste into the overwrite column posts.
+
+        The column used to take no block at all -- the browser dropped the
+        whole clipboard into one box, the line breaks stripped, and
+        ``parseFloat`` read ``8.28.3`` out of two tenors and wrote 8.28 to one
+        of them.  A silently wrong mark from a paste nobody was told had
+        failed, which is the anti-pattern this project exists to remove.
+        """
+        from volkit.webapp import BookService
+        service = BookService(str(BOOK), ASOF)
+        out = service.overwrite({"pair": "USDJPY", "kind": "atm_block", "cells": [
+            {"tenor": "1M", "value": 9.5}, {"tenor": "3M", "value": 9.75}]})
+        self.assertEqual(out["problems"], [])
+        rows = {r["tenor"].upper(): r for r in service.marks({"pair": "USDJPY"})["atm"]}
+        self.assertAlmostEqual(rows["1M"]["overwrite"] * 100, 9.5)
+        self.assertAlmostEqual(rows["3M"]["overwrite"] * 100, 9.75)
+        self.assertAlmostEqual(rows["1M"]["marked"], 9.5)
+        # A blank cell of the block is that tenor given back to the curve --
+        # the same thing emptying its box does.
+        service.overwrite({"pair": "USDJPY", "kind": "atm_block",
+                           "cells": [{"tenor": "1M", "value": None}]})
+        again = {r["tenor"].upper(): r
+                 for r in service.marks({"pair": "USDJPY"})["atm"]}["1M"]
+        self.assertIsNone(again["overwrite"])
+        self.assertAlmostEqual(again["marked"], again["curve"], places=9)
+
+    def test_a_block_of_atm_overwrites_that_is_refused_writes_none_of_it(self):
+        """Half a pasted column is not a column anybody typed.
+
+        Two ways in: a cell that is not a number, and a tenor the ATM table
+        does not have.  The second is the one only a block can produce -- a
+        box is typed into on a row that exists, but a pasted label is whatever
+        the spreadsheet called it, and an overwrite at a tenor the curve has
+        no pillar for would be read by nobody.
+        """
+        from volkit.webapp import BookService
+        service = BookService(str(BOOK), ASOF)
+        service.overwrite({"pair": "USDJPY", "kind": "atm", "tenor": "1M", "value": 9.5})
+        for cells, says in (
+                ([{"tenor": "3M", "value": 9.75}, {"tenor": "3M", "value": "much"}],
+                 "much"),
+                ([{"tenor": "3M", "value": 9.75}, {"tenor": "4M", "value": 9.8}],
+                 "4M is not a tenor")):
+            with self.assertRaises(ValueError) as cm:
+                service.overwrite({"pair": "USDJPY", "kind": "atm_block", "cells": cells})
+            self.assertIn("nothing was written", str(cm.exception))
+            self.assertIn(says, str(cm.exception))
+            rows = {r["tenor"].upper(): r for r in service.marks({"pair": "USDJPY"})["atm"]}
+            # The good cell of the refused block is gone and the mark that was
+            # there before it is still there.
+            self.assertIsNone(rows["3M"]["overwrite"])
+            self.assertAlmostEqual(rows["1M"]["overwrite"] * 100, 9.5)
+        with self.assertRaises(ValueError):
+            service.overwrite({"pair": "USDJPY", "kind": "atm_block", "cells": []})
+
 
 class TestSmileTermStructureMarks(unittest.TestCase):
     """The three coefficients behind each smile parameter, marked by hand.

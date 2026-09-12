@@ -1012,10 +1012,29 @@ class TestWebAssets(unittest.TestCase):
         posted = set(_re.findall(
             r"/api/overwrite'\s*,\s*(?:Object\.assign\()?\{.*?kind:'([a-z_]+)'", js, _re.S))
         self.assertIn("quotes", posted, "the block paste is not posted from the page")
+        self.assertIn("atm_block", posted, "the overwrite column posts no block")
         self.assertIn("quote", posted)
         handler = _source("volkit", "webapp.py").split("def overwrite(")[1].split("\n    def ")[0]
         served = set(_re.findall(r'kind == "([a-z_]+)"', handler))
         self.assertEqual(posted - served, set())
+
+    def test_the_block_paste_is_taken_on_the_overwrite_column_as_well(self):
+        """The ATM overwrite column takes a pasted block like the quotes do.
+
+        It used to take none: the listener returned unless the box was a
+        quote, so a pasted column fell through to the browser, which put the
+        whole clipboard into one box with the line breaks stripped -- 8.28 out
+        of 8.2 and 8.3, written to one tenor and reported as nothing wrong.
+        Pinned in the source because there is no browser here to paste into.
+        """
+        js = _source("volkit", "web", "index.html").split("<script>")[1].split("</script>")[0]
+        listener = js.split("document.addEventListener('paste'")[1].split("});")[0]
+        for kind in ("'quote'", "'atm'"):
+            self.assertIn(kind, listener, f"a {kind} box is not pasted into")
+        # And the block is read against whichever column set it landed on,
+        # rather than the quote fields whatever the box was.
+        self.assertIn("function qpCols(kind)", js)
+        self.assertIn("qpCols(kind)", js.split("function qpPlan(")[1])
 
     def test_the_monitor_panel_fields_are_all_understood_by_the_server(self):
         """Same guard as the listed, market-maker and comparison panels.

@@ -357,6 +357,19 @@ move the screen.
   that wants the room. A tenor that *is* overwritten carries a **·** beside
   its name while the column is shut, and the heading counts them — a mark you
   cannot see would be worse than a column you did not want.
+
+  The column takes a **block paste**, the same way the quotes below it do:
+  copy a column of marks out of a spreadsheet, click the box the block starts
+  in and paste, and it fills down the tenors from there as one edit. A leading
+  **tenor column** is matched by name rather than by position, so a sheet whose
+  rows are in another order still lands where it should, and a **header row**
+  is dropped. A blank cell is left as it was — emptying a box is still how an
+  overwrite is taken off. A block dropped here **stays in this column**: an
+  overwrite is a mark laid over the fit and a quote is an input to it, so
+  anything in a column to the right, or past the last tenor, is ignored and
+  counted rather than written as a quote, and the note above the table says so.
+  One cell that is not a number refuses the whole block, and a tenor name the
+  table does not have is refused with it.
 * **The quotes, on the same rows** — `RR 25d`, `RR 10d`, `ST 25d`, `ST 10d`:
   the four numbers each tenor's smile is fitted from, as the pair's own sheet
   holds them, in volatility points. They are **editable**. Type into one and
