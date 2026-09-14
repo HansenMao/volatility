@@ -233,9 +233,9 @@ class ExportTables:
     wing_widths: dict[str, dict[str, dict[str, float]]] | None = None  # key -> tenor -> inst -> w
     cos_widths: dict[str, dict[str, float]] | None = None        # key -> tenor -> width
     export_pairs: dict[str, list["PairEntry"]] | None = None     # channel -> entries
-    #: Not an export-policy table: the ``CROSS_CORR`` marking tab, read here
-    #: only so the seeder can say whether the workbook already has it.  The
-    #: correlations themselves are the book's (``Book.cross_correlations``).
+    #: ``CROSS_CORR``: COS's typed cross correlations, pair -> tenor -> rho.
+    #: The COS file builds a cross it names off the two dollar legs at these;
+    #: the book never reads them (``_correlated_atm``).
     cross_corr: dict[str, dict[str, float]] | None = None
     errors: dict[str, str] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
@@ -389,6 +389,19 @@ class ExportTables:
         if "" in rows:
             return rows[""], f"{channel} default shade"
         return 0.0, f"no {channel} default shade"
+
+    def cross_correlation(self, *names: str) -> tuple[str, dict[str, float]] | None:
+        """The first of ``names`` ``CROSS_CORR`` types a ladder for, and the ladder.
+
+        Asked with the published pair and the curve it is fed from, because
+        the desk spells HKD/CNH both ways round and a correlation is the same
+        either way up.
+        """
+        for name in names:
+            ladder = (self.cross_corr or {}).get(str(name).upper())
+            if ladder:
+                return str(name).upper(), ladder
+        return None
 
     def pairs_for(self, channel: str, book=None) -> list["PairEntry"]:
         """The pairs a channel publishes, in order.
@@ -561,23 +574,16 @@ def _read_cos_widths(p: Path, overlay) -> dict[str, dict[str, float]] | None:
 
 
 def _read_cross_corr(p: Path, overlay) -> dict[str, dict[str, float]] | None:
-    """``CROSS_CORR``, read here only so the seeder knows it is there.
+    """``CROSS_CORR``: COS policy, and only COS's.
 
-    The book reads the same tab for itself (``Book.cross_correlations``); this
-    is presence, not policy, and a tab that cannot be read is that tab's
-    error and not an export's.
+    A correlation outside [-1, 1] is refused here, with the row; a ladder
+    that cannot be placed (a tenor that names no length) is refused by the
+    COS build for that pair, where the pillar it would have made is named.
     """
-    rows = configsheets.read_rows(p, cross_mod.CROSS_CORR_SHEET, required=("pair", "tenor"),
-                                  overlay=overlay)
-    if rows is None:
-        return None
-    out: dict[str, dict[str, float]] = {}
-    for row in rows:
-        pair, tenor = row.text("pair").upper(), row.text("tenor")
-        rho = row.real("correlation")
-        if pair and tenor and rho is not None:
-            out.setdefault(pair, {})[str(tenor)] = float(rho)
-    return out
+    try:
+        return cross_mod.load_cross_correlations(p, overlay=overlay)
+    except ValueError as exc:
+        raise PublishError(f"CROSS_CORR could not be read: {exc}") from exc
 
 
 def _read_export_pairs(p: Path, overlay) -> dict[str, list[PairEntry]] | None:
@@ -641,6 +647,10 @@ class Channel:
     #: and left out (NaN) when not -- the COS grid and the Murex ATM file
     #: carry the ATM alone, so an overlay of ATMs is a whole file for them.
     needs: tuple[str, ...] = INSTRUMENTS
+    #: A cross ``CROSS_CORR`` types a ladder for has its ATM built off its two
+    #: dollar legs at that correlation, for this channel alone (COS).  Every
+    #: other channel, and the book, keep the cross the book builds.
+    correlated_crosses: bool = False
 
     def tenor_list(self, tables: ExportTables) -> list[str]:
         if self.tenors:
@@ -650,11 +660,35 @@ class Channel:
                 kace.SPREADS_SHEET, tables.path))
         return sorted(tables.spreads.for_tier(None), key=pillar_years)
 
+    @property
+    def tables(self) -> tuple[str, ...]:
+        """The configuration tables this channel reads, in ``EXPORT_TABS`` order.
+
+        Worked out from what the channel does rather than listed beside it, so
+        a channel that starts reading a table cannot be shown without it.
+        ``SHADES`` and ``EXPORT_PAIRS`` are every channel's: both are keyed
+        by channel.
+        """
+        used = {"SHADES", "EXPORT_PAIRS"}
+        if self.width == "tier":
+            used.add("SPREADS")
+        if self.width == "market":
+            used |= {"MARKET_WIDTHS", "ADD_UPS"}
+        if self.wings_two_way:
+            used.add("WING_WIDTHS")
+        if self.width == "cos":
+            used.add("COS_WIDTHS")
+        if self.correlated_crosses:
+            used.add("CROSS_CORR")
+        return tuple(s for s in configsheets.EXPORT_TABS if s in used)
+
     def summary(self) -> dict:
         return {"key": self.key, "label": self.label, "kind": self.kind,
                 "tenors": list(self.tenors), "width": self.width,
                 "default_tier": self.default_tier, "what": self.what,
-                "wings_two_way": self.wings_two_way, "one_sided": self.one_sided}
+                "wings_two_way": self.wings_two_way, "one_sided": self.one_sided,
+                "correlated_crosses": self.correlated_crosses,
+                "tables": list(self.tables)}
 
 
 CHANNELS: dict[str, Channel] = {
@@ -678,9 +712,11 @@ CHANNELS: dict[str, Channel] = {
     "cos": Channel(
         key="cos", label="COS", kind="file", tenors=COS_TENORS, width="cos",
         default_tier="", precision=2, needs=("atm",), one_sided=True,
+        correlated_crosses=True,
         what="COS_86830_Bid.csv: the ATM bid alone, five tenors, CNY-labelled rows fed "
              "from the CNH curves; the bid sits COS_WIDTHS under the mid, one-sided, "
-             "per pair and tenor"),
+             "per pair and tenor; a cross CROSS_CORR names takes its ATM off its two "
+             "dollar legs at that correlation"),
 }
 
 
@@ -891,6 +927,62 @@ def _book_read(book, pair: str, tenors: list[str], *, cut: str, source: str,
     return read, cannot
 
 
+def _correlated_atm(book, pair: str, ladder: dict[str, float], tenors: list[str], *,
+                    cut: str, wings: str, methods: dict, where: str
+                    ) -> tuple[dict[str, float], dict[str, str], dict[str, str]]:
+    """A cross's ATM off its two dollar legs at ``CROSS_CORR``'s correlation.
+
+    The COS file's CNH crosses, the way the desk's ``CNH cross vols DB``
+    workbook makes them: each leg's ATM at the pillar, read from the book as
+    any published pillar is, put through the triangle at the typed rung.  The
+    cross's own curve -- its fitted correlation, add-on and events -- is not
+    used, and nothing here touches the book: the correlation is COS policy.
+
+    Returns ``({tenor: atm}, {tenor: origin}, {tenor: why not})``.  A pillar
+    a leg cannot supply is named, never filled from the book's own cross,
+    because that would publish a different model under the same row.
+    """
+    atm: dict[str, float] = {}
+    origin: dict[str, str] = {}
+    why: dict[str, str] = {}
+    try:
+        curve = cross_mod.marked_correlation(pair, ladder)
+        spec = book.data.pairs.get(pair)
+        legs = (tuple(spec.legs) if spec is not None and spec.is_cross and len(spec.legs) == 2
+                else cross_mod.dollar_legs(pair))
+        sign = cross_mod.infer_leg_signs(pair, *legs)
+        sign = sign[0] * sign[1]
+    except ValueError as exc:
+        return atm, origin, {t: f"CROSS_CORR cannot build {pair} ({exc})" for t in tenors}
+    reads: dict[str, kace.PillarRead | None] = {}
+    failed: dict[str, str] = {}
+    for leg in legs:
+        try:
+            reads[leg], _ = _book_read(book, leg, tenors, cut=cut, source=wings,
+                                       method=methods.get(leg), where=where)
+        except (KaceError, ValueError, KeyError) as exc:
+            reads[leg], failed[leg] = None, str(exc)
+    for t in tenors:
+        short = [leg for leg in legs if reads[leg] is None or t not in reads[leg].atm]
+        if short:
+            why[t] = "; ".join(
+                f"its leg {leg} " + (f"could not be read ({failed[leg]})" if leg in failed
+                                     else "is not in the book" if leg not in book
+                                     else f"has no {t}")
+                for leg in short)
+            continue
+        v1, v2 = reads[legs[0]].atm[t], reads[legs[1]].atm[t]
+        rho = float(curve(pillar_years(t)))
+        var = v1 * v1 + v2 * v2 - 2.0 * sign * rho * v1 * v2
+        if var <= 0:
+            why[t] = (f"{legs[0]} {v1:.4f} and {legs[1]} {v2:.4f} at correlation {rho:+.3f} "
+                      f"give a variance of {var:.6g}")
+            continue
+        atm[t] = var ** 0.5
+        origin[t] = f"CROSS_CORR {rho:+.3f} on {legs[0]} {v1:.2f}, {legs[1]} {v2:.2f}"
+    return atm, origin, why
+
+
 def pair_sources(entries, source: str, overlay: overlay_mod.Overlay | None,
                  sources: dict | None) -> dict[str, str]:
     """Which source each pair is read from: the choice per pair, else the default.
@@ -986,6 +1078,17 @@ def build(channel_name: str, book, tables: ExportTables, *, source: str = "book"
             notes.append(f"{entry.pair}: the book could not be read ({exc}); every tenor "
                          f"falls to the overlay")
             read, cannot = None, list(want)
+        # COS alone: a cross CROSS_CORR names takes its ATM off its legs.
+        corr_atm: dict[str, float] = {}
+        corr_origin: dict[str, str] = {}
+        corr_why: dict[str, str] = {}
+        corr = tables.cross_correlation(entry.feed_from, entry.pair) if ch.correlated_crosses else None
+        if corr is not None and is_cross(entry.feed_from):
+            corr_atm, corr_origin, corr_why = _correlated_atm(
+                book, entry.feed_from, corr[1], want, cut=cut, wings=wings,
+                methods=methods, where=where)
+        else:
+            corr = None
         pair_missing: list[str] = []
         row_src: dict[str, str] = {}
         use_overlay = overlay is not None and chosen[entry.pair] == "overlay"
@@ -1001,7 +1104,19 @@ def build(channel_name: str, book, tables: ExportTables, *, source: str = "book"
                 base = {"atm": read.atm[t], "rr25": read.wings[t][0], "rr10": read.wings[t][1],
                         "bf25": read.wings[t][2], "bf10": read.wings[t][3]}
                 origin = read.origin[t]
+            if corr is not None:
+                # The legs' ATM replaces the cross's; its wings, where the
+                # book has them, are carried as they are.  A pillar the legs
+                # cannot make has no book ATM at all.
+                if t in corr_atm:
+                    base["atm"] = corr_atm[t]
+                    origin = corr_origin[t]
+                    have_book = True
+                else:
+                    base.pop("atm", None)
+                    have_book = False
             vals = dict(base)
+            book_origin = origin
             src = "book"
             given = (None, None)
             if ov is not None:
@@ -1016,10 +1131,10 @@ def build(channel_name: str, book, tables: ExportTables, *, source: str = "book"
                     origin = ("overlay two-way" if ov.two_way else "overlay")
                     if len(fields_from_file) < len(overlay_mod.FIELDS) and have_book:
                         fell = [f for f in overlay_mod.FIELDS if f not in fields_from_file]
-                        origin += f" ({', '.join(fell)} from the book: {read.origin[t]})"
+                        origin += f" ({', '.join(fell)} from the book: {book_origin})"
                         fell_through += 1
                     if have_book:
-                        for f in fields_from_file:
+                        for f in (f for f in fields_from_file if f in base):
                             d = ov.values[f] - base[f]
                             if abs(d) > 1e-12:
                                 diffs.append({"pair": entry.pair, "tenor": t, "field": f,
@@ -1027,7 +1142,7 @@ def build(channel_name: str, book, tables: ExportTables, *, source: str = "book"
                                               "move": d})
                 elif have_book:
                     fell_through += 1
-                    origin = f"{read.origin[t]} (overlay row blank)"
+                    origin = f"{book_origin} (overlay row blank)"
             missing = [f for f in ch.needs if f not in vals]
             if missing:
                 pair_missing.append(t)
@@ -1055,6 +1170,9 @@ def build(channel_name: str, book, tables: ExportTables, *, source: str = "book"
                                f"the risk reversals change sign, the ATM and flies do not")
             elif entry.feed_from != entry.pair and src == "book":
                 q.notes.append(f"fed from the {entry.feed_from} curve")
+            if corr is not None and src == "book" and t in corr_atm:
+                q.notes.append(f"COS only: the ATM is off the dollar legs at CROSS_CORR's "
+                               f"correlation, not the book's {entry.feed_from}")
             # The shade, then the width around the shaded mid.
             q.shade, q.shade_from = tables.shade(ch.key, entry.pair)
             q.one_sided = ch.one_sided
@@ -1086,11 +1204,18 @@ def build(channel_name: str, book, tables: ExportTables, *, source: str = "book"
                 continue
             quotes.append(q)
         if pair_missing:
+            legs_said = sorted({corr_why[t] for t in pair_missing if t in corr_why})
             refused.append(f"{entry.pair}: no {', '.join(pair_missing)} "
                            + ("in the book or the overlay" if overlay is not None
                               else "in the book")
-                           + (f" (the book has no {entry.feed_from})"
+                           + (f" (CROSS_CORR builds it from its legs, and "
+                              f"{'; '.join(legs_said)})" if legs_said
+                              else f" (the book has no {entry.feed_from})"
                               if entry.feed_from not in book else ""))
+        if corr is not None and corr_atm:
+            notes.append(f"{entry.pair}: the ATM is built off {entry.feed_from}'s dollar legs at "
+                         f"CROSS_CORR's {corr[0]} correlation, for COS only -- the book and "
+                         f"every other channel keep the book's {entry.feed_from}")
         coverage.append({"pair": entry.pair, "label": entry.label,
                          "feed_from": entry.feed_from if entry.feed_from != entry.pair else "",
                          # Which source the pair was told to read, and which

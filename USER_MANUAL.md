@@ -2034,7 +2034,12 @@ grid for grid.
 **Configuration** — the export-policy tables. They are tabs of the workbook
 like every other setting and reach it the same way (**Write to workbook** on
 the Vol marking tab, with the marks); they are edited here rather than in the
-Config window because they belong beside the thing they govern.
+Config window because they belong beside the thing they govern. The card shows
+only the tables the chosen **destination** reads — kACE: `SPREADS`; Bloomberg:
+`MARKET_WIDTHS`, `ADD_UPS`, `WING_WIDTHS`; COS: `COS_WIDTHS`, `CROSS_CORR`;
+every destination: `SHADES` and `EXPORT_PAIRS` — and says which it left out.
+Each table is folded shut under its name; click the name to open it. A reload
+folds them all again.
 
 | Table | What it holds |
 |---|---|
@@ -2044,15 +2049,15 @@ Config window because they belong beside the thing they govern.
 | `WING_WIDTHS` | the **two-way width of each wing** on the Bloomberg feed — `rr25`, `rr10`, `bf25`, `bf10` per pair and tenor, with `default` and `crosses` rows; the most specific wins. A wing goes out at its mark less and plus half of this; it is never shaded |
 | `SHADES` | the ATM **mid shift** in vol points by channel, with a row per pair that differs. `bloomberg` is 0.2 under the mark on both sides for the G7 and G7 Cross pairs, and **zero for USDCNH, USDHKD, HKDCNH and XAUUSD** — the EM/PM block is a separate sheet on the desk's side and shades nothing. A shade is not a width — it moves the mid, and the width goes around it |
 | `COS_WIDTHS` | how far under the mid the **COS bid** sits, in vol points, per pair and tenor, with `default` and `crosses` rows; the most specific wins. **One-sided**: the COS file carries a bid and no ask, so this is the whole distance under the mid — the number on the desk's own `Guideline` sheet. Pair-dependent, which is why it is not a tier of `SPREADS`: the desk runs 0.8/0.6/0.5/0.5/0.5 for most pairs, 1.0/0.8 at the front for USDJPY, 0.9/0.7 for the yen crosses, a flat 0.5 for USDCNH and AUDNZD |
+| `CROSS_CORR` | **COS only.** A cross's correlation typed per tenor — `pair`, `tenor`, `correlation`, optional `note` — e.g. the CNH crosses' ladder O/N to 3Y. Where it names a cross the COS file carries, that row's ATM is built from the two dollar legs' ATMs at the typed correlation (linear in time between rungs, flat outside), the way the desk's CNH cross workbook does it; the Preflight's *From* column shows the correlation and both leg vols. **Nothing else reads it**: the marking and pricing screens, kACE, Bloomberg and Murex all keep the cross as the book builds it. A tenor a leg cannot supply is refused by name. `CNHHKD` and `HKDCNH` are the same cross |
 | `EXPORT_PAIRS` | which pairs each channel publishes, **in the file's order**: `channel`, `pair`, `label` (as the file writes it — `AUD/USD`, `USD/CNY`), `feed_from` (the curve it is read from when that is another pair — COS's CNY rows are fed the CNH curves; a pair marked the other way up is inverted and says so), `last_tenor` (XAUUSD stops at 1Y on Bloomberg). kACE with no rows of its own publishes every pair the book builds |
 
 **Seed the missing tables** (or `volkit export --init-tables`) writes what the
 desk's own files say — the 33 Bloomberg pairs in block order, the 32 Murex
 pairs and 25 COS pairs in row order with their labels, the Bloomberg ATM and
 wing widths cell for cell, the shades and the add-ups, the COS ladder off the
-`Guideline` sheet, and the eight CNH crosses' correlation off the cross
-workbook (`CROSS_CORR`, which is not export policy but comes out of the same
-files) — into the session. Check them against the sheets before the first run.
+`Guideline` sheet, and the eight CNH crosses' COS correlation off the cross
+workbook (`CROSS_CORR`) — into the session. Check them against the sheets before the first run.
 
 One thing COS does differently on purpose: the desk's sheet starts from a
 broker paste — the market's delta-neutral **bid**, rounded down to a tenth —

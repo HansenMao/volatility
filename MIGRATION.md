@@ -570,6 +570,35 @@ one number and three blanks.
 A workbook with no `TENORS` column is unaffected: it governs nothing and every
 sheet is read whole, exactly as before (`MarketData.tenors_stated`).
 
+## 4b-v. `CROSS_CORR` is COS only, and this moves marks where the tab is typed
+
+**Moves numbers only in a workbook or session that carries a `CROSS_CORR` tab.**
+The shipped workbook has none, so nothing on it moves.
+
+`CROSS_CORR` (a cross's correlation typed per tenor, seeded with the eight CNH
+crosses) used to be read by the **book**: a cross it named was built off the
+typed ladder instead of its own `initial` / `long term` / `MR` cells, so every
+screen and every channel saw it. By the desk's decision it is now a **COS
+setting only**:
+
+- **The book** builds every cross from its own three coefficients again. The
+  marking, pricing, monitor and analysis screens, and the kACE, Bloomberg and
+  Murex exports, show and send that cross.
+- **The COS file** takes the ATM of a cross the tab names off its two dollar
+  legs' ATMs at the pillar through the triangle, at the typed correlation. It
+  does not use the book's cross at all (not its fitted correlation, its short
+  add-on or its events). A pillar a leg cannot supply is refused by name.
+
+What moves, if the tab was typed: every non-COS number for a named cross, by
+the difference between its fitted correlation and the ladder. To make a screen
+show the ladder's cross again, mark the pair's correlation initial / final /
+decay on the Vol marking screen to match it. A session saved while the ladder
+was the book's may carry a cross's correlation as (first rung, last rung, decay
+0), which is a flat correlation at the first rung; re-mark it if so. The COS
+file itself also moves slightly against the old build, because it now
+triangulates the legs' pillar ATMs rather than reading the cross's own curve
+(events and short add-on included).
+
 ## 4c. Analysis — new; two of its columns moved when the forward curve went in
 
 The analysis tab is new. The legacy tool had `rv.py`, whose `RV.calc` wrote

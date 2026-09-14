@@ -64,7 +64,12 @@ and says *why*; this file says what is there and what must not be broken.
   shared `/api/config` and `/api/config/save`, with `where: "export"` on the
   tabs this screen edits (`configsheets.EXPORT_TABS`); the Config window
   skips those and this screen shows only those.  One painter
-  (`cfgPaintTabs(where)`) paints both.
+  (`cfgPaintTabs(where)`) paints both; on this screen each table is a
+  `<details>` shut by default (`CFG_OPEN` keeps what was opened across a
+  repaint, not a reload), and `xCfgScope` shows only the tables the chosen
+  destination reads -- `publish.Channel.tables`, worked out from the
+  channel's width source, wings and `correlated_crosses`, and sent in each
+  channel's summary, so the page keeps no list of its own.
 - **Command line:** `volkit export CHANNEL [--pairs ...] [--overlay FILE]
   [--book-pairs ...] [--compare] [--tier] [--multiplier] [--wings]
   [--tolerance] [--file-date] [--confirm-date] [--out-dir] [--dry-run]`, and
@@ -83,6 +88,7 @@ and says *why*; this file says what is there and what must not be broken.
 | `SHADES` | `channel`, `pair` (blank = the channel's default), `shade` | every channel: the ATM mid shift, both sides, before the width |
 | `COS_WIDTHS` | `pair` (`default`, `crosses`, or a pair), `tenor`, `width` -- most specific row wins | COS: how far under the mid the bid sits, **one-sided** |
 | `EXPORT_PAIRS` | `channel`, `pair`, `label`, `feed_from`, `last_tenor`, `note`, in the file's order | every channel: which pairs it publishes and from which curve; kACE with no rows publishes the book's pairs |
+| `CROSS_CORR` | `pair`, `tenor`, `correlation`, `note` -- a cross's correlation rung by rung | **COS only**: a cross it names goes out with its ATM off its two dollar legs at the typed correlation (`_correlated_atm`); the book and every other channel never read it. A pillar a leg cannot supply is refused by name, not filled from the book's cross |
 
 - **A shade is not a width, and the wings are never shaded.** The ATM mid
   moves by the shade and the ATM width goes around it; a wing is its mark

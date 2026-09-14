@@ -1157,7 +1157,17 @@ class TestExportScreen(unittest.TestCase):
         tabs = {t["sheet"]: t for t in svc.config_tabs()["tabs"]}
         for sheet in configsheets.EXPORT_TABS:
             self.assertEqual(tabs[sheet]["where"], "export")
+        self.assertEqual(tabs["CROSS_CORR"]["where"], "export")
         self.assertEqual(tabs["PEG_BANDS"]["where"], "config")
+        # And which of them each destination reads, for the card to show only
+        # those: every table belongs to at least one, none to a stranger.
+        by = {c["key"]: c["tables"] for c in st["channels"]}
+        self.assertEqual(by["kace"], ["SPREADS", "SHADES", "EXPORT_PAIRS"])
+        self.assertEqual(by["bloomberg"], ["MARKET_WIDTHS", "ADD_UPS", "SHADES",
+                                           "WING_WIDTHS", "EXPORT_PAIRS"])
+        self.assertEqual(by["murex"], ["SHADES", "EXPORT_PAIRS"])
+        self.assertEqual(by["cos"], ["SHADES", "COS_WIDTHS", "CROSS_CORR", "EXPORT_PAIRS"])
+        self.assertEqual(set().union(*map(set, by.values())), set(configsheets.EXPORT_TABS))
 
     def test_a_file_run_writes_into_the_export_folder_and_the_log(self):
         svc = self.service()
@@ -1354,36 +1364,78 @@ class TestMarkedCorrelation(unittest.TestCase):
             got = math.sqrt(va * va + vb * vb - 2.0 * sign * rho * va * vb)
             self.assertAlmostEqual(got, expected, places=3, msg=f"{pair} {tenor}")
 
-    def test_the_book_takes_the_ladder_over_the_fit_and_says_so(self):
-        """A pair CROSS_CORR names is built off its rungs, and the warning
-        says so, because the marking screen's three correlation boxes are then
-        showing numbers nothing is using."""
-        from volkit.cross import CrossAtmCurve, MarkedCorrelation
+    def test_the_ladder_is_cos_policy_and_never_reaches_the_book(self):
+        """A workbook whose CROSS_CORR names CNHHKD still builds CNHHKD off its
+        own fitted coefficients, and says nothing about the tab: the
+        correlation is the COS file's, not a mark."""
+        from volkit.cross import CorrelationCurve, CrossAtmCurve
         with tempfile.TemporaryDirectory() as tmp:
             wb = _workbook(Path(tmp))
+            self.assertIn("CNHHKD", publish.ExportTables.load(wb).cross_corr)
             book = Book.from_excel(wb, ASOF).load_all()
             atm = book["CNHHKD"].atm
             self.assertIsInstance(atm, CrossAtmCurve)
-            self.assertIsInstance(atm.correlation, MarkedCorrelation)
-            self.assertEqual(atm.correlation.marks["1M"], 0.325)
-            self.assertTrue(any("CNHHKD" in w and "CROSS_CORR" in w for w in book.warnings),
-                            book.warnings)
-            # Read as the three boxes the screen has always had: the first
-            # rung, the last, and no exponential to report.
-            self.assertEqual((atm.correlation.initial, atm.correlation.final,
-                              atm.correlation.decay), (0.325, 0.2, 0.0))
-            # A re-mark by hand replaces the ladder for the session.
-            self.assertEqual(atm.set_correlation(0.4, 0.4, 1.0), [])
-            self.assertNotIsInstance(atm.correlation, MarkedCorrelation)
+            self.assertIsInstance(atm.correlation, CorrelationCurve)
+            self.assertFalse(any("CROSS_CORR" in w for w in book.warnings), book.warnings)
+            # And the same book with no tab at all is the same cross.
+            bare = Book.from_excel(BOOK, ASOF).load_all()
+            crosses = [p for p in bare.pairs if bare.data.pairs[p].is_cross and p in bare.surfaces]
+            self.assertTrue(crosses)
+            for pair in crosses:
+                self.assertIsInstance(bare[pair].atm.correlation, CorrelationCurve)
 
-    def test_a_workbook_without_the_tab_fits_every_cross_as_before(self):
-        from volkit.cross import CorrelationCurve
-        book = Book.from_excel(BOOK, ASOF).load_all()
-        self.assertEqual(book.cross_correlations, {})
-        crosses = [p for p in book.pairs if book.data.pairs[p].is_cross and p in book.surfaces]
-        self.assertTrue(crosses)
-        for pair in crosses:
-            self.assertIsInstance(book[pair].atm.correlation, CorrelationCurve)
+    def test_cos_builds_a_named_cross_off_its_legs_and_no_other_channel_does(self):
+        import math
+        from volkit import cross
+        with tempfile.TemporaryDirectory() as tmp:
+            wb = _workbook(Path(tmp))
+            tables = publish.ExportTables.load(wb)
+            book = Book.from_excel(wb, ASOF).load_all()
+            b = publish.build("cos", book, tables)
+            self.assertTrue(b.ok, b.refused)
+            legs = book.data.pairs["CNHHKD"].legs
+            sign = math.prod(cross.infer_leg_signs("CNHHKD", *legs))
+            reads = {leg: publish.kace.read_pillars(book, leg, publish.COS_TENORS)
+                     for leg in legs}
+            own = publish.kace.read_pillars(book, "CNHHKD", publish.COS_TENORS)
+            for t in publish.COS_TENORS:
+                q = next(q for q in b.quotes if q.pair == "HKDCNH" and q.tenor == t)
+                rho = tables.cross_corr["CNHHKD"][t]
+                v1, v2 = reads[legs[0]].atm[t], reads[legs[1]].atm[t]
+                self.assertAlmostEqual(q.atm, math.sqrt(v1 * v1 + v2 * v2
+                                                        - 2 * sign * rho * v1 * v2), places=9)
+                self.assertTrue(q.origin.startswith("CROSS_CORR"), q.origin)
+                # The ATM moved off the book's own cross -- which is what
+                # makes the test worth having -- and the wings did not.
+                self.assertNotAlmostEqual(q.atm, own.atm[t], places=4)
+                self.assertAlmostEqual(q.rr25, -own.wings[t][0])
+            self.assertTrue(any("for COS only" in n for n in b.notes), b.notes)
+            # The book is untouched by the build, and kACE posts its own cross.
+            self.assertAlmostEqual(publish.kace.read_pillars(book, "CNHHKD", ["1M"]).atm["1M"],
+                                   own.atm["1M"])
+            tables.export_pairs["kace"] = [publish.PairEntry("CNHHKD", "CNHHKD", "CNHHKD", "")]
+            k = publish.build("kace", book, tables, pairs=["CNHHKD"], pillars_only=True)
+            self.assertTrue(k.quotes, k.refused)
+            for q in k.quotes:
+                self.assertFalse(q.origin.startswith("CROSS_CORR"), q.origin)
+            q = next(q for q in k.quotes if q.tenor == "1M")
+            self.assertAlmostEqual(q.atm, own.atm["1M"])
+            # Without the tab, COS publishes the book's cross as before.
+            tables.cross_corr = None
+            plain = publish.build("cos", book, tables)
+            q = next(q for q in plain.quotes if q.pair == "HKDCNH" and q.tenor == "1M")
+            self.assertAlmostEqual(q.atm, own.atm["1M"])
+
+    def test_a_leg_the_book_lacks_refuses_the_pillar_by_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            wb = _workbook(Path(tmp))
+            tables = publish.ExportTables.load(wb)
+            book = Book.from_excel(wb, ASOF).load_all()
+            del book.surfaces["USDHKD"]
+            b = publish.build("cos", book, tables, pairs=["HKDCNH"])
+            self.assertFalse(b.ok)
+            self.assertTrue(any("HKDCNH" in r and "USDHKD" in r and "CROSS_CORR" in r
+                                for r in b.refused), b.refused)
 
 
 if __name__ == "__main__":

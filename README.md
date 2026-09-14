@@ -1224,7 +1224,10 @@ The panel has two halves. **Input**, on the left:
   for the G7 and G7 Cross pairs, nothing for the EM/PM four), `COS_WIDTHS`
   (how far under the mid the COS bid sits, per pair and tenor, one-sided),
   and `EXPORT_PAIRS` (which pairs each channel publishes, in the file's
-  order, with the file's label, the curve it is fed from and where it stops).
+  order, with the file's label, the curve it is fed from and where it stops),
+  plus `CROSS_CORR` (a cross's correlation per tenor, **COS only**: a cross it
+  names goes into the COS file with its ATM off its two dollar legs at that
+  correlation; the book and the other channels never read it).
   **Seed the missing tables** (`volkit export --init-tables`) writes what the
   desk's files say, `CROSS_CORR` included. COS starts from the marked mid
   rather than the desk sheet's rounded-down market bid, on purpose: one

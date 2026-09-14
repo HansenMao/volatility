@@ -522,7 +522,7 @@ class TestWebAssets(unittest.TestCase):
         # One painter for both editors -- the Config window and the export
         # screen's Configuration card -- told which root it paints.
         for fn in ("function cfgHarvest(i){", "function cfgPaintTabs(where){",
-                   "function cfgTabHtml(t,i){"):
+                   "function cfgTabHtml(t,i,fold){"):
             self.assertIn(fn, js)
         # The save posts what CFG holds after the harvest, not the raw boxes.
         save = js.split("root.querySelectorAll('.cfgsave')")[1].split("});")[0]

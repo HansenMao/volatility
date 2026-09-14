@@ -60,9 +60,9 @@ SHEETS: dict[str, str] = {
                    "never, or always), delta (spot or forward)",
     "WING_RATIOS": "how each tenor's 10-delta wings follow its 25-delta ones: "
                    "pair, tenor, st, rr",
-    "CROSS_CORR": "a cross's correlation typed per tenor, which takes the place of its "
-                  "fitted initial / long-term / mean-reversion where it is there: pair, "
-                  "tenor, correlation, note",
+    "CROSS_CORR": "COS only: a cross's correlation typed per tenor, which the COS file "
+                  "builds that cross's ATM with off its two dollar legs; the book keeps "
+                  "its fitted correlation: pair, tenor, correlation, note",
     "Vega Weights": "how far each tenor moves when the anchor moves one vol point: "
                     "tenor, default, and a column per pair that needs its own",
     # The export policy tables (claude/publishing-channels-design.md).  In the
@@ -93,7 +93,7 @@ SHEETS: dict[str, str] = {
 #: and only the editor differs: the Config window skips them and the export
 #: screen shows nothing else.
 EXPORT_TABS: tuple[str, ...] = ("SPREADS", "MARKET_WIDTHS", "ADD_UPS", "SHADES", "WING_WIDTHS",
-                                "COS_WIDTHS", "EXPORT_PAIRS")
+                                "COS_WIDTHS", "CROSS_CORR", "EXPORT_PAIRS")
 
 #: The old names of tabs that were renamed, so a workbook that still carries
 #: the old name is read and, on the next write, written under the new one in

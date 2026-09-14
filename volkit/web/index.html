@@ -1492,9 +1492,10 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
         <div id="xpre"><div class="etoempty">Nothing built yet. Choose a channel, set each pair&rsquo;s source, and press <b>Build</b>.</div></div>
       </section>
 
-      <section class="card"><h2>Configuration <small>export policy, edited here, read everywhere</small></h2>
-        <div class="hint">These tables live in the workbook like every other setting and are written into it with the marks (<b>Write to workbook</b> on the Vol marking screen). They are edited here rather than in the Config window because they are export policy. A blank cell falls through to its default; a pair a channel wants that <code>MARKET_WIDTHS</code>, <code>WING_WIDTHS</code> or <code>COS_WIDTHS</code> does not carry is refused by name. <code>COS_WIDTHS</code> is one-sided: the COS file carries a bid and no ask, so the width is the whole distance under the mid, which is the number on the desk's own Guideline sheet.
+      <section class="card"><h2>Configuration <small>export policy, edited here</small></h2>
+        <div class="hint">These tables live in the workbook like every other setting and are written into it with the marks (<b>Write to workbook</b> on the Vol marking screen). They are edited here rather than in the Config window because they are export policy. <code>CROSS_CORR</code> is a cross&rsquo;s correlation typed per tenor (<code>pair</code>, <code>tenor</code>, <code>correlation</code>) and is <b>COS only</b>: a cross it names goes into the COS file with its ATM built off its two dollar legs at that correlation. The book, every other screen and every other channel keep the cross as it is marked. A blank cell falls through to its default; a pair a channel wants that <code>MARKET_WIDTHS</code>, <code>WING_WIDTHS</code> or <code>COS_WIDTHS</code> does not carry is refused by name. <code>COS_WIDTHS</code> is one-sided: the COS file carries a bid and no ask, so the width is the whole distance under the mid, which is the number on the desk's own Guideline sheet.
           <span id="xseedwrap"> <button class="ghost" id="xseed" style="width:auto;padding:3px 9px;font-size:11px" title="put the tables this workbook lacks into the session, seeded from the desk's own files of 2026-09-10: each channel's pairs in the file's order, the Bloomberg widths and wing widths, the shade and the add-ups">Seed the missing tables</button></span></div>
+        <div class="meta" id="xcfgscope" style="margin-top:8px"></div>
         <div id="xcfgtabs"></div>
         <div id="xcfgconfirm" class="hide" style="display:flex;gap:8px;align-items:center;margin-top:9px;padding:8px 10px;border:1px solid var(--line);border-radius:6px"></div>
         <div class="msg" id="xcfgmsg"></div>
@@ -5768,15 +5769,22 @@ function cfgHarvest(i){
     rows[r][el.dataset.col]=v===''?null:(/^-?\d*\.?\d+$/.test(v)?parseFloat(v):v);});
   t.rows=rows.filter(r=>r&&t.columns.some(c=>r[c]!=null&&r[c]!==''));
 }
-function cfgTabHtml(t,i){
+function cfgTabHtml(t,i,fold){
   /* A tab this session holds says so on its own heading as well as in the
      window's, because the two answers -- what the book is using and what the
      file says -- are only ever different here, and a difference nobody is
-     told about is the silent change this tool exists to remove. */
-  const head='<div style="margin-top:12px"><label>'+esc(t.sheet)+
+     told about is the silent change this tool exists to remove.
+     `fold` is the export screen's: each table folds under its heading,
+     shut until opened, and stays as it was left across a repaint. */
+  const title=esc(t.sheet)+
     (t.pending?' <span class="pill warn" title="this session holds this tab; the workbook still says what it said. Write to workbook, on the Vol marking screen, is what puts it in">held in this session</span>':'')+
-    '<span class="meta" style="margin-left:7px;font-weight:400">'+esc(t.what)+'</span></label>';
-  if(t.error)return head+'<div class="msg bad">'+esc(t.error)+'</div></div>';
+    '<span class="meta" style="margin-left:7px;font-weight:400">'+esc(t.what)+'</span>';
+  const head=fold
+    ?'<details class="cfgfold" data-sheet="'+esc(t.sheet)+'" style="margin-top:12px"'+(CFG_OPEN[t.sheet]?' open':'')+
+      '><summary style="cursor:pointer;font-weight:600">'+title+'</summary>'
+    :'<div style="margin-top:12px"><label>'+title+'</label>';
+  const end=fold?'</details>':'</div>';
+  if(t.error)return head+'<div class="msg bad">'+esc(t.error)+'</div>'+end;
   /* A column the desk added can be taken away again, from its own heading.
      Only one it added: the fixed columns are what the tab's reader looks for,
      and a tab that had lost one of them would be unreadable on the next load.
@@ -5805,8 +5813,11 @@ function cfgTabHtml(t,i){
       'title="'+esc(t.shape||'')+'; blank cells in the column fall back to default">'+
       '<button class="ghost cfgaddcol" data-tab="'+i+
       '" style="width:auto;padding:4px 11px;font-size:11px">Add '+esc(t.open)+'</button>':'')+
-    '</div>'+(t.measure==='vega'?cfgVegaHtml(i):'')+'</div>';
+    '</div>'+(t.measure==='vega'?cfgVegaHtml(i):'')+end;
 }
+/* Which folded tables are open, by sheet: this page's memory only, so a
+   reload shuts them all again. */
+const CFG_OPEN={};
 /* The two editors of the configuration tabs: the Config window shows the
    tabs that configure the book, the export screen's Configuration card the
    export-policy tables (`where` is the server's, from configsheets.EXPORT_TABS).
@@ -5819,7 +5830,13 @@ function cfgPaintTabs(where){
   const R=CFG_ROOTS[where], root=$(R.root);
   if(!root||!CFG)return;
   const mine=i=>((CFG.tabs[i].where||'config')===where);
-  root.innerHTML=(CFG.tabs||[]).map((t,i)=>mine(i)?cfgTabHtml(t,i):'').join('');
+  const fold=where==='export';
+  root.innerHTML=(CFG.tabs||[]).map((t,i)=>mine(i)?cfgTabHtml(t,i,fold):'').join('');
+  if(fold){
+    root.querySelectorAll('details.cfgfold').forEach(d=>{
+      d.ontoggle=()=>{CFG_OPEN[d.dataset.sheet]=d.open}});
+    xCfgScope();
+  }
   root.querySelectorAll('.cfgsave').forEach(b=>{
     b.onclick=()=>{
       const i=+b.dataset.tab, t=CFG.tabs[i];
@@ -8037,7 +8054,23 @@ function xApplyChannel(){
     if(tiers.indexOf(want)<0&&tiers.length)$('#xtier').value=tiers.indexOf(ch.default_tier)>=0?ch.default_tier:tiers[0];
   }
   xRenderPick();
+  xCfgScope();
   $('#xsend').disabled=true; $('#xdl').classList.add('hide'); $('#xdl').innerHTML='';
+}
+/* The Configuration card shows the tables the chosen destination reads --
+   the server's list (publish.Channel.tables), not one kept here -- and says
+   how many it left out, so a table is never missing without a word. */
+function xCfgScope(){
+  const ch=xChan(), want=ch&&ch.tables?ch.tables:null;
+  const folds=[...document.querySelectorAll('#xcfgtabs details.cfgfold')];
+  let shown=0;
+  folds.forEach(d=>{const on=!want||want.indexOf(d.dataset.sheet)>=0;
+    d.classList.toggle('hide',!on);if(on)shown++});
+  const el=$('#xcfgscope'); if(!el)return;
+  const off=folds.filter(d=>d.classList.contains('hide')).map(d=>d.dataset.sheet);
+  el.innerHTML=!folds.length?'':(want?'the tables <b>'+esc(ch.label)+'</b> reads — '+shown+' of '+folds.length+
+    (off.length?'; the others ('+off.map(esc).join(', ')+') belong to other destinations':''):'every table')+
+    ' · click a table to open it';
 }
 function xPayload(){
   const ch=xChan(); const cm=mmCutMethods(); const src=xSources();
@@ -8086,7 +8119,7 @@ function xPaintOverlay(){
         if(body.action!=='load')await boot();
         await xLoad();
       }catch(e){$('#xmsg').className='msg bad';$('#xmsg').textContent=e.message}
-      finally{stop()}};
+      finally{stop();$('#xstatus').innerHTML=''}};
     $('#xovapply').onclick=()=>{
       const pairs=[...tbl.querySelectorAll('input[data-ovp]:checked:not(:disabled)')].map(el=>el.dataset.ovp);
       if(!pairs.length){$('#xmsg').className='msg bad';$('#xmsg').textContent='tick the pairs to write over the book first';return}
@@ -8112,7 +8145,7 @@ async function xLoadOverlay(fromText){
     xKeep({ovpath:$('#xovpath').value||''});
     await xLoad();
   }catch(e){$('#xmsg').className='msg bad';$('#xmsg').textContent=e.message}
-  finally{stop()}
+  finally{stop();$('#xstatus').innerHTML=''}
 }
 /* ---- the input side: compare ------------------------------------------- */
 function xCell(v,d){return v==null?'—':num(v,d==null?VOLDP:d)}
@@ -8147,7 +8180,7 @@ async function xCompare(){
     if(r.book_refused.length||r.overlay_refused.length)h+='<div class="etowarn" style="margin-top:6px">'+r.book_refused.concat(r.overlay_refused).map(x=>'! '+esc(x)).join('<br>')+'</div>';
     $('#xcmp').innerHTML=h;
     $('#xstatus').innerHTML='<span class="etonote">· compared '+r.rows.length+' pillar(s)</span>';
-  }catch(e){$('#xcmp').innerHTML='<div class="out err"><div class="v">'+esc(e.message)+'</div></div>'}
+  }catch(e){$('#xcmp').innerHTML='<div class="out err"><div class="v">'+esc(e.message)+'</div></div>';stop();$('#xstatus').innerHTML=''}
   finally{stop()}
 }
 /* ---- the output side: the preflight ------------------------------------ */
@@ -8234,7 +8267,7 @@ async function xBuild(){
   $('#xmsg').textContent='';
   try{const b=await post('/api/export/build',body);xPaintBuild(b);
     $('#xstatus').innerHTML='<span class="etonote">· built '+(b.rows||0)+' pillar(s)'+(b.ok?'':' — refused')+'</span>';}
-  catch(e){$('#xpre').innerHTML='';$('#xsend').disabled=true;$('#xmsg').className='msg bad';$('#xmsg').textContent=e.message}
+  catch(e){$('#xpre').innerHTML='';$('#xsend').disabled=true;$('#xmsg').className='msg bad';$('#xmsg').textContent=e.message;stop();$('#xstatus').innerHTML=''}
   finally{stop()}
 }
 function xSend(){
@@ -8262,7 +8295,7 @@ function xSend(){
       if(r.entries){XS.entries=r.entries;xPaintLog()}
       if(!body.dry_run&&r.ok)$('#xsend').disabled=true;
     }catch(e){c.classList.add('hide');$('#xmsg').className='msg bad';$('#xmsg').textContent=e.message}
-    finally{stop()}
+    finally{stop();$('#xstatus').innerHTML=''}
   };
 }
 /* ---- the log ----------------------------------------------------------- */

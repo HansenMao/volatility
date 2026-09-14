@@ -125,10 +125,7 @@ class TestConfigurationTabs(unittest.TestCase):
         from volkit import configsheets
         # CONVENTIONS is optional for the same reason: a pair with no row takes
         # the market's conventions, and most pairs never need a row.
-        # CROSS_CORR is optional for the same reason as WING_RATIOS: a cross
-        # with no rows is fitted from its own three coefficients, which is
-        # what every workbook did before the tab existed.
-        optional = {"WING_RATIOS", "CONVENTIONS", "CROSS_CORR"}
+        optional = {"WING_RATIOS", "CONVENTIONS"}
         # The export-policy tables are optional too: a desk that publishes
         # nothing has no business carrying them, and the channels refuse by
         # name until they are typed (`volkit export --init-tables` seeds).

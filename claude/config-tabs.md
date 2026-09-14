@@ -35,16 +35,18 @@ the old name when the new is absent and `write_rows` renames the tab, in place
 with its prose, the first time it is written; `renamed_tabs` reports which
 state a workbook is in.
 
-`CROSS_CORR` is the newest, and it is **not** export policy: it is what the
-*book* builds a cross with.  `pair`, `tenor`, `correlation` -- a correlation
-typed rung by rung, which takes the place of that pair's fitted `initial` /
-`long_term` / `mean_reversion` wherever the tab names it (`cross.py`'s
-`MarkedCorrelation`; between rungs it is linear in time, outside them flat).
-The desk's own CNH cross workbook has always carried a correlation per tenor
-rather than three coefficients, and an exponential fitted through that ladder
-reproduces none of its rungs, so the tab is the ladder itself.  Edited in the
-Config window like the rest, and seeded with the desk's eight CNH crosses by
-the same command that seeds the export tables.
+`CROSS_CORR` is the newest, and it is **COS policy and nothing else** (the
+desk's decision): `pair`, `tenor`, `correlation` -- a correlation typed rung
+by rung (`cross.py`'s `MarkedCorrelation`; between rungs it is linear in
+time, outside them flat).  Where it names a cross the COS channel publishes,
+the COS build takes that cross's ATM off its two dollar legs' pillar ATMs
+through the triangle at the typed rung (`publish._correlated_atm`), the way
+the desk's own CNH cross workbook does.  **The book never reads it**: every
+screen, and the kACE, Bloomberg and Murex channels, keep the cross the book
+builds from its own `initial` / `long_term` / `mean_reversion`.  It was once
+the book's override; it moved when the desk said the ladder is a COS
+setting.  In `EXPORT_TABS`, edited on the Vol bulk processing screen, and
+seeded with the desk's eight CNH crosses by the same command as the rest.
 
 `market_feed.csv` stays a file on purpose: it is market data with an `asof`,
 overwritten daily, and a file is easier to overwrite than a tab in a workbook
