@@ -68,7 +68,8 @@ from . import session
 from .numerics import ConvergenceError
 from .marketmaker import (BACKBONE_KNOBS, CROSS_KNOBS, DEFAULT_BACKBONE_FREE,
                           DEFAULT_CROSS_FREE, CurveTarget, TuneResult, _Knobs,
-                          fit_atm_curve, informative_params, tune_smile_shifts)
+                          fit_atm_curve, informative_params, split_at_fit_cutoff,
+                          tune_smile_shifts)
 from .surface import PARAM_NAMES
 
 DAYS_IN_YEAR = 365.2425
@@ -730,6 +731,10 @@ def propose(book, pair: str, *, targets: list[CurveTarget] | None = None,
     if book is None or pair not in book:
         raise MarkingError(f"{pair} is not built in this book")
     surface = book[pair]
+    # A target curve handed in whole -- a file, the archive -- is cut at the
+    # fit cutoff here, the way the screen's sources are in curve_targets.
+    targets, dropped, beyond_cutoff = split_at_fit_cutoff(surface, targets)
+    targets = targets or None
     plan = plan_fit(book, pair, tendencies=tendencies, targets=targets,
                     wing_quotes=wing_quotes, free=free, smile_free=smile_free,
                     method=method)
@@ -750,6 +755,9 @@ def propose(book, pair: str, *, targets: list[CurveTarget] | None = None,
         for r in tendencies.contested:
             out.warnings.append(f"{rot.LABEL} on {r.rule.key} is contested by "
                                 f"{r.real_n} real correction(s)")
+    if beyond_cutoff:
+        # Every target cut away is a fit that did not happen, which is a warning.
+        (out.warnings if dropped and not targets else out.notes).append(beyond_cutoff)
     after = {k: (dict(v) if isinstance(v, dict) else v) for k, v in out.before.items()}
 
     # -- the curve ---------------------------------------------------------
@@ -794,6 +802,72 @@ def propose(book, pair: str, *, targets: list[CurveTarget] | None = None,
     if not out.moved:
         out.notes.append("the fit landed where the surface already is; there is nothing to do")
     return out
+
+
+#: The marking screen's names for the four curve knobs a fit to the overwrites
+#: may free, and the knob each one is on either kind of curve.  A cross's level
+#: is its legs', so there the first three are the correlation's term structure.
+OVERWRITE_FIT_DOF = ("initial", "final", "decay", "add_on")
+_DOF_KNOBS = {
+    False: {"initial": "initial_vol", "final": "long_term_vol",
+            "decay": "mean_reversion", "add_on": "short_addon"},
+    True: {"initial": "corr_initial", "final": "corr_final",
+           "decay": "corr_decay", "add_on": "short_addon"},
+}
+
+
+def propose_to_overwrites(book, pair: str, dof) -> dict:
+    """The curve the ATM overwrites describe, with the knobs the desk freed.
+
+    The marking agent's own ``propose`` aimed at the overwrite column: the
+    targets are the pinned tenors (``curve_targets``, source ``overwrites``,
+    cut at the fit cutoff there like every other way in), and the free set is
+    the caller's -- no plan, no journal, no learned nudge, because the desk
+    chose the degrees of freedom by name.  Nothing stays on the book; the
+    caller applies ``params`` when it wants them.
+    """
+    from . import marketmaker as mm
+    if book is None or pair not in book:
+        raise MarkingError(f"{pair} is not built in this book")
+    surface = book[pair]
+    knobs = _Knobs(surface.atm)
+    names = _DOF_KNOBS[knobs.is_cross]
+    dof = [str(d).strip().lower() for d in (dof or ()) if str(d).strip()]
+    unknown = [d for d in dof if d not in names]
+    if unknown:
+        raise MarkingError(f"{', '.join(unknown)} is not a degree of freedom here; "
+                           f"expected {', '.join(OVERWRITE_FIT_DOF)}")
+    if not dof:
+        raise MarkingError("no degree of freedom was ticked, so there is nothing to fit")
+    free = tuple(names[d] for d in OVERWRITE_FIT_DOF if d in dof)
+    targets, evidence = mm.curve_targets(surface, [], {}, source="overwrites")
+    proposal = propose(book, pair, targets=targets, free=free)
+    fit = proposal.fit
+    after = (proposal.after or {}).get("curve") or {}
+    before = (proposal.before or {}).get("curve") or {}
+    return {
+        "pair": pair.upper(), "is_cross": knobs.is_cross, "evidence": evidence,
+        "dof": [d for d in OVERWRITE_FIT_DOF if d in dof],
+        "free": list(free), "knobs": {d: names[d] for d in OVERWRITE_FIT_DOF},
+        "fitted": fit is not None,
+        "before": {k: before.get(k) for k in knobs.available},
+        "params": {k: after.get(k) for k in knobs.available},
+        "rows": [] if fit is None else [
+            {"tenor": t.tenor, "target": t.vol * 100.0, "before": b * 100.0,
+             "after": a * 100.0, "diff": (a - t.vol) * 100.0, "moved": (a - b) * 100.0}
+            for t, b, a in zip(fit.targets, fit.achieved_before, fit.achieved_after)],
+        "rmse": None if fit is None else fit.rmse * 100.0,
+        "max_error": None if fit is None else fit.max_error * 100.0,
+        "max_error_tenor": None if fit is None else fit.max_error_tenor,
+        "converged": bool(fit is not None and fit.converged),
+        "message": "" if fit is None else fit.message,
+        # The plan's "no journal was given" note is about a proposal the agent
+        # planned; this one was planned by the desk, and saying otherwise
+        # would describe a different fit.
+        "notes": [n for n in list(proposal.plan.notes) + list(proposal.notes)
+                  if not n.startswith("no journal was given")],
+        "warnings": list(proposal.warnings) + ([] if fit is None else list(fit.warnings)),
+    }
 
 
 def _to_screen(name: str, value: float) -> float:

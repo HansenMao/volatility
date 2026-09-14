@@ -726,6 +726,63 @@ class TestWingRatios(unittest.TestCase):
         self.assertEqual(s.warnings, [])
 
 
+class TestCrossQuotesFromLegs(unittest.TestCase):
+    """A thin cross's RR and ST filled from its two dollar legs."""
+
+    def setUp(self):
+        from volkit.webapp import BookService
+        self.svc = BookService(str(book_for("EURGBP", "EURUSD", "GBPUSD")), ASOF)
+
+    def test_the_marks_say_which_pairs_have_legs_to_fill_from(self):
+        self.assertEqual(self.svc.marks({"pair": "EURGBP"})["legs"], ["EURUSD", "GBPUSD"])
+        self.assertIsNone(self.svc.marks({"pair": "EURUSD"})["legs"])
+
+    def test_show_writes_nothing(self):
+        out = self.svc.cross_quotes({"pair": "EURGBP", "cut": "NY"})
+        self.assertEqual(out["applied"], [])
+        self.assertTrue(all(not r["error"] for r in out["rows"]))
+        self.assertEqual(self.svc.book["EURGBP"].quote_overwrites, {})
+        self.assertFalse(self.svc.dirty)
+
+    def test_fill_writes_what_show_read_as_quotes_at_the_tenors_asked(self):
+        shown = {r["tenor"].upper(): r for r in
+                 self.svc.cross_quotes({"pair": "EURGBP", "cut": "NY"})["rows"]}
+        out = self.svc.cross_quotes({"pair": "EURGBP", "cut": "NY", "apply": True,
+                                     "tenors": ["3M", "1y"]})
+        s = self.svc.book["EURGBP"]
+        self.assertEqual({t.upper() for t in out["applied"]}, {"3M", "1Y"})
+        self.assertEqual(set(s.quote_overwrites), {"3M", "1Y"})
+        self.assertTrue(self.svc.dirty)
+        rows = {r["tenor"].upper(): r for r in self.svc.marks({"pair": "EURGBP"})["atm"]}
+        for tenor in ("3M", "1Y"):
+            self.assertTrue(rows[tenor]["quotes_marked"])
+            self.assertTrue(rows[tenor]["fitted"])
+            for field, value in shown[tenor]["quotes"].items():
+                self.assertAlmostEqual(rows[tenor]["quotes"][field], value, places=9,
+                                       msg=(tenor, field))
+
+    def test_a_wing_a_ratio_derives_is_left_to_the_ratio_unless_asked(self):
+        """Writing the 10-delta would take it off its ratio -- a second
+        decision the fill does not make on its own."""
+        s = self.svc.book["EURGBP"]
+        s.overwrite_ratio("3M", "st", 3.0)
+        out = self.svc.cross_quotes({"pair": "EURGBP", "cut": "NY", "apply": True,
+                                     "tenors": ["3M"]})
+        row = [r for r in out["rows"] if r["tenor"].upper() == "3M"][0]
+        self.assertEqual(row["ratio_derived"], ["st_10"])
+        self.assertNotIn("st_10", s.quote_overwrites["3M"])
+        self.assertAlmostEqual(s.effective_ratio("3M").st, 3.0)
+        self.svc.cross_quotes({"pair": "EURGBP", "cut": "NY", "apply": True,
+                               "tenors": ["3M"], "override_ratios": True})
+        self.assertIn("st_10", s.quote_overwrites["3M"])
+        self.assertIsNone(s.effective_ratio("3M").st)
+
+    def test_a_pair_with_no_legs_is_refused(self):
+        with self.assertRaises(ValueError):
+            self.svc.cross_quotes({"pair": "EURUSD", "apply": True})
+        self.assertEqual(self.svc.book["EURUSD"].quote_overwrites, {})
+
+
 class TestHeldFitGoesStale(unittest.TestCase):
     """Held marks are only good for the book they came from.
 
@@ -958,6 +1015,24 @@ class TestHeldFitGoesStale(unittest.TestCase):
         self.assertEqual(js.count("method:'POST'"), 1)
         self.assertIn("bookMoved()", js.split("const post=")[1][:400])
 
+    def test_marks_kept_on_the_market_maker_tab_reach_the_vol_marking_screen(self):
+        """Accepting a proposal with *keep the marks* ticked wrote the marks
+        onto the book, and the Vol marking screen went on showing the curve,
+        the overwrites and the charts it had loaded before: ``bookMoved``
+        refreshes the market-maker tab only.  Both ways the card writes -- a
+        recorded answer and a hand fit -- now re-read the screen's own pair
+        when the server says the marks were applied, the way choosing that
+        pair would."""
+        html = _source("volkit", "web", "index.html")
+        js = html.split("<script>")[1].split("</script>")[0]
+        body = js.split("async function refreshMarking(){")[1].split("\n}")[0]
+        for call in ("loadCurve()", "loadMarks()", "loadBand()", "redraw()"):
+            self.assertIn(call, body)
+        record = js.split("async function recordMark(verdict){")[1].split("\n}")[0]
+        self.assertIn("if(r.applied)await refreshMarking()", record)
+        fit = js.split("async function runFit(){")[1].split("\n}")[0]
+        self.assertIn("if(MFR.applied)await refreshMarking()", fit)
+
 
 class TestCurveComparison(unittest.TestCase):
     """Several curves side by side, and the same curve on other dates."""
@@ -1082,6 +1157,124 @@ class TestCurveComparison(unittest.TestCase):
         first = service.compare_curves(payload)
         self.assertEqual(first, service.compare_curves(payload))
         self.assertEqual(first["field"], "rr25")
+
+
+class TestFitCutoff(unittest.TestCase):
+    """A tenor beyond the pair's fit cutoff is not part of the interpolation.
+
+    The ``CONVENTIONS`` tab's ``fit cutoff`` (blank is 1Y) is the other half
+    of the ATM boundary beside it: out to it the tenors shape the ATM curve
+    fit and the smile term structures; beyond it a tenor is marked by its own
+    overwrite and its own quotes, and what the fit to the shorter tenors
+    reads there is information only.  Pinned here: the short end does not
+    move when a long quote does, the long quote is still honoured at its own
+    tenor, every way into an ATM curve fit is cut at the same place, and the
+    marking screen is told which rows are beyond it.
+    """
+
+    def surface(self):
+        return Book.from_excel(BOOK, ASOF).load_all(["USDJPY"])["USDJPY"]
+
+    @staticmethod
+    def long_quote(s):
+        """A 2Y well away from the 1Y, so a fit that took it in would show it."""
+        one = next(m for m in s.marks if m.tenor.upper() == "1Y")
+        return SmileMark("2Y", rr_25=one.rr_25 * 3, rr_10=one.rr_10 * 3,
+                         st_25=one.st_25 * 1.5, st_10=one.st_10 * 1.5)
+
+    def test_the_setting_reads_a_tenor_or_never_and_blank_is_one_year(self):
+        from volkit.surface import DEFAULT_FIT_CUTOFF, fit_cutoff_years
+        self.assertEqual(DEFAULT_FIT_CUTOFF, "1y")
+        self.assertAlmostEqual(fit_cutoff_years(""), 1.0)
+        self.assertAlmostEqual(fit_cutoff_years("18m"), 1.5)
+        self.assertEqual(fit_cutoff_years("never"), float("inf"))
+        for bad in ("sometime", "always", "0d"):
+            with self.assertRaises(ValueError):
+                fit_cutoff_years(bad)
+        s = self.surface()
+        self.assertEqual(s.fit_cutoff_label(), "1Y")
+        # The 1Y pillar is inside on the calendar, whatever length it makes it.
+        self.assertTrue(s.in_fit(s.tenor_years("1Y")))
+        self.assertFalse(s.in_fit(s.tenor_years("18M")))
+
+    def test_a_quote_beyond_the_cutoff_marks_its_tenor_and_does_not_move_the_short_end(self):
+        import dataclasses
+        s = self.surface()
+        t6, t2 = s.tenor_years("6M"), s.tenor_years("2Y")
+        before = s.params_at(t6)
+        term = {k: dataclasses.astuple(v) for k, v in s.term.items()}
+        s.calibrate(list(s.marks) + [self.long_quote(s)])
+        self.assertEqual(s.warnings, [])
+        self.assertEqual([f.tenor for f in s.fits_beyond()], ["2Y"])
+        # The term structures are the ones the tenors inside the cutoff made.
+        self.assertEqual({k: dataclasses.astuple(v) for k, v in s.term.items()}, term)
+        self.assertEqual(s.params_at(t6), before)
+        # ...and the 2Y is pinned to its own calibration, so its quote is honoured.
+        long = s.fits_beyond()[0]
+        for name in PARAM_NAMES:
+            self.assertAlmostEqual(s.params_at(t2)[name], getattr(long, name), places=12)
+        expiry = s.clock.datetime_from_years(t2)
+        self.assertAlmostEqual(s.risk_reversal(expiry, 0.25), self.long_quote(s).rr_25, places=3)
+        # What the shorter tenors read at 2Y is still there to be shown.
+        self.assertNotAlmostEqual(s.curve_params_at(t2)["rho25"], long.rho25, places=3)
+        # Between the 1Y and the 2Y the surface runs from the one to the other.
+        mid = s.params_at(s.tenor_years("18M"))["rho25"]
+        ends = (s.params_at(s.tenor_years("1Y"))["rho25"], long.rho25)
+        self.assertTrue(min(ends) < mid < max(ends), (ends, mid))
+
+        # never: the old surface, where the 2Y bends the short end.
+        n = dataclasses.replace(s, fit_cutoff="never", fits=[], term={}, warnings=[])
+        n.calibrate(list(s.marks))
+        self.assertEqual(n.fits_beyond(), [])
+        self.assertNotAlmostEqual(n.params_at(t6)["rho25"], before["rho25"], places=4)
+
+    def test_every_way_into_an_atm_curve_fit_is_cut_at_the_same_place(self):
+        from volkit import marking
+        from volkit.marketmaker import CurveTarget, curve_targets
+        book = Book.from_excel(BOOK, ASOF).load_all(["USDJPY"])
+        s = book["USDJPY"]
+        s.atm.tenor_overwrites.update({"3m": 0.095, "6m": 0.097, "2y": 0.11})
+        targets, evidence = curve_targets(s, [], {}, source="overwrites")
+        self.assertEqual([x.tenor for x in targets], ["3M", "6M"])
+        self.assertIn("2Y is beyond the 1Y fit cutoff", evidence)
+        s.atm.tenor_overwrites.clear()
+        s.atm.tenor_overwrites["2y"] = 0.11
+        with self.assertRaises(ValueError) as cm:
+            curve_targets(s, [], {}, source="overwrites")
+        self.assertIn("fit cutoff", str(cm.exception))
+        # A target curve handed in whole -- a file, the archive -- is cut too.
+        s.atm.tenor_overwrites.clear()
+        pasted = [CurveTarget(t.upper(), s.tenor_years(t), v, "pasted")
+                  for t, v in (("1M", 0.09), ("3M", 0.093), ("6M", 0.096), ("2Y", 0.2))]
+        proposal = marking.propose(book, "USDJPY", targets=pasted)
+        self.assertIsNotNone(proposal.fit)
+        self.assertEqual([x.tenor for x in proposal.fit.targets], ["1M", "3M", "6M"])
+        self.assertTrue(any("2Y" in n and "fit cutoff" in n for n in proposal.notes),
+                        proposal.notes)
+
+    def test_the_tab_reaches_the_marking_screen(self):
+        from volkit import session
+        from volkit.webapp import BookService
+        d = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d, True)
+        wb = d / "marks.xlsx"
+        shutil.copy(BOOK, wb)
+        session.write_config_tabs(wb, {"CONVENTIONS": [
+            {"pair": "USDJPY", "premium": "", "atmf beyond": "", "delta": "",
+             "fit cutoff": "6m"}]})
+        service = BookService(str(wb), ASOF)
+        out = service.marks({"pair": "USDJPY"})
+        self.assertEqual(out["fit_cutoff"], "6M")
+        atm = {r["tenor"].upper(): r for r in out["atm"]}
+        self.assertFalse(atm["6M"]["beyond_fit"])
+        self.assertTrue(atm["9M"]["beyond_fit"] and atm["1Y"]["beyond_fit"])
+        smile = {r["tenor"].upper(): r for r in out["smile"]}
+        self.assertNotIn("curve", smile["6M"])
+        self.assertEqual(set(smile["1Y"]["curve"]), set(PARAM_NAMES))
+        s = service.book["USDJPY"]
+        self.assertEqual([f.tenor.upper() for f in s.fits_beyond()], ["9M", "1Y"])
+        # A pair with no row keeps the 1Y default.
+        self.assertEqual(service.marks({"pair": "EURUSD"})["fit_cutoff"], "1Y")
 
 
 if __name__ == "__main__":

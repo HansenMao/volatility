@@ -1478,8 +1478,56 @@ def _forwards_for(book, pair: str, expiries: dict) -> tuple[dict, list[str]]:
 # ===========================================================================
 
 
+def split_at_fit_cutoff(surface, targets) -> tuple[list, list[str], str]:
+    """The targets inside the pair's fit cutoff, the tenors beyond it, and why.
+
+    A long-dated level is not part of the interpolation (``VolSurface
+    .fit_cutoff``, the ``CONVENTIONS`` tab): the curve is shaped by the
+    shorter tenors, what it reads beyond the cutoff is information only, and
+    the tenor's own ATM overwrite is what marks it.  Every way into a curve
+    fit comes through here -- :func:`curve_targets` for the screen's sources,
+    ``marking.propose`` for a target curve handed in whole -- so a pasted
+    file and a pinned tenor cannot be cut at two different places.  The third
+    value is the sentence to say, empty when nothing was left out.
+    """
+    targets = list(targets or [])
+    in_fit = getattr(surface, "in_fit", None)
+    if in_fit is None or not targets:
+        return targets, [], ""
+    kept = [x for x in targets if in_fit(x.t)]
+    dropped = [x.tenor for x in targets if not in_fit(x.t)]
+    if not dropped:
+        return kept, [], ""
+    cutoff = surface.fit_cutoff_label()
+    one = len(dropped) == 1
+    if not kept:
+        return kept, dropped, (
+            f"every target ({', '.join(dropped)}) is beyond the {cutoff} fit cutoff, so there "
+            f"is nothing to fit the curve to; a tenor beyond it is marked by its own ATM "
+            f"overwrite, or move the cutoff on the CONVENTIONS tab")
+    return kept, dropped, (
+        f"{', '.join(dropped)} {'is' if one else 'are'} beyond the {cutoff} fit cutoff and "
+        f"{'was' if one else 'were'} left out of the curve fit -- overwrite "
+        f"{'it' if one else 'them'} on the marking screen instead")
+
+
 def curve_targets(surface, quotes, expiries, *, source: str,
                   text: str = "") -> tuple[list[CurveTarget], str]:
+    """The target at-the-money curve a fit goes through, inside the fit cutoff.
+
+    Every source is read by :func:`_source_targets`, then cut at the pair's
+    fit cutoff by :func:`split_at_fit_cutoff`, and the evidence says what was
+    left out.
+    """
+    targets, evidence = _source_targets(surface, quotes, expiries, source=source, text=text)
+    kept, dropped, why = split_at_fit_cutoff(surface, targets)
+    if dropped and not kept:
+        raise ValueError(why)
+    return kept, (f"{evidence}; {why}" if why else evidence)
+
+
+def _source_targets(surface, quotes, expiries, *, source: str,
+                    text: str = "") -> tuple[list[CurveTarget], str]:
     """Where the target at-the-money curve comes from, and what it is.
 
     A module-level function and not a panel's method, because the thing that

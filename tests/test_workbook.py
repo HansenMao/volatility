@@ -48,12 +48,15 @@ class TestConfigurationTabs(unittest.TestCase):
         shutil.copy(BOOK, wb_path)
         # written the way the configuration screen writes it
         session.write_config_tabs(wb_path, {"CONVENTIONS": [
-            {"pair": "EURJPY", "premium": "JPY", "atmf beyond": "2y", "delta": ""},
-            {"pair": "USDCNH", "premium": "", "atmf beyond": "never", "delta": "forward"},
+            {"pair": "EURJPY", "premium": "JPY", "atmf beyond": "2y", "delta": "",
+             "fit cutoff": "2y"},
+            {"pair": "USDCNH", "premium": "", "atmf beyond": "never", "delta": "forward",
+             "fit cutoff": "never"},
             {"pair": "GBPCHF", "premium": "GBP", "atmf beyond": "", "delta": ""},   # not in CONFIG
         ]})
         found = load_conventions(wb_path)
-        self.assertEqual(found["EURJPY"], {"premium": "JPY", "atmf_beyond": "2y", "delta": ""})
+        self.assertEqual(found["EURJPY"], {"premium": "JPY", "atmf_beyond": "2y", "delta": "",
+                                           "fit_cutoff": "2y"})
         data = ExcelSource(wb_path).load()
         self.assertEqual(data.problems, [])
         eurjpy = data.pairs["EURJPY"].conventions()
@@ -71,6 +74,20 @@ class TestConfigurationTabs(unittest.TestCase):
         book = Book.from_excel(wb_path, ASOF).load_all(["EURJPY"])
         self.assertFalse(book["EURJPY"].conv.premium_adjusted)
         self.assertFalse(book["EURJPY"].conv.atm_is_forward(book["EURJPY"].tenor_years("2y")))
+        # the fit cutoff too, and a pair with no row keeps the 1Y default
+        self.assertEqual(data.pairs["USDCNH"].fit_cutoff, "never")
+        self.assertEqual(book["EURJPY"].fit_cutoff_label(), "2Y")
+        self.assertTrue(book["EURJPY"].in_fit(book["EURJPY"].tenor_years("2y")))
+        self.assertFalse(book["EURJPY"].in_fit(book["EURJPY"].tenor_years("3y")))
+        usdjpy = Book.from_excel(wb_path, ASOF).build(["USDJPY"])["USDJPY"]
+        self.assertEqual(usdjpy.fit_cutoff_label(), "1Y")
+        # a cutoff that is not a tenor is a problem, named by row
+        session.write_config_tabs(wb_path, {"CONVENTIONS": [
+            {"pair": "EURJPY", "premium": "", "atmf beyond": "", "delta": "",
+             "fit cutoff": "sometime"}]})
+        data = ExcelSource(wb_path).load()
+        self.assertTrue(any("CONVENTIONS row" in p and "fit cutoff" in p for p in data.problems),
+                        data.problems)
         # a premium currency that is not the pair's is a problem, named by row
         session.write_config_tabs(wb_path, {"CONVENTIONS": [
             {"pair": "EURJPY", "premium": "USD", "atmf beyond": "", "delta": ""}]})
@@ -2091,6 +2108,91 @@ class TestVegaWeightsThroughTheScreens(unittest.TestCase):
         first = [r[0] for r in book["Vega Weights"].iter_rows(values_only=True)][:3]
         book.close()
         self.assertTrue(all(str(c).startswith("#") for c in first), first)
+
+
+class TestCurveFittedToTheOverwrites(unittest.TestCase):
+    """The ATM card's fit to its own overwrite column.
+
+    Two calls of one route, like the bump: a proposal leaves nothing on the
+    book, and an apply writes the fitted parameters -- the numbers the
+    proposal showed, onto the curve card's own fields -- and clears an
+    overwrite only when asked, and only where the fit was aimed.
+    """
+
+    def _service(self, pairs=("EURUSD",)):
+        import shutil
+        import tempfile
+        from volkit.webapp import BookService
+        d = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d, True)
+        return BookService(str(book_copy(d, pairs=pairs)), ASOF)
+
+    def _overwrite(self, svc, pair, n=6):
+        marks = svc.marks({"pair": pair, "cut": "NY"})
+        for i, r in enumerate(marks["atm"][:n]):
+            svc.overwrite({"pair": pair, "kind": "atm", "tenor": r["tenor"],
+                           "value": r["cut"] + (0.5 if i % 2 else 0.2)})
+
+    def test_a_proposal_leaves_the_curve_and_the_overwrites_where_they_were(self):
+        svc = self._service()
+        self._overwrite(svc, "EURUSD")
+        atm = svc.book["EURUSD"].atm
+        was_curve = svc.curve({"pair": "EURUSD"})["params"]
+        was_ow = dict(atm.tenor_overwrites)
+        out = svc.atm_fit({"pair": "EURUSD", "dof": ["initial", "final", "decay"]})
+        self.assertTrue(out["fitted"])
+        self.assertFalse(out["applied"])
+        self.assertEqual(out["free"], ["initial_vol", "long_term_vol", "mean_reversion"])
+        self.assertEqual(len(out["rows"]), len(was_ow))
+        self.assertEqual(svc.curve({"pair": "EURUSD"})["params"], was_curve)
+        self.assertEqual(atm.tenor_overwrites, was_ow)
+        # An unticked knob is pinned: the fit may not move it.
+        self.assertEqual(out["params"]["short_addon"], out["before"]["short_addon"])
+
+    def test_applying_writes_the_proposed_parameters_and_clears_only_when_asked(self):
+        svc = self._service()
+        self._overwrite(svc, "EURUSD")
+        atm = svc.book["EURUSD"].atm
+        shown = svc.atm_fit({"pair": "EURUSD", "dof": ["initial", "final"]})
+        kept = svc.atm_fit({"pair": "EURUSD", "dof": ["initial", "final"], "apply": True})
+        self.assertTrue(kept["applied"])
+        self.assertEqual(kept["cleared"], [])
+        self.assertEqual(len(atm.tenor_overwrites), len(shown["rows"]))
+        params = svc.curve({"pair": "EURUSD"})["params"]
+        for k in ("initial_vol", "long_term_vol"):
+            self.assertAlmostEqual(params[k], shown["params"][k], places=9)
+        done = svc.atm_fit({"pair": "EURUSD", "dof": ["initial", "final"], "apply": True,
+                            "clear_overwrites": True})
+        self.assertEqual(sorted(done["cleared"]), sorted(r["tenor"] for r in done["rows"]))
+        self.assertEqual(atm.tenor_overwrites, {})
+
+    def test_a_cross_frees_its_correlation_under_the_same_names(self):
+        svc = self._service(pairs=("EURUSD", "USDJPY", "EURJPY"))
+        self._overwrite(svc, "EURJPY")
+        out = svc.atm_fit({"pair": "EURJPY", "dof": ["initial", "final", "decay", "add_on"]})
+        self.assertTrue(out["is_cross"])
+        self.assertEqual(out["free"], ["corr_initial", "corr_final", "corr_decay", "short_addon"])
+
+    def test_what_cannot_be_fitted_is_said_and_never_applied(self):
+        svc = self._service()
+        with self.assertRaises(ValueError) as ctx:          # no overwrite at all
+            svc.atm_fit({"pair": "EURUSD", "dof": ["initial"]})
+        self.assertIn("no tenor is pinned", str(ctx.exception))
+        self._overwrite(svc, "EURUSD", n=2)
+        for bad in ([], ["curvature"]):
+            with self.assertRaises(ValueError):
+                svc.atm_fit({"pair": "EURUSD", "dof": bad})
+        # Two overwrites cannot determine four parameters: a proposal that
+        # says so, and an apply that refuses rather than writing half a fit.
+        was = svc.curve({"pair": "EURUSD"})["params"]
+        four = ["initial", "final", "decay", "add_on"]
+        out = svc.atm_fit({"pair": "EURUSD", "dof": four})
+        self.assertFalse(out["fitted"])
+        self.assertTrue(any("cannot determine" in w for w in out["warnings"]), out["warnings"])
+        with self.assertRaises(ValueError):
+            svc.atm_fit({"pair": "EURUSD", "dof": four, "apply": True, "clear_overwrites": True})
+        self.assertEqual(svc.curve({"pair": "EURUSD"})["params"], was)
+        self.assertEqual(len(svc.book["EURUSD"].atm.tenor_overwrites), 2)
 
 
 class TestRealizedVegaWeights(unittest.TestCase):

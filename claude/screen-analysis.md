@@ -141,6 +141,17 @@ is built out of them.
   ever needs their product, and getting the product right while getting the
   individual signs wrong leaves the ATM correct and flips the RR. A test pins
   both against each other.
+- **The same copula fills a thin cross's quotes** on the marking screen
+  (`analytics.implied_cross_quotes`, `BookService.cross_quotes`,
+  `/api/marks/cross`). `_cross_legs` is the one set-up it shares with the
+  triangle. The ST it writes is the **market** strangle
+  (`Combined.market_strangle`, the `VolSurface.strangle` solve on the combined
+  law's prices), never the triangle's smile `fly`, because the sheet's `ST`
+  columns are market strangles; a test pushes one leg through alone and gets
+  its own market strangle back. Deltas are read with `slice_conv(t)`. What it
+  writes is ordinary quote overwrites through `webapp._write_quote_block`, the
+  paste's all-or-nothing block, and a ratio-derived 10-delta wing is skipped
+  unless `override_ratios` is set.
 - Every combined distribution is renormalised onto its own forward. The shift
   is compared against the triangle's known convexity (the legs' MGFs at the
   coefficients plus `rho*sd_a*sd_b`); only the unexplained remainder warns.

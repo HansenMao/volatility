@@ -68,7 +68,7 @@ settings that go with them:
 | `SPREADS` | the pillars posted and the ATM width each spreading **tier** posts at them (kACE, and the `cos` ladder for the COS file); was `SPREADS`, and the old name is still read |
 | `MARKET_WIDTHS`, `ADD_UPS`, `SHADES`, `EXPORT_PAIRS` | the bulk export's policy: the Bloomberg widths, the mid shades, and which pairs each channel publishes — edited on the **Vol bulk processing** tab, not here |
 | `HOLIDAYS` | holiday dates no rule derives: `country, date, remove` |
-| `CONVENTIONS` | a pair's quoting conventions where they differ from the market's: `pair, premium, atmf beyond, delta` |
+| `CONVENTIONS` | a pair's quoting conventions where they differ from the market's: `pair, premium, atmf beyond, delta, fit cutoff` |
 
 Each is an ordinary table with a header row. A row whose first cell starts
 with `#` is a note and is skipped, wherever it sits — the tabs ship with the
@@ -400,6 +400,22 @@ move the screen.
   applies. A strangle must be positive, refused in the box rather than as a
   calibration failure later.
 
+  On a **cross**, a row under the table fills the risk reversals and
+  strangles **from the two dollar legs**, for a cross too thin to have a run of
+  its own. Each leg's marked smile is tied to the other at the cross's own
+  correlation (the curve its ATM is already built from) by the Analysis
+  screen's Gaussian-copula triangle, and the cross's smile is read off the
+  result: the RR is its risk reversal, the ST its *market* strangle, the
+  convention the sheet's columns hold. **Show** lists what the legs imply at
+  every tenor, with the quote on the row now beside it and a tick per tenor;
+  **Fill the quotes** recomputes and writes the ticked tenors (every tenor, if
+  nothing has been shown) as ordinary quotes, in one refit. They are saved,
+  exported and taken off like any typed quote. A 10-delta wing a ratio derives
+  is left to its ratio unless the box beside the buttons is ticked. The ATM
+  is not written. The copula knows nothing of tail dependence the market does
+  not quote, or of the change of measure between the legs' currencies and the
+  cross's, so read the result as a starting mark, not a market.
+
   These edits are saved with the session, and **Write to workbook** puts them
   into the pair sheet's own cells (a new tenor becomes a new row). That is the
   one mark written into a sheet's own number rather than into a row the reader
@@ -424,6 +440,23 @@ move the screen.
   **`volkit migrate-wings --in-place`** once to read the multiples onto the tab
   and flatten the sheets to numbers; `volkit check` says whether a workbook has
   been through it.
+* **Fit the curve to the overwrites** — shown with the **overwrites** column,
+  and only then. Tick the degrees of freedom the fit may move — **initial**,
+  **final**, **decay**, **add-on** (on a plain pair the backbone's initial vol,
+  long-term vol and mean reversion; on a cross the correlation's initial, final
+  and decay; add-on is the short add-on on either) — and press **Propose**. The
+  overwrites inside the fit cutoff are the target curve, and the fit is the one
+  the marking agent runs on a pasted curve, with your ticks as the free set: a
+  table of each tenor's overwrite, the curve as it was, the fitted curve and the
+  miss, the parameters before and after, and any warning (a parameter resting
+  on its bound, a curve that cannot pass through the targets). It needs at
+  least as many overwrites as ticked boxes and says so when it has fewer.
+  **Apply to curve** re-runs the fit on the overwrites as they are then and
+  writes the fitted parameters onto the curve, exactly as typing them into the
+  curve card would. The overwrites stay on unless **and clear the overwrites it
+  fits** is ticked, which clears only the tenors the fit used — one beyond the
+  fit cutoff keeps its overwrite, because nothing else marks it. A proposal
+  made before the overwrites changed says so.
 * **Bump** — tick **bump** in the heading for the row that moves the whole
   curve at once. Choose an **anchor** tenor, type a **move** in vol points, and
   every tenor moves `move × w(tenor) / w(anchor)` where the weights come from
@@ -588,11 +621,26 @@ move the screen.
     pairs) says so with `delta = forward` on the `CONVENTIONS` tab and never
     asks for a rate.
 
-  The `CONVENTIONS` tab (`pair, premium, atmf beyond, delta`) overrides the
-  three per pair: `premium` is the currency the premium is paid in (one of
-  the pair's own), `atmf beyond` a tenor, `never` or `always`, `delta` is
-  `spot` or `forward`. A pair without a row takes the rules above, and most
-  never need one.
+  The `CONVENTIONS` tab (`pair, premium, atmf beyond, delta, fit cutoff`)
+  overrides these per pair: `premium` is the currency the premium is paid in
+  (one of the pair's own), `atmf beyond` a tenor, `never` or `always`, `delta`
+  is `spot` or `forward`, and `fit cutoff` is below. A pair without a row takes
+  the rules above, and most never need one.
+
+  * **Where the fit stops.** Out to and including the **1Y pillar** a tenor is
+    part of the interpolation: its ATM level is a target of the ATM curve fit
+    and its smile shapes the four parameter term structures. A tenor **beyond**
+    it is not, so one thin long-dated quote cannot bend the short end. What
+    the curve and the term structures read out there is extrapolated from the
+    shorter tenors and is **information only** — you are expected to overwrite
+    it. The ATM table marks such a row **info** (amber until its ATM is
+    overwritten); the smile is pinned to that tenor's own quotes where it has
+    them, and the per-tenor grid marks the row **pinned**, with what the fit to
+    the shorter tenors reads there on hover. A curve fit that is handed a level
+    beyond the cutoff — a pinned tenor, a pasted target curve, a paste of ATM
+    quotes — leaves it out and says so. Set `fit cutoff` to another tenor, or
+    to `never` to fit every tenor as before; blank is 1Y. It is a separate
+    setting from `atmf beyond`, though both default to 1Y.
 
   **Forward premium or spot premium.** Every price the model makes is a
   forward value. The **premium toggle** on the Results bar (*premium: forward
@@ -1325,6 +1373,12 @@ Every row on both sheets says which pair it is, and the rows stay in the order
 you wrote them. The one selector left is on the **Marking agent** card, because
 a fit is of one curve; the cards under the sheet — the knowledge bank, the
 archive, the printed tape — show every pair.
+
+**Every card on the right folds under its heading.** Tick the heading to
+open or shut it; the small print beside the title is filled either way, so a
+shut card still says what it holds — how many quotes were checked, what the
+last fit freed, how many rules the bank has. The cards start open, except the
+knowledge bank, and the browser remembers which you shut.
 
 **A line that names no pair is refused**, with the reason, and is not priced.
 There is nothing on the screen saying which pair you meant, and answering it

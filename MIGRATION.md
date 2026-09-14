@@ -257,7 +257,7 @@ unadjusted, so their 25- and 10-delta wing quotes were placed at unadjusted
 strikes and every cross smile was calibrated to the wrong points.
 `DeltaConvention.for_pair` now applies the market's rule (USD when it is in
 the pair, else the base currency, is the premium currency) and a
-`CONVENTIONS` tab (`pair, premium, atmf beyond`) overrides it per pair.
+`CONVENTIONS` tab (`pair, premium, atmf beyond, delta, fit cutoff`) overrides it per pair.
 
 **The at-the-money is the straddle out to 1Y and the forward beyond.** The
 tool put the ATM vol on the delta-neutral straddle at every tenor, and read
@@ -335,6 +335,28 @@ a per cent, and the premium rows gain a *spot* reading. The vols themselves
 are quotes and move for none of it. The delta-neutral straddle
 strike is unchanged by any of this (it is delta neutral under either
 reading), as is every price.
+
+**The fit stops at 1Y.** The smile parameter term structures were fitted
+through every quoted tenor, and an ATM curve fit went through every target it
+was given, so one long-dated quote -- the thinnest market on the sheet -- bent
+the shape the whole short end is read on. A tenor beyond the pair's **fit
+cutoff** (`fit cutoff` on the `CONVENTIONS` tab: a tenor or `never`, blank is
+1Y, resolved on the pair's calendar like `atmf beyond` so the 1Y pillar is
+inside) is now left out of both. `VolSurface.interpolate_params` fits the term
+structures through the tenors inside it only; `VolSurface.params_at` pins a
+quoted tenor beyond it to its own calibration (from the curve at the last
+tenor inside, shaped by the term structure between, flat past the last), so a
+long-dated quote still marks its own tenor; `marketmaker.split_at_fit_cutoff`
+drops the ATM targets beyond it, for the screen's sources in `curve_targets`
+and for a target curve handed to `marking.propose` whole (a file, the
+archive), and says which. What the fit reads beyond the cutoff is information
+only and is expected to be overwritten; the marking screen marks those rows.
+
+**What moves.** The shipped workbook's `TENORS` stop at 1Y, so nothing marked
+moves. A workbook listing longer pillars sees the smile inside 1Y move to the
+fit without them, the smile at a quoted long tenor move onto that tenor's own
+calibration, and an ATM curve fit ignore a long-dated target. `fit cutoff =
+never` on a pair's row restores the old fit exactly.
 
 ---
 

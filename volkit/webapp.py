@@ -51,7 +51,8 @@ from .quotes import FLY_CONVENTIONS
 from .quotes import VOL_UNITS as QUOTE_VOL_UNITS
 from .surface import PARAM_NAMES, QUOTE_FIELDS, QUOTE_LABELS, RATIO_WINGS
 from . import vegaweights
-from .analytics import TARGETS, carry_table, fair_value_table, realized_table, triangle_table
+from .analytics import (TARGETS, carry_table, fair_value_table, implied_cross_quotes,
+                        realized_table, triangle_table)
 from .relvalue import HISTORY_DAYS, SHARED, SIGNALS, WEIGHTS
 from .relvalue import panel_from_request as relvalue_panel_from_request
 from .banded import BAND_MODES, BandTreatment, band_panel
@@ -82,6 +83,37 @@ PARAM_LABELS = {
     "corr_initial": "correlation initial", "corr_final": "correlation final",
     "corr_decay": "correlation decay",
 }
+
+
+def _write_quote_block(surface, cells) -> None:
+    """Write a block of quotes onto one surface, all of them or none.
+
+    What a paste out of a spreadsheet is, and what the cross fill from the legs
+    writes.  Not the single-quote route in a loop: that would refit once per
+    cell, and a block that failed halfway would leave the pair holding half a
+    table nobody typed.  So every cell is written against a snapshot and the
+    snapshot is put back if any one of them is refused.  The caller refits
+    once, after the last cell.  Cells are ``{tenor, field, value}`` in vol
+    points; a blank value gives that quote back to the sheet.
+    """
+    if not isinstance(cells, list) or not cells:
+        raise ValueError("a block of quotes needs at least one cell")
+    keep_q = {t: dict(v) for t, v in surface.quote_overwrites.items()}
+    keep_r = {t: dict(v) for t, v in surface.ratio_overwrites.items()}
+    try:
+        for cell in cells:
+            tenor, field = cell.get("tenor"), cell.get("field")
+            raw = cell.get("value")
+            if raw is None or raw == "":
+                surface.clear_quote_overwrite(tenor, field)
+            else:
+                surface.overwrite_quote(tenor, field, float(raw) / 100.0)
+    except Exception as exc:  # noqa: BLE001 - reported to the browser
+        surface.quote_overwrites.clear()
+        surface.quote_overwrites.update(keep_q)
+        surface.ratio_overwrites.clear()
+        surface.ratio_overwrites.update(keep_r)
+        raise ValueError(f"nothing was written: {exc}") from None
 
 
 class BookService:
@@ -1142,6 +1174,10 @@ class BookService:
                     "marked": surface.atm.term_vol(t) * 100,
                     "cut": surface.atm.cut_vol(self.clock.datetime_from_years(t), cut) * 100,
                     "overwrite": surface.atm.tenor_overwrites.get(tenor.lower()),
+                    # Beyond the pair's fit cutoff the tenor is not part of the
+                    # interpolation: the curve there is read off the shorter
+                    # tenors, information only, and the overwrite marks it.
+                    "beyond_fit": not surface.in_fit(t),
                 }
                 qr = quotes.get(tenor.upper())
                 row["quotes"] = ({f: (None if qr[f] is None else qr[f] * 100)
@@ -1177,15 +1213,26 @@ class BookService:
                 atm_rows.append(row)
             smile_rows = []
             for fit in surface.fits:
-                row = {"tenor": fit.tenor, "t": fit.t, "atm": fit.atm_vol * 100, "ok": fit.ok}
+                row = {"tenor": fit.tenor, "t": fit.t, "atm": fit.atm_vol * 100, "ok": fit.ok,
+                       "beyond_fit": not surface.in_fit(fit.t)}
+                if row["beyond_fit"] and (surface.term or surface.term_marks):
+                    # What the term structures fitted to the shorter tenors
+                    # read here -- shown beside the tenor's own calibration,
+                    # which is what the surface is pinned to.
+                    row["curve"] = surface.curve_params_at(fit.t)
                 for name in ("slog25", "slog10", "rho25", "rho10"):
                     row[name] = getattr(fit, name)
                     ow = surface.param_overwrites.get(name, {})
                     row[name + "_ow"] = ow.get(fit.tenor.upper())
                 smile_rows.append(row)
+            spec = self.book.data.pairs.get(q["pair"])
             return {"atm": atm_rows, "smile": smile_rows,
+                    # A cross's two dollar legs, which is what offers the fill
+                    # of its quotes from them; None on anything else.
+                    "legs": list(spec.legs) if spec is not None and spec.is_cross else None,
                     "term": surface.term_rows(),
                     "anchor": surface.anchor_tenors,
+                    "fit_cutoff": surface.fit_cutoff_label(),
                     "quote_fields": list(QUOTE_FIELDS), "quote_labels": dict(QUOTE_LABELS),
                     "wings": dict(RATIO_WINGS),
                     "ratios": [ratios[t.upper()] for t in
@@ -1449,32 +1496,10 @@ class BookService:
                                         float(q["value"]) / 100.0)
                 refit = True
             elif kind == "quotes":
-                # A block of quotes written together -- what a paste out of a
-                # spreadsheet is.  Not the single-quote route in a loop: that
-                # would refit once per cell, and a block that failed halfway
-                # would leave the pair holding half a table nobody typed.  So
-                # every cell is written against a snapshot and the snapshot is
-                # put back if any one of them is refused; the fit happens once,
-                # after the last cell, like it does for a single quote.
-                cells = q.get("cells")
-                if not isinstance(cells, list) or not cells:
-                    raise ValueError("a block of quotes needs at least one cell")
-                keep_q = {t: dict(v) for t, v in surface.quote_overwrites.items()}
-                keep_r = {t: dict(v) for t, v in surface.ratio_overwrites.items()}
-                try:
-                    for cell in cells:
-                        tenor, field = cell.get("tenor"), cell.get("field")
-                        raw = cell.get("value")
-                        if raw is None or raw == "":
-                            surface.clear_quote_overwrite(tenor, field)
-                        else:
-                            surface.overwrite_quote(tenor, field, float(raw) / 100.0)
-                except Exception as exc:  # noqa: BLE001 - reported to the browser
-                    surface.quote_overwrites.clear()
-                    surface.quote_overwrites.update(keep_q)
-                    surface.ratio_overwrites.clear()
-                    surface.ratio_overwrites.update(keep_r)
-                    raise ValueError(f"nothing was written: {exc}") from None
+                # A block of quotes written together, all or none; the fit
+                # happens once, after the last cell, like it does for a single
+                # quote.
+                _write_quote_block(surface, q.get("cells"))
                 refit = True
             elif kind == "clear_quote":
                 surface.clear_quote_overwrite(q.get("tenor") or None,
@@ -1637,6 +1662,114 @@ class BookService:
                               "after": None if r.after is None else r.after * 100.0,
                               "move": None if r.move is None else r.move * 100.0,
                               "reason": r.reason} for r in rows]}
+
+    def atm_fit(self, payload: dict) -> dict:
+        """Fit the curve to the ATM overwrites, freeing the knobs the desk ticked.
+
+        Two calls of one route, like the bump: ``apply`` false is the proposal
+        a marker reads, true recomputes it and writes the fitted parameters
+        onto the curve -- the same numbers the curve card would take typed.
+        An apply never replays a proposal on screen: an overwrite typed in
+        between is a different target curve.
+
+        The overwrites stay where they are unless ``clear_overwrites`` is set,
+        and then only the tenors the fit was aimed at are cleared: a tenor
+        beyond the fit cutoff is marked by its overwrite alone, and clearing it
+        because the curve was fitted elsewhere would unmark it.
+        """
+        from .marking import MarkingError, propose_to_overwrites
+        with self._lock:
+            if self.book is None:
+                raise ValueError(self.load_error or "no workbook is loaded")
+            pair = str(payload.get("pair") or "").strip().upper() or self.book.pairs[0]
+            try:
+                out = propose_to_overwrites(self.book, pair, payload.get("dof") or [])
+            except MarkingError as exc:
+                raise ValueError(str(exc)) from None
+            out.update(applied=False, cleared=[])
+            if payload.get("apply"):
+                if not out["fitted"]:
+                    raise ValueError("the curve was not fitted, so there is nothing to apply: "
+                                     + "; ".join(out["warnings"] or ["no reason was given"]))
+                surface = self.book[pair]
+                problems = session.set_curve_params(
+                    surface.atm, {k: out["params"][k] for k in out["free"]})
+                if problems:
+                    raise ValueError("the fitted curve was refused: " + "; ".join(problems))
+                if payload.get("clear_overwrites"):
+                    for row in out["rows"]:
+                        surface.atm.clear_overwrite(row["tenor"])
+                    out["cleared"] = [row["tenor"] for row in out["rows"]]
+                surface.invalidate()
+                self.dirty = True
+                out["applied"] = True
+            return out
+
+    def cross_quotes(self, payload: dict) -> dict:
+        """A cross's risk reversals and strangles, as its two dollar legs imply.
+
+        For a cross too thin to have a run of its own
+        (``analytics.implied_cross_quotes``).  Two calls of one route, like the
+        bump: ``apply`` false is the table a marker reads, true recomputes it
+        and writes the ``tenors`` asked for as ordinary quote overwrites -- the
+        numbers a person could have typed into the quote boxes, in one block
+        and one refit, saved with the session and cleared like any other quote.
+        An apply never replays the table on screen: a leg re-marked in between
+        is a different answer.
+
+        A 10-delta wing a ``WING_RATIOS`` multiple derives is left to the ratio
+        unless ``override_ratios`` is set, and the row says so: writing it
+        would take the wing off its ratio, which is a second decision.  A tenor
+        the legs cannot build keeps its row and its reason and is not written.
+        """
+        with self._lock:
+            pair = str(payload.get("pair") or "").strip().upper()
+            if not pair:
+                raise ValueError("name the cross whose quotes are to be implied")
+            surface = self.book[pair]
+            cut = str(payload.get("cut") or "NY")
+            method = payload.get("method") or None
+            override = bool(payload.get("override_ratios"))
+            rows = implied_cross_quotes(self.book, pair, method=method, cut=cut,
+                                        tenors=self._atm_tenors(surface))
+            wanted = payload.get("tenors")
+            wanted = (None if wanted is None
+                      else {str(t).strip().upper() for t in wanted})
+            out_rows, cells = [], []
+            for r in rows:
+                derived = ([] if override else
+                           [f for w, f in RATIO_WINGS.items()
+                            if surface.effective_ratio(r.tenor.upper()).get(w) is not None])
+                chosen = wanted is None or r.tenor.upper() in wanted
+                if payload.get("apply") and chosen and not r.error:
+                    cells.extend({"tenor": r.tenor, "field": f, "value": r.quotes[f] * 100.0}
+                                 for f in QUOTE_FIELDS if f not in derived)
+                out_rows.append({
+                    "tenor": r.tenor, "rho": r.rho, "error": r.error,
+                    "warnings": list(r.warnings), "ratio_derived": derived,
+                    "quotes": {f: r.quotes[f] * 100.0 for f in r.quotes},
+                    "atm": None if r.error else r.atm * 100.0,
+                    "cross_atm": None if r.error else r.cross_atm * 100.0,
+                    "leg_atm": None if r.error else [v * 100.0 for v in r.leg_atm],
+                })
+            applied: list[str] = []
+            problems: list[str] = []
+            if payload.get("apply"):
+                if not cells:
+                    raise ValueError("no tenor the legs could build was asked for, so "
+                                     "nothing was written")
+                _write_quote_block(surface, cells)
+                surface.calibrate()
+                problems = list(surface.warnings)
+                surface.warnings.clear()
+                problems.extend(f"{fit.tenor}: {fit.message}"
+                                for fit in surface.fits if not fit.ok)
+                surface.invalidate()
+                self.dirty = True
+                applied = list(dict.fromkeys(c["tenor"] for c in cells))
+            spec = self.book.data.pairs[pair]
+            return {"pair": pair, "legs": list(spec.legs), "cut": cut,
+                    "applied": applied, "problems": problems, "rows": out_rows}
 
     # -- the session file -------------------------------------------------
     # -- the workbook's configuration tabs --------------------------------
@@ -3608,6 +3741,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self.service.vega_realized(payload))
             elif url.path == "/api/atm/bump":
                 self._json(self.service.atm_bump(payload))
+            elif url.path == "/api/atm/fit":
+                self._json(self.service.atm_fit(payload))
+            elif url.path == "/api/marks/cross":
+                self._json(self.service.cross_quotes(payload))
             elif url.path == "/api/config/pair":
                 self._json(self.service.config_pair(payload))
             elif url.path == "/api/workbook/restore":

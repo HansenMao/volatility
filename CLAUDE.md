@@ -297,10 +297,18 @@ to safely amend.
   `strike_from_delta` scale by it), forward delta with a stated reason
   otherwise. Every delta read off a slice goes through `sl.conv`, never
   `surface.conv`. A `CONVENTIONS` tab overrides per pair (`premium`, `atmf
-  beyond`, `delta`); `DeltaConvention.of` coerces the legacy bool and passes a
+  beyond`, `delta`, `fit cutoff`); `DeltaConvention.of` coerces the legacy bool and passes a
   convention through whole. `pricing._discounted` adds the premium as paid
   (quote-currency discount factor) beside the forward premium, `None` without
   a rate.
+- **A tenor beyond the pair's fit cutoff is not part of the interpolation**
+  (`VolSurface.fit_cutoff`, `CONVENTIONS` `fit cutoff`, default 1Y, `never`
+  fits everything). The smile term structures are fitted inside it
+  (`interpolate_params`), a quoted tenor beyond it is pinned to its own fit
+  (`params_at`), and every ATM curve fit's targets are cut at it in one place
+  (`marketmaker.split_at_fit_cutoff`, from `curve_targets` and
+  `marking.propose`). What the fit reads beyond it is information only and the
+  marking screen says so (`beyond_fit`). MIGRATION.md 1.7.
 - **A quoted tenor sits on the volatility axis at its calendar expiry**
   (`calendars.expiry_years`, through `AtmCurve` / `VolSurface` / `Book
   .tenor_years`). `timeutil.tenor_to_years` is a nominal length and a sort key,

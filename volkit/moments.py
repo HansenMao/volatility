@@ -351,6 +351,38 @@ class Combined:
             out[f"put{tag}"] = vp
         return out
 
+    def market_strangle(self, delta: float, atm: float | None = None) -> float:
+        """The market strangle this smile prices, in vol over ``atm``.
+
+        What a pair sheet's ``ST`` column holds, and not the smile strangle
+        :meth:`table` reports as ``fly``: the one volatility over the ATM at
+        which a strangle struck at its own ``delta`` strikes costs what this
+        distribution charges for those strikes.  The same solve as
+        ``VolSurface.strangle``, with the combined law's prices in place of a
+        slice's -- so a number written into the sheet off this is read back by
+        the fit as the smile it came from.
+
+        ``atm`` defaults to this law's own at-the-money (:meth:`table`'s): the
+        strangle is a shape measured from the smile it belongs to.
+        """
+        if atm is None:
+            atm = self.implied_vol(black.atm_strike(1.0, self.implied_vol(1.0), self.t, self.conv))
+        t, d = self.t, abs(delta)
+
+        def premium_gap(s: float) -> float:
+            v = atm + s
+            if v <= 0:
+                return 1e6
+            kc = black.strike_from_delta(d, 1.0, v, t, True, self.conv)
+            kp = black.strike_from_delta(-d, 1.0, v, t, False, self.conv)
+            flat = float(black.price(1.0, kc, v, t, True) + black.price(1.0, kp, v, t, False))
+            put = float(self.call(kp)) - (1.0 - kp)          # parity, per unit of forward
+            return float(self.call(kc)) + put - flat
+
+        return solve_scalar(premium_gap, 0.0, lo_bound=-atm * 0.9,
+                            bracket=(-atm * 0.5, atm * 2.0),
+                            what=f"{d:.2f} delta market strangle on the combined smile")
+
 
 def combine(dist_a: Distribution, dist_b: Distribution, coefficients: tuple[int, int],
             rho: float, conv: DeltaConvention | bool = False, *,

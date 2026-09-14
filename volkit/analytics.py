@@ -1035,29 +1035,12 @@ class TriangleRow:
     warnings: tuple[str, ...] = ()
 
 
-def triangle_table(book, pair: str, *, method: str | None = None, cut: str = "NY",
-                   deltas=(0.10, 0.25), with_noise: bool = True,
-                   tenors=None) -> list[TriangleRow]:
-    """Compare a cross's marked smile with the one its two legs imply.
+def _cross_legs(book, pair: str):
+    """A cross's surface, its curve, its two legs with their smiles fitted, and
+    the signs the legs enter its log return with.
 
-    The at-the-money row has an exact answer and gets one: the variance
-    triangle, the same expression ``cross.py`` uses to build the curve in the
-    first place.  The risk reversal and the butterfly have no exact answer
-    from two marginals and a correlation, so the legs' whole distributions are
-    tied together with a Gaussian copula and the cross's smile is integrated
-    out of the result -- see ``moments.py`` for what that assumes.
-
-    ``noise`` is the same machinery run on each leg alone, where it should
-    reproduce the input exactly.  Whatever it gets wrong there it is also
-    getting wrong here, so a difference smaller than the noise is not a
-    difference.
-
-    The two at-the-money triangles do not agree, and should not.  The variance
-    triangle uses each leg's *at-the-money* volatility; the distribution
-    triangle uses each leg's whole density, whose variance is larger by the
-    convexity of its own smile.  ``smile_convexity`` is that gap, reported so
-    it is not mistaken for a marking error -- it is typically a fifth of a
-    volatility point and it is what the book's own construction leaves out.
+    The one set-up the triangle and the implied quotes share, so the two
+    cannot build one cross out of different legs.
     """
     spec = book.data.pairs.get(pair)
     if spec is None or not spec.is_cross:
@@ -1083,7 +1066,34 @@ def triangle_table(book, pair: str, *, method: str | None = None, cut: str = "NY
                     f"build a {pair} triangle out of"
                 )
             book[leg].calibrate(marks)
-    ca, cb = moments.triangle_coefficients(pair, leg_a, leg_b)
+    return surface, curve, (leg_a, leg_b), moments.triangle_coefficients(pair, leg_a, leg_b)
+
+
+def triangle_table(book, pair: str, *, method: str | None = None, cut: str = "NY",
+                   deltas=(0.10, 0.25), with_noise: bool = True,
+                   tenors=None) -> list[TriangleRow]:
+    """Compare a cross's marked smile with the one its two legs imply.
+
+    The at-the-money row has an exact answer and gets one: the variance
+    triangle, the same expression ``cross.py`` uses to build the curve in the
+    first place.  The risk reversal and the butterfly have no exact answer
+    from two marginals and a correlation, so the legs' whole distributions are
+    tied together with a Gaussian copula and the cross's smile is integrated
+    out of the result -- see ``moments.py`` for what that assumes.
+
+    ``noise`` is the same machinery run on each leg alone, where it should
+    reproduce the input exactly.  Whatever it gets wrong there it is also
+    getting wrong here, so a difference smaller than the noise is not a
+    difference.
+
+    The two at-the-money triangles do not agree, and should not.  The variance
+    triangle uses each leg's *at-the-money* volatility; the distribution
+    triangle uses each leg's whole density, whose variance is larger by the
+    convexity of its own smile.  ``smile_convexity`` is that gap, reported so
+    it is not mistaken for a marking error -- it is typically a fifth of a
+    volatility point and it is what the book's own construction leaves out.
+    """
+    surface, curve, (leg_a, leg_b), (ca, cb) = _cross_legs(book, pair)
 
     rows: list[TriangleRow] = []
     for tenor in (tenors or book.data.tenor_points):
@@ -1151,6 +1161,92 @@ def triangle_table(book, pair: str, *, method: str | None = None, cut: str = "NY
             leg_atm=(va, vb), implied_correlation=implied_rho,
             leg_vega=(dva, dvb), rho_vega=drho, warnings=tuple(warn),
         ))
+    return rows
+
+
+@dataclass(frozen=True)
+class ImpliedQuoteRow:
+    """The four quotes a cross's two legs and its correlation imply at one tenor.
+
+    ``quotes`` is keyed by the pair sheet's own fields (``rr_25``, ``st_25``,
+    ...) and holds what the sheet holds: risk reversals and **market**
+    strangles, in decimals.  Empty, with ``error`` saying why, when the tenor
+    could not be built -- the row keeps its place either way.
+    """
+
+    tenor: str
+    t: float
+    rho: float
+    quotes: dict[str, float]
+    #: The combined smile's own at-the-money, which the strangles are measured
+    #: from, beside the cross's marked one.  They differ by the legs' smile
+    #: convexity (``TriangleRow.smile_convexity``), which no quote carries.
+    atm: float
+    cross_atm: float
+    leg_atm: tuple[float, float]
+    warnings: tuple[str, ...] = ()
+    error: str = ""
+
+
+def implied_cross_quotes(book, pair: str, *, method: str | None = None, cut: str = "NY",
+                         tenors=None) -> list[ImpliedQuoteRow]:
+    """The risk reversals and strangles a cross's dollar legs imply, tenor by tenor.
+
+    For a cross too illiquid to have a broker run of its own: the two legs'
+    marked smiles are tied together at the cross's own correlation curve --
+    the one its ATM is already built from -- by the Gaussian copula of
+    :func:`triangle_table`, and the cross's smile is read off the result in
+    the sheet's convention.  The risk reversal is the smile's; the strangle is
+    the **market** strangle (``Combined.market_strangle``), because that is
+    what the sheet's ``ST`` columns hold and what the fit reads them as.
+
+    Read, never written: the marking screen writes what it is handed as
+    ordinary quote overwrites.  The ATM is not among them -- the cross's curve
+    already is the variance triangle of its legs.  The assumptions are the
+    triangle's (``moments.py``, CLAUDE.md §7): a Gaussian copula, and no
+    change of measure between the legs' domestic currencies and the cross's.
+    """
+    surface, curve, (leg_a, leg_b), (ca, cb) = _cross_legs(book, pair)
+    rows: list[ImpliedQuoteRow] = []
+    nan = float("nan")
+    for tenor in (tenors or book.data.tenor_points):
+        t = surface.tenor_years(tenor)
+        expiry = book.clock.datetime_from_years(t)
+        rho = float(np.asarray(curve.correlation(t)))
+        warn: list[str] = []
+        try:
+            cross_atm = float(surface.atm_vol(expiry, cut))
+            leg_atm = (float(book[leg_a].atm_vol(expiry, cut)),
+                       float(book[leg_b].atm_vol(expiry, cut)))
+            da = moments.distribution_from_surface(book[leg_a], expiry, method=method,
+                                                   cut=cut, label=leg_a)
+            db = moments.distribution_from_surface(book[leg_b], expiry, method=method,
+                                                   cut=cut, label=leg_b)
+            warn.extend(f"{d.label}: {w}" for d in (da, db) for w in d.warnings)
+            comb = moments.combine(da, db, (ca, cb), rho, surface.slice_conv(t))
+            warn.extend(comb.warnings)
+            got = comb.table((0.10, 0.25))
+            quotes = {"rr_25": float(got["rr25"]), "rr_10": float(got["rr10"]),
+                      "st_25": comb.market_strangle(0.25, got["atm"]),
+                      "st_10": comb.market_strangle(0.10, got["atm"])}
+            bad = [f for f in ("st_25", "st_10") if not quotes[f] > 0.0]
+            if bad:
+                # A sheet refuses a strangle that is not positive, and so does
+                # the quote box; saying so on the tenor's own row keeps a write
+                # of the whole table from failing on it.
+                raise ValueError(
+                    "the legs imply a market strangle that is not positive ("
+                    + ", ".join(f"{f} {quotes[f] * 100:.4g}" for f in bad)
+                    + "), which a sheet cannot hold")
+            rows.append(ImpliedQuoteRow(tenor=tenor, t=t, rho=rho, quotes=quotes,
+                                        atm=float(got["atm"]), cross_atm=cross_atm,
+                                        leg_atm=leg_atm, warnings=tuple(warn)))
+        except (ValueError, ArithmeticError, ConvergenceError) as exc:
+            # The row is kept, empty, with the reason on it -- the triangle's
+            # own rule, for the same reason.
+            rows.append(ImpliedQuoteRow(tenor=tenor, t=t, rho=rho, quotes={}, atm=nan,
+                                        cross_atm=nan, leg_atm=(nan, nan),
+                                        warnings=tuple(warn), error=str(exc)))
     return rows
 
 

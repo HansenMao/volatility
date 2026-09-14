@@ -493,6 +493,39 @@ class TestWebAssets(unittest.TestCase):
         self.assertIn("fillSel('#mbumpanchor',MARKS.atm.map(r=>r.tenor),"
                       "keyTenorIn(MARKS.atm.map(r=>r.tenor)))", paint)
 
+    def test_the_fill_from_the_legs_goes_with_the_quote_columns_on_a_cross(self):
+        """It writes the quote boxes, so it opens with them, and only a cross
+        has legs; Show and Fill are one route with a flag, like the bump."""
+        page = _source("volkit", "web", "index.html")
+        js = page.split("<script>")[1].split("</script>")[0]
+        self.assertIn('<div class="hide" id="mxqrow"', page)
+        paint = js.split("function paintMarks(){")[1].split("\nasync function loadMarks")[0]
+        self.assertIn("$('#mxqrow').classList.toggle('hide',!(qcols&&MARKS.legs))", paint)
+        body = js.split("async function mxqRun(apply){")[1].split("\n}")[0].replace(" ", "")
+        self.assertIn("post('/api/marks/cross'", body)
+        self.assertIn("apply:!!apply", body)
+        self.assertIn("override_ratios:$('#mxqratio').checked", body)
+        self.assertIn("awaitloadMarks()", body)
+        self.assertIn("$('#mxqgo').onclick=()=>mxqRun(false)", js.replace(" ", ""))
+        self.assertIn("$('#mxqapply').onclick=()=>mxqRun(true)", js.replace(" ", ""))
+
+    def test_the_fit_to_the_overwrites_is_shown_only_with_the_overwrite_column(self):
+        """Its target curve is the overwrite column, so it opens and shuts with
+        it; and like the bump, Propose and Apply are one route with a flag."""
+        page = _source("volkit", "web", "index.html")
+        js = page.split("<script>")[1].split("</script>")[0]
+        self.assertIn('<div class="hide" id="mowfitrow"', page)
+        self.assertIn("$('#mowfitrow').classList.toggle('hide',!$('#matmowshow').checked)", js)
+        for dof in ("initial", "final", "decay", "add_on"):
+            self.assertIn(f'data-owdof="{dof}"', page)
+        body = js.split("async function owfitRun(apply){")[1].split("\n}")[0].replace(" ", "")
+        self.assertIn("post('/api/atm/fit'", body)
+        self.assertIn("apply:!!apply", body)
+        self.assertIn("dof:owfitDof()", body)
+        self.assertIn("awaitloadCurve()", body)
+        self.assertIn("$('#mowfitgo').onclick=()=>owfitRun(false)", js.replace(" ", ""))
+        self.assertIn("$('#mowfitapply').onclick=()=>owfitRun(true)", js.replace(" ", ""))
+
     def test_the_key_tenor_is_matched_however_the_workbook_spells_it(self):
         """`fillSel` matches by string.  A default of '1M' offered to a
         workbook whose tenors are '1m' matches nothing and falls through to

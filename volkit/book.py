@@ -548,6 +548,7 @@ class Book:
         surface = VolSurface(
             pair=name, atm=atm,
             conv=spec.conventions(),
+            fit_cutoff=spec.fit_cutoff,
             wing_ratios=dict(self.wing_ratios.get(name, {})),
         )
         # A closure over the book, like the forward lookup: a feed loaded

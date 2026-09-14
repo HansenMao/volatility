@@ -426,12 +426,21 @@ table.mmxr td{padding:2px 6px}
 .mmgrid{display:grid;grid-template-columns:minmax(280px,1fr) minmax(560px,2.35fr);gap:14px;align-items:start}
 @media (max-width:1180px){.mmgrid{grid-template-columns:1fr}}
 .mmleft,.mmright{display:flex;flex-direction:column;gap:14px;min-width:0}
-.mmleft textarea{width:100%;resize:vertical;border-radius:6px;padding:8px;
+.mmleft textarea,.mmtargetbox textarea{width:100%;resize:vertical;border-radius:6px;padding:8px;
   font:11.5px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
   color:var(--ink);background:var(--field);border:1px solid var(--line)}
-.mmleft textarea:focus{outline:2px solid var(--accent);outline-offset:-1px}
+.mmleft textarea:focus,.mmtargetbox textarea:focus{outline:2px solid var(--accent);outline-offset:-1px}
+.mmtargetbox{margin:0 0 10px}
+.mmtargetbox>label{display:block;margin:0 0 4px;font-size:11px;color:var(--muted)}
+.mmtargetbox>label small{font-weight:normal}
 .mmwide{overflow-x:auto}
 .mmwide table{width:max-content;min-width:100%}
+/* Every card on the right column folds under its heading: the tick is the
+   heading itself, and the heading's small print says what the card holds
+   either way, so shutting one never hides a mark. */
+.mmfoldlab{margin:0;display:flex;align-items:center;gap:6px;width:auto;cursor:pointer;
+  font:inherit;color:inherit;text-transform:inherit;letter-spacing:inherit}
+.mmfoldtog{width:auto;margin:0}
 .mmknobs{display:flex;gap:22px;flex-wrap:wrap;margin:0 0 4px}
 .mmknobs>div{min-width:200px}
 .mmknob{display:flex;gap:12px;flex-wrap:wrap;font-size:11.5px;color:var(--muted)}
@@ -764,6 +773,41 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
           wing is skipped, and anything past the last tenor or the last column is ignored and
           counted. One cell that is not a number refuses the whole block: half a pasted table is
           not a table anybody typed.</details>
+        <!-- The quotes of a cross too thin to have a run of its own, read off
+             its two dollar legs and its correlation.  Shown with the quote
+             columns, on a cross only: what it writes is the quote boxes. -->
+        <div class="hide" id="mxqrow" style="margin-top:11px">
+          <div class="row" style="flex-wrap:wrap;gap:8px;align-items:center">
+            <b style="font-size:12px;width:auto">RR and ST from the legs</b>
+            <span class="meta" id="mxqlegs" style="width:auto"></span>
+            <button class="ghost" id="mxqgo"
+              style="width:auto;padding:5px 12px;font-size:12px">Show</button>
+            <button id="mxqapply"
+              style="width:auto;padding:5px 12px;font-size:12px">Fill the quotes</button>
+            <label style="margin:0;display:flex;align-items:center;gap:5px;width:auto;font-size:11px"
+              title="a 10-delta wing a WING_RATIOS multiple derives is left to the ratio unless this is ticked; ticked, the implied wing is written and the wing comes off its ratio at that tenor">
+              <input type="checkbox" id="mxqratio" style="width:auto"> and the 10-delta wings a ratio derives</label>
+            <span class="grow"></span><span class="meta" id="mxqstale"></span>
+          </div>
+          <details class="hint" style="margin-top:6px"><summary>How the legs imply a cross&rsquo;s
+            smile, and what Fill writes</summary>Each leg&rsquo;s <b>marked smile</b> is read as a
+            distribution at the cross&rsquo;s expiry, the two are tied together at the
+            cross&rsquo;s own <b>correlation</b> &mdash; the curve its ATM is already built from
+            &mdash; by a Gaussian copula, and the cross&rsquo;s smile is read off the result: the
+            same construction as the Analysis screen&rsquo;s cross triangle. The <b>RR</b> is the
+            smile&rsquo;s risk reversal; the <b>ST</b> is the <i>market</i> strangle, which is what
+            the sheet&rsquo;s columns hold. Both are measured from the combined smile&rsquo;s own
+            ATM. The ATM itself is not written: the cross&rsquo;s curve already is the triangle
+            of its legs&rsquo; ATMs. What the copula leaves out &mdash; tail dependence the
+            market does not quote, and the change of measure between the legs&rsquo; currencies
+            and the cross&rsquo;s &mdash; is left in the answer.
+            <b>Show</b> reads, <b>Fill</b> writes: it recomputes, then writes the ticked tenors
+            (every tenor, before anything is shown) as ordinary quotes, in one block and one
+            refit &mdash; saved with the session and taken off the way any quote is, by
+            emptying its box. A tenor the legs cannot build keeps its row and its reason and is
+            not written.</details>
+          <div id="mxqout" style="margin-top:8px"></div>
+        </div>
         <div class="hide" id="mratiorow" style="margin-top:11px">
           <div class="scroll"><table class="mark" id="mratio"></table></div>
           <details class="hint" style="margin-top:6px"><summary>How a ratio derives a
@@ -787,6 +831,47 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
           rather than written as a quote. One cell that is not a number refuses the whole
           block.</details>
         <div class="row hide" id="matmowrow" style="margin-top:9px"><button class="danger" id="mclearatm">Clear ATM overwrites</button></div>
+        <!-- The curve the overwrites describe.  The marking agent's own fit
+             (marking.propose) aimed at the overwrite column, with the free
+             knobs ticked here by name rather than planned.  Shown with the
+             overwrite column and only then: the column is its target curve. -->
+        <div class="hide" id="mowfitrow" style="margin-top:11px">
+          <div class="row" style="flex-wrap:wrap;gap:10px;align-items:center">
+            <b style="font-size:12px;width:auto">Fit the curve to the overwrites</b>
+            <span class="meta" style="width:auto">free:</span>
+            <label style="margin:0;display:flex;align-items:center;gap:4px;width:auto;font-size:11px">
+              <input type="checkbox" data-owdof="initial" checked style="width:auto"> initial</label>
+            <label style="margin:0;display:flex;align-items:center;gap:4px;width:auto;font-size:11px">
+              <input type="checkbox" data-owdof="final" checked style="width:auto"> final</label>
+            <label style="margin:0;display:flex;align-items:center;gap:4px;width:auto;font-size:11px">
+              <input type="checkbox" data-owdof="decay" checked style="width:auto"> decay</label>
+            <label style="margin:0;display:flex;align-items:center;gap:4px;width:auto;font-size:11px">
+              <input type="checkbox" data-owdof="add_on" style="width:auto"> add-on</label>
+          </div>
+          <div class="row" style="flex-wrap:wrap;gap:8px;align-items:center;margin-top:7px">
+            <button class="ghost" id="mowfitgo"
+              style="width:auto;padding:5px 12px;font-size:12px">Propose</button>
+            <button id="mowfitapply"
+              style="width:auto;padding:5px 12px;font-size:12px">Apply to curve</button>
+            <label style="margin:0;display:flex;align-items:center;gap:5px;width:auto;font-size:11px"
+              title="once the fitted parameters are on the curve, take off the overwrites it was fitted to; a tenor beyond the fit cutoff keeps its overwrite, because nothing else marks it">
+              <input type="checkbox" id="mowfitclear" style="width:auto"> and clear the overwrites it fits</label>
+            <span class="grow"></span><span class="meta" id="mowfitstale"></span>
+          </div>
+          <details class="hint" style="margin-top:6px"><summary>What is fitted, and what
+            Apply writes</summary>The targets are the <b>overwrites</b> in the column above,
+            inside the pair&rsquo;s fit cutoff; the fit is the one the marking agent runs on a
+            pasted curve, with the free parameters ticked here instead of planned. On a plain
+            pair <b>initial</b>, <b>final</b> and <b>decay</b> are the backbone&rsquo;s initial
+            vol, long-term vol and mean reversion; on a cross they are the correlation&rsquo;s.
+            <b>add-on</b> is the short add-on on either; the short decay is never freed here.
+            A fit needs at least as many overwrites as ticked boxes.
+            <b>Propose</b> reads, <b>Apply</b> writes: it re-runs the fit on the overwrites as
+            they are then and puts the fitted parameters on the curve, exactly as typing them
+            into the curve card would. The overwrites stay unless the box beside it is ticked.
+          </details>
+          <div id="mowfitout" style="margin-top:8px"></div>
+        </div>
         <!-- The bump.  A desk does not mark a term structure one tenor at a
              time: it has a view on one of them and the rest of the curve
              follows in a fixed proportion.  Those proportions are the
@@ -1578,11 +1663,6 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
           placeholder="eur 1M ATM in 100mm&#10;eur 3M 25d RR&#10;eur 2M 25d fly&#10;eur 6M 1.1000 call&#10;eur 1M/3M ATM spread&#10;eur 6M 1.10 call vs 1.15 call&#10;cnh 29 Sep 6.6600 put live in pips&#10;cnh fri ATM&#10;&#10;the same words as the market box, with the price left off"></textarea>
         <div class="msg" id="mqparse"></div></section>
 
-      <section class="card hide" id="mmtargetcard">
-        <h2>Target at-the-money curve <small>tenor and level, one a line</small></h2>
-        <textarea id="mmtarget" spellcheck="false" style="height:132px"
-          placeholder="1W 8.10&#10;1M 8.35&#10;3M 8.60&#10;1Y 9.05"></textarea></section>
-
       <section class="card"><h2>Your vega profile <small>optional; a long position shades the mid down</small></h2>
         <textarea id="mmvega" spellcheck="false" style="height:110px"
           placeholder="1M  250&#10;3M -120&#10;1Y  400"></textarea>
@@ -1591,7 +1671,8 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
     </div>
 
     <div class="mmright">
-      <section class="card"><h2>Our quote <small id="mqsheethead"></small></h2>
+      <section class="card mmfold" data-fold="quote"><h2><label class="mmfoldlab"><input type="checkbox" class="mmfoldtog" checked> Our quote</label> <small id="mqsheethead"></small></h2>
+        <div class="mmfoldbody">
         <div class="meta" id="mqmarks"></div>
         <div id="mqsheet"></div>
         <div class="mmbar" style="margin:8px 0 0">
@@ -1600,9 +1681,10 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
                     title="File every priced row as a price shown to the client named on the bar, with the mid the model had now. What became of each one is answered with the buttons that then appear beside it, and that is what the client's record is built from.">Record as shown</button>
           </div>
           <div class="meta" id="mqrecordmsg"></div>
-        </div></section>
+        </div></div></section>
 
-      <section class="card"><h2>Marking agent <small id="markhead"></small></h2>
+      <section class="card mmfold" data-fold="mark"><h2><label class="mmfoldlab"><input type="checkbox" class="mmfoldtog" checked> Marking agent</label> <small id="markhead"></small></h2>
+        <div class="mmfoldbody">
         <div class="mmbar" style="margin:0 0 10px">
           <div class="f" title="the one pair this card marks. A fit is of one curve, so the pair lives here and nowhere else on the tab: the check and the quote take theirs from the boxes, and the cards under the sheet show every pair."><label>Pair</label><select id="markpair" style="width:118px"></select></div>
           <div class="f"><label>Target ATM curve</label><select id="mmsource" style="width:150px"></select></div>
@@ -1624,6 +1706,12 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
               <input type="checkbox" id="markapply" style="width:auto"> keep the marks</label>
           </div>
         </div>
+        <!-- Only the fit reads the target curve, so the box lives on this card
+             and shows only when the source above is the paste. -->
+        <div class="hide mmtargetbox" id="mmtargetcard">
+          <label>Target at-the-money curve <small>tenor and level, one a line</small></label>
+          <textarea id="mmtarget" spellcheck="false" style="height:132px"
+            placeholder="1W 8.10&#10;1M 8.35&#10;3M 8.60&#10;1Y 9.05"></textarea></div>
         <div class="mmknobs">
           <div><label>At-the-money curve may move</label><div class="mmknob" id="mmfree"></div></div>
           <div><label>Smile parameters may move</label><div class="mmknob" id="mmsmilefree"></div></div>
@@ -1659,7 +1747,7 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
           <b>Quote</b> makes a two-way. There used to be a <i>Fit</i> button beside them that also
           moved the curve and the wings, which meant two ways to re-mark and only one of them written
           down. There is now one card, one journal and one place to look.
-          <br><b>Propose</b> is the agent: it reads the market paste and the target curve above,
+          <br><b>Propose</b> is the agent: it reads the market paste and the target curve on this card,
           decides which knobs to free and how far to trust what this desk has done to proposals like
           this one, runs the fit and hands back numbers. <b>With the market box empty</b> and
           <i>score against the archive</i> ticked, the archive is the market: the two agents confer
@@ -1678,24 +1766,28 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
           <br><b>Nothing here reaches the workbook.</b> A proposal is numbers the browser holds; the
           journal is the only file written. Tick <b>keep the marks</b> to leave what you accepted,
           edited or fitted on the loaded book &mdash; still in memory only, and a reload discards
-          it.</details></section>
+          it.</details></div></section>
 
       <!-- Where we are marked against the run comes first, because it is what
            Check Market answers and what a morning reads before it looks at
            what a fit arrived at.  The curve and the wings are the fit's own
            output and sit under it. -->
-      <section class="card"><h2>The market against the curve <small id="mmsheethead"></small></h2>
+      <section class="card mmfold" data-fold="against"><h2><label class="mmfoldlab"><input type="checkbox" class="mmfoldtog" checked> The market against the curve</label> <small id="mmsheethead"></small></h2>
+        <div class="mmfoldbody">
         <div class="meta" id="mmagainst"></div>
-        <div id="mmsheet"></div></section>
-      <section class="card"><h2>At-the-money curve <small id="mmcurvehead"></small></h2>
+        <div id="mmsheet"></div></div></section>
+      <section class="card mmfold" data-fold="curve"><h2><label class="mmfoldlab"><input type="checkbox" class="mmfoldtog" checked> At-the-money curve</label> <small id="mmcurvehead"></small></h2>
+        <div class="mmfoldbody">
         <details class="hint"><summary>What fills this card</summary>What the last fit on the
           <b>Marking agent</b> card arrived at. Filled by <b>Propose</b>&rsquo;s own fit and by
           <b>Fit my way</b>; nothing else on this screen moves a curve.</details>
-        <div id="mmcurve"></div></section>
-      <section class="card"><h2>Wings <small id="mmwinghead"></small></h2>
-        <div id="mmwings"></div></section>
+        <div id="mmcurve"></div></div></section>
+      <section class="card mmfold" data-fold="wings"><h2><label class="mmfoldlab"><input type="checkbox" class="mmfoldtog" checked> Wings</label> <small id="mmwinghead"></small></h2>
+        <div class="mmfoldbody">
+        <div id="mmwings"></div></div></section>
 
-      <section class="card"><h2>Quoting agent&rsquo;s archive <small id="agenthead"></small></h2>
+      <section class="card mmfold" data-fold="archive"><h2><label class="mmfoldlab"><input type="checkbox" class="mmfoldtog" checked> Quoting agent&rsquo;s archive</label> <small id="agenthead"></small></h2>
+        <div class="mmfoldbody">
         <div class="mmbar" style="margin:0 0 10px">
           <div class="f" title="An observation counts half after this many days."><label>Half-life (d)</label><input id="agenthalf" value="5" style="width:84px"></div>
           <div class="f" title="Age-weighted observations needed before the archive sets a width."><label>Min evidence</label><input id="agentmin" value="2" style="width:88px"></div>
@@ -1739,8 +1831,9 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
           counted in what printed and left out of the vega. It reaches the price as the
           <b>Flow</b> column on the quote sheet, and only when <b>Flow wt</b> is above zero;
           ask the record &ldquo;who has been paying in the 1M&rdquo; for the same reading in
-          words.</details></section>
-      <section class="card"><h2>Ask the record <small id="askhead"></small></h2>
+          words.</details></div></section>
+      <section class="card mmfold" data-fold="ask"><h2><label class="mmfoldlab"><input type="checkbox" class="mmfoldtog" checked> Ask the record</label> <small id="askhead"></small></h2>
+        <div class="mmfoldbody">
         <div id="askchat" class="askchat"></div>
         <div class="mmbar" style="margin:10px 0 0">
           <div class="f" style="flex:1;min-width:240px"><label>Question</label>
@@ -1761,22 +1854,22 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
           same mark the quote leans on), <b>a client&rsquo;s record</b> (&ldquo;is Fund A a buyer or
           a seller of the 3M ATM&rdquo;, the same record the quote applies), the journal and the
           marks. It takes the archive card&rsquo;s evidence settings above. Ask it to fetch, re-mark, record or quote and it names the button that
-          does that. &ldquo;And the 1M?&rdquo; keeps the topic of the question before.</details></section>
+          does that. &ldquo;And the 1M?&rdquo; keeps the topic of the question before.</details></div></section>
 
-      <!-- Shut by default.  The bank is a file the desk keeps rather than
-           something a morning reads: most sessions price off it and never
+      <!-- Shut by default, where the cards above start open.  The bank is a
+           file the desk keeps rather than something a morning reads: most sessions price off it and never
            open it, and the width it set is already named on the row it made.
            A card may be shut but a mark may not be hidden
            (claude/invariants.md), so the heading carries the rule count
            whether the card is open or not, and says outright when there are
            edits that have not been saved to the file. -->
-      <section class="card">
-        <h2><label style="margin:0;display:flex;align-items:center;gap:6px;width:auto;font-size:inherit;font-weight:inherit">
-            <input type="checkbox" id="mmbankshow" style="width:auto"> Knowledge bank</label>
+      <section class="card mmfold" data-fold="bank">
+        <h2><label class="mmfoldlab">
+            <input type="checkbox" class="mmfoldtog" id="mmbankshow"> Knowledge bank</label>
           <span class="grow"></span>
           <span class="pill warn hide" id="mmbankdirty"></span>
           <small id="mmbankhead"></small></h2>
-        <div id="mmbankbody" class="hide">
+        <div id="mmbankbody" class="mmfoldbody">
           <div class="toolbar">
             <button id="mmrule">+ Rule</button>
             <button class="ghost" id="mmlearn" title="Propose spread rules from the widths the archive has seen, age-weighted, with the run pasted above counted as if it were filed. Proposed here, saved by you.">Learn widths</button>
@@ -2097,7 +2190,7 @@ const api=async(p,o)=>{const r=await fetch(p,o);const j=await r.json();
    not trust this list: a held fit is stamped with a fingerprint of the pair's
    marks and the quote refuses a stale one whatever the browser believed. */
 const MARKING_ROUTES=['/api/overwrite','/api/curve','/api/events','/api/events/weights',
-  '/api/band','/api/atm/bump','/api/reload','/api/session/load','/api/config/save',
+  '/api/band','/api/atm/bump','/api/atm/fit','/api/marks/cross','/api/reload','/api/session/load','/api/config/save',
   '/api/config/pair','/api/workbook/restore','/api/mm/mark/fit','/api/mm/mark/record',
   /* The export overlay applied to (or reverted off) the session, and the
      export tables seeded into it: both put marks on the book or rebuild it. */
@@ -2993,7 +3086,8 @@ function mq(){return{pair:$('#mpair').value,cut:$('#mcut').value,method:$('#mmet
 function saveMarking(){try{localStorage.setItem('volkit.marking',JSON.stringify(
   {atm_overwrites:$('#matmowshow').checked,quotes:$('#mquoteshow').checked,
    ratios:$('#mratioshow').checked,smile:$('#msmileshow').checked,
-   bump:$('#mbumpshow').checked}))}catch(e){}}
+   bump:$('#mbumpshow').checked,
+   owfit_dof:owfitDof()}))}catch(e){}}
 function loadMarking(){
   let v=null; try{v=JSON.parse(localStorage.getItem('volkit.marking')||'null')}catch(e){}
   v=v&&typeof v==='object'?v:{};
@@ -3003,10 +3097,14 @@ function loadMarking(){
   $('#mquoteshow').checked=v.quotes!==false;
   $('#mratioshow').checked=!!v.ratios;
   $('#mbumpshow').checked=!!v.bump;
+  if(Array.isArray(v.owfit_dof))$$('#mowfitrow input[data-owdof]').forEach(
+    i=>{i.checked=v.owfit_dof.indexOf(i.dataset.owdof)>=0});
   markingVisible();
 }
 function markingVisible(){
   $('#matmowrow').classList.toggle('hide',!$('#matmowshow').checked);
+  /* The fit's target curve is the overwrite column, so it is shown with it. */
+  $('#mowfitrow').classList.toggle('hide',!$('#matmowshow').checked);
   $('#msmilebody').classList.toggle('hide',!$('#msmileshow').checked);
   /* Nothing is hidden by shutting the bump: what it makes are per-tenor ATM
      overwrites, which the overwrite count in this card's heading already
@@ -3048,6 +3146,7 @@ function paintMarks(){
   const nown=MARKS.atm.filter(r=>r.overwrite!=null).length;
   const nq=MARKS.atm.filter(r=>r.quotes_marked).length;
   $('#matmowcount').textContent=(!ow&&nown)?`· ${nown} marked`:'';
+  owfitStale();
   const qn=$('#mquotenote');
   /* Three things want this line, and they are not equals: a refusal beats
      what the last paste did, and both beat the standing count of re-quoted
@@ -3059,6 +3158,11 @@ function paintMarks(){
   /* Each paste note belongs to the column it describes and goes with it. */
   $('#mqpastehint').classList.toggle('hide',!qcols);
   $('#mowpastehint').classList.toggle('hide',!ow);
+  /* The fill from the legs writes the quote boxes, so it goes with them --
+     and only a cross has legs to fill from. */
+  $('#mxqrow').classList.toggle('hide',!(qcols&&MARKS.legs));
+  $('#mxqlegs').textContent=MARKS.legs?(MARKS.legs.join(' × ')+', at the cross’s correlation'):'';
+  mxqStale();
   // Two columns want to sit beside each other; anything more wants the card.
   $('#matm').className='mark'+((ow||qcols)?'':' tight');
   $('#matm').innerHTML=`<thead><tr><th>Tenor</th><th>${esc(MARKS.cut)} cut %</th>`+
@@ -3078,8 +3182,16 @@ function paintMarks(){
         :(!any)?'':(r.fitted?(r.quotes_marked?
           ' <span class="owdot" title="re-quoted away from the sheet">&bull;</span>':'')
         :' <span class="pill bad" title="a tenor is quoted by all four of its numbers or by none, so this one is not fitted">part</span>');
+      /* Beyond the pair's fit cutoff the tenor is left out of the ATM and
+         smile interpolation, so what the curve reads here came off the
+         shorter tenors and is information only. Amber until it is overwritten. */
+      const cut=r.beyond_fit?' <span class="pill'+(r.overwrite==null?' warn':'')+'" title="beyond the '+
+        esc(MARKS.fit_cutoff||'')+' fit cutoff (CONVENTIONS tab): not part of the ATM or smile interpolation. '+
+        'The level read here is extrapolated from the shorter tenors and is information only'+
+        (r.overwrite==null?' — overwrite it':'; the overwrite marks it')+
+        '. Where the tenor is quoted, the smile is pinned to the quotes at this tenor">info</span>':'';
       return `<tr${isKeyTenor(r.tenor)?' class="key"':''}><td>${esc(r.tenor)}`+
-      ((!ow&&r.overwrite!=null)?' <span class="owdot" title="overwritten">&bull;</span>':'')+tag+
+      ((!ow&&r.overwrite!=null)?' <span class="owdot" title="overwritten">&bull;</span>':'')+tag+cut+
       `</td><td>${vnum(r.cut)}</td>`+
       (ow?`<td><input data-m="atm" data-tenor="${esc(r.tenor)}" value="${r.overwrite==null?'':(r.overwrite*100).toFixed(4)}"
         placeholder="${vnum(r.curve)}"></td>`:'')+
@@ -3135,7 +3247,14 @@ function paintMarks(){
         placeholder="${r.fitted==null?'':r.fitted[c].toFixed(4)}"></td>`).join('')+'</tr>').join('')
      :`<tr><td colspan="4" class="meta">no smile term structure for this pair</td></tr>`)+'</tbody>';
   $('#msmile').innerHTML=`<thead><tr><th>Tenor</th>${P.map(p=>`<th>${p}</th>`).join('')}</tr></thead><tbody>`+
-    (MARKS.smile.length?MARKS.smile.map(r=>`<tr><td>${esc(r.tenor)}${r.ok?'':' <span class="pill bad">fit</span>'}</td>`+
+    (MARKS.smile.length?MARKS.smile.map(r=>`<tr><td>${esc(r.tenor)}${r.ok?'':' <span class="pill bad">fit</span>'}`+
+      /* A tenor beyond the fit cutoff is not in the term structures; the
+         surface is pinned to its own calibration, and what the fit to the
+         shorter tenors reads here is shown on hover, information only. */
+      (r.beyond_fit?' <span class="pill" title="beyond the '+esc(MARKS.fit_cutoff||'')+
+        ' fit cutoff: left out of the term structures, and the surface is pinned to the quotes at this tenor'+
+        (r.curve?'. The fit to the shorter tenors reads '+P.map(p=>p+' '+num(r.curve[p],4)).join(', ')+
+        ', information only':'')+'">pinned</span>':'')+`</td>`+
       P.map(p=>`<td><input data-m="smile" data-param="${p}" data-tenor="${esc(r.tenor)}"
         value="${r[p+'_ow']==null?'':r[p+'_ow'].toFixed(4)}" placeholder="${r[p].toFixed(4)}"></td>`).join('')+'</tr>').join('')
      :`<tr><td colspan="5" class="meta">no smile quotes for this pair</td></tr>`)+'</tbody>';
@@ -3424,6 +3543,128 @@ async function bumpRun(apply){
 }
 $('#mbumpgo').onclick=()=>bumpRun(false);
 $('#mbumpapply').onclick=()=>bumpRun(true);
+/* ---- a cross's quotes from its legs ---------------------------------------
+   The bump's shape again: `Show` reads and `Fill` writes, and the fill
+   recomputes rather than replaying the table -- a leg re-marked in between is
+   a different answer.  The table's ticks say which tenors a fill writes; with
+   no table up it writes every tenor the legs can build.  What it writes is
+   quote overwrites and nothing else. */
+let MXQ=null;
+function mxqStale(){
+  const o=mq(), stale=!!(MXQ&&(MXQ.pair!==o.pair||MXQ.cut!==o.cut));
+  $('#mxqstale').textContent=stale?'read on '+MXQ.pair+' '+MXQ.cut+' — show again':'';
+  $('#mxqstale').className=stale?'msg bad':'meta';
+}
+async function mxqRun(apply){
+  const out=$('#mxqout'), o=mq(), body={pair:o.pair,cut:o.cut,method:o.method,
+    override_ratios:$('#mxqratio').checked,apply:!!apply};
+  /* Ticks off a table read on another pair or cut name nothing on this one. */
+  if(apply&&MXQ&&MXQ.pair===o.pair&&MXQ.cut===o.cut)
+    body.tenors=$$('#mxqout input[data-xqtenor]').filter(i=>i.checked).map(i=>i.dataset.xqtenor);
+  if(apply&&body.tenors&&!body.tenors.length){
+    out.insertAdjacentHTML('afterbegin','<div class="msg bad">no tenor is ticked, so nothing was written</div>');return}
+  const keep=body.tenors;
+  out.innerHTML='<span class="spin"></span> '+(apply?'filling':'reading')+'…';
+  let r;
+  try{r=await post('/api/marks/cross',body)}
+  catch(e){out.innerHTML='<div class="msg bad">'+esc(e.message)+'</div>';return}
+  MXQ={pair:r.pair,cut:r.cut};
+  const F=quoteFields(), ok=r.rows.filter(x=>!x.error).length;
+  const tick=x=>!x.error&&(!keep||keep.indexOf(x.tenor)>=0);
+  out.innerHTML=
+    '<div class="msg '+(apply?'ok':'')+'">'+(apply
+      ? r.applied.length+' tenor(s) re-quoted off '+esc(r.legs.join(' × '))
+      : ok+' of '+r.rows.length+' tenor(s) built from '+esc(r.legs.join(' × ')))+'</div>'+
+    (r.problems&&r.problems.length?'<div class="msg bad">'+esc(r.problems.join(' · '))+'</div>':'')+
+    '<div class="scroll" style="margin-top:6px"><table class="mark"><thead><tr><th></th><th>Tenor</th>'+
+    '<th title="the cross’s correlation at this tenor">ρ</th>'+
+    F.map(f=>'<th>'+esc(quoteLabel(f))+'</th>').join('')+'</tr></thead><tbody>'+
+    r.rows.map(x=>{
+      const now=((MARKS&&MARKS.atm.find(a=>a.tenor.toUpperCase()===x.tenor.toUpperCase()))||{}).quotes||{};
+      const note=x.warnings.length?' <span class="pill warn" title="'+esc(x.warnings.join(' · '))+'">note</span>':'';
+      return '<tr><td><input type="checkbox" data-xqtenor="'+esc(x.tenor)+'" style="width:auto"'+
+        (tick(x)?' checked':'')+(x.error?' disabled':'')+'></td><td>'+esc(x.tenor)+note+'</td>'+
+        (x.error
+          ?'<td colspan="'+(F.length+1)+'" class="meta">'+esc(x.error)+'</td>'
+          :'<td title="combined ATM '+vnum(x.atm)+' against the cross’s '+vnum(x.cross_atm)+
+            '; legs '+x.leg_atm.map(vnum).join(' / ')+'">'+num(x.rho,3)+'</td>'+
+           F.map(f=>{
+             const ratio=x.ratio_derived.indexOf(f)>=0;
+             return '<td'+(ratio?' class="derived" title="derived by its ratio, so not written — tick the box above to write it"':'')+'>'+
+               vsgn(x.quotes[f])+(now[f]==null?'':'<span class="meta"> ('+vnum(now[f])+')</span>')+'</td>';
+           }).join(''))+'</tr>';}).join('')+'</tbody></table></div>'+
+    '<div class="meta" style="margin-top:4px">implied, with the quote on the row now in brackets</div>';
+  mxqStale();
+  if(apply){QPROB=r.problems||[];QPASTE='';await loadMarks();await redraw();schedulePrice()}
+}
+$('#mxqgo').onclick=()=>mxqRun(false);
+$('#mxqapply').onclick=()=>mxqRun(true);
+/* ---- the curve fitted to the overwrites ---------------------------------
+   The same two-calls-of-one-route shape as the bump, for the same reason: an
+   apply re-runs the fit on the overwrites as they are then, never replays the
+   proposal on screen.  What it writes is the curve's own parameters.  The
+   overwrites a proposal was made from are remembered, so a proposal that no
+   longer describes the column above it says so rather than sitting there
+   looking current. */
+let OWFIT=null;
+function owSignature(){
+  return MARKS?JSON.stringify(MARKS.atm.filter(r=>r.overwrite!=null).map(r=>[r.tenor,r.overwrite])):'';
+}
+function owfitStale(){
+  const stale=!!(OWFIT&&(OWFIT.pair!==mq().pair||OWFIT.sig!==owSignature()));
+  $('#mowfitstale').textContent=stale?'the overwrites have changed since this proposal — propose again':'';
+  $('#mowfitstale').className=stale?'msg bad':'meta';
+}
+function owfitDof(){return $$('#mowfitrow input[data-owdof]').filter(i=>i.checked).map(i=>i.dataset.owdof)}
+async function owfitRun(apply){
+  const out=$('#mowfitout');
+  out.innerHTML='<span class="spin"></span> '+(apply?'fitting and applying':'fitting')+'…';
+  let r;
+  try{
+    r=await post('/api/atm/fit',{pair:mq().pair,dof:owfitDof(),apply:!!apply,
+                                 clear_overwrites:$('#mowfitclear').checked});
+  }catch(e){OWFIT=null;owfitStale();out.innerHTML='<div class="msg bad">'+esc(e.message)+'</div>';return}
+  const pts=k=>['initial_vol','long_term_vol','short_addon'].indexOf(k)>=0;
+  const names=r.rows.map(x=>x.tenor);
+  const head=!r.fitted
+    ?'<div class="msg bad">the curve was not fitted</div>'
+    :'<div class="msg '+(apply?'ok':'')+'">'+(apply
+        ?'fitted parameters applied to the '+esc(r.pair)+' curve'+
+          (r.cleared.length?'; overwrites cleared at '+esc(r.cleared.join(', ')):'; the overwrites are still on')
+        :'proposal: '+esc(r.evidence))+'</div>'+
+      '<div class="mmstat" style="margin-top:4px"><span>RMSE <b>'+vnum(r.rmse)+'</b> vol pts</span>'+
+      '<span>worst <b>'+vsgn(r.max_error)+'</b> at '+esc(r.max_error_tenor)+'</span>'+
+      '<span>'+esc(r.message)+'</span></div>';
+  out.innerHTML=head+
+    (r.fitted?'<div class="owfitchart" style="margin-top:6px"></div>'+
+      '<div class="legend"><span><i style="background:'+C2+'"></i>overwrite</span>'+
+      '<span><i style="background:'+C1+'"></i>fitted curve</span>'+
+      '<span><i style="background:'+C3+'"></i>curve now</span></div>'+
+      '<div class="scroll" style="margin-top:6px"><table class="mark"><thead><tr><th>Tenor</th>'+
+      '<th>Overwrite %</th><th>Curve was %</th><th>Fitted %</th><th>Miss</th><th>Moved</th></tr></thead><tbody>'+
+      r.rows.map(x=>'<tr><td>'+esc(x.tenor)+'</td><td>'+vnum(x.target)+'</td><td>'+vnum(x.before)+
+        '</td><td>'+vnum(x.after)+'</td><td'+cls(x.diff)+'>'+vsgn(x.diff)+'</td><td'+cls(x.moved)+'>'+
+        vsgn(x.moved)+'</td></tr>').join('')+'</tbody></table></div>'+
+      '<div class="scroll" style="margin-top:8px"><table class="mark"><thead><tr><th>Parameter</th>'+
+      '<th>Was</th><th>Fitted</th></tr></thead><tbody>'+
+      PORDER.filter(k=>k in r.params).map(k=>'<tr><td>'+esc(PLABEL[k]||k)+
+        (r.free.indexOf(k)<0?' <small class="meta">(pinned)</small>':'')+'</td><td>'+
+        num(r.before[k],pts(k)?4:5)+'</td><td>'+num(r.params[k],pts(k)?4:5)+'</td></tr>').join('')+
+      '</tbody></table></div>':'')+
+    (r.warnings||[]).map(w=>'<div class="etowarn">! '+esc(w)+'</div>').join('')+
+    (r.notes||[]).map(n=>'<div class="meta" style="font-size:11px;margin-top:2px">'+esc(n)+'</div>').join('');
+  if(r.fitted)chart(out.querySelector('.owfitchart'),[
+    {color:C3,dash:true,pts:r.rows.map((x,i)=>[i,x.before])},
+    {color:C1,pts:r.rows.map((x,i)=>[i,x.after])},
+    {type:'dot',color:C2,pts:r.rows.map((x,i)=>[i,x.target])},
+  ],{xfmt:anTenorFmt(names),ldp:2,r:16,height:190});
+  if(apply){OWFIT=null;await loadCurve();await loadMarks();await redraw();schedulePrice()}
+  else OWFIT={pair:r.pair,sig:owSignature()};
+  owfitStale();
+}
+$('#mowfitgo').onclick=()=>owfitRun(false);
+$('#mowfitapply').onclick=()=>owfitRun(true);
+$$('#mowfitrow input[data-owdof]').forEach(i=>i.onchange=saveMarking);
 $('#mclearratio').onclick=async()=>{await post('/api/overwrite',{pair:mq().pair,kind:'clear_ratio'});
   await loadMarks();await redraw();schedulePrice()};
 $('#msmileshow').onchange=()=>{markingVisible();saveMarking();paintMarks()};
@@ -6603,7 +6844,7 @@ function mqAvailable(){
 }
 function saveMM(){try{localStorage.setItem('volkit.mm',
   JSON.stringify(Object.assign({},mfPayload(),readFields(MCF),readFields(MQF),readFields(MKF),
-    {reversion_shown:$('#mmrevshow').checked,bank_shown:$('#mmbankshow').checked})))}catch(e){}}
+    {reversion_shown:$('#mmrevshow').checked,folds:mmFolds()})))}catch(e){}}
 function loadMM(){
   try{const r=localStorage.getItem('volkit.mm');if(r)MM=JSON.parse(r)}catch(e){MM={}}
   if(!MM||typeof MM!=='object')MM={};
@@ -6616,10 +6857,32 @@ function loadMM(){
      -- and mmRevVisible() then clears the boxes if it was closed, so a range
      can never be restored into a control nobody can see. */
   $('#mmrevshow').checked=!!MM.reversion_shown;
-  /* Shut unless this browser opened it: the bank is a file the desk edits
-     now and then, not a panel a morning reads. */
-  $('#mmbankshow').checked=!!MM.bank_shown;
-  bankVisible();
+  /* Every right-column card comes back as this browser left it. Unremembered
+     ones start open, except the bank: a file the desk edits now and then, not
+     a panel a morning reads. (bank_shown is what older sessions saved.) */
+  const folds=(MM.folds&&typeof MM.folds==='object')?MM.folds:{};
+  if(folds.bank==null&&MM.bank_shown!=null)folds.bank=!!MM.bank_shown;
+  document.querySelectorAll('.mmright .mmfold').forEach(s=>{
+    const k=s.dataset.fold,v=folds[k];
+    s.querySelector(':scope > h2 .mmfoldtog').checked=v==null?!MMFOLD_SHUT[k]:!!v});
+  mmFoldVisible();
+}
+/* -- the folding cards ---------------------------------------------------
+   Each card on the right column is a section.mmfold with a data-fold key, a
+   tick in its heading and one .mmfoldbody; the tick shows or hides the body
+   and the state is kept per browser with the rest of the tab. The heading
+   is outside the body on purpose: its small print is filled whether the card
+   is open or not, so a shut card still says what it holds. */
+const MMFOLD_SHUT={bank:true};
+function mmFolds(){
+  const out={};
+  document.querySelectorAll('.mmright .mmfold').forEach(s=>{
+    out[s.dataset.fold]=s.querySelector(':scope > h2 .mmfoldtog').checked});
+  return out;
+}
+function mmFoldVisible(){
+  document.querySelectorAll('.mmright .mmfold').forEach(s=>{
+    s.querySelector(':scope > .mmfoldbody').classList.toggle('hide',!s.querySelector(':scope > h2 .mmfoldtog').checked)});
 }
 
 /* -- the mean-reversion range ------------------------------------------
@@ -6817,9 +7080,6 @@ function bankHead(){
 /* Every path that changes a rule goes through this, so nothing can be edited
    without the heading knowing. */
 function bankTouched(){BANK.dirty=true;bankHead()}
-function bankVisible(){
-  $('#mmbankbody').classList.toggle('hide',!$('#mmbankshow').checked);
-}
 /* The bank is a file the desk keeps, not a result, so the card fills without
    anything having been run: a rule cannot be edited on a screen that will only
    show it after a price has been made. */
@@ -7669,6 +7929,7 @@ async function runFit(){
     $('#markstatus').innerHTML='fitted '+esc(MFR.marks.what)+
       (MFR.applied?' · <b>kept on the book</b>':'')+
       ((MFR.warnings||[]).length?' · '+MFR.warnings.length+' message(s)':'');
+    if(MFR.applied)await refreshMarking();
     /* Both read-only cards stand on what this just produced, and a screen
        half on the new curve and half on the old is the failure this whole
        split exists to remove. */
@@ -7788,6 +8049,20 @@ function paintMark(){
     'press Fit my way first; the marks it arrives at are the edit':'';
 }
 
+/* The marking card has just left its marks on the loaded book ("keep the
+   marks"), so the Vol marking screen is reading a book that has moved under
+   it: its curve, overwrite table, band card and charts are the marks as they
+   were when that pair was last loaded.  Re-read them exactly as choosing the
+   pair does -- the pair and cut the screen already has, so nothing moves the
+   screen -- and repaint.  Always the screen's own pair, not only when it is
+   the one just marked: a cross is composed from its legs, so re-marking a leg
+   moves it too.  A failure is said on the card that caused it. */
+async function refreshMarking(){
+  if(!has('marking')||!$('#mpair').value)return;
+  try{await loadCurve();await loadMarks();await loadBand();await redraw();}
+  catch(e){$('#markmsg').innerHTML+='<div class="etowarn">! the Vol marking screen could not '+
+    'reload '+esc($('#mpair').value)+': '+esc(e.message)+'</div>'}
+}
 async function recordMark(verdict){
   if(!MKR||!markFresh()){
     $('#markmsg').className='msg warn';
@@ -7804,6 +8079,7 @@ async function recordMark(verdict){
       (r.notes||[]).map(n=>'<div class="etonote">· '+esc(n)+'</div>').join('')+
       (r.warnings||[]).map(n=>'<div class="etowarn">! '+esc(n)+'</div>').join('');
     $('#markstatus').textContent='recorded as '+verdict;
+    if(r.applied)await refreshMarking();
     if(verdict==='accepted'){
       /* The proposal's marks are what the check and the quote stand on now,
          and both cards say so. */
@@ -7946,7 +8222,7 @@ $('#agentmodel').onchange=()=>{saveMM();scheduleMQ()};
    so it saves and shows its box and runs nothing. */
 $('#mmsource').onchange=()=>{mmTargetVisible();saveMM()};
 $('#mmrevshow').onchange=()=>{mmRevVisible();saveMM()};
-$('#mmbankshow').onchange=()=>{bankVisible();saveMM()};
+document.querySelectorAll('.mmright .mmfoldtog').forEach(el=>{el.onchange=()=>{mmFoldVisible();saveMM()}});
 ['#mmrevlo','#mmrevhi','#marklook','#markmin','#markrounds'].forEach(id=>{$(id).oninput=saveMM});
 ['#mmfallbackmult','#mmscale','#mmfair','#mmaxe','#mmcap','#mmhorizon',
  '#mmflowwt','#mmflowscale','#mmflowtol'].forEach(id=>{
@@ -8410,6 +8686,7 @@ $('#mpair').onchange=async()=>{setMethodSel('#mmethod',$('#mpair').value);
   /* A bump table belongs to the pair it was read on: left up, it is another
      pair's levels under this pair's heading. */
   $('#mbumpout').innerHTML='';$('#mbumpcol').textContent='';
+  $('#mxqout').innerHTML='';MXQ=null;
   await loadCurve();await loadMarks();await loadBand();redraw();bumpWeights()};
 $('#mcut').onchange=async()=>{await loadMarks();await loadBand();redraw()};
 $('#mmethod').onchange=redraw;

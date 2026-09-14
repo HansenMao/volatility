@@ -387,6 +387,64 @@ class TestAnalysis(unittest.TestCase):
             analytics.triangle_table(self.book, "EURUSD", cut="NY")
         self.assertIn("not a cross", str(cm.exception))
 
+    # -- a cross's quotes implied by its legs ----------------------------
+
+    def test_a_leg_alone_gives_back_its_own_risk_reversal_and_market_strangle(self):
+        """The fill writes into the sheet's ST columns, which hold *market*
+        strangles; the triangle's ``fly`` is the smile strangle, a different
+        number.  Pushed through the copula on its own, a leg must come back
+        with the RR and the market strangle its own surface reads."""
+        leg = self.book["EURUSD"]
+        for tenor in ("1m", "1y"):
+            t = leg.tenor_years(tenor)
+            expiry = self.book.clock.datetime_from_years(t)
+            dist = moments.distribution_from_surface(leg, expiry, cut="NY")
+            point = moments.Distribution(x=np.array([-1e-9, 0.0, 1e-9]),
+                                         pdf=np.array([0.0, 1e9, 0.0]),
+                                         cdf=np.array([0.0, 0.5, 1.0]), t=dist.t, label="point")
+            comb = moments.combine(dist, point, (1, 1), 0.0, leg.slice_conv(t))
+            got = comb.table((0.10, 0.25))
+            self.assertAlmostEqual(got["rr25"], leg.risk_reversal(expiry, 0.25, cut="NY"),
+                                   delta=1e-4, msg=tenor)
+            for d in (0.25, 0.10):
+                self.assertAlmostEqual(comb.market_strangle(d, got["atm"]),
+                                       leg.strangle(expiry, d, cut="NY"), delta=2e-4,
+                                       msg=(tenor, d))
+
+    def test_the_implied_quotes_are_the_sheets_four_fields(self):
+        from volkit.surface import QUOTE_FIELDS
+        rows = analytics.implied_cross_quotes(self.book, "EURJPY", cut="NY", tenors=["3m", "1y"])
+        tri = {r.tenor: r for r in analytics.triangle_table(
+            self.book, "EURJPY", cut="NY", tenors=["3m", "1y"], with_noise=False)}
+        self.assertEqual([r.tenor for r in rows], ["3m", "1y"])
+        for r in rows:
+            self.assertEqual(r.error, "", msg=r.tenor)
+            self.assertEqual(set(r.quotes), set(QUOTE_FIELDS))
+            self.assertGreater(r.quotes["st_25"], 0.0)
+            self.assertGreater(r.quotes["st_10"], r.quotes["st_25"])
+            # The same copula as the triangle, at the cross's own correlation.
+            self.assertAlmostEqual(r.rho, tri[r.tenor].rho, places=12)
+            self.assertAlmostEqual(r.quotes["rr_25"], tri[r.tenor].triangle["rr25"], delta=5e-4)
+
+    def test_a_tenor_the_legs_cannot_imply_keeps_its_row(self):
+        def boom(*a, **kw):
+            raise ValueError("no density here")
+
+        original = moments.distribution_from_surface
+        moments.distribution_from_surface = boom
+        try:
+            rows = analytics.implied_cross_quotes(self.book, "EURJPY", cut="NY", tenors=["3m"])
+        finally:
+            moments.distribution_from_surface = original
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].quotes, {})
+        self.assertIn("no density here", rows[0].error)
+
+    def test_a_pair_that_is_not_a_cross_has_no_implied_quotes(self):
+        with self.assertRaises(ValueError) as cm:
+            analytics.implied_cross_quotes(self.book, "EURUSD", cut="NY")
+        self.assertIn("not a cross", str(cm.exception))
+
     # -- the forward curve's own carry -----------------------------------
 
     def test_the_at_the_money_row_carries_no_delta(self):

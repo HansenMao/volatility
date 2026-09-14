@@ -174,8 +174,8 @@ heading on the sheet are one string.
 
 ## CONVENTIONS (added 2026-09-04)
 
-`pair, premium, atmf beyond`, optional — a pair with no row takes the
-market's conventions from `black.DeltaConvention.for_pair`:
+`pair, premium, atmf beyond, delta, fit cutoff`, optional — a pair with no
+row takes the market's conventions from `black.DeltaConvention.for_pair`:
 
 - `premium` is the currency the option premium is paid in, one of the pair's
   own. The quoted delta is **premium adjusted iff that is the base currency**.
@@ -194,6 +194,25 @@ market's conventions from `black.DeltaConvention.for_pair`:
   delta out to the boundary. Spot delta needs the base currency's discount
   factor, which comes off the **market feed** (below); without one the slice
   reads forward delta and says so (`DeltaConvention.at` -> `delta_note`).
+- `fit cutoff` (added 2026-09-14) is the tenor beyond which a tenor is **not
+  part of the interpolation**; `never` allowed (fit everything, the old
+  behaviour), `always` is not (nothing to extrapolate from); blank is `1y`;
+  `fit cut off` is read as the same column. Not a quoting convention, so it
+  lives on the surface rather than in `DeltaConvention`: `PairSpec.fit_cutoff`
+  -> `VolSurface.fit_cutoff`, resolved on the pair's calendar in
+  `__post_init__` with the same day's grace as `atmf beyond` (`in_fit(t)`).
+  Beyond it: the smile term structures are fitted without the tenor
+  (`interpolate_params`, which warns and fits through everything if no fitted
+  tenor is inside), a quoted tenor is pinned to its own calibration
+  (`params_at` -- knots at the last tenor inside, read off the curve, and at
+  each quoted tenor beyond; the anchor's ratio formula between; flat past the
+  last), and an ATM curve fit's targets are dropped
+  (`marketmaker.split_at_fit_cutoff`, called by `curve_targets` and
+  `marking.propose`, so the screen's sources, a pasted file and the archive
+  are cut at one place). What the fit reads beyond the cutoff is information
+  only and expected to be overwritten; `/api/marks` sends `beyond_fit` per ATM
+  and smile row (with `curve`, the short-tenor reading, on the smile row) and
+  `fit_cutoff`, and the grid shows **info** / **pinned** pills.
 
 ## Discounting: the feed's OIS rows (was the RATES tab, moved 2026-09-07)
 

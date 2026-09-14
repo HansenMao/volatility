@@ -57,7 +57,9 @@ SHEETS: dict[str, str] = {
     "HOLIDAYS": "holiday dates no rule derives: country, date, remove",
     "CONVENTIONS": "a pair's quoting conventions where they differ from the market's: "
                    "pair, premium (the currency it is paid in), atmf beyond (a tenor, "
-                   "never, or always), delta (spot or forward)",
+                   "never, or always), delta (spot or forward), fit cutoff (a tenor or "
+                   "never; blank is 1Y -- a tenor beyond it is left out of the ATM and "
+                   "smile interpolation and is marked by its own overwrite)",
     "WING_RATIOS": "how each tenor's 10-delta wings follow its 25-delta ones: "
                    "pair, tenor, st, rr",
     "CROSS_CORR": "COS only: a cross's correlation typed per tenor, which the COS file "
@@ -114,7 +116,7 @@ EDITABLE: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "PEG_BANDS": (("pair", "lower", "upper", "note"), ("pair", "lower", "upper")),
     "SPREADS": (("tenor", "default", "note"), ("tenor", "default")),
     "HOLIDAYS": (("country", "date", "remove"), ("country", "date")),
-    "CONVENTIONS": (("pair", "premium", "atmf beyond", "delta"), ("pair",)),
+    "CONVENTIONS": (("pair", "premium", "atmf beyond", "delta", "fit cutoff"), ("pair",)),
     "WING_RATIOS": (("pair", "tenor", "st", "rr"), ("pair", "tenor")),
     "CROSS_CORR": (("pair", "tenor", "correlation", "note"), ("pair", "tenor")),
     "Vega Weights": (("tenor", "default", "note"), ("tenor", "default")),

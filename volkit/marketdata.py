@@ -28,7 +28,7 @@ import pandas as pd
 from . import black
 from .black import DeltaConvention
 from .cross import dollar_legs, infer_leg_signs, is_cross as pair_is_cross
-from .surface import PARAM_NAMES, TERM_COEFFS, SmileMark
+from .surface import PARAM_NAMES, TERM_COEFFS, SmileMark, fit_cutoff_years
 from .events import EventBook, EventRow
 from .timeutil import UTC, parse_datetime, tenor_key
 
@@ -148,6 +148,9 @@ class PairSpec:
     premium_ccy: str = ""
     atmf_beyond: str = ""
     delta_type: str = ""
+    #: The tenor beyond which a tenor is not part of the interpolation (the
+    #: ATM curve fit and the smile term structures); blank is the default 1Y.
+    fit_cutoff: str = ""
 
     def resolved_premium_adjusted(self) -> bool:
         return self.conventions().premium_adjusted
@@ -167,7 +170,7 @@ CONVENTIONS_SHEET = "CONVENTIONS"
 
 
 def load_conventions(path: str | Path, *, overlay=None) -> dict[str, dict] | None:
-    """The ``CONVENTIONS`` tab, by pair: ``{"premium": ccy, "atmf_beyond": text}``.
+    """The ``CONVENTIONS`` tab, by pair: ``{"premium", "atmf_beyond", "delta", "fit_cutoff"}``.
 
     ``None`` when the workbook has no such tab, which is the ordinary case:
     every pair then takes the market's conventions.  A row that cannot be
@@ -200,7 +203,14 @@ def load_conventions(path: str | Path, *, overlay=None) -> dict[str, dict] | Non
         if kind and kind not in ("spot", "forward"):
             raise ValueError(f"{CONVENTIONS_SHEET} row {row.number}: delta must be 'spot' or "
                              f"'forward', not {kind!r}")
-        out[pair] = {"premium": premium, "atmf_beyond": beyond, "delta": kind}
+        # Spelled either way on a sheet; the screens write ``fit cutoff``.
+        cutoff = row.text("fit cutoff") or row.text("fit cut off")
+        try:
+            fit_cutoff_years(cutoff)
+        except ValueError as exc:
+            raise ValueError(f"{CONVENTIONS_SHEET} row {row.number}: {exc}") from None
+        out[pair] = {"premium": premium, "atmf_beyond": beyond, "delta": kind,
+                     "fit_cutoff": cutoff}
     return out
 
 
@@ -352,6 +362,7 @@ class ExcelSource:
             spec.premium_ccy = cells["premium"]
             spec.atmf_beyond = cells["atmf_beyond"]
             spec.delta_type = cells["delta"]
+            spec.fit_cutoff = cells.get("fit_cutoff", "")
         stated = [p for p in found if p in data.pairs]
         if stated:
             data.notes.append(f"{CONVENTIONS_SHEET}: {len(stated)} pair(s) read from the workbook")

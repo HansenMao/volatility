@@ -27,10 +27,44 @@ from .black import DeltaConvention
 from .numerics import ConvergenceError, fixed_point, solve_scalar
 from .sabr import SabrCalibration, SabrParams
 from .smile import INTERPOLATORS, SmileSlice
-from .timeutil import Clock, tenor_key, tenor_to_years
+from .timeutil import DAYS_IN_YEAR, Clock, tenor_key, tenor_to_years
 
 # The four smile parameters carried across expiries.
 PARAM_NAMES = ("slog10", "slog25", "rho25", "rho10")
+
+#: Where the fit stops unless a pair says otherwise.  A tenor out to and
+#: including the 1Y pillar is part of the interpolation -- the ATM curve fit
+#: and the smile parameter term structures; a tenor beyond it is not, because
+#: a long-dated market is thin and one quote out there bends the short end
+#: the desk actually trades.  What the fit reads beyond the cutoff is
+#: extrapolated from the shorter tenors and is information only: the desk is
+#: expected to overwrite it (the ATM overwrite, the tenor's own quotes).
+DEFAULT_FIT_CUTOFF = "1y"
+_FIT_NEVER = ("never", "none", "no", "-")
+#: The same day's grace as the ATM boundary: the cutoff pillar's calendar
+#: expiry can sit a few days past its nominal length, and it stays inside.
+_FIT_BOUNDARY_GRACE = 1.0 / DAYS_IN_YEAR
+
+
+def fit_cutoff_years(text) -> float:
+    """Read a ``fit cutoff`` setting: a tenor, ``never``, or blank.
+
+    Blank is the default, 1Y.  ``never`` fits every tenor, which is how the
+    surface worked before there was a cutoff.  Nominal here -- ``1y`` is one
+    year -- and re-read on the pair's calendar by :class:`VolSurface`, the way
+    ``atmf beyond`` is.  There is no ``always``: a surface fitted to nothing
+    has no shape to extrapolate.
+    """
+    word = str(text or DEFAULT_FIT_CUTOFF).strip().lower()
+    if word in _FIT_NEVER:
+        return float("inf")
+    try:
+        years = float(tenor_to_years(word))
+    except Exception:  # noqa: BLE001 -- any unreadable spelling is the one error
+        raise ValueError(f"cannot read {text!r} as a fit cutoff: a tenor or 'never'") from None
+    if years <= 0:
+        raise ValueError(f"a fit cutoff of {text!r} leaves no tenor to fit; use a tenor or 'never'")
+    return years
 
 #: The four quotes one tenor of a pair's sheet holds, in the order a marker
 #: reads them: both risk reversals, then both market strangles, each pair of
@@ -273,6 +307,12 @@ class VolSurface:
     # what re-marking a wing against a broker run actually means.  The
     # market-maker screen tunes these; zero is the marked surface.
     param_shifts: dict[str, float] = field(default_factory=dict)
+    # The ``CONVENTIONS`` tab's ``fit cutoff``: a tenor, or ``never``.  A
+    # tenor beyond it is not part of the interpolation -- the smile term
+    # structures are fitted without it and the ATM curve fit does not target
+    # it (``marketmaker.curve_targets``).  ``fit_cutoff_years`` is the same
+    # thing on this pair's calendar, set in ``__post_init__``.
+    fit_cutoff: str = DEFAULT_FIT_CUTOFF
     warnings: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
@@ -280,7 +320,24 @@ class VolSurface:
         # calendar expiry on this book's valuation date -- so "beyond 1y" is
         # beyond the 1Y pillar, whatever the calendar makes its length.
         self.conv = DeltaConvention.of(self.conv).resolved(self.tenor_years)
+        self.fit_cutoff = str(self.fit_cutoff or DEFAULT_FIT_CUTOFF).strip()
+        # The fit cutoff is read the same way, so the 1Y pillar is inside it
+        # on every valuation date.
+        self.fit_cutoff_years = fit_cutoff_years(self.fit_cutoff)
+        if math.isfinite(self.fit_cutoff_years):
+            try:
+                self.fit_cutoff_years = float(self.tenor_years(self.fit_cutoff))
+            except Exception:  # noqa: BLE001 -- keep the nominal reading
+                pass
         self._slices: dict[tuple, SmileSlice] = {}
+
+    def in_fit(self, t: float) -> bool:
+        """Whether a tenor ``t`` years out is part of the interpolation."""
+        return t <= self.fit_cutoff_years + _FIT_BOUNDARY_GRACE
+
+    def fit_cutoff_label(self) -> str:
+        """The cutoff as a person reads it: ``1Y``, or ``never``."""
+        return "never" if not math.isfinite(self.fit_cutoff_years) else self.fit_cutoff.upper()
 
     def slice_conv(self, t: float) -> DeltaConvention:
         """The pair's conventions at one tenor: with the discount factor a
@@ -699,13 +756,37 @@ class VolSurface:
         self._slices.clear()
         return self.fits
 
+    def fits_in(self) -> list[TenorFit]:
+        """The fitted tenors the interpolation is built from: those inside the cutoff."""
+        return [f for f in self.fits if self.in_fit(f.t)]
+
+    def fits_beyond(self) -> list[TenorFit]:
+        """The fitted tenors beyond the cutoff, each pinned to its own quotes."""
+        return [f for f in self.fits if not self.in_fit(f.t)]
+
     def interpolate_params(self) -> dict[str, ParamTermStructure]:
-        """Give each smile parameter a term structure across expiries."""
+        """Give each smile parameter a term structure across expiries.
+
+        Fitted through the tenors inside the fit cutoff only.  A tenor beyond
+        it keeps its own calibration and :meth:`params_at` pins the surface to
+        it there, so a long-dated quote marks its own tenor without bending
+        the shape the short end is read on.
+        """
         if not self.fits:
             raise ValueError(f"{self.pair}: fit_smiles must run before interpolate_params")
-        ts = [f.t for f in self.fits]
+        inside = self.fits_in()
+        if not inside:
+            # Every quoted tenor is beyond the cutoff.  Fitting through them
+            # all is the only shape there is, and it is said rather than done
+            # quietly: the cutoff the tab asks for has not been honoured.
+            inside = list(self.fits)
+            self.warnings.append(
+                f"{self.pair}: every fitted tenor is beyond the {self.fit_cutoff_label()} fit "
+                f"cutoff, so the smile term structure was fitted through all of them; "
+                f"quote a tenor inside it or move the cutoff on the CONVENTIONS tab")
+        ts = [f.t for f in inside]
         self.term = {
-            name: fit_param_term_structure(ts, [getattr(f, name) for f in self.fits], name=name)
+            name: fit_param_term_structure(ts, [getattr(f, name) for f in inside], name=name)
             for name in PARAM_NAMES
         }
         self._slices.clear()
@@ -743,28 +824,51 @@ class VolSurface:
         structure -- the legacy ``use_overwrite`` behaviour, but without the
         division by ``v2_c - v1_c`` that blew up whenever the term structure
         happened to be flat between two tenors.
+
+        Beyond the fit cutoff the quoted tenors are pinned whether or not the
+        anchor is on: the term structure was fitted without them, so reading
+        it out there would ignore the quotes the desk marked at those tenors.
+        Without the anchor the pinning starts from the curve at the last
+        tenor inside the cutoff, so everything inside it reads exactly what
+        it read before.  Past the last quoted tenor it reads flat.  With no
+        quoted tenor beyond the cutoff at all, the long end is the curve
+        fitted to the shorter tenors -- information only, and the marking
+        screen says so.
         """
         if not self.term and not self.term_marks:
             raise ValueError(f"{self.pair}: no smile term structure; run calibrate() first")
         curves = {name: self.param_curve(name) for name in PARAM_NAMES}
-        out = {name: float(curves[name](t)) for name in PARAM_NAMES}
-        for name, ow in self.param_overwrites.items():
-            if name in out and "curve" in ow:
-                out[name] = float(ow["curve"])
-        if not self.anchor_tenors or not self.fits:
+        out = self._curve_params(curves, t)
+        inside = [f.t for f in self.fits if self.in_fit(f.t)]
+        # With nothing inside the cutoff the term structure went through every
+        # tenor (interpolate_params says so), and there is nothing to pin.
+        beyond = [i for i, f in enumerate(self.fits) if not self.in_fit(f.t)] if inside else []
+        if not self.fits or not (self.anchor_tenors or beyond):
             return self._shifted(out)
 
-        ts = [f.t for f in self.fits]
+        # The knots the surface is pinned to: every fitted tenor with the
+        # anchor on; without it, the seam where the fitted curve hands over
+        # and every quoted tenor beyond the cutoff.
+        if self.anchor_tenors:
+            knots = [(f.t, {n: self._anchor_value(n, i) for n in PARAM_NAMES})
+                     for i, f in enumerate(self.fits)]
+        else:
+            if t <= inside[-1]:
+                return self._shifted(out)
+            knots = [(inside[-1], self._curve_params(curves, inside[-1]))]
+            knots += [(self.fits[i].t, {n: self._anchor_value(n, i) for n in PARAM_NAMES})
+                      for i in beyond]
+        ts = [k[0] for k in knots]
         if t <= ts[0] or t >= ts[-1]:
-            idx = 0 if t <= ts[0] else len(ts) - 1
-            for name in PARAM_NAMES:
-                out[name] = self._anchor_value(name, idx)
-            return out
+            out = dict(knots[0][1] if t <= ts[0] else knots[-1][1])
+            # The anchored surface has always read flat outside its tenors
+            # unshifted; the cutoff's pinning is new and takes the shifts.
+            return out if self.anchor_tenors else self._shifted(out)
         j = int(np.searchsorted(np.array(ts), t, side="left"))
         i = j - 1
         t1, t2 = ts[i], ts[j]
         for name in PARAM_NAMES:
-            v1, v2 = self._anchor_value(name, i), self._anchor_value(name, j)
+            v1, v2 = knots[i][1][name], knots[j][1][name]
             c1, c2 = float(curves[name](t1)), float(curves[name](t2))
             ct = float(curves[name](t))
             denom = c2 - c1
@@ -773,6 +877,25 @@ class VolSurface:
             ratio = (ct - c1) / denom if abs(denom) > 1e-12 else (t - t1) / (t2 - t1)
             out[name] = v1 + ratio * (v2 - v1)
         return self._shifted(out)
+
+    def _curve_params(self, curves: dict[str, ParamTermStructure], t: float) -> dict[str, float]:
+        """The four parameters straight off their term structures at ``t``, unshifted."""
+        out = {name: float(curves[name](t)) for name in PARAM_NAMES}
+        for name, ow in self.param_overwrites.items():
+            if name in out and "curve" in ow:
+                out[name] = float(ow["curve"])
+        return out
+
+    def curve_params_at(self, t: float) -> dict[str, float]:
+        """What the fit to the tenors inside the cutoff reads at ``t``, before any pinning.
+
+        Beyond the cutoff this is the information-only reading the marking
+        screen shows beside a tenor's own calibration.
+        """
+        if not self.term and not self.term_marks:
+            raise ValueError(f"{self.pair}: no smile term structure; run calibrate() first")
+        curves = {name: self.param_curve(name) for name in PARAM_NAMES}
+        return self._shifted(self._curve_params(curves, t))
 
     def _shifted(self, out: dict[str, float]) -> dict[str, float]:
         """Apply ``param_shifts`` to a parameter set.
