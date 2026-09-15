@@ -658,6 +658,26 @@ class TestMarketMakerModel(unittest.TestCase):
                 free=("initial_vol",))
         self.assertIn("cross", str(ctx.exception))
 
+    def test_a_cross_correlation_decay_is_fitted_in_the_mean_reversion_range(self):
+        """The correlation decay is a cross curve's rate of turn as the mean
+        reversion is a backbone's, so it is fitted in the same range -- the
+        house one, or the one typed on the agent's card -- where it used to
+        roam 0-200 and sweep nodes of its own."""
+        import copy
+        book = Book.from_excel(BOOK, ASOF).load_all(["AUDUSD", "USDJPY", "AUDJPY"])
+        atm = copy.deepcopy(book["AUDJPY"].atm)
+        want = [marketmaker.CurveTarget(t.upper(), book["AUDJPY"].tenor_years(t), v)
+                for t, v in (("1w", 0.080), ("1m", 0.095), ("3m", 0.105), ("6m", 0.108),
+                             ("1y", 0.109))]
+        free = ("corr_initial", "corr_final", "corr_decay")
+        for rng in (None, (0.2, 0.5), (1.0, 40.0)):
+            fit = marketmaker.fit_atm_curve(atm, want, free=free, reversion_range=rng)
+            lo, hi = rng or marketmaker.MEAN_REVERSION_RANGE
+            self.assertEqual(fit.reversion_range, (lo, hi))
+            self.assertTrue(lo - 1e-9 <= fit.after["corr_decay"] <= hi + 1e-9,
+                            (rng, fit.after["corr_decay"]))
+        self.assertNotIn("corr_decay", marketmaker._BOUNDS)
+
     # -- the hinge ---------------------------------------------------------
     def test_the_hinge_is_flat_inside_the_market_and_signed_outside_it(self):
         self.assertEqual(marketmaker._hinge(0.082, 0.080, 0.086), 0.0)

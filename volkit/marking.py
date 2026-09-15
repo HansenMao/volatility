@@ -816,7 +816,8 @@ _DOF_KNOBS = {
 }
 
 
-def propose_to_overwrites(book, pair: str, dof) -> dict:
+def propose_to_overwrites(book, pair: str, dof, *,
+                          reversion_range: tuple[float, float] | None = None) -> dict:
     """The curve the ATM overwrites describe, with the knobs the desk freed.
 
     The marking agent's own ``propose`` aimed at the overwrite column: the
@@ -825,6 +826,11 @@ def propose_to_overwrites(book, pair: str, dof) -> dict:
     the caller's -- no plan, no journal, no learned nudge, because the desk
     chose the degrees of freedom by name.  Nothing stays on the book; the
     caller applies ``params`` when it wants them.
+
+    ``reversion_range`` is the agent card's mean-reversion range, ``None`` for
+    the house one: the backbone's mean reversion, or a cross's correlation
+    decay, is fitted inside it exactly as the agent's own fit and the realized
+    correlation fit are.
     """
     from . import marketmaker as mm
     if book is None or pair not in book:
@@ -841,7 +847,7 @@ def propose_to_overwrites(book, pair: str, dof) -> dict:
         raise MarkingError("no degree of freedom was ticked, so there is nothing to fit")
     free = tuple(names[d] for d in OVERWRITE_FIT_DOF if d in dof)
     targets, evidence = mm.curve_targets(surface, [], {}, source="overwrites")
-    proposal = propose(book, pair, targets=targets, free=free)
+    proposal = propose(book, pair, targets=targets, free=free, reversion_range=reversion_range)
     fit = proposal.fit
     after = (proposal.after or {}).get("curve") or {}
     before = (proposal.before or {}).get("curve") or {}
@@ -849,6 +855,8 @@ def propose_to_overwrites(book, pair: str, dof) -> dict:
         "pair": pair.upper(), "is_cross": knobs.is_cross, "evidence": evidence,
         "dof": [d for d in OVERWRITE_FIT_DOF if d in dof],
         "free": list(free), "knobs": {d: names[d] for d in OVERWRITE_FIT_DOF},
+        "reversion_range": list(reversion_range or mm.MEAN_REVERSION_RANGE),
+        "reversion_house": reversion_range is None,
         "fitted": fit is not None,
         "before": {k: before.get(k) for k in knobs.available},
         "params": {k: after.get(k) for k in knobs.available},

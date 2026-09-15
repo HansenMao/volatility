@@ -849,8 +849,49 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
             The window is the Analysis screen&rsquo;s: <code>match</code> gives each tenor its own
             length, a number holds every tenor to that one. <b>&plusmn;</b> is one standard error,
             <code>(1&minus;&rho;&sup2;)/&radic;n</code>, and <b>diff</b> is marked less realized.
-            The history is the one loaded on the Analysis screen. Nothing here is written: the
-            correlation is marked on the curve card.</details>
+            The history is the one loaded on the Analysis screen. Nothing in the table is written:
+            the correlation is marked on the curve card, or by the fit below.</details>
+          <!-- The correlation curve put through the realized column above.
+               Propose reads and Apply writes, one route with a flag, like the
+               fit to the overwrites; what it writes is the curve's own
+               initial / final / decay. -->
+          <div class="row" style="flex-wrap:wrap;gap:10px;align-items:center;margin-top:11px">
+            <b style="font-size:12px;width:auto">Fit the correlation to realized</b>
+            <span class="meta" style="width:auto">free:</span>
+            <label style="margin:0;display:flex;align-items:center;gap:4px;width:auto;font-size:11px">
+              <input type="checkbox" data-corrdof="initial" checked style="width:auto"> initial</label>
+            <label style="margin:0;display:flex;align-items:center;gap:4px;width:auto;font-size:11px">
+              <input type="checkbox" data-corrdof="final" checked style="width:auto"> final</label>
+            <label style="margin:0;display:flex;align-items:center;gap:4px;width:auto;font-size:11px">
+              <input type="checkbox" data-corrdof="decay" checked style="width:auto"> decay</label>
+          </div>
+          <div class="row" style="flex-wrap:wrap;gap:8px;align-items:center;margin-top:7px">
+            <button class="ghost" id="mcorrfitgo"
+              style="width:auto;padding:5px 12px;font-size:12px">Propose</button>
+            <button id="mcorrfitapply"
+              style="width:auto;padding:5px 12px;font-size:12px">Apply to curve</button>
+            <span class="grow"></span><span class="meta" id="mcorrfitstale"></span>
+          </div>
+          <details class="hint" style="margin-top:6px"><summary>What is fitted, and what
+            Apply writes</summary>The targets are the <b>Realized &rho;</b> column above, over
+            the lookback in its box, at every tenor that has one inside the pair&rsquo;s fit
+            cutoff. Each is weighted by one over its <b>&plusmn;</b>, so a correlation off a
+            month of returns counts for less than one off a year. The curve is
+            <code>final &minus; (final &minus; initial)&middot;e<sup>&minus;decay&middot;t</sup></code>;
+            an unticked coefficient is pinned where the curve card has it. The decay is fitted
+            in the marking agent&rsquo;s <b>mean-reversion range</b> &mdash; the floor and
+            ceiling set on its card on the Market maker screen, or the house range when those
+            boxes are empty &mdash; so a correlation turns no faster or slower than the desk
+            lets a backbone. With a <b>number</b> in the lookback box every tenor
+            is the same window and the ladder has no term structure to fit: use
+            <code>match</code>. <b>Miss</b> is fitted less realized, <b>z</b> the same in
+            standard errors, and the <b>ATM</b> columns are the cross&rsquo;s curve volatility
+            under each correlation curve, overwrites aside &mdash; a realized correlation is
+            physical, so a fit that moves the ATM a long way is a mark to look at before it is
+            applied. <b>Propose</b> reads, <b>Apply</b> writes: it re-runs the fit on the history
+            and lookback as they are then and puts the ticked coefficients on the curve, exactly
+            as typing them into the curve card would.</details>
+          <div id="mcorrfitout" style="margin-top:8px"></div>
         </div>
         <details class="hint hide" id="mowpastehint" style="margin-top:7px"><summary>The
           overwrite column takes a block paste too</summary>A column of marks out of a
@@ -899,7 +940,10 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
             pair <b>initial</b>, <b>final</b> and <b>decay</b> are the backbone&rsquo;s initial
             vol, long-term vol and mean reversion; on a cross they are the correlation&rsquo;s.
             <b>add-on</b> is the short add-on on either; the short decay is never freed here.
-            A fit needs at least as many overwrites as ticked boxes.
+            <b>decay</b> is fitted in the marking agent&rsquo;s <b>mean-reversion range</b>
+            &mdash; the floor and ceiling on its card on the Market maker screen, or the house
+            range when those are empty &mdash; the same range the fit to realized correlation
+            uses. A fit needs at least as many overwrites as ticked boxes.
             <b>Propose</b> reads, <b>Apply</b> writes: it re-runs the fit on the overwrites as
             they are then and puts the fitted parameters on the curve, exactly as typing them
             into the curve card would. The overwrites stay unless the box beside it is ticked.
@@ -2243,7 +2287,7 @@ const api=async(p,o)=>{const r=await fetch(p,o);const j=await r.json();
    not trust this list: a held fit is stamped with a fingerprint of the pair's
    marks and the quote refuses a stale one whatever the browser believed. */
 const MARKING_ROUTES=['/api/overwrite','/api/curve','/api/events','/api/events/weights',
-  '/api/band','/api/atm/bump','/api/atm/fit','/api/marks/cross','/api/reload','/api/session/load','/api/config/save',
+  '/api/band','/api/atm/bump','/api/atm/fit','/api/marks/cross','/api/marks/correlation/fit','/api/reload','/api/session/load','/api/config/save',
   '/api/config/pair','/api/workbook/restore','/api/mm/mark/fit','/api/mm/mark/record',
   /* The export overlay applied to (or reverted off) the session, and the
      export tables seeded into it: both put marks on the book or rebuild it. */
@@ -3140,7 +3184,7 @@ function saveMarking(){try{localStorage.setItem('volkit.marking',JSON.stringify(
   {atm_overwrites:$('#matmowshow').checked,quotes:$('#mquoteshow').checked,
    ratios:$('#mratioshow').checked,smile:$('#msmileshow').checked,
    bump:$('#mbumpshow').checked,corr:$('#mcorrshow').checked,corr_lookback:$('#mcorrlook').value,
-   owfit_dof:owfitDof()}))}catch(e){}}
+   owfit_dof:owfitDof(),corrfit_dof:corrfitDof()}))}catch(e){}}
 function loadMarking(){
   let v=null; try{v=JSON.parse(localStorage.getItem('volkit.marking')||'null')}catch(e){}
   v=v&&typeof v==='object'?v:{};
@@ -3154,6 +3198,8 @@ function loadMarking(){
   if(typeof v.corr_lookback==='string'&&v.corr_lookback)$('#mcorrlook').value=v.corr_lookback;
   if(Array.isArray(v.owfit_dof))$$('#mowfitrow input[data-owdof]').forEach(
     i=>{i.checked=v.owfit_dof.indexOf(i.dataset.owdof)>=0});
+  if(Array.isArray(v.corrfit_dof))$$('#mcorrrow input[data-corrdof]').forEach(
+    i=>{i.checked=v.corrfit_dof.indexOf(i.dataset.corrdof)>=0});
   markingVisible();
 }
 function markingVisible(){
@@ -3202,6 +3248,7 @@ function paintMarks(){
   const nq=MARKS.atm.filter(r=>r.quotes_marked).length;
   $('#matmowcount').textContent=(!ow&&nown)?`· ${nown} marked`:'';
   owfitStale();
+  corrfitStale();
   const qn=$('#mquotenote');
   /* Three things want this line, and they are not equals: a refusal beats
      what the last paste did, and both beat the standing count of re-quoted
@@ -3560,7 +3607,7 @@ $('#mratioshow').onchange=()=>{saveMarking();paintMarks()};
 $('#mbumpshow').onchange=()=>{markingVisible();saveMarking();bumpWeights()};
 $('#mcorrshow').onchange=()=>{saveMarking();paintMarks();corrLoad()};
 let CORRT=null;
-$('#mcorrlook').oninput=()=>{clearTimeout(CORRT);CORRT=setTimeout(()=>{saveMarking();corrLoad()},400)};
+$('#mcorrlook').oninput=()=>{corrfitStale();clearTimeout(CORRT);CORRT=setTimeout(()=>{saveMarking();corrLoad()},400)};
 /* ---- a cross's correlation, marked and realized ---------------------------
    Read whenever the marks are, since a re-marked curve moves the marked
    column, and only while the box is ticked on a cross.  A response that
@@ -3607,6 +3654,81 @@ async function corrLoad(){
     'shows — physical, not priced. What to mark on <code>CROSS_DEPENDENCE</code> from them, with a '+
     'premium, is suggested in the Config window under that tab</div>';
 }
+/* ---- the correlation curve fitted to realized -----------------------------
+   The fit to the overwrites' shape: Propose and Apply are one route with a
+   flag, and an apply re-runs the fit rather than replaying the proposal on
+   screen.  A proposal remembers the pair, the lookback and the curve it was
+   made against, and says so once any of them has moved. */
+let CORRFIT=null;
+function corrfitDof(){return $$('#mcorrrow input[data-corrdof]').filter(i=>i.checked).map(i=>i.dataset.corrdof)}
+function corrfitSig(){
+  const p=(CURVE&&CURVE.is_cross)?CURVE.params:{};
+  return JSON.stringify([mq().pair,$('#mcorrlook').value.trim().toLowerCase(),revSig(),
+    p.corr_initial,p.corr_final,p.corr_decay]);
+}
+function corrfitStale(){
+  const stale=!!(CORRFIT&&CORRFIT.sig!==corrfitSig());
+  $('#mcorrfitstale').textContent=stale?'the pair, the lookback, the mean-reversion range or the curve has changed since this proposal — propose again':'';
+  $('#mcorrfitstale').className=stale?'msg bad':'meta';
+}
+async function corrfitRun(apply){
+  const out=$('#mcorrfitout');
+  out.innerHTML='<span class="spin"></span> '+(apply?'fitting and applying':'fitting')+'…';
+  let r;
+  try{
+    r=await post('/api/marks/correlation/fit',Object.assign({pair:mq().pair,dof:corrfitDof(),
+                   apply:!!apply,lookback_days:$('#mcorrlook').value},revRange()));
+  }catch(e){CORRFIT=null;corrfitStale();out.innerHTML='<div class="msg bad">'+esc(e.message)+'</div>';return}
+  const sg=v=>(v==null||!isFinite(v))?'—':(v>0?'+':'')+num(v,3);
+  const pct=v=>v==null?'—':vnum(v*100), mv=(a,b)=>(a==null||b==null)?null:(b-a)*100;
+  const used=r.rows.filter(x=>x.used), names=r.rows.map(x=>x.tenor);
+  out.innerHTML=
+    '<div class="msg '+(apply?'ok':'')+'">'+(apply
+      ?'fitted '+esc(r.free.join(', '))+' applied to the '+esc(r.pair)+' correlation curve'
+      :'proposal: '+used.length+' realized correlation(s) over '+
+        (r.lookback_days?num(r.lookback_days,0)+' days':'a window matched to each tenor'))+'</div>'+
+    '<div class="mmstat" style="margin-top:4px"><span>RMSE <b>'+num(r.rmse,3)+'</b></span>'+
+    '<span>worst <b>'+sg(r.max_error)+'</b> at '+esc(r.max_error_tenor)+'</span>'+
+    '<span>rms z <b>'+num(r.rms_z,2)+'</b></span>'+
+    (r.free.indexOf('decay')>=0?revSpan(r,'decay'):'')+
+    '<span>'+esc(r.message)+'</span></div>'+
+    '<div class="corrfitchart" style="margin-top:6px"></div>'+
+    '<div class="legend"><span><i style="background:'+C2+'"></i>realized</span>'+
+    '<span><i style="background:'+C1+'"></i>fitted curve</span>'+
+    '<span><i style="background:'+C3+'"></i>curve now</span></div>'+
+    '<div class="scroll" style="margin-top:6px"><table class="mark"><thead><tr><th>Tenor</th>'+
+    '<th>Realized ρ</th><th>Now ρ</th><th>Fitted ρ</th><th title="fitted less realized">Miss</th>'+
+    '<th title="the miss in standard errors">z</th>'+
+    '<th class="grp" title="the cross’s curve volatility under the curve now, overwrites aside">ATM now %</th>'+
+    '<th title="under the fitted curve">ATM fitted %</th><th>Moved</th></tr></thead><tbody>'+
+    r.rows.map(x=>'<tr'+(isKeyTenor(x.tenor)?' class="key"':'')+'><td>'+esc(x.tenor)+
+      (x.used?'':' <span class="pill" title="'+esc(x.reason)+'">not fitted</span>')+'</td>'+
+      '<td>'+sg(x.realized)+(x.realized_se==null?'':'<span class="meta"> ±'+num(x.realized_se,2)+'</span>')+'</td>'+
+      '<td>'+sg(x.before)+'</td><td>'+sg(x.after)+'</td>'+
+      '<td'+cls(x.miss)+'>'+sg(x.miss)+'</td><td class="meta">'+(x.z==null?'—':num(x.z,2))+'</td>'+
+      '<td class="grp">'+pct(x.atm_before)+'</td><td>'+pct(x.atm_after)+'</td>'+
+      '<td'+cls(mv(x.atm_before,x.atm_after))+'>'+vsgn(mv(x.atm_before,x.atm_after))+'</td></tr>').join('')+
+    '</tbody></table></div>'+
+    '<div class="scroll" style="margin-top:8px"><table class="mark"><thead><tr><th>Coefficient</th>'+
+    '<th>Was</th><th>Fitted</th></tr></thead><tbody>'+
+    ['initial','final','decay'].map(k=>'<tr><td>'+k+
+      (r.free.indexOf(k)<0?' <small class="meta">(pinned)</small>':'')+'</td><td>'+
+      num(r.before[k],k==='decay'?3:4)+'</td><td>'+num(r.after[k],k==='decay'?3:4)+'</td></tr>').join('')+
+    '</tbody></table></div>'+
+    (r.warnings||[]).map(w=>'<div class="etowarn">! '+esc(w)+'</div>').join('')+
+    (r.notes||[]).map(n=>'<div class="meta" style="font-size:11px;margin-top:2px">'+esc(n)+'</div>').join('');
+  chart(out.querySelector('.corrfitchart'),[
+    {color:C3,dash:true,pts:r.rows.map((x,i)=>[i,x.before])},
+    {color:C1,pts:r.rows.map((x,i)=>[i,x.after])},
+    {type:'dot',color:C2,pts:r.rows.map((x,i)=>[i,x.realized]).filter(p=>p[1]!=null)},
+  ],{xfmt:anTenorFmt(names),ldp:3,r:16,height:190});
+  if(apply){await loadCurve();await loadMarks();await redraw();schedulePrice()}
+  CORRFIT=apply?null:{sig:corrfitSig()};
+  corrfitStale();
+}
+$('#mcorrfitgo').onclick=()=>corrfitRun(false);
+$('#mcorrfitapply').onclick=()=>corrfitRun(true);
+$$('#mcorrrow input[data-corrdof]').forEach(i=>i.onchange=saveMarking);
 /* Which column this pair's weights come from, and what the tab cannot weight,
    said *before* anything is bumped: a tenor with no weight does not move, and
    finding that out from the result table is finding it out one press late. */
@@ -3718,13 +3840,25 @@ $('#mxqapply').onclick=()=>mxqRun(true);
    overwrites a proposal was made from are remembered, so a proposal that no
    longer describes the column above it says so rather than sitting there
    looking current. */
+/* The range a curve's rate of turn is fitted in -- a backbone's mean
+   reversion, a cross's correlation decay -- is the marking agent's, off its
+   own card on the Market maker screen.  Both curve fits on this card send
+   those two boxes and nothing of their own: empty boxes are the house range
+   there and here, and one pair of boxes cannot disagree with itself. */
+function revRange(){return {reversion_lo:$('#mmrevlo').value,reversion_hi:$('#mmrevhi').value}}
+function revSig(){return [$('#mmrevlo').value.trim(),$('#mmrevhi').value.trim()]}
+function revSpan(r,what){
+  return '<span title="the marking agent’s mean-reversion range, set on its card on the Market maker screen">'+
+    esc(what)+' held in <b>'+num(r.reversion_range[0],2)+'</b>–<b>'+num(r.reversion_range[1],2)+'</b>'+
+    (r.reversion_house?' (house)':' (agent card)')+'</span>';
+}
 let OWFIT=null;
 function owSignature(){
-  return MARKS?JSON.stringify(MARKS.atm.filter(r=>r.overwrite!=null).map(r=>[r.tenor,r.overwrite])):'';
+  return MARKS?JSON.stringify([MARKS.atm.filter(r=>r.overwrite!=null).map(r=>[r.tenor,r.overwrite]),revSig()]):'';
 }
 function owfitStale(){
   const stale=!!(OWFIT&&(OWFIT.pair!==mq().pair||OWFIT.sig!==owSignature()));
-  $('#mowfitstale').textContent=stale?'the overwrites have changed since this proposal — propose again':'';
+  $('#mowfitstale').textContent=stale?'the overwrites or the mean-reversion range have changed since this proposal — propose again':'';
   $('#mowfitstale').className=stale?'msg bad':'meta';
 }
 function owfitDof(){return $$('#mowfitrow input[data-owdof]').filter(i=>i.checked).map(i=>i.dataset.owdof)}
@@ -3733,8 +3867,8 @@ async function owfitRun(apply){
   out.innerHTML='<span class="spin"></span> '+(apply?'fitting and applying':'fitting')+'…';
   let r;
   try{
-    r=await post('/api/atm/fit',{pair:mq().pair,dof:owfitDof(),apply:!!apply,
-                                 clear_overwrites:$('#mowfitclear').checked});
+    r=await post('/api/atm/fit',Object.assign({pair:mq().pair,dof:owfitDof(),apply:!!apply,
+                                 clear_overwrites:$('#mowfitclear').checked},revRange()));
   }catch(e){OWFIT=null;owfitStale();out.innerHTML='<div class="msg bad">'+esc(e.message)+'</div>';return}
   const pts=k=>['initial_vol','long_term_vol','short_addon'].indexOf(k)>=0;
   const names=r.rows.map(x=>x.tenor);
@@ -3746,6 +3880,7 @@ async function owfitRun(apply){
         :'proposal: '+esc(r.evidence))+'</div>'+
       '<div class="mmstat" style="margin-top:4px"><span>RMSE <b>'+vnum(r.rmse)+'</b> vol pts</span>'+
       '<span>worst <b>'+vsgn(r.max_error)+'</b> at '+esc(r.max_error_tenor)+'</span>'+
+      (r.dof.indexOf('decay')>=0?revSpan(r,r.is_cross?'decay':'mean reversion'):'')+
       '<span>'+esc(r.message)+'</span></div>';
   out.innerHTML=head+
     (r.fitted?'<div class="owfitchart" style="margin-top:6px"></div>'+
@@ -7162,9 +7297,11 @@ function mmRevVisible(){
     if(!$('#mmrevlo').value)$('#mmrevlo').value=house[0]!=null?house[0]:'';
     if(!$('#mmrevhi').value)$('#mmrevhi').value=house[1]!=null?house[1]:'';
   }else{$('#mmrevlo').value='';$('#mmrevhi').value='';}
+  owfitStale();corrfitStale();
   $('#mmrevhint').textContent=house.length
     ? 'the house range is '+house[0]+' to '+house[1]+', a half-life of '
       +(Math.LN2/house[1]*12).toFixed(1)+' to '+(Math.LN2/house[0]*12).toFixed(1)+' months'
+      +'; it bounds a cross’s correlation decay too, and both curve fits on the Vol marking ATM card'
     : '';
 }
 
@@ -8486,6 +8623,8 @@ $('#mmsource').onchange=()=>{mmTargetVisible();saveMM()};
 $('#mmrevshow').onchange=()=>{mmRevVisible();saveMM()};
 document.querySelectorAll('.mmright .mmfoldtog').forEach(el=>{el.onchange=()=>{mmFoldVisible();saveMM()}});
 ['#mmrevlo','#mmrevhi','#marklook','#markmin','#markrounds'].forEach(id=>{$(id).oninput=saveMM});
+/* The correlation fit on the marking card is bounded by the same range. */
+['#mmrevlo','#mmrevhi'].forEach(id=>$(id).addEventListener('input',()=>{owfitStale();corrfitStale()}));
 ['#mmfallbackmult','#mmscale','#mmfair','#mmaxe','#mmcap','#mmhorizon',
  '#mmflowwt','#mmflowscale','#mmflowtol'].forEach(id=>{
   $(id).oninput=()=>{saveMM();scheduleMQ()}});

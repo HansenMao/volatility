@@ -1568,6 +1568,251 @@ def correlation_table(book, pair: str, history=None, *, lookback_days: float | N
                             rows=rows, unavailable=unavailable)
 
 
+#: The correlation curve's coefficients by the names the marking card ticks,
+#: in the order they are shown.  The same three names the fit to the ATM
+#: overwrites frees on a cross; the short add-on is not here because a
+#: realized correlation says nothing about a volatility add-on.
+CORRELATION_FIT_DOF = ("initial", "final", "decay")
+_CORR_KNOB = {"initial": "corr_initial", "final": "corr_final", "decay": "corr_decay"}
+#: The decay is not here: it is fitted in the marking agent's mean-reversion
+#: range (``marketmaker.MEAN_REVERSION_RANGE``, or the range typed on its
+#: card), so one judgement bounds how fast any curve on the desk may turn.
+_CORR_BOUNDS = {"initial": (-0.999, 0.999), "final": (-0.999, 0.999)}
+#: A fitted decay past this many e-foldings by the shortest target puts the
+#: initial correlation where no window measured it, and is said.
+_CORR_DECAY_SPAN = 1.0
+#: A standard error is never allowed below this in the weights: a realized
+#: correlation near one has a vanishing ``(1 - rho^2)/sqrt(n)``, and a weight
+#: without a floor would let one tenor pin the whole curve.
+_CORR_SE_FLOOR = 0.01
+
+
+@dataclass(frozen=True)
+class CorrelationFitRow:
+    """One tenor of :func:`fit_correlation_curve`.
+
+    ``before`` / ``after`` are the curve's correlation at the tenor, ``miss``
+    is fitted less realized and ``z`` the same in standard errors.  The ATM
+    columns are the cross's curve volatility (decimals, overwrites ignored)
+    under each curve, so the move a fit makes is read in volatility as well
+    as in correlation.  A tenor that is not a target keeps its row with
+    ``used`` false and the reason.
+    """
+
+    tenor: str
+    t: float
+    before: float
+    after: float
+    realized: float | None = None
+    realized_se: float | None = None
+    miss: float | None = None
+    z: float | None = None
+    atm_before: float | None = None
+    atm_after: float | None = None
+    used: bool = False
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class CorrelationFit:
+    pair: str
+    legs: tuple[str, str]
+    lookback_days: float | None
+    free: tuple[str, ...]
+    before: dict[str, float]
+    after: dict[str, float]
+    rows: list[CorrelationFitRow]
+    rmse: float
+    max_error: float
+    max_error_tenor: str
+    #: The weighted misses' root mean square, in standard errors: about one
+    #: is a curve the history cannot tell from the realized ladder.
+    rms_z: float
+    converged: bool
+    message: str
+    #: The range the decay was fitted in, and whether it is the house one.
+    reversion_range: tuple[float, float] = (0.0, 0.0)
+    reversion_house: bool = True
+    warnings: tuple[str, ...] = ()
+    notes: tuple[str, ...] = ()
+
+
+def fit_correlation_curve(book, pair: str, history, *, free=CORRELATION_FIT_DOF,
+                          lookback_days: float | None = None, realized_basis: str = "auto",
+                          tenors=None,
+                          reversion_range: tuple[float, float] | None = None) -> CorrelationFit:
+    """A cross's correlation curve put through its legs' realized correlations.
+
+    The targets are :func:`correlation_table`'s realized column -- the same
+    window and basis as the marking card shows -- inside the pair's fit cutoff
+    (``marketmaker.split_at_fit_cutoff``, like every other curve fit), each
+    weighted by one over its standard error so a one-month correlation off
+    twenty returns does not count as much as a year's.  The coefficients not
+    in ``free`` are pinned at what the curve holds now.  Nothing is written:
+    the fit runs on the coefficients alone and ``after`` is what the caller
+    puts on the curve when it wants to keep it.
+
+    The decay is fitted inside ``reversion_range`` -- the marking agent's
+    mean-reversion range, ``None`` for the house one -- read by the same
+    ``marketmaker.check_reversion_range``, so the correlation cannot turn
+    faster or slower than the desk lets a backbone.
+
+    Refused rather than half-answered: a pair that is not a cross, a curve
+    that is not three coefficients, no history, a name that is not a
+    coefficient, and fewer measured tenors than free coefficients.
+    """
+    import copy
+    from scipy.optimize import least_squares
+    from .cross import CorrelationCurve
+    from .marketmaker import (MEAN_REVERSION_RANGE, check_reversion_range, reversion_nodes,
+                              split_at_fit_cutoff)
+
+    house = reversion_range is None
+    rev = MEAN_REVERSION_RANGE if house else check_reversion_range(reversion_range)
+
+    wanted = [str(d).strip().lower() for d in (free or ()) if str(d).strip()]
+    unknown = [d for d in wanted if d not in CORRELATION_FIT_DOF]
+    if unknown:
+        raise ValueError(f"{', '.join(unknown)} is not a coefficient of the correlation curve; "
+                         f"expected {', '.join(CORRELATION_FIT_DOF)}")
+    free = tuple(d for d in CORRELATION_FIT_DOF if d in wanted)
+    if not free:
+        raise ValueError("no coefficient of the correlation curve was left free, so there "
+                         "is nothing to fit")
+    table = correlation_table(book, pair, history, lookback_days=lookback_days,
+                              realized_basis=realized_basis, tenors=tenors)
+    if table.unavailable:
+        raise ValueError(table.unavailable)
+    surface = book[pair]
+    atm = surface.atm
+    if not isinstance(atm.correlation, CorrelationCurve):
+        raise ValueError(f"{pair}'s correlation is not an initial / final / decay curve, so "
+                         f"there are no coefficients to fit")
+    c = atm.correlation
+    before = {"initial": float(c.initial), "final": float(c.final), "decay": float(c.decay)}
+
+    measured = [r for r in table.rows if r.realized is not None and not r.error]
+    targets, dropped, cut_note = split_at_fit_cutoff(surface, measured)
+    notes: list[str] = []
+    warnings: list[str] = []
+    if cut_note:
+        (warnings if not targets else notes).append(cut_note)
+    if len(targets) < len(free):
+        raise ValueError(
+            f"{len(targets)} tenor(s) with a realized correlation cannot determine "
+            f"{len(free)} free coefficient(s) ({', '.join(free)})"
+            + (f"; {cut_note}" if cut_note and not targets else "")
+            + "; free fewer coefficients or lengthen the lookback")
+    targets = sorted(targets, key=lambda r: r.t)
+    ts = np.array([r.t for r in targets], dtype=float)
+    goals = np.array([r.realized for r in targets], dtype=float)
+    se = np.array([max(r.realized_se or 0.0, _CORR_SE_FLOOR) for r in targets], dtype=float)
+
+    def curve_at(values: dict[str, float], t) -> np.ndarray:
+        final, initial = values["final"], values["initial"]
+        return final - (final - initial) * np.exp(-values["decay"] * np.asarray(t, dtype=float))
+
+    def residuals(x: np.ndarray) -> np.ndarray:
+        values = {**before, **dict(zip(free, (float(v) for v in x)))}
+        return (curve_at(values, ts) - goals) / se
+
+    bounds = {**_CORR_BOUNDS, "decay": rev}
+    range_name = (f"the house mean-reversion range {rev[0]:g}-{rev[1]:g}" if house else
+                  f"the marking agent's mean-reversion range {rev[0]:g}-{rev[1]:g}, as set rather than "
+                  f"the house one")
+    if "decay" in free:
+        notes.append(f"the decay is fitted in {range_name}")
+        if not rev[0] <= before["decay"] <= rev[1]:
+            notes.append(f"the curve's decay of {before['decay']:g} is outside that range, so "
+                         f"a fit cannot give it back")
+    lo = np.array([bounds[k][0] for k in free], dtype=float)
+    hi = np.array([bounds[k][1] for k in free], dtype=float)
+    # Levels read straight off the shortest and longest targets; the decay has
+    # no such reading and is swept before any polishing, so a local minimum in
+    # it is not where the fit starts.
+    level = {"initial": float(goals[0]), "final": float(goals[-1])}
+    seeds = []
+    for decay in (reversion_nodes(rev) if "decay" in free else (before["decay"],)):
+        seed = {**before, **{k: v for k, v in {**level, "decay": decay}.items() if k in free}}
+        seeds.append(np.clip([seed[k] for k in free], lo + 1e-12, hi - 1e-12))
+    best = min(seeds, key=lambda x: float(np.sum(residuals(x) ** 2)))
+    try:
+        sol = least_squares(residuals, best, bounds=(lo, hi), xtol=1e-13, ftol=1e-13,
+                            gtol=1e-13, max_nfev=400)
+        x, converged = sol.x, bool(sol.success)
+        message = "converged" if converged else f"least-squares stopped: {sol.message}"
+    except Exception as exc:  # noqa: BLE001 - fall back to the sweep, but say so
+        x, converged = best, False
+        message = (f"polish failed ({type(exc).__name__}: {exc}); reporting the best "
+                   f"sweep node")
+    after = {**before, **dict(zip(free, (float(v) for v in x)))}
+    if not converged:
+        warnings.append(message)
+    for k in free:
+        if min(abs(after[k] - bounds[k][0]), abs(after[k] - bounds[k][1])) < 1e-6:
+            warnings.append(
+                f"the fitted {k} sits on its bound [{bounds[k][0]:g}, {bounds[k][1]:g}]"
+                + (f" ({range_name})" if k == "decay" else "")
+                + "; the realized ladder wants a curve this one cannot draw")
+    if "decay" in free and after["decay"] * float(ts[0]) > _CORR_DECAY_SPAN:
+        warnings.append(f"the fitted decay is more than one e-folding by the shortest target "
+                        f"({targets[0].tenor}), so the initial correlation is set where no "
+                        f"window measured it")
+    span = float(ts[-1])
+    if "decay" in free and abs(after["final"] - after["initial"]) < 0.02:
+        notes.append("the fitted initial and final are within 0.02 of each other, so the "
+                     "decay is barely determined by the data")
+    elif {"final", "decay"} <= set(free) and after["decay"] * span < 0.1:
+        warnings.append(f"the fitted decay is so slow that the longest target "
+                        f"({targets[-1].tenor}) is barely a tenth of the way to the final, so "
+                        f"the final is not determined by the history; pin the decay or the final")
+    if table.lookback_days:
+        warnings.append(f"every tenor is measured over the same {table.lookback_days:g}-day "
+                        f"window, so the targets differ only by basis and carry no term "
+                        f"structure; 'match' gives each tenor its own window")
+
+    # The cross's ATM under each curve, off a copy: the book is not touched.
+    rows_atm: dict[str, tuple[float | None, float | None]] = {}
+    try:
+        work = copy.deepcopy(atm)
+        problems = work.set_correlation(after["initial"], after["final"], after["decay"])
+        if problems:
+            raise ValueError("; ".join(problems))
+        for r in table.rows:
+            rows_atm[r.tenor] = (atm.curve_vol(r.t), work.curve_vol(r.t))
+    except Exception as exc:  # noqa: BLE001 - the fit stands without the ATM columns
+        warnings.append(f"the cross's ATM under the fitted curve could not be read: {exc}")
+
+    used = {r.tenor for r in targets}
+    beyond = set(dropped)
+    rows: list[CorrelationFitRow] = []
+    for r in table.rows:
+        a_before, a_after = rows_atm.get(r.tenor, (None, None))
+        fitted = float(curve_at(after, r.t))
+        miss = None if r.realized is None else fitted - r.realized
+        z = None if miss is None else miss / max(r.realized_se or 0.0, _CORR_SE_FLOOR)
+        reason = ("" if r.tenor in used else
+                  "beyond the fit cutoff" if r.tenor in beyond else
+                  (r.error or "no realized correlation"))
+        rows.append(CorrelationFitRow(
+            tenor=r.tenor, t=r.t, before=float(curve_at(before, r.t)), after=fitted,
+            realized=r.realized, realized_se=r.realized_se, miss=miss, z=z,
+            atm_before=a_before, atm_after=a_after, used=r.tenor in used, reason=reason))
+    misses = [(row.miss, row.tenor) for row in rows if row.used]
+    worst = max(misses, key=lambda m: abs(m[0]))
+    z_used = [row.z for row in rows if row.used]
+    notes.append("the targets are realized correlations -- physical, not priced; matched "
+                 "windows overlap, so neighbouring tenors are not independent evidence")
+    return CorrelationFit(
+        pair=table.pair, legs=table.legs, lookback_days=table.lookback_days, free=free,
+        before=before, after=after, rows=rows,
+        rmse=math.sqrt(sum(m * m for m, _ in misses) / len(misses)),
+        max_error=worst[0], max_error_tenor=worst[1],
+        rms_z=math.sqrt(sum(v * v for v in z_used) / len(z_used)),
+        converged=converged, message=message, reversion_range=tuple(rev),
+        reversion_house=house, warnings=tuple(warnings), notes=tuple(notes))
+
+
 #: The premium sources a dependence suggestion can take: the cross's own marked
 #: butterfly, none at all, or -- anything else -- another cross's, named.
 PREMIUM_OWN, PREMIUM_NONE = "own", "none"

@@ -527,10 +527,40 @@ class TestWebAssets(unittest.TestCase):
         self.assertIn("api('/api/marks/correlation?'", body)
         self.assertIn("lookback_days:$('#mcorrlook').value", body)
         self.assertNotIn("post(", body)
-        self.assertNotIn("/api/marks/correlation", js.split("const MARKING_ROUTES=")[1].split("];")[0])
+        routes = js.split("const MARKING_ROUTES=")[1].split("];")[0]
+        self.assertNotIn("'/api/marks/correlation'", routes)
         from volkit import screens
         owner = {r: sc.name for sc in screens.SCREENS for r in sc.routes}
         self.assertEqual(owner.get("/api/marks/correlation"), "marking")
+
+    def test_the_correlation_fit_sits_with_the_correlation_table_and_writes_through_one_route(self):
+        """Its targets are the table's realized column, so it opens and shuts
+        with it; Propose and Apply are one marking route with a flag, and the
+        lookback is the table's own box rather than a second one."""
+        page = _source("volkit", "web", "index.html")
+        js = page.split("<script>")[1].split("</script>")[0]
+        row = page.split('<div class="hide" id="mcorrrow"')[1].split('<details class="hint hide" id="mowpastehint"')[0]
+        for dof in ("initial", "final", "decay"):
+            self.assertIn(f'data-corrdof="{dof}"', row)
+        for el in ("mcorrfitgo", "mcorrfitapply", "mcorrfitout", "mcorrfitstale"):
+            self.assertIn(f'id="{el}"', row)
+        body = js.split("async function corrfitRun(apply){")[1].split("\n}")[0].replace(" ", "")
+        self.assertIn("post('/api/marks/correlation/fit'", body)
+        self.assertIn("apply:!!apply", body)
+        self.assertIn("lookback_days:$('#mcorrlook').value", body)
+        # The decay's range is the marking agent's own boxes, not a second pair.
+        self.assertIn("revRange()", body)
+        helper = js.split("function revRange(){")[1].split("}")[0].replace(" ", "")
+        self.assertIn("reversion_lo:$('#mmrevlo').value", helper)
+        self.assertIn("reversion_hi:$('#mmrevhi').value", helper)
+        self.assertIn("awaitloadCurve()", body)
+        self.assertIn("$('#mcorrfitgo').onclick=()=>corrfitRun(false)", js.replace(" ", ""))
+        self.assertIn("$('#mcorrfitapply').onclick=()=>corrfitRun(true)", js.replace(" ", ""))
+        routes = js.split("const MARKING_ROUTES=")[1].split("];")[0]
+        self.assertIn("'/api/marks/correlation/fit'", routes)
+        from volkit import screens
+        owner = {r: sc.name for sc in screens.SCREENS for r in sc.routes}
+        self.assertEqual(owner.get("/api/marks/correlation/fit"), "marking")
 
     def test_the_fit_to_the_overwrites_is_shown_only_with_the_overwrite_column(self):
         """Its target curve is the overwrite column, so it opens and shuts with
@@ -545,6 +575,8 @@ class TestWebAssets(unittest.TestCase):
         self.assertIn("post('/api/atm/fit'", body)
         self.assertIn("apply:!!apply", body)
         self.assertIn("dof:owfitDof()", body)
+        # Its range is the agent card's, read by the helper the realized fit reads.
+        self.assertIn("revRange()", body)
         self.assertIn("awaitloadCurve()", body)
         self.assertIn("$('#mowfitgo').onclick=()=>owfitRun(false)", js.replace(" ", ""))
         self.assertIn("$('#mowfitapply').onclick=()=>owfitRun(true)", js.replace(" ", ""))

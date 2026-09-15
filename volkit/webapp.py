@@ -52,7 +52,8 @@ from .quotes import VOL_UNITS as QUOTE_VOL_UNITS
 from .surface import PARAM_NAMES, QUOTE_FIELDS, QUOTE_LABELS, RATIO_WINGS
 from . import vegaweights
 from .analytics import (TARGETS, carry_table, correlation_table, dependence_table, fair_value_table,
-                        implied_cross_quotes, realized_table, triangle_table)
+                        fit_correlation_curve, implied_cross_quotes, realized_table,
+                        triangle_table)
 from .relvalue import HISTORY_DAYS, SHARED, SIGNALS, WEIGHTS
 from .relvalue import panel_from_request as relvalue_panel_from_request
 from .banded import BAND_MODES, BandTreatment, band_panel
@@ -1710,14 +1711,23 @@ class BookService:
         and then only the tenors the fit was aimed at are cleared: a tenor
         beyond the fit cutoff is marked by its overwrite alone, and clearing it
         because the curve was fitted elsewhere would unmark it.
+
+        The mean reversion -- a cross's correlation decay -- is fitted in the
+        marking agent's range, off its card's ``reversion_lo`` /
+        ``reversion_hi``, the house range when both are empty: the same reading
+        as the realized correlation fit.
         """
+        from .marketmaker import _reversion_from_request
         from .marking import MarkingError, propose_to_overwrites
         with self._lock:
             if self.book is None:
                 raise ValueError(self.load_error or "no workbook is loaded")
             pair = str(payload.get("pair") or "").strip().upper() or self.book.pairs[0]
             try:
-                out = propose_to_overwrites(self.book, pair, payload.get("dof") or [])
+                out = propose_to_overwrites(
+                    self.book, pair, payload.get("dof") or [],
+                    reversion_range=_reversion_from_request(payload.get("reversion_lo"),
+                                                            payload.get("reversion_hi")))
             except MarkingError as exc:
                 raise ValueError(str(exc)) from None
             out.update(applied=False, cleared=[])
@@ -1824,17 +1834,7 @@ class BookService:
             pair = str(q.get("pair") or "").strip().upper()
             if not pair:
                 raise ValueError("name the cross whose correlation is to be shown")
-            raw = q.get("lookback_days")
-            lookback = None
-            if raw not in (None, "") and str(raw).strip().lower() != "match":
-                try:
-                    lookback = float(raw)
-                except (TypeError, ValueError):
-                    raise ValueError(f"a lookback is 'match' or a number of days, got "
-                                     f"{raw!r}") from None
-                if not math.isfinite(lookback) or lookback <= 0:
-                    raise ValueError(f"a lookback window is a positive number of days, "
-                                     f"got {raw!r}")
+            lookback = _correlation_lookback(q.get("lookback_days"))
             basis = q.get("realized_basis") or "auto"
             surface = self.book[pair]
             table = correlation_table(self.book, pair, self.history, lookback_days=lookback,
@@ -1844,6 +1844,51 @@ class BookService:
                     "lookback_days": table.lookback_days, "realized_basis": basis,
                     "unavailable": table.unavailable,
                     "rows": [asdict(r) for r in table.rows]}
+
+    def correlation_fit(self, payload: dict) -> dict:
+        """Fit a cross's correlation curve to its legs' realized correlations.
+
+        Two calls of one route, like the fit to the overwrites: ``apply``
+        false is the proposal the correlation table's card reads, true
+        recomputes it -- a leg's history or the lookback may have changed in
+        between -- and writes the fitted coefficients onto the curve, exactly
+        as typing them into the curve card would.  Only the ticked ``dof`` are
+        written; the rest were pinned and are left where they are.
+
+        The decay is fitted in the marking agent's mean-reversion range: the
+        card's ``reversion_lo`` / ``reversion_hi`` boxes, read the way the agent
+        reads them, and the house range when both are empty.
+        """
+        from .marketmaker import _reversion_from_request
+        with self._lock:
+            if self.book is None:
+                raise ValueError(self.load_error or "no workbook is loaded")
+            pair = str(payload.get("pair") or "").strip().upper()
+            if not pair:
+                raise ValueError("name the cross whose correlation is to be fitted")
+            lookback = _correlation_lookback(payload.get("lookback_days"))
+            reversion = _reversion_from_request(payload.get("reversion_lo"),
+                                                payload.get("reversion_hi"))
+            surface = self.book[pair]
+            fit = fit_correlation_curve(self.book, pair, self.history,
+                                        free=payload.get("dof") or [], lookback_days=lookback,
+                                        realized_basis=payload.get("realized_basis") or "auto",
+                                        tenors=self._atm_tenors(surface),
+                                        reversion_range=reversion)
+            applied = False
+            if payload.get("apply"):
+                problems = session.set_curve_params(
+                    surface.atm, {f"corr_{k}": fit.after[k] for k in fit.free})
+                if problems:
+                    raise ValueError("the fitted correlation was refused: " + "; ".join(problems))
+                surface.invalidate()
+                self.dirty = True
+                applied = True
+            out = asdict(fit)
+            out.update(legs=list(fit.legs), free=list(fit.free), applied=applied,
+                       reversion_range=list(fit.reversion_range),
+                       warnings=list(fit.warnings), notes=list(fit.notes))
+            return out
 
     # -- the session file -------------------------------------------------
     # -- the workbook's configuration tabs --------------------------------
@@ -3588,6 +3633,20 @@ def _stamp(mtime: float | None) -> str:
     return datetime.fromtimestamp(mtime, UTC).replace(microsecond=0).isoformat()
 
 
+def _correlation_lookback(raw) -> float | None:
+    """The correlation card's lookback box: ``match`` (or empty) is ``None``,
+    anything else a positive number of days."""
+    if raw in (None, "") or str(raw).strip().lower() == "match":
+        return None
+    try:
+        lookback = float(raw)
+    except (TypeError, ValueError):
+        raise ValueError(f"a lookback is 'match' or a number of days, got {raw!r}") from None
+    if not math.isfinite(lookback) or lookback <= 0:
+        raise ValueError(f"a lookback window is a positive number of days, got {raw!r}")
+    return lookback
+
+
 def _finite(obj):
     """Replace every non-finite float with ``None``, recursively."""
     if isinstance(obj, float):
@@ -3826,6 +3885,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self.service.atm_fit(payload))
             elif url.path == "/api/marks/cross":
                 self._json(self.service.cross_quotes(payload))
+            elif url.path == "/api/marks/correlation/fit":
+                self._json(self.service.correlation_fit(payload))
             elif url.path == "/api/config/pair":
                 self._json(self.service.config_pair(payload))
             elif url.path == "/api/workbook/restore":

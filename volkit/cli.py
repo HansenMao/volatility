@@ -376,6 +376,42 @@ def _print_correlation(args, book) -> None:
         print(f"  ! {note}", file=sys.stderr)
     for note in dict.fromkeys(n for r in table.rows if r.dependence for n in r.dependence.notes):
         print(f"  . {note}", file=sys.stderr)
+    if args.fit_correlation and not table.unavailable:
+        _print_correlation_fit(args, book, history, lookback)
+
+
+def _print_correlation_fit(args, book, history, lookback) -> None:
+    """The marking card's fit of the correlation curve to the realized column,
+    off ``analytics.fit_correlation_curve``.  Prints the proposal; writes
+    nothing."""
+    from . import analytics
+
+    free = [d for d in args.fit_correlation.replace(",", " ").split() if d]
+    fit = analytics.fit_correlation_curve(book, args.pair.upper(), history, free=free,
+                                          lookback_days=lookback,
+                                          realized_basis=args.realized_basis,
+                                          reversion_range=args.reversion_range)
+    print(f"\n  correlation fitted to realized   free: {', '.join(fit.free)}   "
+          f"rmse {fit.rmse:.3f}, worst {fit.max_error:+.3f} at {fit.max_error_tenor}, "
+          f"rms z {fit.rms_z:.2f}   {fit.message}")
+    print(f"  decay held in {fit.reversion_range[0]:g}-{fit.reversion_range[1]:g}"
+          + (" (the house mean-reversion range)" if fit.reversion_house else ""))
+    for k in analytics.CORRELATION_FIT_DOF:
+        print(f"  {k:<8}{fit.before[k]:>10.4f} -> {fit.after[k]:>10.4f}"
+              + ("" if k in fit.free else "   (pinned)"))
+    print(f"  {'tenor':<6}{'realized':>10}{'now':>9}{'fitted':>9}{'miss':>9}{'z':>7}"
+          f"{'atm now %':>11}{'fitted %':>10}")
+    dash = lambda v, f: "—" if v is None else format(v, f)
+    for r in fit.rows:
+        pct = lambda v: None if v is None else v * 100.0
+        print(f"  {r.tenor:<6}{dash(r.realized, '+.3f'):>10}{r.before:>+9.3f}{r.after:>+9.3f}"
+              f"{dash(r.miss, '+.3f'):>9}{dash(r.z, '+.2f'):>7}"
+              f"{dash(pct(r.atm_before), '.4f'):>11}{dash(pct(r.atm_after), '.4f'):>10}"
+              + ("" if r.used else f"   not fitted: {r.reason}"))
+    for w in fit.warnings:
+        print(f"  ! {w}")
+    for n in fit.notes:
+        print(f"  . {n}", file=sys.stderr)
 
 
 def cmd_vega(args) -> int:
@@ -3451,6 +3487,16 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--correlation", action="store_true",
                    help="on a cross, also the correlation at each tenor beside the legs' "
                         "realized correlation")
+    s.add_argument("--fit-correlation", nargs="?", const="initial,final,decay", default=None,
+                   metavar="DOF",
+                   help="with --correlation, also fit the correlation curve to the realized "
+                        "column, freeing DOF (default initial,final,decay); prints, writes "
+                        "nothing")
+    s.add_argument("--reversion-range", nargs=2, metavar=("FLOOR", "CEILING"), type=float,
+                   help=f"with --fit-correlation, the range the correlation decay is fitted "
+                        f"in -- the marking agent's mean-reversion range (default: "
+                        f"{marketmaker.MEAN_REVERSION_RANGE[0]:g} "
+                        f"{marketmaker.MEAN_REVERSION_RANGE[1]:g})")
     s.add_argument("--history", default=_default_history(),
                    help="historical workbook (with --correlation)")
     s.add_argument("--lookback", default="match",

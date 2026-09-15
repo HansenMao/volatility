@@ -457,8 +457,8 @@ move the screen.
   its own length — or a number that holds every tenor to one window. A tenor
   whose window holds too few days keeps its row and says so. The history is
   the one loaded on the Analysis screen; without one the marked column still
-  shows and the table says why the realized one is empty. Nothing here is
-  written — mark the correlation on the curve card.
+  shows and the table says why the realized one is empty. Nothing in the table
+  is written — mark the correlation on the curve card, or with the fit below it.
   Two more columns say how the legs **depend** on each other beyond the
   correlation. **Vol-vol** is the correlation of daily changes in the two legs'
   ATM over the last year, ± one standard error. **Corr vol** is how much their
@@ -470,6 +470,27 @@ move the screen.
   the Config window turns them into marks (see *Cross triangle* under Analysis).
   `volkit tenors EURJPY --correlation --history vol_history.xlsx --lookback 90`
   prints the same table.
+  **Fit the correlation to realized**, under the table, puts the correlation
+  curve through the **Realized ρ** column. Tick what it may move — **initial**,
+  **final**, **decay** — and an unticked one stays where the curve card has it.
+  Every tenor with a realized figure inside the pair's fit cutoff is a target,
+  weighted by one over its standard error, so a month's twenty returns count for
+  less than a year's. The decay is fitted in the marking agent's **mean-reversion
+  range** — the floor and ceiling under *Set the mean-reversion range* on its card
+  on the Market maker screen, or the house range (1.5–6.5) when those boxes are
+  empty — and the result says which. A fitted decay fast enough to set the initial
+  correlation where no window measured it is flagged.
+  Use `match` in the lookback box — with a number every tenor is the same window
+  and there is no term structure to fit, which the result says. **Propose**
+  shows the realized, current and fitted correlation per tenor with the miss, the
+  miss in standard errors (**z**), and the cross's curve ATM under the current
+  and fitted curves, so you can see how far a fit moves the vols before you take
+  it; **Apply to curve** re-runs the fit and writes the ticked coefficients onto
+  the curve, as if typed into the curve card. Realized correlation is what
+  happened, not what the market prices. `--fit-correlation` (optionally
+  `--fit-correlation final`, with `--reversion-range FLOOR CEILING` for a range
+  other than the house one) on the command above prints the proposal and writes
+  nothing.
 * **Fit the curve to the overwrites** — shown with the **overwrites** column,
   and only then. Tick the degrees of freedom the fit may move — **initial**,
   **final**, **decay**, **add-on** (on a plain pair the backbone's initial vol,
@@ -479,14 +500,18 @@ move the screen.
   the marking agent runs on a pasted curve, with your ticks as the free set: a
   table of each tenor's overwrite, the curve as it was, the fitted curve and the
   miss, the parameters before and after, and any warning (a parameter resting
-  on its bound, a curve that cannot pass through the targets). It needs at
-  least as many overwrites as ticked boxes and says so when it has fewer.
+  on its bound, a curve that cannot pass through the targets). **decay** is
+  fitted in the marking agent's **mean-reversion range** — its card's floor and
+  ceiling on the Market maker screen, or the house range 1.5–6.5 when those are
+  empty — exactly as the fit to realized correlation is, and the result says
+  which range it used. It needs at least as many overwrites as ticked boxes and
+  says so when it has fewer.
   **Apply to curve** re-runs the fit on the overwrites as they are then and
   writes the fitted parameters onto the curve, exactly as typing them into the
   curve card would. The overwrites stay on unless **and clear the overwrites it
   fits** is ticked, which clears only the tenors the fit used — one beyond the
   fit cutoff keeps its overwrite, because nothing else marks it. A proposal
-  made before the overwrites changed says so.
+  made before the overwrites or the mean-reversion range changed says so.
 * **Bump** — tick **bump** in the heading for the row that moves the whole
   curve at once. Choose an **anchor** tenor, type a **move** in vol points, and
   every tenor moves `move × w(tenor) / w(anchor)` where the weights come from
@@ -3116,7 +3141,11 @@ box on the card on purpose.
 
 **Fit my way** is the other button, and it is you rather than the agent: the same
 two fitters, with exactly the parameters ticked under *At-the-money curve may
-move* and *Smile parameters may move*, in the mean-reversion range you set. That
+move* and *Smile parameters may move*, in the mean-reversion range you set. On
+a **cross** that range bounds the correlation **decay** instead, and the same
+range bounds both fits on the Vol marking screen's ATM card — to the overwrites
+and to realized correlation — so one pair of boxes decides how fast any curve on
+the desk may turn. (A cross's decay used to be fitted anywhere in 0–200.) That
 button used to live on the toolbar and be called *Fit*; it is here now because a
 mark that moves should move in one place, next to the journal that records it.
 What it arrives at fills the **At-the-money curve** and **Wings** cards below.

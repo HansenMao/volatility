@@ -124,6 +124,11 @@ _PERCENT_KNOBS = ("initial_vol", "long_term_vol", "short_addon", "rate_vol")
 #: purpose and is left exactly as typed; what this constrains is where a cold
 #: fit through a target curve is allowed to land, and a fit that comes to rest
 #: on it says so in its warnings rather than reporting a shape as fitted.
+#:
+#: A cross's **correlation decay** is fitted in the same range: it is the rate
+#: the cross's curve turns at, as the mean reversion is a backbone's, and one
+#: judgement on how fast a curve may turn is one number to set.  Every cross in
+#: ``files/vol_marks.xlsx`` is marked between 3 and 5.5.
 MEAN_REVERSION_RANGE = (1.5, 6.5)
 
 # Bounds for every knob, in decimals.  ``short_addon`` is held non-negative:
@@ -134,7 +139,9 @@ _BOUNDS = {
     "initial_vol": (1e-4, 3.0), "long_term_vol": (1e-4, 3.0),
     "mean_reversion": MEAN_REVERSION_RANGE, "short_addon": (0.0, 0.5),
     "short_decay": (0.0, 500.0),
-    "corr_initial": (-0.999, 0.999), "corr_final": (-0.999, 0.999), "corr_decay": (0.0, 200.0),
+    # corr_decay is not here: it is fitted in the mean-reversion range, set
+    # per fit in fit_atm_curve.
+    "corr_initial": (-0.999, 0.999), "corr_final": (-0.999, 0.999),
 }
 #: Sweep nodes for the mean reversion, taken from the range itself so the two
 #: cannot drift apart.  A node the polish is not allowed to reach can still win
@@ -253,6 +260,9 @@ class CurveFit:
     message: str
     evaluations: int
     seconds: float
+    #: The range the mean reversion -- or a cross's correlation decay -- was
+    #: fitted in.
+    reversion_range: tuple[float, float] = MEAN_REVERSION_RANGE
     warnings: tuple[str, ...] = ()
 
 
@@ -298,7 +308,7 @@ def fit_atm_curve(atm, targets: list[CurveTarget], *, free: tuple[str, ...] | No
     # and the polish can never be taken from two different ranges.
     rev = check_reversion_range(reversion_range) if reversion_range is not None \
         else MEAN_REVERSION_RANGE
-    bounds = {**_BOUNDS, "mean_reversion": rev}
+    bounds = {**_BOUNDS, "mean_reversion": rev, "corr_decay": rev}
     reversion_seeds = reversion_nodes(rev)
 
     knobs = _Knobs(atm)
@@ -363,7 +373,7 @@ def fit_atm_curve(atm, targets: list[CurveTarget], *, free: tuple[str, ...] | No
     if knobs.is_cross:
         # The level of a cross is its legs'; the shape this curve owns is the
         # correlation's decay, so that is what gets swept.
-        for decay in (0.25, 1.0, 4.0, 16.0, 64.0):
+        for decay in reversion_seeds:
             for front in (10.0, 50.0, 200.0):
                 seeds.append(seeded({"corr_decay": decay, "short_decay": front}))
     else:
@@ -436,7 +446,12 @@ def fit_atm_curve(atm, targets: list[CurveTarget], *, free: tuple[str, ...] | No
                 f"outside it is one nobody marks. Widen the range on the fit panel to let "
                 f"the fit go there, or type the value on the marking screen, which is not "
                 f"bounded."
-                if k == "mean_reversion" else "")
+                if k == "mean_reversion" else
+                f" That bound is the mean-reversion range {rev[0]:g}-{rev[1]:g}, which a "
+                f"cross's correlation decay is fitted in as a backbone's mean reversion is: a "
+                f"marking judgement, widened on the marking agent's card, or type the value "
+                f"on the marking screen, which is not bounded."
+                if k == "corr_decay" else "")
             warnings.append(
                 f"{k} came to rest on its bound at {v:.6g}; the targets want more than the "
                 f"parameter can give, so the shape is being limited rather than fitted."
@@ -452,7 +467,7 @@ def fit_atm_curve(atm, targets: list[CurveTarget], *, free: tuple[str, ...] | No
         achieved_before=tuple(achieved_before), achieved_after=tuple(float(v) for v in got),
         rmse=rmse, max_error=float(err[j]), max_error_tenor=targets[j].tenor,
         converged=ok, message=why, evaluations=calls, seconds=seconds,
-        warnings=tuple(warnings),
+        reversion_range=tuple(rev), warnings=tuple(warnings),
     )
 
 

@@ -2176,6 +2176,34 @@ class TestCurveFittedToTheOverwrites(unittest.TestCase):
         self.assertTrue(out["is_cross"])
         self.assertEqual(out["free"], ["corr_initial", "corr_final", "corr_decay", "short_addon"])
 
+    def test_the_decay_is_fitted_in_the_agent_cards_range_like_the_realized_fit(self):
+        """One judgement on how fast a curve may turn: the overwrite fit reads
+        the marking agent's range as the fit to realized correlation does --
+        the house range when the card's boxes are empty, the typed one when
+        they are not, and one box alone refused."""
+        from volkit.marketmaker import MEAN_REVERSION_RANGE
+        svc = self._service(pairs=("EURUSD", "USDJPY", "EURJPY"))
+        self._overwrite(svc, "EURJPY")
+        house = svc.atm_fit({"pair": "EURJPY", "dof": ["initial", "final", "decay"],
+                             "reversion_lo": "", "reversion_hi": ""})
+        self.assertTrue(house["reversion_house"])
+        self.assertEqual(house["reversion_range"], list(MEAN_REVERSION_RANGE))
+        lo, hi = MEAN_REVERSION_RANGE
+        self.assertTrue(lo - 1e-9 <= house["params"]["corr_decay"] <= hi + 1e-9, house["params"])
+        typed = svc.atm_fit({"pair": "EURJPY", "dof": ["initial", "final", "decay"],
+                             "reversion_lo": "0.2", "reversion_hi": "0.5"})
+        self.assertFalse(typed["reversion_house"])
+        self.assertEqual(typed["reversion_range"], [0.2, 0.5])
+        self.assertTrue(0.2 - 1e-9 <= typed["params"]["corr_decay"] <= 0.5 + 1e-9,
+                        typed["params"])
+        with self.assertRaises(ValueError):
+            svc.atm_fit({"pair": "EURJPY", "dof": ["decay"], "reversion_lo": "0.2"})
+        # The plain pair's mean reversion is read off the same boxes.
+        self._overwrite(svc, "EURUSD")
+        plain = svc.atm_fit({"pair": "EURUSD", "dof": ["initial", "final", "decay"],
+                             "reversion_lo": "2", "reversion_hi": "3"})
+        self.assertTrue(2 - 1e-9 <= plain["params"]["mean_reversion"] <= 3 + 1e-9)
+
     def test_what_cannot_be_fitted_is_said_and_never_applied(self):
         svc = self._service()
         with self.assertRaises(ValueError) as ctx:          # no overwrite at all

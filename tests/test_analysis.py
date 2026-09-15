@@ -813,6 +813,153 @@ class TestCrossCorrelation(unittest.TestCase):
                       bare.cross_correlation({"pair": "EURJPY"})["unavailable"])
 
 
+class TestCorrelationFit(unittest.TestCase):
+    """The marking card's fit of a cross's correlation curve to its legs'
+    realized correlations: a proposal that touches nothing, and an apply that
+    writes only the coefficients ticked."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.book = Book.from_excel(BOOK, ASOF).load_all(["EURJPY", "EURUSD"])
+        cls.history = history.load_history(HISTORY, cls.book.pairs)
+
+    def _ladder(self, curve, se=0.05, noise=None):
+        """The real table with its realized column replaced by ``curve``."""
+        table = analytics.correlation_table(self.book, "EURJPY", self.history)
+        rows = []
+        for i, r in enumerate(table.rows):
+            if r.realized is None:
+                rows.append(r)
+                continue
+            rho = float(curve(r.t)) + (0.0 if noise is None else noise[i])
+            rows.append(analytics.CorrelationRow(
+                tenor=r.tenor, t=r.t, marked=r.marked, window_days=r.window_days,
+                realized=rho, realized_se=se, difference=r.marked - rho,
+                observations=r.observations, basis=r.basis))
+        return analytics.CorrelationTable(pair=table.pair, legs=table.legs,
+                                          lookback_days=None, rows=rows)
+
+    def test_a_ladder_drawn_off_a_curve_gives_that_curve_back(self):
+        from unittest import mock
+        truth = CorrelationCurve(0.25, 0.55, 3.0)
+        with mock.patch.object(analytics, "correlation_table",
+                               return_value=self._ladder(truth)):
+            fit = analytics.fit_correlation_curve(self.book, "EURJPY", self.history)
+        self.assertTrue(fit.converged, fit.message)
+        for k in ("initial", "final", "decay"):
+            self.assertAlmostEqual(fit.after[k], getattr(truth, k), places=5, msg=k)
+        self.assertLess(fit.rmse, 1e-8)
+        # A tenor with no realized figure keeps its row and says why.
+        skipped = [r for r in fit.rows if not r.used]
+        self.assertTrue(skipped)
+        self.assertTrue(all(r.reason for r in skipped))
+
+    def test_a_pinned_coefficient_is_not_moved(self):
+        curve = self.book["EURJPY"].atm.correlation
+        fit = analytics.fit_correlation_curve(self.book, "EURJPY", self.history,
+                                              free=["final"])
+        self.assertEqual(fit.free, ("final",))
+        self.assertEqual(fit.after["initial"], curve.initial)
+        self.assertEqual(fit.after["decay"], curve.decay)
+        self.assertNotEqual(fit.after["final"], curve.final)
+
+    def test_the_fit_is_no_worse_than_the_curve_it_started_from(self):
+        fit = analytics.fit_correlation_curve(self.book, "EURJPY", self.history)
+        used = [r for r in fit.rows if r.used]
+        self.assertGreaterEqual(len(used), 3)
+        cost = lambda col: sum(((getattr(r, col) - r.realized) / r.realized_se) ** 2
+                               for r in used)
+        self.assertLessEqual(cost("after"), cost("before") + 1e-12)
+        for r in used:
+            self.assertAlmostEqual(r.miss, r.after - r.realized, places=14)
+
+    def test_the_decay_is_fitted_in_the_marking_agents_mean_reversion_range(self):
+        """One judgement bounds how fast any curve turns: the house range by
+        default, the range typed on the agent's card when there is one."""
+        from volkit.marketmaker import MEAN_REVERSION_RANGE
+        house = analytics.fit_correlation_curve(self.book, "EURJPY", self.history)
+        self.assertTrue(house.reversion_house)
+        self.assertEqual(house.reversion_range, MEAN_REVERSION_RANGE)
+        lo, hi = MEAN_REVERSION_RANGE
+        self.assertTrue(lo - 1e-9 <= house.after["decay"] <= hi + 1e-9, house.after)
+        typed = analytics.fit_correlation_curve(self.book, "EURJPY", self.history,
+                                                reversion_range=(0.2, 0.5))
+        self.assertFalse(typed.reversion_house)
+        self.assertEqual(typed.reversion_range, (0.2, 0.5))
+        self.assertTrue(0.2 - 1e-9 <= typed.after["decay"] <= 0.5 + 1e-9, typed.after)
+        self.assertTrue(any("as set rather than the house" in n for n in typed.notes), typed.notes)
+        # A pinned decay is the curve's, whatever the range.
+        pinned = analytics.fit_correlation_curve(self.book, "EURJPY", self.history,
+                                                 free=["initial", "final"],
+                                                 reversion_range=(0.2, 0.5))
+        self.assertEqual(pinned.after["decay"], self.book["EURJPY"].atm.correlation.decay)
+        for bad in ((0.0, 1.0), (3.0, 2.0)):
+            with self.assertRaises(ValueError, msg=bad):
+                analytics.fit_correlation_curve(self.book, "EURJPY", self.history,
+                                                reversion_range=bad)
+
+    def test_the_book_is_not_touched_and_the_atm_columns_are_read_off_a_copy(self):
+        atm = self.book["EURJPY"].atm
+        was = (atm.correlation.initial, atm.correlation.final, atm.correlation.decay)
+        fit = analytics.fit_correlation_curve(self.book, "EURJPY", self.history)
+        self.assertEqual((atm.correlation.initial, atm.correlation.final,
+                          atm.correlation.decay), was)
+        row = next(r for r in fit.rows if r.tenor.upper() == "1Y")
+        self.assertAlmostEqual(row.atm_before, atm.curve_vol(row.t), places=14)
+        self.assertNotAlmostEqual(row.atm_after, row.atm_before, places=6)
+
+    def test_one_window_for_every_tenor_is_said_to_carry_no_term_structure(self):
+        fit = analytics.fit_correlation_curve(self.book, "EURJPY", self.history,
+                                              lookback_days=90)
+        self.assertTrue(any("same 90-day window" in w for w in fit.warnings), fit.warnings)
+
+    def test_what_cannot_be_fitted_is_refused(self):
+        with self.assertRaises(ValueError):
+            analytics.fit_correlation_curve(self.book, "EURUSD", self.history)
+        for bad in ([], ["add_on"], ["curvature"]):
+            with self.assertRaises(ValueError, msg=bad):
+                analytics.fit_correlation_curve(self.book, "EURJPY", self.history, free=bad)
+        with self.assertRaises(ValueError) as ctx:
+            analytics.fit_correlation_curve(self.book, "EURJPY", None)
+        self.assertIn("no historical workbook", str(ctx.exception))
+        with self.assertRaises(ValueError) as ctx:
+            analytics.fit_correlation_curve(self.book, "EURJPY", self.history,
+                                            tenors=["1m", "3m"])
+        self.assertIn("cannot determine", str(ctx.exception))
+
+    def test_the_route_proposes_without_writing_and_applies_only_the_ticked(self):
+        import json as _json
+        from volkit.webapp import BookService, _finite
+        svc = BookService(str(book_for("EURJPY", "EURUSD", "USDJPY")), ASOF,
+                          history_path=str(HISTORY))
+        was = svc.curve({"pair": "EURJPY"})["params"]
+        shown = svc.correlation_fit({"pair": "eurjpy", "dof": ["initial", "final", "decay"],
+                                     "lookback_days": "match"})
+        _json.dumps(_finite(shown))
+        self.assertFalse(shown["applied"])
+        self.assertFalse(svc.dirty)
+        self.assertEqual(svc.curve({"pair": "EURJPY"})["params"], was)
+        done = svc.correlation_fit({"pair": "EURJPY", "dof": ["final"], "apply": True})
+        self.assertTrue(done["applied"])
+        self.assertTrue(svc.dirty)
+        now = svc.curve({"pair": "EURJPY"})["params"]
+        self.assertAlmostEqual(now["corr_final"], done["after"]["final"], places=12)
+        self.assertEqual(now["corr_initial"], was["corr_initial"])
+        self.assertEqual(now["corr_decay"], was["corr_decay"])
+        with self.assertRaises(ValueError):
+            svc.correlation_fit({"pair": "EURJPY", "dof": ["final"], "lookback_days": "soon"})
+        # The decay's range is read off the agent card's boxes, as the agent
+        # reads them: both empty is the house range, one alone is refused.
+        self.assertTrue(shown["reversion_house"])
+        typed = svc.correlation_fit({"pair": "EURJPY", "dof": ["decay"],
+                                     "reversion_lo": "0.2", "reversion_hi": "0.5"})
+        self.assertEqual(typed["reversion_range"], [0.2, 0.5])
+        self.assertTrue(0.2 - 1e-9 <= typed["after"]["decay"] <= 0.5 + 1e-9)
+        with self.assertRaises(ValueError):
+            svc.correlation_fit({"pair": "EURJPY", "dof": ["decay"], "reversion_lo": "0.2",
+                                 "reversion_hi": ""})
+
+
 class TestAnalysisApi(unittest.TestCase):
     def test_the_payload_carries_no_number_a_browser_cannot_parse(self):
         """Python's json writes NaN, which JSON.parse refuses.
