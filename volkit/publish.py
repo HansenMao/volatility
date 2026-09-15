@@ -1622,7 +1622,8 @@ def compare(book, overlay: overlay_mod.Overlay, *, pairs=None, wings: str = "mar
         quoted = ({canonical_tenor(m.tenor) for m in book[pair].quoted_marks()}
                   if pair in book else set())
         entry = {"pair": pair, "in_book": pair in book, "tenors": len(tenors), "compared": 0,
-                 "max_atm": 0.0, "max_wing": 0.0, "overlay_only": [],
+                 "max_atm": 0.0, "max_rr": 0.0, "max_bf": 0.0, "max_wing": 0.0,
+                 "overlay_only": [],
                  "book_only": sorted(quoted - set(tenors), key=pillar_years)}
         for tenor in tenors:
             given = overlay.rows[(pair, tenor)]
@@ -1643,8 +1644,10 @@ def compare(book, overlay: overlay_mod.Overlay, *, pairs=None, wings: str = "mar
                 d = row["diff"]
                 if d["atm"] is not None:
                     entry["max_atm"] = max(entry["max_atm"], abs(d["atm"]))
-                entry["max_wing"] = max([entry["max_wing"]]
-                                        + [abs(d[f]) for f in COMPARED[1:] if d[f] is not None])
+                for key, kind in (("max_rr", "rr"), ("max_bf", "bf")):
+                    entry[key] = max([entry[key]] + [abs(d[f]) for f in COMPARED[1:]
+                                                     if f.startswith(kind) and d[f] is not None])
+                entry["max_wing"] = max(entry["max_rr"], entry["max_bf"])
             rows.append(row)
         by_pair.append(entry)
     return {"pairs": sorted(wanted), "fields": list(COMPARED), "rows": rows,

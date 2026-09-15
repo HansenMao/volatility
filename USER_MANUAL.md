@@ -154,6 +154,11 @@ workbook** on the Vol marking tab. Adding or removing a pair is the one
 exception and says so. `Esc`, the **Close** button or a click outside the
 window puts it away; nothing is lost by closing it.
 
+Inside **Workbook**, every table — **Pairs**, each configuration tab,
+**Versions** and **What has written it** — folds under its own heading and is
+shut when the page loads; click a heading to open it. A tab this session holds
+still shows *held in this session* on its heading while it is shut.
+
 ### Pricing
 
 Each **column is one option**; each row is a field. Add columns with
@@ -1325,20 +1330,49 @@ marking screen.
 *Suggest from the historical book* measures a cross per tenor: the legs'
 vol-vol correlation and correlation vol (as on the correlation card), the
 vol-vol correlation your marked fly implies at that correlation vol, and the
-**premium** between them. Pick where the premium comes from:
+**premium** between them. Pick where the premium comes from (it starts on
+**none**):
 
 * **its own marked fly** — the suggestion gives back the fly you have, at a
-  correlation vol history supports. For a liquid cross.
+  correlation vol history supports. For a liquid cross. Where no correlation
+  vol could be measured (1W, or past the lookback's reach) the vol-vol
+  correlation is solved at the one the book will read there — held flat or
+  interpolated from the tenors that have one — not at zero, so that tenor
+  gives back its fly too. Hover **vv implied** for which.
 * **none** — history alone; a starting point that carries no risk premium.
 * **another cross's** — the educated guess for a cross with no market: its legs'
   history plus what a liquid cross like it charges (a JPY risk-off cross for
   another, a CNH cross for another). Pick the lender for resemblance, and read
   the result as a model mark.
 
+**Why a tenor comes back blank.** Each half can fail on its own:
+
+* **corr vol** needs at least ten returns in a window the tenor long (so 1W
+  never has one) and three independent such windows in its **lookback** — 730
+  days by default, which reaches about 8M. Type a longer lookback in the *corr
+  vol over … days* box to reach further; it cannot use more history than the
+  historical workbook holds, and the note says how many days it found.
+* **vol vol corr** under *its own marked fly* has none where no vol-vol
+  correlation from −1 to 1 gives your fly (typically the long end of a
+  low-correlation cross — the rest of that fly is correlation vol), or where no
+  25-delta fly is marked. Under another cross's premium, where that cross has none.
+
+Hover a tenor's **note** for which.
+
+**fill gaps** (ticked by default) fills such a tenor from the tenors that do
+have a suggestion — linear in time between them, flat beyond the first and
+last — which is exactly how the book reads the tab if the tenor were left
+blank, shown instead of left to be guessed. A filled number is shown in
+italics with **~**, hover it for where it came from, and it goes into the tab
+with that in the note. A vol-vol correlation filled under the cross's own
+premium does **not** give back that tenor's fly: where it was blank, no vol-vol
+correlation could. Untick it to see only what each tenor supports on its own.
+
 **Suggest into the tab** replaces that cross's rows in the boxes; nothing
 applies until you press **Apply**, and **Fill from the legs** then turns them
 into quotes. `volkit analysis EURJPY --history vol_history.xlsx --dependence
-EURGBP` prints the same table.
+EURGBP` prints the same table (filled cells marked `~`); `--corr-vol-lookback
+DAYS` sets the lookback and `--no-dependence-fill` leaves the gaps blank.
 
 A difference shown as `~0` is inside the **noise floor**: the same machinery run
 on each leg alone, where it should return exactly what it was given. Do not read
@@ -2133,15 +2167,16 @@ left out and which pairs and tenors they were. A number that should be marked
 is reverted, typed and marked.
 
 **Compare — book mids against overlay mids.** Press **Compare**: for every
-pair and tenor the overlay carries, the book's ATM mid beside the overlay's
-and the difference, and — with *wings too* ticked — the same for each risk
-reversal and butterfly. There is no channel here: no width, no shade, just
+pair and tenor the overlay carries, the book's mid beside the overlay's and
+the difference, for the ATM and for each risk reversal and butterfly (25d and
+10d), always all five. There is no channel here: no width, no shade, just
 the marks against the file (the book's wings come from the *wings* select on
 the Output side). A row given as an ATM two-way is compared at its mid and
 marked *2w*; a blank overlay cell shows as a dash rather than falling through
 to the book. Moves above the *flag above* box are coloured; a tenor the book
 cannot mark is listed as overlay-only, and the line under the table names the
-tenors the book quotes that the overlay does not.
+tenors the book quotes that the overlay does not, and each pair's largest
+move in the ATM, the risk reversals and the flies.
 
 **Output — where the marks go, and which source each pair is read from.** The
 destination, and the pair picker: every pair the channel publishes, with a

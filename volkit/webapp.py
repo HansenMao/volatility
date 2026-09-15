@@ -1587,6 +1587,12 @@ class BookService:
         (``premium: own``), none, or another cross's named.  A suggestion for
         the Config window's boxes and nothing more, like the realized vega
         weighting: nothing is written and the book does not move.
+
+        ``corr_vol_lookback`` is the history, in days, the correlation vol is
+        measured across (blank for ``history.CORR_VOL_DAYS``).  ``fill``, on
+        unless sent false, fills a tenor with no suggestion of its own from
+        the tenors that have one, the way the book reads the tab, and names
+        the fill on the row.
         """
         with self._lock:
             pair = str(payload.get("pair") or "").strip().upper()
@@ -1603,12 +1609,25 @@ class BookService:
                                  f"dependence between legs")
             cut = str(payload.get("cut") or "NY")
             method = payload.get("method") or None
+            raw = payload.get("corr_vol_lookback")
+            lookback = None
+            if raw not in (None, ""):
+                try:
+                    lookback = float(raw)
+                except (TypeError, ValueError):
+                    lookback = float("nan")
+                if not math.isfinite(lookback) or lookback <= 0:
+                    raise ValueError(f"a correlation vol lookback is a positive number of "
+                                     f"days, got {raw!r}")
             table = dependence_table(self.book, pair, self.history,
                                      premium=str(payload.get("premium") or "own"),
                                      method=method, cut=cut,
-                                     tenors=self._atm_tenors(self.book[pair]))
+                                     tenors=self._atm_tenors(self.book[pair]),
+                                     corr_vol_lookback_days=lookback,
+                                     fill_gaps=payload.get("fill") is not False)
             return {"pair": table.pair, "legs": list(table.legs), "premium": table.premium,
                     "sheet": CROSS_DEPENDENCE_SHEET, "unavailable": table.unavailable,
+                    "corr_vol_lookback": table.corr_vol_lookback_days, "fill": table.filled,
                     "rows": [asdict(r) for r in table.rows]}
 
     def vega_realized(self, payload: dict) -> dict:

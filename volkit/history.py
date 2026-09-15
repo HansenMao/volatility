@@ -1110,6 +1110,14 @@ def _paired_returns(hist_a: PairHistory, hist_b: PairHistory, lookback_days: flo
 #: and says so.
 CORR_VOL_DAYS = 730.0
 
+#: What a window's return count is reduced by in the sampling variance of its
+#: correlation (:func:`realized_corr_vol`).  Simulated on constant
+#: correlations of 0 to 0.8 and ten to 130 returns a window, 1.5 puts the
+#: noise within 0.005 of its true standard deviation at ten returns and
+#: within 0.001 from twenty; over-subtracting slightly at a high correlation,
+#: which floors toward no correlation vol rather than inventing one.
+CORR_NOISE_DOF_OFFSET = 1.5
+
 
 @dataclass(frozen=True)
 class RealizedVolVol:
@@ -1231,6 +1239,14 @@ def realized_corr_vol(hist_a: PairHistory, hist_b: PairHistory, window_days: flo
     windows' correlations less the average sampling variance is the variance
     of the correlation itself, floored at zero and said when it is.
 
+    The sampling variance is ``mean((1 - r^2)^2) / (n - 1.5)``
+    (:data:`CORR_NOISE_DOF_OFFSET`), not ``/ n``.  Over ``n`` it fell short on
+    a short window -- the plug-in ``(1 - r^2)^2`` is low where ``r`` scatters
+    most, and the first-order variance is itself low at small ``n`` -- and the
+    shortfall read as a correlation vol: on a correlation that never moves,
+    about 0.11 at ten returns (2W) and 0.05 at twenty-one (1M), so the
+    measure put a correlation vol on the short tenors and none further out.
+
     ``corr_vol_se`` is the uncertainty of that from how many *independent*
     windows the lookback holds -- the rolling windows overlap, so it is the
     returns over the window length, not the window count.  Fewer than
@@ -1260,7 +1276,7 @@ def realized_corr_vol(hist_a: PairHistory, hist_b: PairHistory, window_days: flo
         raise HistoryError(f"{legs[0]}/{legs[1]}: no window in which both legs moved")
     rho = np.clip(ab[ok] / np.sqrt(aa[ok] * bb[ok]), -1.0, 1.0)
     raw_var = float(np.var(rho))
-    noise_var = float(np.mean((1.0 - rho * rho) ** 2) / n)
+    noise_var = float(np.mean((1.0 - rho * rho) ** 2) / (n - CORR_NOISE_DOF_OFFSET))
     true_var = raw_var - noise_var
     if true_var <= 0.0:
         warnings.append(

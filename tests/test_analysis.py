@@ -2060,6 +2060,23 @@ class TestRealizedDependence(unittest.TestCase):
         self.assertLess(got.corr_vol, 2 * got.corr_vol_se + 1e-12)
         self.assertAlmostEqual(got.raw_sd, got.noise_sd, delta=0.05)
 
+    def test_a_short_window_does_not_read_its_own_noise_as_a_correlation_vol(self):
+        """The noise was taken out as mean((1 - r^2)^2) / n, which falls short on
+        ten returns: a correlation fixed at 0.4 came out with a correlation vol
+        of about 0.11 at 2W and none further out -- the estimator's shortfall,
+        read as a term structure. Averaged over histories, what is left is zero."""
+        excess, old = [], []
+        for seed in range(40):
+            a, b = _simulated_legs(0.4, seed=seed)
+            got = history.realized_corr_vol(a, b, 14)
+            n = got.window_returns
+            excess.append(got.raw_sd ** 2 - got.noise_sd ** 2)
+            old.append(got.raw_sd ** 2 - got.noise_sd ** 2 * (n - 1.5) / n)
+        self.assertEqual(n, 10)
+        se = float(np.std(excess)) / math.sqrt(len(excess))
+        self.assertLess(abs(float(np.mean(excess))), 3 * se)
+        self.assertGreater(float(np.mean(old)), 5 * se)
+
     def test_a_correlation_that_moves_is_measured_net_of_its_noise(self):
         path = 0.3 + 0.3 * np.sign(np.sin(np.arange(750) * 2 * np.pi / 126))
         a, b = _simulated_legs(path)
@@ -2089,6 +2106,46 @@ class TestRealizedDependence(unittest.TestCase):
         none = analytics.measure_dependence(None, "EURUSD", "USDJPY", "1m", 0.08)
         self.assertIsNone(none.vol_vol)
         self.assertTrue(none.notes)
+
+    def test_a_longer_correlation_vol_lookback_reaches_a_longer_tenor(self):
+        """The two-year lookback was fixed, so a tenor past about 8M could never
+        be given a correlation vol however much history the sheets held."""
+        a, b = _simulated_legs(0.3)
+        legs = {"EURUSD": a, "USDJPY": b}
+        short = analytics.measure_dependence(legs, "EURUSD", "USDJPY", "10M", 300 / 365.2425)
+        self.assertIsNone(short.corr_vol)
+        self.assertTrue(any("independent" in n for n in short.notes), short.notes)
+        long = analytics.measure_dependence(legs, "EURUSD", "USDJPY", "10M", 300 / 365.2425,
+                                            corr_vol_lookback_days=1100)
+        self.assertIsNotNone(long.corr_vol, long.notes)
+
+    def test_a_tenor_without_a_suggestion_is_filled_the_way_the_book_reads_the_tab(self):
+        """A tenor the history or the fly could not suggest was left off the tab,
+        which read as the suggestion covering a few tenors out of all of them."""
+        m = analytics.MeasuredDependence()
+
+        def row(tenor, t, vv, cv, rho=0.4):
+            return analytics.DependenceRow(tenor=tenor, t=t, rho=rho, measured=m,
+                                           suggested_vol_vol=vv, suggested_corr_vol=cv,
+                                           reason="" if vv is not None else "not reached")
+        rows = analytics._fill_dependence_gaps([
+            row("1w", 0.02, 0.3, None), row("1m", 0.08, 0.5, 0.1),
+            row("3m", 0.25, None, 0.2), row("6m", 0.5, 0.7, None),
+            row("1y", 1.0, None, None, rho=0.95)])
+        by = {r.tenor: r for r in rows}
+        self.assertEqual((by["1m"].vol_vol_filled, by["1m"].corr_vol_filled), ("", ""))
+        self.assertEqual((by["1w"].suggested_corr_vol, by["1w"].corr_vol_filled),
+                         (0.1, "held flat from 1m"))
+        self.assertAlmostEqual(by["3m"].suggested_vol_vol, 0.5 + 0.2 * 0.17 / 0.42, places=12)
+        self.assertEqual(by["3m"].vol_vol_filled, "interpolated between 1m and 6m")
+        self.assertEqual(by["3m"].reason, "not reached")
+        self.assertEqual((by["1y"].suggested_vol_vol, by["1y"].vol_vol_filled),
+                         (0.7, "held flat from 6m"))
+        # Flat from 3m's 0.2, but a correlation of 0.95 holds no more than 0.05.
+        self.assertAlmostEqual(by["1y"].suggested_corr_vol, 0.05 - 1e-6, places=12)
+        self.assertTrue(any("held at" in w for w in by["1y"].warnings))
+        self.assertEqual(analytics._fill_dependence_gaps([row("1m", 0.08, None, None)])[0]
+                         .suggested_vol_vol, None)
 
 
 class TestDependenceFromHistory(unittest.TestCase):
@@ -2128,6 +2185,30 @@ class TestDependenceFromHistory(unittest.TestCase):
         # The implied search runs on the coarser grid, and answers to 0.005.
         self.assertAlmostEqual(tri.triangle["fly25"], tri.marked["fly25"], delta=5e-5)
 
+    def test_the_own_premium_is_solved_at_the_correlation_vol_the_book_will_read(self):
+        """1W has no measured correlation vol (a window that short holds too few
+        returns), so its implied vol-vol correlation was solved at zero -- but
+        the book reads a blank there flat from 2W, and a filled row writes the
+        same, so marked as suggested 1W overshot its own fly."""
+        rows = analytics.dependence_table(self.book, "EURJPY", self.history,
+                                          tenors=["1w", "2w"], fill_gaps=True).rows
+        by = {r.tenor: r for r in rows}
+        self.assertIsNone(by["1w"].measured.corr_vol)
+        self.assertIsNotNone(by["2w"].measured.corr_vol, by["2w"].measured.notes)
+        self.assertEqual(by["1w"].implied_corr_vol_from, "held flat from 2w")
+        self.assertEqual(by["1w"].implied_corr_vol, by["2w"].suggested_corr_vol)
+        self.assertEqual(by["1w"].suggested_corr_vol, by["1w"].implied_corr_vol)
+        self.assertEqual(by["2w"].implied_corr_vol_from, "")
+        self.assertIsNotNone(by["1w"].suggested_vol_vol, by["1w"].reason)
+        self.assertEqual(by["1w"].vol_vol_filled, "")
+        book = Book.from_excel(BOOK, ASOF, config={"CROSS_DEPENDENCE": [
+            {"pair": "EURJPY", "tenor": r.tenor, "vol vol corr": r.suggested_vol_vol,
+             "corr vol": r.suggested_corr_vol} for r in rows]}).load_all(["EURJPY"])
+        book.feed = self.book.feed
+        tri = analytics.triangle_table(book, "EURJPY", cut="NY", tenors=["1w"],
+                                       with_noise=False, implied_vol_vol=False)[0]
+        self.assertAlmostEqual(tri.triangle["fly25"], tri.marked["fly25"], delta=5e-5)
+
     def test_no_premium_is_history_alone_and_a_lender_lends_its_own(self):
         none = analytics.dependence_table(self.book, "EURJPY", self.history, premium="none",
                                           tenors=["3m"]).rows[0]
@@ -2144,6 +2225,27 @@ class TestDependenceFromHistory(unittest.TestCase):
             self.assertAlmostEqual(lent.premium_used, lender.premium, places=12)
         with self.assertRaises(ValueError):
             analytics.dependence_table(self.book, "EURJPY", self.history, premium="EURUSD")
+
+    def test_a_filled_row_is_what_the_book_reads_from_the_rows_that_were_not(self):
+        tenors = ["1w", "3m", "1y"]
+        plain = analytics.dependence_table(self.book, "EURJPY", self.history, premium="none",
+                                           tenors=tenors)
+        filled = analytics.dependence_table(self.book, "EURJPY", self.history, premium="none",
+                                            tenors=tenors, fill_gaps=True)
+        self.assertEqual((plain.filled, filled.filled), (False, True))
+        self.assertEqual(filled.corr_vol_lookback_days, history.CORR_VOL_DAYS)
+        gaps = [r for r in filled.rows if r.corr_vol_filled]
+        self.assertTrue(gaps, [r.measured.notes for r in plain.rows])
+        tab = [{"pair": "EURJPY", "tenor": r.tenor, "vol vol corr": r.suggested_vol_vol,
+                "corr vol": r.suggested_corr_vol} for r in plain.rows
+               if r.suggested_vol_vol is not None or r.suggested_corr_vol is not None]
+        book = Book.from_excel(BOOK, ASOF, config={"CROSS_DEPENDENCE": tab})
+        for r in gaps:
+            got = book.dependence_at("EURJPY", r.t)
+            self.assertAlmostEqual(got.corr_vol, r.suggested_corr_vol, places=9, msg=r.tenor)
+        with self.assertRaises(ValueError):
+            analytics.dependence_table(self.book, "EURJPY", self.history, tenors=["3m"],
+                                       corr_vol_lookback_days=0)
 
     def test_the_relative_value_triangle_is_priced_on_the_realized_dependence(self):
         """The Gaussian copula put every cross fly below its legs' history as
@@ -2202,6 +2304,11 @@ class TestDependenceFromHistory(unittest.TestCase):
         out = service.dependence_realized({"pair": "EURJPY", "premium": "none"})
         self.assertEqual((out["sheet"], out["premium"]), ("CROSS_DEPENDENCE", "none"))
         self.assertTrue(out["rows"])
+        # The screen fills gaps unless told not to, and says what lookback it used.
+        self.assertEqual((out["fill"], out["corr_vol_lookback"]), (True, history.CORR_VOL_DAYS))
+        self.assertIn("corr_vol_filled", out["rows"][0])
+        with self.assertRaises(ValueError):
+            service.dependence_realized({"pair": "EURJPY", "corr_vol_lookback": "-5"})
         tabs = {t["sheet"]: t for t in service.config_tabs()["tabs"]}
         self.assertEqual(tabs["CROSS_DEPENDENCE"]["measure"], "dependence")
         with self.assertRaises(ValueError):

@@ -196,6 +196,34 @@ is built out of them.
   `/api/dependence/realized` (a marking-screen route, read-only) feeds the
   Config window's `measure: "dependence"` on `CROSS_DEPENDENCE`, the vega
   weighting's arrangement: into the boxes, never onto the tab.
+  **Gaps are filled and the lookback is a setting** (added 2026-09-15). With
+  `CORR_VOL_DAYS` fixed, no tenor past about 8M could have a correlation vol,
+  and under `own` a fly the legs cannot reach has no vol-vol correlation; a
+  tenor with neither was dropped from the tab, which read as the suggestion
+  covering a few tenors. `corr_vol_lookback_days` runs from
+  `dependence_table` through `measure_dependence` to `realized_corr_vol`
+  (`corr_vol_lookback` on the route, the *corr vol over* box,
+  `--corr-vol-lookback`). `fill_gaps` (`_fill_dependence_gaps`; off in
+  `analytics`, on by default on the route and the CLI, `--no-dependence-fill`)
+  fills each value on its own ladder by `Book.dependence_at`'s rule -- linear in
+  time, flat outside -- so a filled row is what the book reads there with it
+  blank, and a test pins that equality; a filled correlation vol is capped at
+  that tenor's `1 - |rho|`. The row names the fill (`vol_vol_filled`,
+  `corr_vol_filled`) and keeps `reason`; a lender's premium is taken from its
+  unfilled table, so a premium is lent only where its fly identified one.
+  **The own premium is solved at the correlation vol the book will read**
+  (fixed 2026-09-15). A tenor with no measured correlation vol had its implied
+  vol-vol correlation solved at zero, but `Book.dependence_at` reads that blank
+  off the neighbouring rungs (and a filled row writes the same), so marked as
+  suggested it overshot its fly (EURJPY 1W 0.221 against 0.213). The held
+  value comes from `_ladder_value` over the capped measured correlation vols
+  whether or not gaps are filled, and the row carries it
+  (`implied_corr_vol`, `implied_corr_vol_from`); a test pins 1W to its fly.
+  **The correlation vol's noise is over `n - 1.5`** (fixed 2026-09-15,
+  `history.CORR_NOISE_DOF_OFFSET`). Over `n` it under-subtracted on short
+  windows and a constant correlation read about 0.11 of correlation vol at 2W
+  and none past 2M; a test averages forty simulated histories at ten returns a
+  window and pins the excess to zero. MIGRATION.md 4b-vii.
 - **The same copula fills a thin cross's quotes** on the marking screen
   (`analytics.implied_cross_quotes`, `BookService.cross_quotes`,
   `/api/marks/cross`). `_cross_legs` is the one set-up it shares with the

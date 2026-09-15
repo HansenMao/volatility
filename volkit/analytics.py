@@ -15,7 +15,7 @@ The pricing logic is preserved; only the plumbing is rewritten.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime
 from pathlib import Path
 
@@ -26,7 +26,7 @@ from . import black, moments, sabr
 from .cross import CrossAtmCurve
 from .numerics import ConvergenceError
 from .marketdata import open_workbook
-from .history import (DYNAMICS_DAYS, HistoryError, Realized, SeriesStats, implied_stats,
+from .history import (CORR_VOL_DAYS, DYNAMICS_DAYS, HistoryError, Realized, SeriesStats, implied_stats,
                       realized, realized_corr_vol, realized_correlation, realized_vol_vol,
                       vol_dynamics)
 from .surface import VolSurface, smile_points
@@ -1456,14 +1456,18 @@ class MeasuredDependence:
 
 def measure_dependence(history, leg_a: str, leg_b: str, tenor: str, t: float, *,
                        window_days: float | None = None,
-                       basis: str = "auto") -> MeasuredDependence:
+                       basis: str = "auto",
+                       corr_vol_lookback_days: float | None = None) -> MeasuredDependence:
     """The legs' realized vol-vol correlation and correlation vol at one tenor.
 
     The vol-vol correlation is :func:`history.realized_vol_vol` at the tenor
     over its own year; the correlation vol is :func:`history.realized_corr_vol`
     on windows the tenor long (or ``window_days``), on the basis the realized
-    correlation beside it is measured on.  Either half that cannot be measured
-    is ``None`` with its reason in ``notes``.
+    correlation beside it is measured on, across ``corr_vol_lookback_days``
+    (``history.CORR_VOL_DAYS`` when not given).  The lookback is what bounds
+    the longest tenor with a correlation vol: it has to hold three independent
+    windows the tenor long.  Either half that cannot be measured is ``None``
+    with its reason in ``notes``.
     """
     window = float(window_days) if window_days else t * 365.2425
     notes: list[str] = []
@@ -1480,7 +1484,8 @@ def measure_dependence(history, leg_a: str, leg_b: str, tenor: str, t: float, *,
     except (HistoryError, ValueError, ArithmeticError) as exc:
         notes.append(f"vol-vol correlation not measured: {exc}")
     try:
-        cv = realized_corr_vol(history[leg_a], history[leg_b], window, basis=basis,
+        cv = realized_corr_vol(history[leg_a], history[leg_b], window,
+                               corr_vol_lookback_days or CORR_VOL_DAYS, basis=basis,
                                basis_tenor=tenor)
         notes.extend(f"correlation vol: {w}" for w in cv.warnings)
     except (HistoryError, ValueError, ArithmeticError) as exc:
@@ -1831,17 +1836,28 @@ class DependenceRow:
     marked_corr_vol: float = 0.0
     marked_fly25: float | None = None
     #: The vol-vol correlation the marked 25-delta fly asks for, holding the
-    #: **measured** correlation vol, and the premium it carries over the
-    #: measured vol-vol correlation.  The premium is put on the vol-vol
-    #: correlation alone: one butterfly identifies one number.
+    #: correlation vol the suggestion marks here, and the premium it carries
+    #: over the measured vol-vol correlation.  The premium is put on the
+    #: vol-vol correlation alone: one butterfly identifies one number.
     implied_vol_vol: float | None = None
     implied_note: str = ""
+    #: The correlation vol that was held: the measured one, or -- where none
+    #: was measured -- what the book reads there off the tenors that were
+    #: (``implied_corr_vol_from`` names which), 0 where no tenor was.
+    implied_corr_vol: float = 0.0
+    implied_corr_vol_from: str = ""
     premium: float | None = None
     #: The premium the suggestion uses and where it came from.
     premium_used: float | None = None
     premium_source: str = PREMIUM_OWN
     suggested_vol_vol: float | None = None
     suggested_corr_vol: float | None = None
+    #: Where a suggestion that could not be made at this tenor was filled from
+    #: the tenors that have one -- ``"interpolated between 6m and 1y"``, ``"held
+    #: flat from 6m"`` -- or empty where the suggestion is this tenor's own.
+    #: ``reason`` still says why it could not be.
+    vol_vol_filled: str = ""
+    corr_vol_filled: str = ""
     reason: str = ""
     warnings: tuple[str, ...] = ()
 
@@ -1853,11 +1869,73 @@ class DependenceTable:
     premium: str
     rows: list[DependenceRow]
     unavailable: str = ""
+    #: The lookback the correlation vol was measured across, in days.
+    corr_vol_lookback_days: float = CORR_VOL_DAYS
+    #: Whether a tenor without a suggestion was filled from its neighbours.
+    filled: bool = False
+
+
+def _ladder_value(rungs, t: float) -> tuple[float | None, str]:
+    """A value off ``[(t, value, tenor), ...]`` sorted by ``t``, and how it was read.
+
+    ``Book.dependence_at``'s rule: linear in time between two rungs, flat
+    outside them.  ``(None, "")`` with no rungs.
+    """
+    if not rungs:
+        return None, ""
+    if t <= rungs[0][0]:
+        return rungs[0][1], f"held flat from {rungs[0][2]}"
+    if t >= rungs[-1][0]:
+        return rungs[-1][1], f"held flat from {rungs[-1][2]}"
+    k = next(i for i, p in enumerate(rungs) if p[0] >= t)
+    (t0, v0, n0), (t1, v1, n1) = rungs[k - 1], rungs[k]
+    return v0 + (v1 - v0) * (t - t0) / (t1 - t0), f"interpolated between {n0} and {n1}"
+
+
+def _fill_dependence_gaps(rows: list[DependenceRow]) -> list[DependenceRow]:
+    """Each suggestion a tenor could not make, filled from the tenors that made one.
+
+    The rule ``Book.dependence_at`` reads the tab by -- each value its own
+    ladder, linear in time between two rungs and flat outside them -- so a
+    filled row marks what the book would have read at that tenor had the row
+    been left blank, and says so instead of leaving the gap to be guessed at.
+    A correlation vol filled is kept inside what the model holds at *that*
+    tenor's correlation, as a measured one is.
+    """
+    def ladder(get):
+        return sorted((r.t, get(r), r.tenor) for r in rows if get(r) is not None)
+
+    fill = _ladder_value
+    vv_rungs = ladder(lambda r: r.suggested_vol_vol)
+    cv_rungs = ladder(lambda r: r.suggested_corr_vol)
+    out: list[DependenceRow] = []
+    for r in rows:
+        change: dict[str, object] = {}
+        warnings = list(r.warnings)
+        if r.suggested_vol_vol is None:
+            vv, how = fill(vv_rungs, r.t)
+            if vv is not None:
+                change.update(suggested_vol_vol=vv, vol_vol_filled=how)
+        if r.suggested_corr_vol is None:
+            cv, how = fill(cv_rungs, r.t)
+            if cv is not None:
+                cap = max(1.0 - abs(r.rho) - 1e-6, 0.0)
+                if cv > cap:
+                    warnings.append(f"a filled correlation vol of {cv:.3f} around a correlation "
+                                    f"of {r.rho:+.3f} reaches past 1, so it is held at {cap:.3f}")
+                    cv = cap
+                change.update(suggested_corr_vol=cv, corr_vol_filled=how)
+        if change:
+            change["warnings"] = tuple(warnings)
+            r = replace(r, **change)
+        out.append(r)
+    return out
 
 
 def dependence_table(book, pair: str, history, *, premium: str = PREMIUM_OWN,
                      method: str | None = None, cut: str = "NY", tenors=None,
-                     basis: str = "auto") -> DependenceTable:
+                     basis: str = "auto", corr_vol_lookback_days: float | None = None,
+                     fill_gaps: bool = False) -> DependenceTable:
     """A cross's dependence per tenor: what history shows, what its fly implies, what to mark.
 
     ``measured`` is :func:`measure_dependence` -- physical.  ``implied_vol_vol``
@@ -1874,7 +1952,20 @@ def dependence_table(book, pair: str, history, *, premium: str = PREMIUM_OWN,
     measured one, kept inside what the model can hold at the cross's
     correlation.  A suggestion goes into the Config window's boxes and nowhere
     else.
+
+    ``corr_vol_lookback_days`` is the history the correlation vol is measured
+    across (``history.CORR_VOL_DAYS`` by default); a longer one reaches longer
+    tenors.  ``fill_gaps`` fills a tenor that has no suggestion of its own from
+    the tenors that do (:func:`_fill_dependence_gaps`) and names the fill on
+    the row -- what the book would read there anyway, made visible.  A vol-vol
+    correlation filled under the cross's own premium does **not** give back
+    that tenor's fly: where it was blank, no vol-vol correlation could.
     """
+    lookback = (CORR_VOL_DAYS if corr_vol_lookback_days is None
+                else float(corr_vol_lookback_days))
+    if not math.isfinite(lookback) or lookback <= 0:
+        raise ValueError(f"a correlation vol lookback is a positive number of days, got "
+                         f"{corr_vol_lookback_days!r}")
     surface, curve, (leg_a, leg_b), _ = _cross_legs(book, pair)
     names = list(tenors or book.data.tenor_points)
     premium = str(premium or PREMIUM_OWN).strip()
@@ -1891,34 +1982,52 @@ def dependence_table(book, pair: str, history, *, premium: str = PREMIUM_OWN,
             if source not in book:
                 raise ValueError(f"{source} is not built in this book, so it has no premium "
                                  f"to lend {pair}")
+            # The lender's own suggestions, unfilled: a premium is lent only
+            # where the lender's fly identified one.
             analog = {r.tenor.upper(): r for r in dependence_table(
                 book, source, history, premium=PREMIUM_OWN, method=method, cut=cut,
-                tenors=names, basis=basis).rows}
+                tenors=names, basis=basis, corr_vol_lookback_days=lookback).rows}
     unavailable = ""
     if history is None:
         unavailable = "no historical workbook is loaded, so the legs' dependence cannot be measured"
     measured = {tenor: measure_dependence(history, leg_a, leg_b, tenor,
-                                          surface.tenor_years(tenor), basis=basis)
+                                          surface.tenor_years(tenor), basis=basis,
+                                          corr_vol_lookback_days=lookback)
                 for tenor in names}
 
-    # The implied vol-vol correlation holds the measured correlation vol, so
-    # a suggestion of measured corr vol plus this vol-vol gives back the fly.
+    # The implied vol-vol correlation holds the correlation vol the suggestion
+    # marks at the tenor, so marking the two together gives back the fly.
+    # Where none was measured that is not zero: the book reads a blank
+    # correlation vol off the tenors that have one (and a filled row writes
+    # the same number), so the vol-vol correlation is solved at that.  Solved
+    # at zero instead, a 1W beside a measured 2W overshot its own fly.
+    ts = {tenor: surface.tenor_years(tenor) for tenor in names}
+    rhos = {tenor: float(np.asarray(curve.correlation(ts[tenor]))) for tenor in names}
+
+    def cap(tenor):
+        return max(1.0 - abs(rhos[tenor]) - 1e-6, 0.0)
+
+    cv_rungs = sorted((ts[k], min(measured[k].corr_vol, cap(k)), k) for k in names
+                      if measured[k].corr_vol is not None)
     held: dict[str, object] = {}
+    held_cv: dict[str, tuple[float, str]] = {}
     for tenor in names:
-        t = surface.tenor_years(tenor)
-        rho = float(np.asarray(curve.correlation(t)))
-        cv = measured[tenor].corr_vol or 0.0
-        cv = min(cv, max(1.0 - abs(rho) - 1e-6, 0.0))
+        if measured[tenor].corr_vol is not None:
+            cv, how = min(measured[tenor].corr_vol, cap(tenor)), ""
+        else:
+            cv, how = _ladder_value(cv_rungs, ts[tenor])
+            cv = 0.0 if cv is None else min(cv, cap(tenor))
+        held_cv[tenor] = (cv, how)
         held[tenor] = moments.Dependence(None, cv) if cv > 0 else None
     tri = {r.tenor: r for r in triangle_table(
         book, pair, method=method, cut=cut, tenors=names, with_noise=False,
         implied_vol_vol=True, dependence=held,
-        dependence_source={k: "measured correlation vol" for k in names})}
+        dependence_source={k: (f"correlation vol {held_cv[k][1]}" if held_cv[k][1]
+                               else "measured correlation vol") for k in names})}
 
     rows: list[DependenceRow] = []
     for tenor in names:
-        t = surface.tenor_years(tenor)
-        rho = float(np.asarray(curve.correlation(t)))
+        t, rho = ts[tenor], rhos[tenor]
         m = measured[tenor]
         r = tri.get(tenor)
         now = book.dependence_at(pair, t)
@@ -1966,11 +2075,15 @@ def dependence_table(book, pair: str, history, *, premium: str = PREMIUM_OWN,
             marked_corr_vol=0.0 if now is None else now.corr_vol,
             marked_fly25=None if r is None else r.marked.get("fly25"),
             implied_vol_vol=implied, implied_note=implied_note, premium=own,
+            implied_corr_vol=held_cv[tenor][0], implied_corr_vol_from=held_cv[tenor][1],
             premium_used=used, premium_source=source,
             suggested_vol_vol=vv, suggested_corr_vol=cv, reason=reason,
             warnings=tuple(warnings)))
+    if fill_gaps:
+        rows = _fill_dependence_gaps(rows)
     return DependenceTable(pair=pair, legs=(leg_a, leg_b), premium=source, rows=rows,
-                           unavailable=unavailable)
+                           unavailable=unavailable, corr_vol_lookback_days=lookback,
+                           filled=bool(fill_gaps))
 
 
 def _vega_split(va: float, vb: float, rho: float, ca: int, cb: int,

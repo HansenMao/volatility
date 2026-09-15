@@ -182,6 +182,17 @@ def _clock(args) -> Clock:
     return Clock.utcnow()
 
 
+def _positive_days(text: str) -> float:
+    """An argparse type for a number of days that must be positive."""
+    try:
+        days = float(text)
+    except ValueError:
+        days = float("nan")
+    if not math.isfinite(days) or days <= 0:
+        raise argparse.ArgumentTypeError(f"a number of days must be positive, got {text!r}")
+    return days
+
+
 def _book(args, pairs=None) -> Book:
     # A saved session's configuration tabs are read *before* the book is
     # built, because a peg band or a holiday decides how the workbook loads
@@ -991,16 +1002,20 @@ def cmd_analysis(args) -> int:
         elif history is None:
             print("\n  ! --dependence needs --history: the legs' dependence is measured on it")
         else:
-            table = analytics.dependence_table(book, args.pair, history, premium=args.dependence,
-                                               method=args.method, cut=args.cut)
+            table = analytics.dependence_table(
+                book, args.pair, history, premium=args.dependence, method=args.method,
+                cut=args.cut, corr_vol_lookback_days=args.corr_vol_lookback,
+                fill_gaps=not args.no_dependence_fill)
             print(f"\ndependence — {args.pair} off {table.legs[0]} / {table.legs[1]} history, "
-                  f"suggestion is measured plus premium from {table.premium}")
+                  f"suggestion is measured plus premium from {table.premium}, correlation vol "
+                  f"over {table.corr_vol_lookback_days:g} days")
             print(f"  {'tenor':<6}{'rho':>7}{'vv meas':>9}{'± se':>7}{'cv meas':>9}{'± se':>7}"
                   f"{'fly25 mk':>10}{'vv impl':>9}{'premium':>9}{'used':>8}"
                   f"{'-> vol vol corr':>17}{'corr vol':>10}")
 
-            def cell(v, w, f):
-                return ("—" if v is None or v != v else format(v, f)).rjust(w)
+            def cell(v, w, f, filled=""):
+                return ("—" if v is None or v != v else
+                        ("~" if filled else "") + format(v, f)).rjust(w)
 
             for r in table.rows:
                 m = r.measured
@@ -1008,14 +1023,28 @@ def cmd_analysis(args) -> int:
                       f"{cell(m.vol_vol_se, 7, '.3f')}{cell(m.corr_vol, 9, '.3f')}"
                       f"{cell(m.corr_vol_se, 7, '.3f')}{pct(r.marked_fly25, 3, 10)}"
                       f"{cell(r.implied_vol_vol, 9, '+.3f')}{cell(r.premium, 9, '+.3f')}"
-                      f"{cell(r.premium_used, 8, '+.3f')}{cell(r.suggested_vol_vol, 17, '+.3f')}"
-                      f"{cell(r.suggested_corr_vol, 10, '.3f')}")
+                      f"{cell(r.premium_used, 8, '+.3f')}"
+                      f"{cell(r.suggested_vol_vol, 17, '+.3f', r.vol_vol_filled)}"
+                      f"{cell(r.suggested_corr_vol, 10, '.3f', r.corr_vol_filled)}")
             print("  measured is physical; the premium is what the marked fly charges on top, put "
-                  "on the vol-vol\n  correlation with the correlation vol held at what was "
-                  "measured. The suggestion goes on the\n  CROSS_DEPENDENCE tab by hand or "
-                  "through the Config window -- this writes nothing")
+                  "on the vol-vol\n  correlation with the correlation vol held at the one "
+                  "suggested -- measured, or where none\n  was, what the book reads there off the "
+                  "tenors that have one. The suggestion goes on the\n  CROSS_DEPENDENCE tab by "
+                  "hand or through the Config window -- this writes nothing")
+            if any(r.vol_vol_filled or r.corr_vol_filled for r in table.rows):
+                print("  ~ a tenor with no suggestion of its own, filled from the tenors that have "
+                      "one the way\n  the book reads the tab (linear in time, flat outside); a "
+                      "filled vol-vol correlation\n  does not give back that tenor's fly. "
+                      "--no-dependence-fill leaves them blank")
             for r in table.rows:
-                for note in (r.reason,) + r.warnings:
+                fills = [f"{name} {how}" for name, how in (("vol vol corr", r.vol_vol_filled),
+                                                           ("corr vol", r.corr_vol_filled)) if how]
+                unmeasured = tuple(n for n in r.measured.notes
+                                   if n.startswith("correlation vol not measured"))
+                if r.implied_corr_vol_from and r.implied_vol_vol is not None:
+                    fills.append(f"vv implied at corr vol {r.implied_corr_vol:.3f}, "
+                                 f"{r.implied_corr_vol_from}")
+                for note in (r.reason,) + r.warnings + unmeasured + tuple(fills):
                     if note:
                         print(f"  . {r.tenor}: {note}")
 
@@ -3689,6 +3718,13 @@ def build_parser() -> argparse.ArgumentParser:
                    help="on a cross, the legs' measured dependence per tenor and what to mark on "
                         "CROSS_DEPENDENCE: measured plus the cross's own premium (own, the "
                         "default), none, or another cross's (a pair). Needs --history")
+    s.add_argument("--corr-vol-lookback", type=_positive_days, default=None, metavar="DAYS",
+                   help="with --dependence: the history the correlation vol is measured across "
+                        "(default 730 days). It has to hold three independent windows the tenor "
+                        "long, so a longer one reaches longer tenors")
+    s.add_argument("--no-dependence-fill", action="store_true",
+                   help="with --dependence: leave a tenor with no suggestion of its own blank "
+                        "instead of filling it from the tenors that have one")
     s.add_argument("--triangle-basis", default="realized", choices=["realized", "marked"],
                    help="what the relative-value triangle ties a cross's legs together with: "
                         "their realized dependence (default) or CROSS_DEPENDENCE")

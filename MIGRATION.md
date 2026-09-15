@@ -714,6 +714,23 @@ the mark.
   windows at rho 0.3 read a correlation vol of about 0.18 on a correlation
   that never moved; a test pins it. Fewer than three independent windows is
   refused. Both carry standard errors.
+* **The sampling noise is over `n - 1.5`, not `n`** (changed 2026-09-15,
+  `history.CORR_NOISE_DOF_OFFSET`). `mean((1 - r^2)^2) / n` still fell short on
+  a short window, and the shortfall read as correlation vol that fell with the
+  tenor: on a correlation fixed at 0.4, about 0.11 at 2W (ten returns), 0.05 at
+  1M, 0.025 at 2M, and nothing by 3M -- a term structure made by the
+  estimator. On the sample history (constant 0.40) EURJPY's 2W moved from
+  0.142 to 0.100 and 1M from 0.065 to 0.043, both now inside their standard
+  errors. **Moves** the measured correlation vol everywhere it is shown (the
+  correlation card, the Config window's suggestion, and the relative-value
+  triangle on `realized`), most at the shortest tenors; nothing marked moves.
+  To restore the old figure, set `CORR_NOISE_DOF_OFFSET = 0.0`.
+* **Suggestions fill their gaps, and the own premium is solved where it will
+  be read** (2026-09-15). A tenor with no measured correlation vol had its
+  implied vol-vol correlation solved at zero, while the book reads the blank
+  flat from the neighbouring tenor -- EURJPY 1W, marked as suggested, gave a
+  fly of 0.221 against 0.213. It is now solved at that neighbouring value, and
+  *fill gaps* writes it. Suggestions only; nothing applies until **Apply**.
 * **The triangle signal** ties the legs at the measured vol-vol correlation
   plus a **premium** (none by default, or another cross's -- never the
   cross's own, which is backed out of the fly being compared against and would

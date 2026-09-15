@@ -1622,11 +1622,10 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
         <div class="hint" style="margin-top:8px">Loaded, the overlay changes nothing: every other screen, the kACE feed sub-tab included, shows the marks as they were, and the Output side reads it only for the pairs set to <b>overlay</b> there. <b>Overwrite book</b> puts the ticked pairs&rsquo; rows onto the book itself (an ATM overwrite and typed quotes, the same as marking them by hand) after saving the session as it was (<code>pre-overlay-&lt;stamp&gt;.json</code>); <b>Revert</b> puts that back, whole. While anything is overwritten, <b>Write to workbook</b> refuses and a session save writes only the rows inside the book and says what it left out.</div>
       </section>
 
-      <section class="card"><h2>Compare <small>book mids against overlay mids</small></h2>
+      <section class="card"><h2>Compare <small>book mids against overlay mids: ATM, risk reversals, flies</small></h2>
         <div class="row" style="flex-wrap:wrap;gap:8px;align-items:flex-end">
           <div class="f" title="the largest move, in vol points, to colour as a warning"><label>Flag above</label><input id="xcmptol" value="0.5" style="width:60px"></div>
           <button id="xcmpgo" style="width:auto;padding:6px 14px;font-size:12px">Compare</button>
-          <label class="mmchk" title="also the four wings: 25d and 10d risk reversal and butterfly"><input type="checkbox" id="xcmpwings"> wings too</label>
         </div>
         <div id="xcmp" style="margin-top:8px"><div class="etoempty">Load an overlay and press <b>Compare</b>.</div></div>
       </section>
@@ -2249,8 +2248,12 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
           <code>&lt;name&gt;.backups/</code> beside it, and is listed under <b>Versions</b>
           below with a button to put it back. What this session has marked goes back on the
           book afterwards, so adding a pair no longer costs a morning.</div>
-        <label>Pairs</label>
-        <div class="scroll"><table class="mark" id="cfgpairs"></table></div>
+        <!-- Every table in this card folds under its own heading and is shut
+             until opened, like the export screen's: a tab this session holds
+             still says so on the heading while it is shut. -->
+        <details class="cfgfold" data-sheet="__pairs">
+        <summary style="cursor:pointer;font-weight:600">Pairs<span class="meta" id="cfgpairsn" style="margin-left:7px;font-weight:400"></span></summary>
+        <div class="scroll" style="margin-top:6px"><table class="mark" id="cfgpairs"></table></div>
         <div class="row" style="margin-top:9px;flex-wrap:wrap;gap:6px">
           <input id="cfgnewpair" placeholder="USDSGD" style="width:104px;text-transform:uppercase">
           <input id="cfgnewatm" placeholder="ATM %" style="width:88px"
@@ -2262,6 +2265,7 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
           A cross takes a <b>correlation</b> between its dollar legs instead. Removing a
           pair takes it out of <code>CONFIG</code> only — its column and its sheet stay, so
           adding it back finds what it had.</div>
+        </details>
         <div id="cfgtabs" style="margin-top:14px"></div>
         <div id="cfgversions" style="margin-top:16px"></div>
         <div id="cfgconfirm" class="hide" style="display:flex;gap:8px;align-items:center;margin-top:9px;padding:8px 10px;border:1px solid var(--line);border-radius:6px"></div>
@@ -6273,6 +6277,7 @@ async function loadConfig(){
   pend.textContent=held.length?(held.join(', ')+' held in this session — not written yet'):'';
   cfgWorkbookVisible();
   const pairs=(STATE.pairs||[]);
+  $('#cfgpairsn').textContent=pairs.length+' pair'+(pairs.length===1?'':'s');
   $('#cfgpairs').innerHTML='<thead><tr><th>Pair</th><th></th></tr></thead><tbody>'+
     pairs.map(p=>'<tr><td>'+esc(p)+'</td><td style="text-align:right">'+
       '<button class="ghost cfgdrop" data-pair="'+esc(p)+'" style="width:auto;padding:3px 9px;font-size:11px">remove</button>'+
@@ -6349,8 +6354,15 @@ function cfgTabHtml(t,i,fold){
     '</div>'+(t.measure==='vega'?cfgVegaHtml(i):t.measure==='dependence'?cfgDepHtml(i):'')+end;
 }
 /* Which folded tables are open, by sheet: this page's memory only, so a
-   reload shuts them all again. */
+   reload shuts them all again.  Both editors fold -- the Config window's
+   Workbook card as well as the export screen -- and the card's own tables
+   that are not tabs (the pair list, the versions) use keys starting `__`,
+   which no sheet name can. */
 const CFG_OPEN={};
+function cfgFoldBind(root){
+  root.querySelectorAll('details.cfgfold').forEach(d=>{
+    d.ontoggle=()=>{CFG_OPEN[d.dataset.sheet]=d.open}});
+}
 /* The two editors of the configuration tabs: the Config window shows the
    tabs that configure the book, the export screen's Configuration card the
    export-policy tables (`where` is the server's, from configsheets.EXPORT_TABS).
@@ -6363,13 +6375,9 @@ function cfgPaintTabs(where){
   const R=CFG_ROOTS[where], root=$(R.root);
   if(!root||!CFG)return;
   const mine=i=>((CFG.tabs[i].where||'config')===where);
-  const fold=where==='export';
-  root.innerHTML=(CFG.tabs||[]).map((t,i)=>mine(i)?cfgTabHtml(t,i,fold):'').join('');
-  if(fold){
-    root.querySelectorAll('details.cfgfold').forEach(d=>{
-      d.ontoggle=()=>{CFG_OPEN[d.dataset.sheet]=d.open}});
-    xCfgScope();
-  }
+  root.innerHTML=(CFG.tabs||[]).map((t,i)=>mine(i)?cfgTabHtml(t,i,true):'').join('');
+  cfgFoldBind(root);
+  if(where==='export')xCfgScope();
   root.querySelectorAll('.cfgsave').forEach(b=>{
     b.onclick=()=>{
       const i=+b.dataset.tab, t=CFG.tabs[i];
@@ -6532,7 +6540,7 @@ function cfgVegaPaint(i){
    another cross's for a cross with no market of its own -- goes into the
    boxes for somebody to look at and apply, never onto the tab on its own. */
 let DEPR=null;
-let DEPUI={open:false,pair:'',premium:'own'};
+let DEPUI={open:false,pair:'',premium:'none',lookback:'730',fill:true};
 const isCrossPair=p=>/^[A-Z]{6}$/.test(p)&&p.slice(0,3)!=='USD'&&p.slice(3)!=='USD';
 function cfgDepHtml(i){
   return '<details class="hint" style="margin-top:9px"'+(DEPUI.open?' open':'')+
@@ -6545,9 +6553,21 @@ function cfgDepHtml(i){
     'The suggestion is measured plus a premium: the cross&rsquo;s <b>own</b> (it gives back its '+
     'marked fly), <b>none</b> (history alone), or <b>another cross&rsquo;s</b> — the educated guess '+
     'for a cross with no market of its own.</div>'+
+    '<div style="margin:6px 0 0">A tenor can come back blank: the correlation vol needs at least ten '+
+    'returns in a window and three independent windows in the <b>lookback</b> (so 730 days reaches '+
+    'about 8M), and under its own premium a fly no vol-vol correlation reaches has none. '+
+    '<b>fill gaps</b> fills such a tenor from the tenors that have a suggestion &mdash; linear in time, '+
+    'flat beyond the ends, the way the book reads the tab anyway &mdash; and marks it <b>~</b>. A '+
+    'filled vol-vol correlation does not give back that tenor&rsquo;s own fly.</div>'+
     '<div class="row" style="margin-top:8px;flex-wrap:wrap;gap:6px">'+
     '<select class="cfgdpair" style="width:auto;padding:3px 6px"></select>'+
     '<span class="meta">premium</span><select class="cfgdprem" style="width:auto;padding:3px 6px"></select>'+
+    '<span class="meta">corr vol over</span><input class="cfgdlook" style="width:64px" '+
+    'title="the history the correlation vol is measured across, in days: three independent windows '+
+    'the tenor long must fit in it, so a longer one reaches longer tenors"><span class="meta">days</span>'+
+    '<label style="margin:0;display:flex;align-items:center;gap:5px;width:auto;font-size:11px" '+
+    'title="fill a tenor with no suggestion of its own from the tenors that have one">'+
+    '<input type="checkbox" class="cfgdfill" style="width:auto"> fill gaps</label>'+
     '<button class="cfgdgo" style="width:auto;padding:4px 11px;font-size:11px;background:transparent;'+
     'color:var(--ink);border:1px solid var(--line);font-weight:500">Measure</button></div>'+
     '<div class="cfgdout" data-tab="'+i+'" style="margin-top:8px"></div></details>';
@@ -6560,9 +6580,12 @@ function cfgDepBind(){
   const prem=$('#cfgtabs').querySelector('.cfgdprem');
   prem.innerHTML='<option value="own">its own marked fly</option><option value="none">none</option>'+
     crosses.map(p=>'<option value="'+esc(p)+'">'+esc(p)+'&rsquo;s</option>').join('');
-  prem.value=DEPUI.premium||'own';
-  const keep=()=>{DEPUI.pair=box.value;DEPUI.premium=prem.value};
-  box.onchange=keep; prem.onchange=keep;
+  prem.value=DEPUI.premium||'none';
+  const look=$('#cfgtabs').querySelector('.cfgdlook'), fill=$('#cfgtabs').querySelector('.cfgdfill');
+  look.value=DEPUI.lookback; fill.checked=DEPUI.fill;
+  const keep=()=>{DEPUI.pair=box.value;DEPUI.premium=prem.value;DEPUI.lookback=look.value;
+                  DEPUI.fill=fill.checked};
+  box.onchange=keep; prem.onchange=keep; look.onchange=keep; fill.onchange=keep;
   box.closest('details').ontoggle=e=>{DEPUI.open=e.target.open};
   if(DEPR)cfgDepPaint(i);
   $('#cfgtabs').querySelector('.cfgdgo').onclick=async()=>{
@@ -6570,7 +6593,9 @@ function cfgDepBind(){
     const out=$('#cfgtabs').querySelector('.cfgdout');
     out.innerHTML='<span class="spin"></span> measuring… (the implied vol-vol is a search per tenor)';
     try{DEPR=await post('/api/dependence/realized',{pair:box.value,premium:prem.value,
-                                                     cut:mq().cut||'NY'})}
+                                                     cut:mq().cut||'NY',
+                                                     corr_vol_lookback:look.value.trim(),
+                                                     fill:fill.checked})}
     catch(e){DEPR=null;out.innerHTML='<div class="msg bad">'+esc(e.message)+'</div>';return}
     cfgDepPaint(i);
   };
@@ -6580,30 +6605,41 @@ function cfgDepPaint(i){
   const r=DEPR; if(!r){out.innerHTML='';return}
   const sg=(v,d)=>(v==null||!isFinite(v))?'—':(v>0?'+':'')+num(v,d==null?3:d);
   const src=r.premium==='own'?'its own marked fly':r.premium==='none'?'no premium':r.premium+'&rsquo;s premium';
-  out.innerHTML='<div class="meta">'+esc(r.pair)+' off '+esc(r.legs.join(' / '))+' history · '+src+'</div>'+
+  /* A filled suggestion is shown as one, with where it came from on hover:
+     it is the neighbours' number, not this tenor's. */
+  const fl=(txt,how)=>how?'<span title="'+esc(how)+'"><i>~'+txt+'</i></span>':txt;
+  const anyFill=r.rows.some(x=>x.vol_vol_filled||x.corr_vol_filled);
+  out.innerHTML='<div class="meta">'+esc(r.pair)+' off '+esc(r.legs.join(' / '))+' history · '+src+
+    ' · corr vol over '+num(r.corr_vol_lookback,0)+' days'+(r.fill?' · gaps filled':'')+'</div>'+
     (r.unavailable?'<div class="msg bad">'+esc(r.unavailable)+'</div>':'')+
     '<div class="scroll" style="margin-top:6px"><table class="mark"><thead><tr><th>Tenor</th>'+
     '<th title="measured vol-vol correlation ± se">vv measured</th>'+
     '<th title="measured correlation vol ± se">cv measured</th>'+
     '<th title="the cross’s marked 25-delta fly">fly25</th>'+
-    '<th title="the vol-vol correlation the marked fly implies at the measured correlation vol">vv implied</th>'+
+    '<th title="the vol-vol correlation the marked fly implies at the correlation vol suggested for the tenor (measured, or read off the tenors that have one); hover a cell for which">vv implied</th>'+
     '<th title="implied less measured">premium</th><th title="the premium the suggestion uses">used</th>'+
     '<th class="grp">&rarr; vol vol corr</th><th>&rarr; corr vol</th><th>marked now</th></tr></thead><tbody>'+
     r.rows.map(x=>{
       const m=x.measured||{};
-      const why=[x.reason].concat(x.warnings||[],m.notes||[]).filter(Boolean);
+      const why=[x.reason].concat(x.warnings||[],m.notes||[],
+        x.vol_vol_filled?['vol vol corr '+x.vol_vol_filled]:[],
+        x.corr_vol_filled?['corr vol '+x.corr_vol_filled]:[]).filter(Boolean);
       const note=why.length?' <span class="pill warn" title="'+esc(why.join(' · '))+'">note</span>':'';
       return '<tr><td>'+esc(x.tenor)+note+'</td>'+
         '<td>'+(m.vol_vol==null?'—':sg(m.vol_vol)+'<span class="meta"> ±'+num(m.vol_vol_se,2)+'</span>')+'</td>'+
         '<td>'+(m.corr_vol==null?'—':num(m.corr_vol,3)+'<span class="meta"> ±'+num(m.corr_vol_se,2)+'</span>')+'</td>'+
         '<td>'+(x.marked_fly25==null?'—':vnum(x.marked_fly25*100))+'</td>'+
-        '<td'+(x.implied_note?' title="'+esc(x.implied_note)+'"':'')+'>'+sg(x.implied_vol_vol)+'</td>'+
+        '<td title="'+esc(['at corr vol '+num(x.implied_corr_vol,3)+(x.implied_corr_vol_from?
+          ' ('+x.implied_corr_vol_from+')':' (measured)')].concat(x.implied_note?[x.implied_note]:[])
+          .join(' · '))+'">'+sg(x.implied_vol_vol)+'</td>'+
         '<td>'+sg(x.premium)+'</td><td>'+sg(x.premium_used)+'</td>'+
-        '<td class="grp"><b>'+sg(x.suggested_vol_vol)+'</b></td><td><b>'+
-          (x.suggested_corr_vol==null?'—':num(x.suggested_corr_vol,3))+'</b></td>'+
+        '<td class="grp"><b>'+fl(sg(x.suggested_vol_vol),x.vol_vol_filled)+'</b></td><td><b>'+
+          (x.suggested_corr_vol==null?'—':fl(num(x.suggested_corr_vol,3),x.corr_vol_filled))+'</b></td>'+
         '<td class="meta">'+(x.marked_vol_vol==null&&!x.marked_corr_vol?'—':
           sg(x.marked_vol_vol,2)+' / '+num(x.marked_corr_vol,2))+'</td></tr>';}).join('')+
     '</tbody></table></div>'+
+    (anyFill?'<div class="meta" style="margin-top:4px">~ filled from the tenors that have a suggestion '+
+      '(hover for which); a filled vol-vol correlation does not give back that tenor&rsquo;s fly</div>':'')+
     '<div class="row" style="margin-top:8px;align-items:center;gap:6px"><button class="cfgduse" '+
     'style="width:auto;padding:4px 11px;font-size:11px;background:transparent;'+
     'color:var(--ink);border:1px solid var(--line);font-weight:500">Suggest into the tab</button>'+
@@ -6624,7 +6660,9 @@ function cfgDepPaint(i){
       const row={pair:r.pair,tenor:x.tenor};
       row[vv]=x.suggested_vol_vol==null?null:Math.round(x.suggested_vol_vol*1e3)/1e3;
       row[cv]=x.suggested_corr_vol==null?null:Math.round(x.suggested_corr_vol*1e3)/1e3;
-      row.note=note; keep.push(row); n++;});
+      const fills=[x.vol_vol_filled?'vol vol corr '+x.vol_vol_filled:'',
+                   x.corr_vol_filled?'corr vol '+x.corr_vol_filled:''].filter(Boolean);
+      row.note=fills.length?note+'; '+fills.join('; '):note; keep.push(row); n++;});
     t.rows=keep;
     cfgPaintTabs('config');
     cfgDepPaint(i);
@@ -6682,9 +6720,11 @@ function paintVersions(){
   const B=VERS.backups||[], W=VERS.writes||[], K=VERS.keep||{};
   const rule='the newest '+(K.latest||0)+', then one an hour ('+(K.hourly||0)+
     '), a day ('+(K.daily||0)+'), a week ('+(K.weekly||0)+') and a month ('+(K.monthly||0)+')';
-  host.innerHTML='<label>Versions<span class="meta" style="margin-left:7px;font-weight:400">'+
-    B.length+' copy(s) in '+esc(VERS.folder)+'/, '+vbytes(VERS.bytes)+'</span></label>'+
-    (B.length?'<div class="scroll"><table class="mark"><thead><tr><th>Taken</th><th>Size</th>'+
+  const fold=(key,title)=>'<details class="cfgfold" data-sheet="'+key+'" style="margin-top:12px"'+
+    (CFG_OPEN[key]?' open':'')+'><summary style="cursor:pointer;font-weight:600">'+title+'</summary>';
+  host.innerHTML=fold('__versions','Versions<span class="meta" style="margin-left:7px;font-weight:400">'+
+    B.length+' copy(s) in '+esc(VERS.folder)+'/, '+vbytes(VERS.bytes)+'</span>')+
+    (B.length?'<div class="scroll" style="margin-top:6px"><table class="mark"><thead><tr><th>Taken</th><th>Size</th>'+
       '<th>File</th><th></th></tr></thead><tbody>'+
       B.map(r=>'<tr><td>'+esc(vwhen(r.when))+'</td><td>'+vbytes(r.bytes)+'</td>'+
         '<td>'+esc(r.name)+
@@ -6699,9 +6739,10 @@ function paintVersions(){
     '. Twenty copies of one afternoon used to push out last week, which is the one somebody '+
     'asks for. A write that changes nothing keeps no second copy of the same bytes, and the '+
     'copy taken before the first write that flattened the workbook is never thinned out — it '+
-    'is the only one holding anything a round trip cannot carry.</div>'+
-    (W.length?'<label style="margin-top:12px">What has written it</label>'+
-      '<div class="scroll"><table class="mark"><thead><tr><th>When</th><th>Write</th>'+
+    'is the only one holding anything a round trip cannot carry.</div></details>'+
+    (W.length?fold('__writes','What has written it<span class="meta" style="margin-left:7px;font-weight:400">'+
+      W.length+' write'+(W.length===1?'':'s')+'</span>')+
+      '<div class="scroll" style="margin-top:6px"><table class="mark"><thead><tr><th>When</th><th>Write</th>'+
       '<th>Pairs / tabs</th><th>Marks</th></tr></thead><tbody>'+
       W.map(w=>'<tr><td>'+esc(vwhen(w.when))+'</td><td>'+esc(w.what||'')+
         (w.reused?' <span class="meta">no new copy</span>':'')+'</td>'+
@@ -6711,8 +6752,9 @@ function paintVersions(){
       '<div class="hint" style="margin-top:6px">One line per write, kept for good — a few '+
       'hundred bytes each. Where a write was an export of marks, the session document beside '+
       'it in <code>'+esc(VERS.history_folder||'')+'/</code> is those marks, and loading it '+
-      'puts them back on the book without touching the workbook.</div>'
+      'puts them back on the book without touching the workbook.</div></details>'
      :'');
+  cfgFoldBind(host);
   host.querySelectorAll('.cfgback').forEach(b=>{
     b.onclick=()=>cfgConfirm('Put <b>'+esc(b.dataset.name)+'</b> back as the workbook? '+
       'What it replaces is kept, so this can be undone the same way.','Restore',
@@ -6721,6 +6763,7 @@ function paintVersions(){
 $('#cfgopen').onclick=cfgOpen;
 $('#cfgclose').onclick=cfgClose;
 $('#cfgwbshow').onchange=()=>{saveCfgWorkbook();cfgWorkbookVisible()};
+cfgFoldBind($('#cfgbody'));
 loadCfgWorkbook();
 $('#feedcfg').onclick=cfgOpen;
 $('#anhistcfg').onclick=cfgOpen;
@@ -8835,7 +8878,7 @@ async function xCompare(){
   try{
     const r=await post('/api/export/compare',body);
     const tol=parseFloat($('#xcmptol').value); const T=isFinite(tol)?tol:null;
-    const F=$('#xcmpwings').checked?r.fields:['atm'];
+    const F=r.fields;
     const head={atm:'ATM',rr25:'RR 25',rr10:'RR 10',bf25:'BF 25',bf10:'BF 10'};
     let h='<div class="mmstat"><span>'+r.pairs.length+' pair(s)</span><span>book wings: '+esc(r.wings)+'</span>'+
       '<span>overlay '+esc(String(r.overlay.sha256||'').slice(0,8))+'</span></div>';
@@ -8848,7 +8891,7 @@ async function xCompare(){
           '<td class="meta" style="text-align:left">'+(x.same?'same':'')+'</td></tr>'}).join('')+
       '</tbody></table></div>';
     h+='<div class="meta" style="margin-top:6px">'+r.by_pair.map(p=>'<b>'+esc(p.pair)+'</b> '+p.compared+'/'+p.tenors+' compared'+(p.in_book?'':' (not in the book)')+
-      ', largest Δ ATM '+num(p.max_atm,VOLDP)+', Δ wing '+num(p.max_wing,VOLDP)+
+      ', largest Δ ATM '+num(p.max_atm,VOLDP)+', Δ RR '+num(p.max_rr,VOLDP)+', Δ BF '+num(p.max_bf,VOLDP)+
       (p.overlay_only.length?', overlay only '+esc(p.overlay_only.join(' ')):'')+(p.book_only.length?', book also quotes '+esc(p.book_only.join(' ')):'')).join('<br>')+'</div>';
     if(r.refused.length)h+='<div class="etowarn" style="margin-top:6px">'+r.refused.map(x=>'! '+esc(x)).join('<br>')+'</div>';
     $('#xcmp').innerHTML=h;

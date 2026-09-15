@@ -64,8 +64,9 @@ and says *why*; this file says what is there and what must not be broken.
   shared `/api/config` and `/api/config/save`, with `where: "export"` on the
   tabs this screen edits (`configsheets.EXPORT_TABS`); the Config window
   skips those and this screen shows only those.  One painter
-  (`cfgPaintTabs(where)`) paints both; on this screen each table is a
-  `<details>` shut by default (`CFG_OPEN` keeps what was opened across a
+  (`cfgPaintTabs(where)`) paints both; on both screens each table is a
+  `<details>` shut by default (the Config window's Workbook card folds its
+  Pairs and Versions tables the same way, under `__`-prefixed keys) (`CFG_OPEN` keeps what was opened across a
   repaint, not a reload), and `xCfgScope` shows only the tables the chosen
   destination reads -- `publish.Channel.tables`, worked out from the
   channel's width source, wings and `correlated_crosses`, and sent in each
@@ -191,7 +192,11 @@ and says *why*; this file says what is there and what must not be broken.
   overlay cell is `None` and compares as nothing: it does **not** fall
   through to the book, which would read as agreement.  A tenor the book
   cannot mark is overlay-only; tenors the book quotes and the file lacks are
-  named per pair (`by_pair[].book_only`), not given rows.
+  named per pair (`by_pair[].book_only`), not given rows.  The card shows
+  all five marks every time -- the risk reversals and flies are not behind a
+  tick -- and each pair's largest move is reported separately for the ATM,
+  the risk reversals and the flies (`max_atm`, `max_rr`, `max_bf`;
+  `max_wing` is the larger of the last two).
 - **kACE under an overlay:** a pair read whole off the book goes through
   `kace.build` with its daily series; a pair read from the overlay, or one
   the book does not hold, goes pillars-only and the notes say so.

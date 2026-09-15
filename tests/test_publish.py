@@ -963,6 +963,13 @@ class TestOverlay(_Fixture):
         self.assertEqual(by["USDJPY"]["compared"], 1)
         self.assertIn("1W", by["USDJPY"]["book_only"])
         self.assertAlmostEqual(by["USDJPY"]["max_wing"], abs(r["diff"]["rr25"]))
+        # The risk reversals and the flies are reported apart, not lumped as "wings".
+        rrs = [abs(r["diff"][f]) for f in ("rr25", "rr10") if r["diff"][f] is not None]
+        bfs = [abs(r["diff"][f]) for f in ("bf25", "bf10") if r["diff"][f] is not None]
+        self.assertAlmostEqual(by["USDJPY"]["max_rr"], max(rrs))
+        self.assertAlmostEqual(by["USDJPY"]["max_bf"], max(bfs, default=0.0))
+        self.assertAlmostEqual(by["USDJPY"]["max_wing"],
+                               max(by["USDJPY"]["max_rr"], by["USDJPY"]["max_bf"]))
         # A pair the book does not hold, and a tenor it cannot mark, are overlay-only.
         self.assertFalse(by["AUDHKD"]["in_book"])
         self.assertEqual(len(by["AUDHKD"]["overlay_only"]), 9)
