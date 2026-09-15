@@ -169,6 +169,35 @@ is built out of them.
   It adds about two seconds to a cross's triangle, so it is a switch
   (`implied_vol_vol`, `--no-implied-vol-vol`, the *implied vol-vol* checkbox)
   and `relvalue` switches it off.
+- **The cross's risk reversal can be marked too, and is measured** (added
+  2026-09-15). The Gaussian copula and both inputs above are radially
+  symmetric, so they add no skew: the triangle RR was the legs' skews added up
+  and sat short of the marks (AUDJPY 3M -1.56 against -2.08 on the test
+  workbook) whatever was marked. `corr spot corr` (`Dependence.corr_spot`,
+  `[-1, 1]`, a third ladder) is the correlation between the correlation's move
+  and the cross's return; the model carries it by leaning the correlation vol's
+  states onto the cross's direction with `zeta = corr_spot / sqrt(2/pi)`
+  (`Dependence.lean`, exact for the two-state law; `MAX_CORR_SPOT` 0.798 is a
+  full lean): each (state, regime) tensor grid is reweighted by
+  `_lean(sign * zeta, D)`, `2 Phi(c D / sqrt(1 - c^2))`, which averages to one so
+  state and regime probabilities are kept; the legs' scores go through
+  `_leaning_score_tables` so the marginals are kept. **No corr vol, no lean**:
+  the law is the unleaned one bit for bit, with a warning. Zero takes the old
+  path. RR moves roughly odd in it, the fly by hundredths. `implied_corr_spot`
+  backs out the one the marked rr25 asks for (holding the marked vol-vol and
+  corr vol; probe the ends and 0, then Brent), only where corr vol is marked and
+  `implied_vol_vol` is on (`triangle_table(implied_corr_spot=)` switches it off
+  alone). **Measured** by `history.realized_corr_spot`: daily change of the
+  correlation the three ATMs imply against `ca ra + cb rb`, over a year, quote
+  noise out by the first autocovariance (at most x2) -- *not* the rolling
+  windows corr vol uses, which a simulation showed cannot recover a lean on two
+  years. Needs the cross's sheet. `measure_dependence(pair=)` carries it to the
+  correlation card, `MeasuredDependence.band`, `relvalue._realized_dependence`
+  (plus the lender's premium) and `dependence_table` (`_suggest_corr_spot`:
+  implied at the suggested vol-vol and the held corr vol, premium, suggested;
+  then vol-vol re-solved at a lean that moved, so a whole suggestion gives back
+  the fly; fill gaps on its own ladder). *Suggest into the tab* writes all three
+  and keeps a typed lean only where none is suggested.
 - **The triangle reads its deltas in the slice's convention** (fixed
   2026-09-15). It handed the copula `surface.conv` and the noise floor
   `leg.conv`, forward delta, against a marked smile read off `slice_conv(t)` in

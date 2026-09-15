@@ -21,7 +21,8 @@ then integrate the cross's whole smile out of it on a deterministic tensor
 grid.  Nothing is fitted and nothing is simulated, so the same inputs give the
 same numbers to the last digit.
 
-Two approximations are made and neither is hidden:
+Two approximations are made and neither is hidden, and one thing is added for
+the risk reversal:
 
 * **The measure.**  A leg's risk-neutral density is quoted under its own
   domestic measure; the cross's is under a third.  Combining them ignores that
@@ -40,6 +41,16 @@ Two approximations are made and neither is hidden:
   variance regimes, whose size each leg's own smile supplies, and a
   volatility of the correlation.  Unmarked, the copula is the Gaussian one
   above, to the last digit.
+* **The risk reversal.**  Every copula above is radially symmetric -- it
+  looks the same with every move reversed -- so none of them adds a skew of
+  its own: the cross's risk reversal is the legs' skews added up, and the
+  two inputs above move the butterfly and barely touch it.  What a cross
+  risk reversal is paid for beyond its legs is the correlation moving *with*
+  the cross -- rising as a risk-off cross sells off.  That is the third
+  input, ``corr_spot``, the correlation between the correlation and the
+  cross, which history measures (``history.realized_corr_spot``): it leans
+  the correlation vol's two states towards the cross's direction, leaving
+  each state's probability, and so the butterfly, nearly where they were.
 
 The size of both is bounded from below by the diagnostic in
 ``reconstruction_error``: run each *leg* through the same grid on its own and
@@ -291,6 +302,12 @@ def triangle_coefficients(pair: str, leg_a: str, leg_b: str) -> tuple[int, int]:
     return coeff(leg_a), coeff(leg_b)
 
 
+#: The largest correlation-spot correlation two correlation states can carry:
+#: at a full lean the state is the sign of the cross's score, and a sign's
+#: correlation with a standard normal is ``sqrt(2/pi)``.
+MAX_CORR_SPOT = math.sqrt(2.0 / math.pi)
+
+
 @dataclass(frozen=True)
 class Dependence:
     """How two legs depend on each other beyond one correlation.  Both marked.
@@ -316,10 +333,30 @@ class Dependence:
     units: over the life of the option the correlation is ``rho - corr_vol``
     or ``rho + corr_vol`` with even odds -- the smallest law with that mean and
     that standard deviation.  Both ends must lie in ``[-1, 1]``.
+
+    ``corr_spot`` is how the correlation moves with the **cross**, in
+    ``[-1, 1]``: the correlation between the correlation's move and the
+    cross's own return -- what puts a risk reversal into the cross beyond its
+    legs' own skews, and what ``history.realized_corr_spot`` measures.
+    Negative is the risk-off cross (AUDJPY's correlation rising as it sells
+    off).  Which way that skews the cross follows from the legs' signs: a
+    higher correlation widens a product cross and narrows a ratio one.
+
+    It is carried by leaning ``corr_vol``'s two states: they keep even odds
+    overall, but given the cross's standardised score ``D`` the high one,
+    ``rho + corr_vol``, is taken with probability ``Phi(zeta D / sqrt(1 -
+    zeta**2))``.  That law's correlation between the state and ``D`` is
+    exactly ``zeta sqrt(2/pi)``, so ``zeta = corr_spot / sqrt(2/pi)``
+    (:attr:`lean`): the number marked is the correlation itself, and a
+    measured one means the same thing here.  Two states cannot hold more than
+    :data:`MAX_CORR_SPOT`, about 0.80; beyond it the lean is full and the
+    law says so.  It leans the correlation vol and so moves nothing without
+    one.
     """
 
     vol_vol: float | None = None
     corr_vol: float = 0.0
+    corr_spot: float = 0.0
 
     def __post_init__(self) -> None:
         if self.vol_vol is not None:
@@ -329,11 +366,20 @@ class Dependence:
         c = float(self.corr_vol)
         if not math.isfinite(c) or not 0.0 <= c < 1.0:
             raise ValueError(f"a correlation vol must lie in [0, 1), got {self.corr_vol!r}")
+        z = float(self.corr_spot)
+        if not math.isfinite(z) or not -1.0 <= z <= 1.0:
+            raise ValueError(f"a correlation-spot correlation must lie in [-1, 1], "
+                             f"got {self.corr_spot!r}")
 
     @property
     def active(self) -> bool:
         """Whether this is anything but the Gaussian copula."""
-        return self.vol_vol is not None or self.corr_vol > 0.0
+        return self.vol_vol is not None or self.corr_vol > 0.0 or self.corr_spot != 0.0
+
+    @property
+    def lean(self) -> float:
+        """The skew-normal lean ``zeta`` carrying :attr:`corr_spot`, held to ``[-1, 1]``."""
+        return max(-1.0, min(1.0, float(self.corr_spot) / MAX_CORR_SPOT))
 
 
 def regime_dispersion(excess_kurtosis: float) -> float:
@@ -367,6 +413,7 @@ class Combined:
     #: ``None`` and ``0`` for the Gaussian copula.
     vol_vol: float | None = None
     corr_vol: float = 0.0
+    corr_spot: float = 0.0
     #: Each leg's excess kurtosis, which sized its variance regimes; NaN where
     #: no regimes were built.
     leg_kurtosis: tuple[float, float] = (float("nan"), float("nan"))
@@ -578,10 +625,66 @@ def _score_table(dist: Distribution, scales: np.ndarray, probs: np.ndarray, reac
     """
     y = np.linspace(-reach, reach, points)
     u = (probs[None, :] * ndtr(y[:, None] / scales[None, :])).sum(axis=1)
+    return _quantile_table(dist, y, u)
+
+
+def _quantile_table(dist: Distribution, y: np.ndarray, u: np.ndarray):
+    """The leg's log return at scores ``y`` whose own law puts them at ``u``,
+    and the scores beyond which the leg's grid is exhausted."""
     c = np.maximum.accumulate(dist.cdf)
     u = np.maximum.accumulate(u)
     limits = (float(np.interp(c[0], u, y)), float(np.interp(c[-1], u, y)))
     return y, dist.quantile(u), limits
+
+
+def _lean(c: float, d):
+    """``2 Phi(c d / sqrt(1 - c**2))``: the weight a state leaning ``c`` puts on score ``d``.
+
+    Averages to one over a standard normal ``d`` for every ``c``, which is
+    what keeps each state's probability where it was; at ``|c| = 1`` it is
+    the step it tends to.
+    """
+    d = np.asarray(d, dtype=float)
+    if abs(c) >= 1.0:
+        return np.where(c * d > 0.0, 2.0, np.where(d == 0.0, 1.0, 0.0))
+    return 2.0 * ndtr(c * d / math.sqrt(1.0 - c * c))
+
+
+def _leaning_score_tables(dist_a: Distribution, dist_b: Distribution,
+                          components, coefficients: tuple[int, int], reach: float,
+                          points: int = 6001):
+    """Both legs' score-to-return tables when the correlation state leans.
+
+    A lean makes each leg's score skewed -- the high-correlation state sits on
+    one side of the cross, and the cross is partly each leg -- so the score's
+    own law is no longer the regime mixture :func:`_score_table` reads in
+    closed form.  It is still Gaussian-conditional: given one leg's score the
+    cross's standardised score is normal, and the lean integrates over it as
+    ``2 Phi(c mu / sqrt(1 - c**2 + c**2 tau**2))``.  So each leg's score
+    density is summed exactly over the states and integrated once on a fine
+    grid, and each leg keeps exactly the marginal its smile implies.
+    """
+    ca, cb = coefficients
+    y = np.linspace(-reach, reach, points)
+    dens_a = np.zeros(points)
+    dens_b = np.zeros(points)
+    for r, g1, g2, p, c in components:
+        q = math.sqrt(max(1.0 - r * r, 0.0))
+        sd = math.sqrt(max(g1 * g1 + g2 * g2 + 2.0 * ca * cb * r * g1 * g2, 1e-300))
+        for dens, own, other, load, sign in ((dens_a, g1, g2, ca * g1 + cb * g2 * r, cb),
+                                             (dens_b, g2, g1, cb * g2 + ca * g1 * r, ca)):
+            z = y / own
+            mu = z * load / sd
+            tau = other * q / sd
+            den = 1.0 - c * c + c * c * tau * tau
+            lean = (_lean(1.0 if c > 0 else -1.0, mu) if den <= 0.0
+                    else 2.0 * ndtr(c * mu / math.sqrt(den)))
+            dens += p * np.exp(-0.5 * z * z) / (own * math.sqrt(2.0 * math.pi)) * lean
+    tables = []
+    for dist, dens in ((dist_a, dens_a), (dist_b, dens_b)):
+        u = np.concatenate(([0.0], np.cumsum(0.5 * (dens[1:] + dens[:-1]) * np.diff(y))))
+        tables.append(_quantile_table(dist, y, u / u[-1]))
+    return tables
 
 
 def _combine_dependent(dist_a: Distribution, dist_b: Distribution,
@@ -605,6 +708,15 @@ def _combine_dependent(dist_a: Distribution, dist_b: Distribution,
     **Correlation vol.**  The score correlation is ``rho - corr_vol`` or
     ``rho + corr_vol``, each with probability one half.
 
+    **Correlation-spot correlation.**  Each state's nodes are reweighted by
+    :func:`_lean` of the cross's standardised score within that state and
+    regime -- up on one side, down on the other, averaging to one -- so the
+    state keeps its half and its regimes their weights, and only *where* in
+    the cross's distribution the high correlation falls changes.  The legs'
+    scores are then mapped through their leaned laws
+    (:func:`_leaning_score_tables`) so neither marginal moves.  No lean is
+    the regime copula exactly, by the same code as before.
+
     Every (correlation, regime) pair is a tensor grid of its own, exactly as
     :func:`combine` builds one, and the whole set is binned onto one uniform
     grid of log returns by cloud-in-cell -- which keeps every node's mass and
@@ -620,10 +732,22 @@ def _combine_dependent(dist_a: Distribution, dist_b: Distribution,
                 f"a correlation vol of {s:.4g} around a correlation of {rho:.4g} reaches "
                 f"{r:.4g}, outside [-1, 1]")
     ends = tuple(min(max(r, -1.0), 1.0) for r in ends)
+    signs = (0.0,) if s == 0.0 else (-1.0, 1.0)
 
     kurt = (dist_a.moments().excess_kurtosis, dist_b.moments().excess_kurtosis)
     lam = dependence.vol_vol
+    corr_spot = float(dependence.corr_spot)
     warnings: list[str] = []
+    if corr_spot != 0.0 and s == 0.0:
+        warnings.append(
+            f"a correlation-spot correlation of {corr_spot:+.3g} leans the correlation vol towards "
+            f"the cross's direction, and none is marked, so it moves nothing")
+    elif abs(corr_spot) > MAX_CORR_SPOT:
+        warnings.append(
+            f"a correlation-spot correlation of {corr_spot:+.3g} is more than two correlation "
+            f"states can carry ({MAX_CORR_SPOT:.3f}); it is priced at a full lean, "
+            f"{math.copysign(MAX_CORR_SPOT, corr_spot):+.3f}")
+    lean = dependence.lean if s > 0.0 else 0.0
     if lam is None:
         disp = (0.0, 0.0)
     else:
@@ -657,7 +781,18 @@ def _combine_dependent(dist_a: Distribution, dist_b: Distribution,
     sw = _simpson_weights(n, h) * np.exp(-0.5 * z * z) / math.sqrt(2.0 * math.pi)
     grid_w = sw[:, None] * sw[None, :]
     reach = span * math.sqrt(2.0)
-    if single:
+    if lean != 0.0:
+        # Each (state, regime) with the lean it takes: the high correlation
+        # leans ``zeta`` and the low one the other way.
+        components = [(r, float(root1[k]), float(root2[k]), float(probs[k]) / len(ends),
+                       sign * lean)
+                      for r, sign in zip(ends, signs) for k in range(probs.size)]
+        (y_a, x_a, lim_a), (y_b, x_b, lim_b) = _leaning_score_tables(
+            dist_a, dist_b, components, coefficients,
+            reach * float(max(root1.max(), root2.max())))
+        tab_a, tab_b = (y_a, x_a), (y_b, x_b)
+        single = False
+    elif single:
         # No regimes: the scaled score is the score, and its law is exact.
         c_a, c_b = np.maximum.accumulate(dist_a.cdf), np.maximum.accumulate(dist_b.cdf)
         tab_a = tab_b = None
@@ -672,7 +807,7 @@ def _combine_dependent(dist_a: Distribution, dist_b: Distribution,
     ws: list[np.ndarray] = []
     total = sum_a = sum_b = sum_ab = out_a = out_b = 0.0
     leg_a_cache: dict[float, tuple[np.ndarray, np.ndarray]] = {}
-    for r in ends:
+    for r, sign in zip(ends, signs):
         z2 = r * z[:, None] + math.sqrt(max(1.0 - r * r, 0.0)) * z[None, :]
         for k in range(probs.size):
             key = float(root1[k])
@@ -684,6 +819,10 @@ def _combine_dependent(dist_a: Distribution, dist_b: Distribution,
             y2 = float(root2[k]) * z2
             xb = dist_b.quantile(ndtr(y2)) if single else np.interp(y2, *tab_b)
             wk = grid_w * (float(probs[k]) / len(ends))
+            if lean != 0.0:
+                g1, g2 = float(root1[k]), float(root2[k])
+                sd = math.sqrt(max(g1 * g1 + g2 * g2 + 2.0 * ca * cb * r * g1 * g2, 1e-300))
+                wk = wk * _lean(sign * lean, (ca * y1[:, None] + cb * y2) / sd)
             xs.append((ca * xa[:, None] + cb * xb).ravel())
             ws.append(wk.ravel())
             row_w = wk.sum(axis=1)
@@ -736,7 +875,7 @@ def _combine_dependent(dist_a: Distribution, dist_b: Distribution,
     return Combined(xc=grid, weight=mass, t=dist_a.t, rho=float(rho),
                     coefficients=(ca, cb), conv=DeltaConvention.of(conv), clamped=clamped,
                     shift=shift, convexity=convexity, warnings=tuple(warnings),
-                    vol_vol=None if lam is None else float(lam), corr_vol=s,
+                    vol_vol=None if lam is None else float(lam), corr_vol=s, corr_spot=corr_spot,
                     leg_kurtosis=(float(kurt[0]), float(kurt[1])))
 
 
@@ -792,7 +931,8 @@ def combine_holding_atm(dist_a: Distribution, dist_b: Distribution,
     step = math.copysign(max(abs(step) * 1.25, 1e-4), step if step != 0.0 else 1.0)
     far = min(max(start + step, lo_bound), hi_bound)
     what = (f"the correlation holding the combined ATM at {target_atm:.4%} under a vol-vol "
-            f"correlation of {dependence.vol_vol} and a correlation vol of {s:g}")
+            f"correlation of {dependence.vol_vol}, a correlation vol of {s:g} and a "
+            f"correlation-spot correlation of {dependence.corr_spot:g}")
     try:
         root = solve_scalar(gap, start, lo_bound=lo_bound, hi_bound=hi_bound, xtol=2e-5,
                             bracket=(min(start, far), max(start, far)), what=what)
@@ -813,14 +953,15 @@ IMPLIED_GRID = {"nodes": 81, "bins": 2001}
 def implied_vol_vol(dist_a: Distribution, dist_b: Distribution,
                     coefficients: tuple[int, int], rho: float,
                     conv: DeltaConvention | bool, target_fly: float, *,
-                    corr_vol: float = 0.0, delta: float = 0.25,
+                    corr_vol: float = 0.0, corr_spot: float = 0.0, delta: float = 0.25,
                     target_atm: float | None = None) -> tuple[float | None, str]:
     """The vol-vol correlation at which the legs give the marked cross butterfly.
 
     What :class:`Dependence` is marked against, the way the implied
     correlation is what a cross's ATM is marked against.  The ATM is held
     (:func:`combine_holding_atm`) at every trial, so the answer moves the
-    butterfly and nothing else; ``corr_vol`` is held at what is marked.
+    butterfly and nothing else; ``corr_vol`` and ``corr_spot`` are held at what
+    is marked.
 
     ``(value, "")``, or ``(None, reason)`` when no vol-vol correlation in
     ``[-1, 1]`` reaches the marked butterfly -- the reason says how far the
@@ -836,7 +977,8 @@ def implied_vol_vol(dist_a: Distribution, dist_b: Distribution,
         # Each trial starts from the correlation the nearest one held at.
         near = min(held, key=lambda k: abs(k - lam)) if held else None
         law = combine_holding_atm(dist_a, dist_b, coefficients, rho, conv,
-                                  Dependence(vol_vol=lam, corr_vol=corr_vol),
+                                  Dependence(vol_vol=lam, corr_vol=corr_vol,
+                                             corr_spot=corr_spot),
                                   target_atm=target_atm,
                                   rho_start=None if near is None else held[near], **IMPLIED_GRID)
         held[lam] = law.rho
@@ -865,6 +1007,65 @@ def implied_vol_vol(dist_a: Distribution, dist_b: Distribution,
         f"no vol-vol correlation in [-1, 1] gives the marked {int(round(delta * 100))}-delta "
         f"butterfly of {target_fly:.3%}: the legs give between {reach[0]:.3%} and "
         f"{reach[-1]:.3%} over that range, {why}")
+
+
+def implied_corr_spot(dist_a: Distribution, dist_b: Distribution,
+                      coefficients: tuple[int, int], rho: float,
+                      conv: DeltaConvention | bool, target_rr: float, *,
+                      vol_vol: float | None = None, corr_vol: float = 0.0,
+                      delta: float = 0.25,
+                      target_atm: float | None = None) -> tuple[float | None, str]:
+    """The correlation-spot correlation at which the legs give the marked cross risk reversal.
+
+    :func:`implied_vol_vol`'s twin, for the risk reversal: the ATM held at
+    every trial and the vol-vol correlation and correlation vol held at what
+    is marked, so the answer is what the risk reversal asks of the
+    correlation's lean and nothing else.  It leans the correlation vol, so
+    with none marked there is nothing to lean and the answer says so.
+
+    ``(value, "")``, or ``(None, reason)``.
+    """
+    tag = f"rr{int(round(delta * 100))}"
+    top = MAX_CORR_SPOT
+    if not corr_vol > 0.0:
+        return None, ("a correlation-spot correlation leans the correlation vol, and none is "
+                      "marked, so no value of it moves the risk reversal")
+    if target_atm is None:
+        target_atm = combine(dist_a, dist_b, coefficients, rho, conv).atm_vol()[0]
+
+    held: dict[float, float] = {}
+
+    def rr(zeta: float) -> float:
+        near = min(held, key=lambda k: abs(k - zeta)) if held else None
+        law = combine_holding_atm(dist_a, dist_b, coefficients, rho, conv,
+                                  Dependence(vol_vol=vol_vol, corr_vol=corr_vol, corr_spot=zeta),
+                                  target_atm=target_atm,
+                                  rho_start=None if near is None else held[near], **IMPLIED_GRID)
+        held[zeta] = law.rho
+        return float(law.table((delta,))[tag])
+
+    try:
+        at = {z: rr(z) - target_rr for z in (-top, 0.0, top)}
+    except (ValueError, ArithmeticError, ConvergenceError) as exc:
+        return None, f"the correlation-spot correlation could not be searched: {exc}"
+    if at[0.0] == 0.0:
+        return 0.0, ""
+    for lo, hi in ((-top, 0.0), (0.0, top)):
+        if at[lo] * at[hi] <= 0.0:
+            try:
+                return float(solve_scalar(lambda x: rr(x) - target_rr, 0.5 * (lo + hi),
+                                          bracket=(lo, hi), lo_bound=lo, hi_bound=hi,
+                                          xtol=5e-3, what="the implied correlation-spot "
+                                                          "correlation")), ""
+            except (ValueError, ArithmeticError, ConvergenceError) as exc:
+                return None, f"the correlation-spot correlation could not be solved: {exc}"
+    reach = sorted(v + target_rr for v in at.values())
+    return None, (
+        f"no correlation-spot correlation in [{-top:+.2f}, {top:+.2f}] -- all two correlation "
+        f"states can carry -- gives the marked "
+        f"{int(round(delta * 100))}-delta risk reversal of {target_rr:+.3%}: the legs give "
+        f"between {reach[0]:+.3%} and {reach[-1]:+.3%} at a correlation vol of {corr_vol:g}, so "
+        f"the rest needs more correlation vol, or is something the legs do not carry")
 
 
 def reconstruction_error(dist: Distribution, conv: DeltaConvention | bool,

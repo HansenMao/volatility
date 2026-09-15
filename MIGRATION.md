@@ -685,6 +685,81 @@ shape read off the marked wings (`_sabr_shape`). AUDJPY 1Y triangle fly25 moved
 marking screen's implied quotes already used `slice_conv(t)` and do not move.
 There is no switch: it was wrong.
 
+## 4b-vi-a. `CROSS_DEPENDENCE` gains `corr spot corr`: a cross's risk reversal out of its legs, measured off history
+
+**Moves numbers only on crosses whose `CROSS_DEPENDENCE` rows fill the new
+column**, and in the dependence suggestions and the relative-value triangle
+wherever the history has the cross's own sheet. Blank is zero, and zero is the
+previous code path exactly.
+
+**Why.** The vol-vol correlation and the correlation vol were added for the
+fly, and they do that. But they, and the Gaussian copula under them, are
+*radially symmetric* copulas: the joint law looks the same with every move
+reversed, so they add no skew of their own and the cross's RR is only the
+legs' skews added up. Sweeping vol-vol over [-0.5, 0.9] and corr vol over
+[0, 0.2] on the test workbook moves the 25-delta fly by a factor of two or
+more, but the RR by 0.05-0.14 vol, and that small move is only the ATM-holding
+correlation re-solve. The triangle RR sat short of the marks at every tenor
+whatever was marked: AUDJPY 3M -1.56 against -2.08, EURJPY 1Y -0.83 against
+-1.32, EURGBP 1M +0.26 against +0.45. What a cross RR is paid for beyond its
+legs is the correlation moving *with* the cross (rising in a risk-off
+sell-off), which nothing in the model had.
+
+**What was added.** A third input, **`corr spot corr`** in `[-1, 1]`
+(`moments.Dependence.corr_spot`): the correlation between the legs'
+correlation moving and the cross's own return. The model carries it by
+leaning the correlation vol's two states towards the cross's direction: given
+the cross's standardised score `D` in a state, the high correlation
+`rho + corr vol` has probability `Phi(zeta D / sqrt(1 - zeta^2))`. That law's
+correlation between the state and `D` is exactly `zeta sqrt(2/pi)`, so
+`zeta = corr spot corr / sqrt(2/pi)` (`Dependence.lean`) and the number marked
+means what a measured one means; two states carry at most
+`sqrt(2/pi) = 0.798`, and more is priced at a full lean with a warning. The
+weight averages to one within each state and regime, so each state keeps its
+half and the fly stays nearly put; the legs' scores are mapped through their
+*leaned* laws (`_leaning_score_tables`) so each leg keeps exactly its own
+marginal. It leans the correlation vol, so it needs one: with none it moves
+nothing and warns. The ATM is held as before. `TriangleRow` /
+`ImpliedQuoteRow` carry `corr_spot`; **`implied_corr_spot`** backs out the one
+the marked 25-delta RR asks for, holding the marked vol-vol and corr vol.
+
+**Measured.** `history.realized_corr_spot`: each day the cross's correlation
+implied by the three at-the-money volatilities (both legs' and the cross's, at
+the tenor, by the book's variance triangle), and the zero-mean correlation of
+its daily change with `ca ra + cb rb`, over `DYNAMICS_DAYS` -- the way the
+vol-vol correlation is measured. White quote noise in the implied correlation
+is taken out through the change's first autocovariance (scaling up by at most
+x2, `raw` kept). The rolling-window alternative -- each window's realized
+correlation against the window's cross return, the same object as corr vol --
+was tried and refused: simulated with a known lean it came back at half size
+on thirty years and not at all on two, where a daily measure on 500 days has a
+standard error of about 0.05 and recovers a planted value. It needs the
+cross's own sheet. `measure_dependence(pair=)`, `MeasuredDependence.corr_spot`
+(and `band` moves it by its standard error), the correlation card, and
+`dependence_table`: measured, implied, premium and suggested, from the same
+premium source as the vol-vol correlation. `dependence_table` solves the
+vol-vol correlation at the measured lean, then the lean at the suggested
+vol-vol, then -- where the suggested lean differs -- the vol-vol again at it,
+so a suggestion marked whole gives back the marked fly; the relative-value
+triangle (`relvalue._realized_dependence`) prices the measured lean plus the
+lender's premium on it.
+
+On the test workbook at vol-vol 0.5, corr vol 0.15: AUDJPY 3M rr25 -1.58 with
+no corr spot corr, -2.12 at -0.56 (marked -2.08), fly25 0.343 -> 0.333; EURJPY
+1Y rr25 -0.82 -> -1.26 at -0.56 (marked -1.32), fly25 0.416 -> 0.402; EURGBP 1M
++0.29 -> +0.62 at -0.24 (marked +0.45), fly25 0.165 -> 0.163. The sign is the
+same on all three: correlation rising as the cross falls. On the sample
+history the measured values are within two standard errors of zero at every
+tenor, as they should be -- its correlation is constant by construction -- and
+its correlation vol is too small to lean far enough to reach the marked RRs,
+which the rows say. The 121-node grid is within 0.001 vol of a 481-node one
+even at a full lean.
+
+**To restore the old numbers**: clear the `corr spot corr` column. The
+relative-value triangle's realized basis now carries the measured lean where
+the cross has a sheet and a correlation vol is measured; its `premium="none"`
+setting still borrows nothing for it.
+
 ## 4b-vii. The relative-value triangle is priced on the legs' realized dependence, and this moves its signal
 
 **Moves the relative-value grid's `triangle` signal, and so the score, on every

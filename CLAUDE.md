@@ -117,10 +117,13 @@ listed     exchange traded options: paste parsing, least-squares SABR fit,
            aggregated greeks both Black-Scholes and on the fitted smile
 moments    risk-neutral distribution from a smile; two combined into a cross,
            by a Gaussian copula or by a marked dependence (CROSS_DEPENDENCE:
-           vol-vol correlation, correlation vol) holding the combined ATM
+           vol-vol correlation, correlation vol, and the correlation-spot
+           correlation that leans it for the RR) holding the combined ATM
 history    historical spot / forwards / quotes; realized vol, skew, kurtosis;
            a cross's legs' realized vol-vol correlation and correlation vol
-           (net of sampling noise), which CROSS_DEPENDENCE is measured against
+           (net of sampling noise), and its implied correlation's daily
+           correlation with the cross (net of quote noise), which
+           CROSS_DEPENDENCE is measured against
 analytics  carry and roll, fair value, the cross triangle, indication pricing
 relvalue   one score per expiry and strike, in volatility points: implied
            against realized in level and in shape, the roll and the forward
@@ -560,7 +563,7 @@ and what is reported instead** — read it before "fixing" one.
 - Half-day holidays are full days.
 - The band model needs a forward feed, and refuses rather than guessing.
 - The cross RR/fly triangle assumes a Gaussian copula unless `CROSS_DEPENDENCE`
-  marks a vol-vol correlation and correlation vol, and ignores the change of
+  marks a vol-vol correlation, correlation vol and correlation-spot correlation, and ignores the change of
   measure between the legs' domestic currencies either way.
 - Fair value is a first-order break-even, not a valuation.
 - Realized moments are projected onto a tenor assuming independence.

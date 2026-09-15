@@ -18,7 +18,22 @@ for the reasoning behind it. Read this file when working in the area above.
   legs' domestic currencies either way. The marked dependence is itself a
   choice: lognormal variance regimes sized by each leg's own kurtosis, a
   two-point correlation, and no link between the correlation and the regimes
-  (correlation rising *in* stress is not modelled). All stated in `moments.py`;
+  (correlation rising *in* stress is not modelled). The correlation's link to
+  the cross's *direction* is modelled (`corr spot corr`): a skew-normal lean of
+  the two correlation states, which needs a correlation vol to act, carries at
+  most 0.80 of correlation, and cannot reach a risk reversal beyond what a full
+  lean of the marked corr vol gives. The regimes themselves do not lean (the
+  legs' own skews already carry their vol-spot).
+- **The measured corr spot corr is the market's correlation moving**, not a
+  realized one: daily changes in the correlation three quoted ATMs imply, which
+  carry whatever the smile does to an ATM as spot moves along it, and quote
+  noise the autocovariance correction only partly removes (capped at x2). It
+  needs the cross's own sheet. The realized alternative -- rolling-window
+  correlations against the window's cross return, consistent with corr vol --
+  was measured in simulation and could not recover a known lean on two years
+  of history, so it is not offered. The daily measure is also a statement about
+  daily increments applied to a lean over the option's life, which holds for a
+  diffusive correlation and not for one that jumps. All stated in `moments.py`;
   the change of measure is not corrected for.
 - **Measured dependence is physical and a premium is borrowed.** The realized
   vol-vol correlation and correlation vol carry no risk premium; the

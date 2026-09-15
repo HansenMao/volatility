@@ -191,29 +191,33 @@ def load_cross_correlations(path, *, overlay=None) -> dict[str, dict[str, float]
 
 
 #: The workbook tab of a cross's marked dependence beyond its correlation: the
-#: vol-vol correlation and the correlation vol the smile triangle ties the two
-#: legs together with (``moments.Dependence``).  The book reads it; a cross it
+#: vol-vol correlation, the correlation vol and the correlation-spot correlation
+#: the smile triangle ties the two legs together with (``moments.Dependence``).  The book reads it; a cross it
 #: does not name is the Gaussian copula.
 CROSS_DEPENDENCE_SHEET = "CROSS_DEPENDENCE"
 
-#: The tab's two value columns, as its header spells them.
+#: The tab's three value columns, as its header spells them.
 VOL_VOL_COLUMN = "vol vol corr"
 CORR_VOL_COLUMN = "corr vol"
+CORR_SPOT_COLUMN = "corr spot corr"
 
 
 def load_cross_dependence(path, *, overlay=None) -> dict[str, dict[str, tuple]]:
-    """Read the workbook's ``CROSS_DEPENDENCE`` tab: pair, tenor, vol vol corr, corr vol.
+    """Read the workbook's ``CROSS_DEPENDENCE`` tab: pair, tenor, vol vol corr, corr vol,
+    corr spot corr.
 
-    ``{PAIR: {TENOR: (vol_vol, corr_vol)}}``, tenors as typed and either value
-    ``None`` where its cell is blank -- a desk may mark one without the other.
+    ``{PAIR: {TENOR: (vol_vol, corr_vol, corr_spot)}}``, tenors as typed and any
+    value ``None`` where its cell is blank -- a desk may mark one without the
+    others.  A tab written before the third column existed has no such column,
+    which reads as blank.
     An absent tab is ``{}``: every cross is the Gaussian copula, which is what
     every cross was before the tab existed.
 
     Refused by row rather than dropped: a pair that is not a cross (a dollar
     pair has no legs to tie together), a tenor that names no length, a vol-vol
-    correlation outside ``[-1, 1]``, a correlation vol outside ``[0, 1)``, and
-    one tenor given twice.  A row with neither value says nothing and is
-    skipped.
+    correlation outside ``[-1, 1]``, a correlation vol outside ``[0, 1)``, a
+    correlation-spot correlation outside ``[-1, 1]``, and one tenor given twice.
+    A row with no value says nothing and is skipped.
     """
     from . import configsheets
     from .timeutil import TenorError, parse_tenor
@@ -230,7 +234,8 @@ def load_cross_dependence(path, *, overlay=None) -> dict[str, dict[str, tuple]]:
             continue
         where = f"{CROSS_DEPENDENCE_SHEET} row {row.number}: {pair} {tenor}"
         vol_vol, corr_vol = row.real(VOL_VOL_COLUMN), row.real(CORR_VOL_COLUMN)
-        if vol_vol is None and corr_vol is None:
+        corr_spot = row.real(CORR_SPOT_COLUMN)
+        if vol_vol is None and corr_vol is None and corr_spot is None:
             continue
         if len(pair) != 6 or not pair.isalpha() or not is_cross(pair):
             bad.append(f"{where} -- {pair} is not a cross, so it has no legs to tie together")
@@ -246,11 +251,14 @@ def load_cross_dependence(path, *, overlay=None) -> dict[str, dict[str, tuple]]:
         if corr_vol is not None and not 0.0 <= corr_vol < 1.0:
             bad.append(f"{where} corr vol {corr_vol:g} is outside [0, 1)")
             continue
+        if corr_spot is not None and not -1.0 <= corr_spot <= 1.0:
+            bad.append(f"{where} corr spot corr {corr_spot:g} is outside [-1, 1]")
+            continue
         ladder = out.setdefault(pair, {})
         if any(k.upper() == tenor.upper() for k in ladder):
             bad.append(f"{where} is given twice")
             continue
-        ladder[tenor] = (vol_vol, corr_vol)
+        ladder[tenor] = (vol_vol, corr_vol, corr_spot)
     if bad:
         raise ValueError("; ".join(bad))
     return out

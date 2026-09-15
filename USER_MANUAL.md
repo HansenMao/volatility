@@ -69,7 +69,7 @@ settings that go with them:
 | `MARKET_WIDTHS`, `ADD_UPS`, `SHADES`, `EXPORT_PAIRS` | the bulk export's policy: the Bloomberg widths, the mid shades, and which pairs each channel publishes — edited on the **Vol bulk processing** tab, not here |
 | `HOLIDAYS` | holiday dates no rule derives: `country, date, remove` |
 | `CONVENTIONS` | a pair's quoting conventions where they differ from the market's: `pair, premium, atmf beyond, delta, fit cutoff` |
-| `CROSS_DEPENDENCE` | how a cross's legs depend on each other beyond the correlation, for the smile its legs imply: `pair, tenor, vol vol corr, corr vol, note`. See *Cross triangle* under Analysis |
+| `CROSS_DEPENDENCE` | how a cross's legs depend on each other beyond the correlation, for the smile its legs imply: `pair, tenor, vol vol corr, corr vol, corr spot corr, note`. See *Cross triangle* under Analysis |
 
 Each is an ordinary table with a header row. A row whose first cell starts
 with `#` is a note and is skipped, wherever it sits — the tabs ship with the
@@ -1309,13 +1309,24 @@ and tenor, on the workbook's `CROSS_DEPENDENCE` tab (Config window):
   own fly already says. A risk-off cross like AUDJPY sits near 1.
 * **corr vol** (0 to 1) — how much the correlation itself moves over the
   option's life, e.g. `0.1` for 0.1 either side.
+* **corr spot corr** (−1 to 1) — the correlation between how the legs'
+  correlation moves and how **the cross** moves, the same kind of number history
+  measures (see *Marking from history*). The first two are fly inputs: neither
+  cares which way the cross goes, so on their own the cross's risk reversal is
+  just its legs' skews added up, and on most crosses that is short of the
+  market. Negative means the correlation rises as the cross falls — the
+  risk-off cross — and it leans the corr vol that way: a product cross like
+  AUDJPY gets a more negative RR, a ratio cross like EURGBP a more positive one.
+  The fly barely moves (a few hundredths of a vol point). It **needs a corr vol**
+  to lean; with none it moves nothing and the row says so. The model can carry
+  at most ±0.80 (above that it prices ±0.80 and says so). Blank is none.
 
 Between the tenors you mark, each is a straight line in time; before the first
 and after the last it stays flat. The ATM does **not** move when you mark them —
 the copula's correlation is re-solved to hold it — only the wings do. The
 **dependence** column shows what is marked, **copula ρ** the correlation the
 copula ended up at, and hovering a **tri** cell shows the Gaussian copula's
-number beside it.
+number beside it. In **dependence**, σρ is the corr vol and ρS the corr spot corr.
 
 **implied vol-vol** is the number to mark against: the vol-vol correlation at
 which the legs give your 25-delta fly. **Do not start from 0** — zero means the
@@ -1326,11 +1337,21 @@ something the legs do not carry). Delete a cross's rows to go back to the
 Gaussian copula exactly. The same marks reach **Fill from the legs** on the Vol
 marking screen.
 
+**implied corr spot** does the same for the risk reversal: the corr spot corr at
+which the legs give your 25-delta RR, holding the vol vol corr and corr vol you
+marked. It is only searched where a corr vol is marked. Mark the fly first
+(vol vol corr, corr vol), then the RR (corr spot corr): the lean hardly touches
+the fly, so the two steps do not undo each other. *none* means even a full lean
+does not reach your RR at that corr vol; hover it for how far the legs go.
+
 **Marking from history.** Under `CROSS_DEPENDENCE` in the Config window,
 *Suggest from the historical book* measures a cross per tenor: the legs'
 vol-vol correlation and correlation vol (as on the correlation card), the
 vol-vol correlation your marked fly implies at that correlation vol, and the
-**premium** between them. Pick where the premium comes from (it starts on
+**premium** between them. It does the same for the risk reversal: the
+**corr spot corr** measured, the one your marked 25-delta RR implies at the
+suggested vol vol corr and corr vol, and its premium. The premium source you
+pick applies to both. Pick where the premium comes from (it starts on
 **none**):
 
 * **its own marked fly** — the suggestion gives back the fly you have, at a
@@ -1352,6 +1373,14 @@ vol-vol correlation your marked fly implies at that correlation vol, and the
   days by default, which reaches about 8M. Type a longer lookback in the *corr
   vol over … days* box to reach further; it cannot use more history than the
   historical workbook holds, and the note says how many days it found.
+* **corr spot corr** is measured day by day: each day the correlation the
+  three at-the-money vols imply (the two legs' and the cross's, at the tenor,
+  by the same triangle the book uses), and how its daily change lines up with
+  the cross's daily return, over a year. It needs **the cross's own sheet** with
+  its ATM on it — an illiquid cross without one has none measured, and its
+  suggestion comes from its RR's premium or a lender's. The quotes' own noise
+  is taken out (it can only shrink the number). Under *its own marked fly* it has
+  no suggestion where the tenor has no corr vol to lean.
 * **vol vol corr** under *its own marked fly* has none where no vol-vol
   correlation from −1 to 1 gives your fly (typically the long end of a
   low-correlation cross — the rest of that fly is correlation vol), or where no
@@ -1368,7 +1397,9 @@ with that in the note. A vol-vol correlation filled under the cross's own
 premium does **not** give back that tenor's fly: where it was blank, no vol-vol
 correlation could. Untick it to see only what each tenor supports on its own.
 
-**Suggest into the tab** replaces that cross's rows in the boxes; nothing
+**Suggest into the tab** replaces that cross's rows in the boxes, all three
+values, keeping a corr spot corr you typed only at a tenor history suggests
+none for; nothing
 applies until you press **Apply**, and **Fill from the legs** then turns them
 into quotes. `volkit analysis EURJPY --history vol_history.xlsx --dependence
 EURGBP` prints the same table (filled cells marked `~`); `--corr-vol-lookback

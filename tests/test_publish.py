@@ -1130,6 +1130,32 @@ class TestOverlayOnTheService(unittest.TestCase):
         with self.assertRaises(publish.PublishError):
             svc.export_overlay({"action": "revert"})
 
+    def test_an_overnight_row_lands_on_a_config_1d(self):
+        # The desk's CONFIG lists the front of the curve as ``1d``; the
+        # overlay reads ``1d`` and ``O/N`` as one pillar.  The Input card said
+        # "partly" and Overwrite book skipped the row, because the overlay
+        # held that no book ever has an O/N row.
+        from openpyxl import load_workbook
+        wb = self.tmp / "with_1d.xlsx"
+        shutil.copy(self.wb, wb)
+        book = load_workbook(wb)
+        book["CONFIG"].cell(row=book["CONFIG"].max_row + 1, column=2, value="1d")
+        book.save(wb)
+        svc = self.service()
+        svc.path = str(wb)
+        svc.reload(discard=True)
+        self.assertIn("1d", svc.book["USDJPY"].config_tenors)
+        svc.export_overlay({"action": "load", "path": "on.csv",
+                            "text": "pair,tenor,atm\nUSDJPY,1d,12.0\nUSDJPY,1W,10.5\n"})
+        per = {e["pair"]: e for e in svc.overlay_state()["per_pair"]}
+        self.assertEqual(per["USDJPY"]["tenors_in_book"], ["O/N", "1W"])
+        self.assertEqual(overlay.book_tenor(svc.book, "USDJPY", "O/N"), "1d")
+        out = svc.export_overlay({"action": "apply", "pairs": ["USDJPY"]})
+        self.assertEqual(out["applied"], ["USDJPY O/N", "USDJPY 1W"])
+        # Under the book's own spelling, so the curve and the marking screen see it.
+        self.assertAlmostEqual(svc.book["USDJPY"].atm.tenor_overwrites["1d"], 0.12)
+        svc.export_overlay({"action": "revert"})
+
     def test_a_reload_that_discards_the_session_drops_the_applied_overlay(self):
         svc = self.service()
         svc.export_overlay({"action": "load", "text": OVERLAY, "path": "run.csv"})

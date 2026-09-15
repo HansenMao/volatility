@@ -55,7 +55,7 @@ from pathlib import Path
 
 from . import paths
 from .kace import canonical_tenor, pillar_years
-from .timeutil import tenor_to_years
+from .timeutil import tenor_key, tenor_to_years
 
 #: The five quotes a row carries, in the order every channel writes them.
 FIELDS = ("atm", "rr25", "rr10", "bf25", "bf10")
@@ -337,14 +337,33 @@ def split_by_book(overlay: Overlay, book) -> tuple[list[OverlayRow], list[Overla
     return inside, outside
 
 
-def _book_lists(book, pair: str, tenor: str) -> bool:
-    if tenor == "O/N":
-        return False                     # no sheet quotes an O/N row; it is a curve point
+#: The spellings CONFIG may give the overnight tenor.  The overlay reads
+#: ``1d`` as ``O/N`` (``kace.canonical_tenor``), and a desk whose CONFIG lists
+#: the front of the curve as ``1d`` holds that row: it is the overnight.
+OVERNIGHT_KEYS = frozenset({"O/N", "1D"})
+
+
+def book_tenor(book, pair: str, tenor: str) -> str | None:
+    """The book's own spelling of an overlay tenor, or ``None`` if it has none.
+
+    An overwrite is keyed by the spelling the curve and the marking screen
+    use, so an ``O/N`` row lands on a CONFIG ``1d`` and not beside it.  A book
+    with no CONFIG tenor list governs nothing and takes the tenor as given --
+    except O/N, which such a book has no row for.
+    """
     surface = book[pair]
+    listed = surface.config_tenors
+    if tenor == "O/N":
+        return next((t for t in listed if tenor_key(t) in OVERNIGHT_KEYS), None)
     try:
-        return surface.lists_tenor(tenor)
+        return next((t for t in listed if tenor_key(t) == tenor_key(tenor)),
+                    None if listed else tenor)
     except Exception:  # noqa: BLE001 - a tenor the surface cannot place is outside
-        return False
+        return None
+
+
+def _book_lists(book, pair: str, tenor: str) -> bool:
+    return book_tenor(book, pair, tenor) is not None
 
 
 def overflow_report(overlay: Overlay, book) -> dict:
@@ -387,12 +406,13 @@ def apply_to_book(overlay: Overlay, book, pairs=None) -> dict:
     touched: set[str] = set()
     for row in sorted(inside, key=lambda r: (r.pair, pillar_years(r.tenor))):
         surface = book[row.pair]
+        tenor = book_tenor(book, row.pair, row.tenor) or row.tenor
         try:
             if "atm" in row.values:
-                surface.atm.overwrite_tenor(row.tenor, row.values["atm"] / 100.0)
+                surface.atm.overwrite_tenor(tenor, row.values["atm"] / 100.0)
             for name, fld in WING_FIELDS.items():
                 if name in row.values:
-                    surface.overwrite_quote(row.tenor, fld, row.values[name] / 100.0)
+                    surface.overwrite_quote(tenor, fld, row.values[name] / 100.0)
             touched.add(row.pair)
             applied.append(f"{row.pair} {row.tenor}")
         except (TypeError, ValueError) as exc:

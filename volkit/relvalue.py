@@ -696,7 +696,7 @@ def _realized_dependence(book, pair: str, history, names, *, premium: str, metho
     for tenor in names:
         t = surface.tenor_years(tenor)
         rho = float(np.asarray(curve.correlation(t)))
-        m = measure_dependence(history, leg_a, leg_b, tenor, t, basis=basis)
+        m = measure_dependence(history, leg_a, leg_b, tenor, t, basis=basis, pair=pair)
         cap = max(1.0 - abs(rho) - 1e-6, 0.0)
         cv = min(m.corr_vol or 0.0, cap)
         add = 0.0
@@ -715,7 +715,15 @@ def _realized_dependence(book, pair: str, history, names, *, premium: str, metho
             notes.append(f"{tenor}: the vol-vol correlation was not measured "
                          f"({'; '.join(m.notes) or 'no reason given'}), so the triangle there "
                          f"carries the measured correlation vol alone")
-        dep = moments.Dependence(vv, cv)
+        # The lean is measured off the cross's own quotes, plus the lender's
+        # premium on it where the lender has one; without a correlation vol it
+        # has nothing to lean and is left out.
+        cs = 0.0
+        if m.corr_spot is not None and cv > 0.0:
+            lent = lend.get(tenor.upper()) if premium != PREMIUM_NONE else None
+            extra = 0.0 if lent is None or lent.corr_spot_premium is None else lent.corr_spot_premium
+            cs = min(max(m.corr_spot + extra, -1.0), 1.0)
+        dep = moments.Dependence(vv, cv, cs)
         deps[tenor] = dep if dep.active else None
         bands[tenor] = m.band(dep, rho) if dep.active else ()
         sources[tenor] = (
@@ -724,7 +732,10 @@ def _realized_dependence(book, pair: str, history, names, *, premium: str, metho
                f"{m.vol_vol:+.2f} (se {m.vol_vol_se:.2f})")
             + f", {said}, correlation vol "
             + ("not measured" if m.corr_vol is None else
-               f"{cv:.2f} (se {m.corr_vol_se:.2f})"))
+               f"{cv:.2f} (se {m.corr_vol_se:.2f})")
+            + ", corr spot "
+            + ("not measured" if m.corr_spot is None else
+               f"{cs:+.2f} (se {m.corr_spot_se:.2f})"))
     return deps, bands, sources, notes
 
 

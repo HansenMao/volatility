@@ -68,8 +68,12 @@ SHEETS: dict[str, str] = {
     "CROSS_DEPENDENCE": "how a cross's legs depend on each other beyond its correlation, "
                         "per tenor, for the smile its legs imply: pair, tenor, vol vol corr "
                         "(the correlation of the legs' variance regimes, -1 to 1), corr vol "
-                        "(the volatility of the correlation, 0 to 1), note -- a cross with "
-                        "no row is the Gaussian copula",
+                        "(the volatility of the correlation, 0 to 1), corr spot corr (the "
+                        "correlation between the correlation's moves and the cross's return, "
+                        "-1 to 1, measured off history: negative is a correlation that rises "
+                        "as the cross falls, which is the cross's risk reversal beyond its "
+                        "legs; it leans the corr vol), note -- a cross with no row is the "
+                        "Gaussian copula",
     "Vega Weights": "how far each tenor moves when the anchor moves one vol point: "
                     "tenor, default, and a column per pair that needs its own",
     # The export policy tables (claude/publishing-channels-design.md).  In the
@@ -124,7 +128,8 @@ EDITABLE: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "CONVENTIONS": (("pair", "premium", "atmf beyond", "delta", "fit cutoff"), ("pair",)),
     "WING_RATIOS": (("pair", "tenor", "st", "rr"), ("pair", "tenor")),
     "CROSS_CORR": (("pair", "tenor", "correlation", "note"), ("pair", "tenor")),
-    "CROSS_DEPENDENCE": (("pair", "tenor", "vol vol corr", "corr vol", "note"), ("pair", "tenor")),
+    "CROSS_DEPENDENCE": (("pair", "tenor", "vol vol corr", "corr vol", "corr spot corr", "note"),
+                         ("pair", "tenor")),
     "Vega Weights": (("tenor", "default", "note"), ("tenor", "default")),
     "MARKET_WIDTHS": (("tenor", "note"), ("tenor",)),
     "ADD_UPS": (("pair", "overnight", "other", "note"), ("pair",)),

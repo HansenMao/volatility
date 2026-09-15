@@ -50,6 +50,9 @@ seeded with the desk's eight CNH crosses by the same command as the rest.
 
 `CROSS_DEPENDENCE` (added 2026-09-15) is **the book's**, edited in the Config
 window: `pair`, `tenor`, `vol vol corr` (`[-1, 1]`), `corr vol` (`[0, 1)`),
+`corr spot corr` (`[-1, 1]`, added 2026-09-15 for the cross RR -- the
+correlation between the correlation's moves and the cross's return, measured by
+`history.realized_corr_spot`; a tab without the column reads it as blank),
 `note`. It marks how a cross's legs depend on each other beyond the
 correlation, for the smile its legs imply (the Analysis triangle and the
 marking screen's fill from the legs; `claude/screen-analysis.md`). Read by

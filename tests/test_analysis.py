@@ -448,6 +448,40 @@ class TestAnalysis(unittest.TestCase):
         self.assertAlmostEqual(q.copula_rho, r.copula_rho, places=12)
         self.assertAlmostEqual(q.quotes["rr_25"], r.triangle["rr25"], places=12)
 
+    def test_a_marked_corr_spot_moves_the_triangle_risk_reversal_and_backs_itself_out(self):
+        """The correlation-spot correlation reaches the triangle and the implied
+        quotes the way the other two do, moves the risk reversal the Gaussian
+        copula and the symmetric dependence leave at the legs' skews, and the
+        row backs out the one the cross's marked risk reversal asks for."""
+        def book(lean):
+            made = Book.from_excel(BOOK, ASOF, config={"CROSS_DEPENDENCE": [
+                {"pair": "AUDJPY", "tenor": "3m", "vol vol corr": 0.5, "corr vol": 0.15,
+                 "corr spot corr": lean}]}).load_all(["AUDJPY"])
+            made.feed = self.book.feed
+            return made
+
+        plain = analytics.triangle_table(book(None), "AUDJPY", cut="NY", tenors=["3m"],
+                                         with_noise=False)[0]
+        leaned = book(-0.6)
+        r = analytics.triangle_table(leaned, "AUDJPY", cut="NY", tenors=["3m"],
+                                     with_noise=False)[0]
+        self.assertEqual((plain.corr_spot, r.corr_spot), (0.0, -0.6))
+        self.assertAlmostEqual(r.triangle["atm"], plain.triangle["atm"], delta=2e-6)
+        self.assertLess(r.triangle["rr25"], plain.triangle["rr25"] - 2e-3)
+        self.assertLess(abs(r.triangle["fly25"] - plain.triangle["fly25"]), 5e-4)
+        # The marked risk reversal asks for the same lean from either row.
+        for row in (plain, r):
+            self.assertIsNotNone(row.implied_corr_spot, row.implied_corr_spot_note)
+            self.assertLess(row.implied_corr_spot, 0.0)
+        self.assertAlmostEqual(plain.implied_corr_spot, r.implied_corr_spot, delta=0.03)
+        q = analytics.implied_cross_quotes(leaned, "AUDJPY", cut="NY", tenors=["3m"])[0]
+        self.assertEqual(q.corr_spot, -0.6)
+        self.assertAlmostEqual(q.quotes["rr_25"], r.triangle["rr25"], places=12)
+        # No correlation vol marked: nothing to lean, so nothing is searched.
+        off = analytics.triangle_table(self.book, "AUDJPY", cut="NY", tenors=["3m"],
+                                       with_noise=False)[0]
+        self.assertEqual((off.implied_corr_spot, off.implied_corr_spot_note), (None, ""))
+
     def test_the_triangle_backs_out_the_vol_vol_correlation_to_mark_against(self):
         r = analytics.triangle_table(self.book, "EURJPY", cut="NY", tenors=["3m"],
                                      with_noise=False)[0]
@@ -2034,8 +2068,78 @@ def _simulated_legs(rho_path, *, vol_vol=0.7, days=750, seed=3):
     return a, b
 
 
+def _planted_corr_spot(corr_spot, *, days=500, noise=0.0, seed=1):
+    """Two legs and their product cross whose correlation moves with the cross
+    at ``corr_spot``, with the three at-the-money volatilities the variance
+    triangle gives and ``noise`` of quote noise on each."""
+    from volkit.history import PairHistory
+    rng = np.random.default_rng(seed)
+    dates, d = [], date(2023, 1, 2)
+    while len(dates) < days:
+        if d.weekday() < 5:
+            dates.append(d)
+        d += timedelta(days=1)
+    va, vb, dt = 0.08, 0.09, 1.0 / 252.0
+    rho = np.empty(days)
+    rho[0] = 0.3
+    ra, rb = np.zeros(days), np.zeros(days)
+    for i in range(1, days):
+        r = rho[i - 1]
+        z1, z2, z3 = rng.standard_normal(3)
+        ra[i] = va * math.sqrt(dt) * z1
+        rb[i] = vb * math.sqrt(dt) * (r * z1 + math.sqrt(1.0 - r * r) * z2)
+        score = (ra[i] + rb[i]) / math.sqrt((va * va + vb * vb + 2.0 * r * va * vb) * dt)
+        shock = corr_spot * score + math.sqrt(1.0 - corr_spot ** 2) * z3
+        rho[i] = min(max(r + 0.02 * shock - 0.02 * (r - 0.3), -0.9), 0.9)
+    vc = np.sqrt(va * va + vb * vb + 2.0 * rho * va * vb)
+    sa, sb = 1.1 * np.exp(np.cumsum(ra)), 140.0 * np.exp(np.cumsum(rb))
+
+    def quoted(v):
+        return {"3M": v + noise * rng.standard_normal(days)}
+    return (PairHistory("EURUSD", dates=list(dates), spot=sa, atm=quoted(np.full(days, va))),
+            PairHistory("USDJPY", dates=list(dates), spot=sb, atm=quoted(np.full(days, vb))),
+            PairHistory("EURJPY", dates=list(dates), spot=sa * sb, atm=quoted(vc)))
+
+
 class TestRealizedDependence(unittest.TestCase):
     """What a cross's legs' history says about the dependence CROSS_DEPENDENCE marks."""
+
+    def test_the_corr_spot_is_the_implied_correlation_moving_with_the_cross(self):
+        """A correlation planted to move with the cross comes back, on the three
+        quoted ATMs and the legs' spots alone."""
+        for planted in (-0.4, 0.0, 0.6):
+            got = history.realized_corr_spot(*_planted_corr_spot(planted), (1, 1), "3M",
+                                             lookback_days=5000)
+            self.assertLess(abs(got.corr_spot - planted), 3.0 * got.corr_spot_se + 0.02,
+                            msg=(planted, got))
+            self.assertEqual((got.tenor, got.cross, got.observations), ("3M", "EURJPY", 499))
+            self.assertLess(got.corr_spot_se, 0.06)
+
+    def test_the_quotes_own_noise_is_taken_out_of_the_corr_spot(self):
+        """Noise in three quoted volatilities is noise in the correlation they
+        imply, which shrinks its correlation with anything; the measure scales
+        it back by what the change's first autocovariance says the noise was."""
+        clean = history.realized_corr_spot(*_planted_corr_spot(-0.5), (1, 1), "3M",
+                                           lookback_days=5000)
+        noisy = history.realized_corr_spot(*_planted_corr_spot(-0.5, noise=0.0005), (1, 1),
+                                           "3M", lookback_days=5000)
+        self.assertLess(noisy.raw, -0.1)
+        self.assertGreater(noisy.raw, clean.raw)          # shrunk toward zero
+        self.assertGreater(noisy.noise_share, 0.2)
+        self.assertLess(abs(noisy.corr_spot - clean.corr_spot),
+                        abs(noisy.raw - clean.raw))        # and brought back
+        self.assertGreater(noisy.corr_spot_se, clean.corr_spot_se)
+
+    def test_the_corr_spot_needs_the_cross_quoted_at_the_money(self):
+        a, b, c = _planted_corr_spot(0.0, days=60)
+        c.atm = {}
+        with self.assertRaises(history.HistoryError) as ctx:
+            history.realized_corr_spot(a, b, c, (1, 1), "3M")
+        self.assertIn("EURJPY", str(ctx.exception))
+        a, b, c = _planted_corr_spot(0.0, days=60)
+        got = history.realized_corr_spot(a, b, c, (1, 1), "1M")
+        self.assertEqual(got.tenor, "3M")
+        self.assertTrue(any("3M was used" in w for w in got.warnings), got.warnings)
 
     def test_the_vol_vol_correlation_is_the_correlation_of_the_legs_atm_changes(self):
         a, b = _simulated_legs(0.3, vol_vol=0.7)
@@ -2166,6 +2270,11 @@ class TestDependenceFromHistory(unittest.TestCase):
             self.assertIsNotNone(r.dependence)
             self.assertIsNotNone(r.dependence.vol_vol, r.dependence.notes)
             self.assertIsNotNone(r.dependence.corr_vol, r.dependence.notes)
+            # The sample's EURJPY sheet quotes its ATM, so the lean is measured
+            # too -- and its correlation never moves, so near zero.
+            self.assertIsNotNone(r.dependence.corr_spot, r.dependence.notes)
+            self.assertLess(abs(r.dependence.corr_spot), 3.0 * r.dependence.corr_spot_se)
+            self.assertEqual(r.dependence.corr_spot_tenor, r.tenor.upper())
         plain = analytics.correlation_table(self.book, "EURJPY", None, tenors=["1m"]).rows[0]
         self.assertIsNone(plain.dependence)
 
@@ -2178,12 +2287,48 @@ class TestDependenceFromHistory(unittest.TestCase):
         self.assertAlmostEqual(r.suggested_vol_vol, r.implied_vol_vol, places=12)
         book = Book.from_excel(BOOK, ASOF, config={"CROSS_DEPENDENCE": [
             {"pair": "EURJPY", "tenor": "3m", "vol vol corr": r.suggested_vol_vol,
-             "corr vol": r.suggested_corr_vol}]}).load_all(["EURJPY"])
+             "corr vol": r.suggested_corr_vol,
+             "corr spot corr": r.suggested_corr_spot}]}).load_all(["EURJPY"])
         book.feed = self.book.feed
         tri = analytics.triangle_table(book, "EURJPY", cut="NY", tenors=["3m"],
                                        with_noise=False, implied_vol_vol=False)[0]
         # The implied search runs on the coarser grid, and answers to 0.005.
         self.assertAlmostEqual(tri.triangle["fly25"], tri.marked["fly25"], delta=5e-5)
+
+    def test_the_corr_spot_is_suggested_like_the_vol_vol_correlation(self):
+        """Measured, implied by the marked risk reversal, the premium between
+        them, and measured plus the premium from the table's source.  Held at
+        a correlation vol large enough to lean, the own premium gives back the
+        marked risk reversal and, solved again at that lean, the marked fly."""
+        surface = self.book["EURJPY"]
+        t = surface.tenor_years("3m")
+        m = analytics.measure_dependence(self.history, "EURUSD", "USDJPY", "3m", t,
+                                         pair="EURJPY")
+        self.assertIsNotNone(m.corr_spot, m.notes)
+        rr = analytics.triangle_table(self.book, "EURJPY", cut="NY", tenors=["3m"],
+                                      with_noise=False, implied_vol_vol=False)[0].marked["rr25"]
+        common = dict(corr_vol=0.15, vol_vol=0.5, target_rr=rr)
+        own = analytics._suggest_corr_spot(self.book, "EURJPY", "3m", t, m, "own", None,
+                                           None, "NY", **common)
+        self.assertIsNotNone(own["implied_corr_spot"], own["implied_corr_spot_note"])
+        self.assertAlmostEqual(own["corr_spot_premium"], own["implied_corr_spot"] - m.corr_spot,
+                               places=12)
+        self.assertAlmostEqual(own["suggested_corr_spot"], own["implied_corr_spot"], places=12)
+        none = analytics._suggest_corr_spot(self.book, "EURJPY", "3m", t, m, "none", None,
+                                            None, "NY", **common)
+        self.assertEqual(none["suggested_corr_spot"], m.corr_spot)
+        lender = analytics.DependenceRow(tenor="3m", t=t, rho=0.4, measured=m,
+                                         corr_spot_premium=-0.2)
+        lent = analytics._suggest_corr_spot(self.book, "EURJPY", "3m", t, m, "EURGBP", lender,
+                                            None, "NY", **common)
+        self.assertAlmostEqual(lent["suggested_corr_spot"], m.corr_spot - 0.2, places=12)
+        flat = analytics._suggest_corr_spot(self.book, "EURJPY", "3m", t, m, "own", None,
+                                            None, "NY", corr_vol=0.0, vol_vol=0.5, target_rr=rr)
+        self.assertIsNone(flat["suggested_corr_spot"])
+        self.assertIn("leans the correlation vol", flat["corr_spot_reason"])
+        # The band moves the lean by its own standard error where it can lean.
+        band = m.band(moments.Dependence(0.5, 0.15, -0.3), rho=0.4)
+        self.assertIn(moments.Dependence(0.5, 0.15, -0.3 - m.corr_spot_se), band)
 
     def test_the_own_premium_is_solved_at_the_correlation_vol_the_book_will_read(self):
         """1W has no measured correlation vol (a window that short holds too few

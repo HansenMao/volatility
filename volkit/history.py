@@ -1300,3 +1300,133 @@ def realized_corr_vol(hist_a: PairHistory, hist_b: PairHistory, window_days: flo
                            raw_sd=math.sqrt(raw_var), noise_sd=math.sqrt(noise_var),
                            corr_vol=corr_vol, corr_vol_se=float(corr_vol_se), basis=used,
                            warnings=tuple(warnings))
+
+
+#: The most a quote-noise correction may scale a measured correlation-spot
+#: correlation up by (:func:`realized_corr_spot`).  Past it the noise is three
+#: quarters of what moved, and what is left is not worth amplifying.
+CORR_SPOT_MAX_CORRECTION = 2.0
+
+
+@dataclass(frozen=True)
+class RealizedCorrSpot:
+    """How the cross's implied correlation moved with the cross."""
+
+    legs: tuple[str, str]
+    cross: str
+    tenor: str                       # the ATM tenor all three sheets were read on
+    start: date
+    end: date
+    observations: int
+    mean_rho: float                  # the implied correlation's average over the window
+    raw: float                       # corr(d rho, cross return) as measured
+    noise_share: float               # of d rho's variance, what the quotes' own noise is
+    corr_spot: float                 # raw, with the quote noise taken out
+    corr_spot_se: float
+    warnings: tuple[str, ...] = ()
+
+
+def realized_corr_spot(hist_a: PairHistory, hist_b: PairHistory, hist_cross: PairHistory,
+                       coefficients: tuple[int, int], tenor: str,
+                       lookback_days: float = DYNAMICS_DAYS, *, end: date | None = None,
+                       min_observations: int = 20) -> RealizedCorrSpot:
+    """The correlation-spot correlation: daily changes in the implied correlation
+    against the cross's own daily return.
+
+    What ``moments.Dependence.corr_spot`` is marked as, measured the way
+    :func:`realized_vol_vol` measures its half -- off quoted volatilities,
+    daily, over :data:`DYNAMICS_DAYS`.  Each day the cross's correlation is
+    implied from the three at-the-money volatilities by the variance triangle
+    the book is built on, ``(sc^2 - sa^2 - sb^2) / (2 ca cb sa sb)``, and its
+    daily change is correlated, zero-mean, with ``ca ra + cb rb`` -- the
+    cross's log return out of its legs' spots, which is the cross's own return
+    to the last digit and needs no cross spot column.
+
+    **Not** the rolling-window correlation :func:`realized_corr_vol` is
+    measured on.  A window's correlation against the window's cross return is
+    the same quantity in principle, but two years hold two dozen independent
+    one-month windows: simulated with a known lean it came back at half size
+    even on thirty years and did not come back at all on two.  Daily implied
+    changes hold five hundred observations.  What that costs is stated rather
+    than hidden: they are the *market's* correlation moving, which carries
+    whatever the smile does to at-the-money volatility as spot moves along it.
+
+    Three quoted volatilities make a noisy correlation, and noise in a level
+    is noise in its change -- unrelated to spot, so it only shrinks the
+    correlation.  White noise in the level puts ``-var/2`` into the change's
+    first autocovariance, so ``-2 * autocovariance`` is taken out of the
+    change's variance and the correlation scaled back up by what that leaves,
+    at most :data:`CORR_SPOT_MAX_CORRECTION`, and ``raw`` keeps the number as
+    measured.  A tenor not quoted on all three sheets is read at the nearest
+    tenor that is, and named.
+    """
+    ca, cb = coefficients
+    legs = (hist_a.pair, hist_b.pair)
+    names = f"{legs[0]}/{legs[1]} and {hist_cross.pair}"
+    key = str(tenor).upper()
+    warnings: list[str] = []
+    sheets = (hist_a, hist_b, hist_cross)
+    for h in sheets:
+        if not h.atm:
+            raise HistoryError(
+                f"{h.pair}'s sheet quotes no at-the-money volatility at any tenor, so the "
+                f"correlation {names} imply cannot be read off it")
+        if not h.spot.size and h is not hist_cross:
+            raise HistoryError(f"{h.pair}: the sheet has no spot column, so the cross's return "
+                               f"cannot be built from it")
+    common_tenors = set(hist_a.atm) & set(hist_b.atm) & set(hist_cross.atm)
+    used = key if key in common_tenors else nearest_quoted_tenor(common_tenors, key)
+    if used is None:
+        raise HistoryError(f"no tenor is quoted at the money on all of {names}, so no implied "
+                           f"correlation can be read")
+    if used != key:
+        warnings.append(f"{key} is not quoted at the money on all three sheets; {used} was used")
+    last = end or min(h.dates[-1] for h in sheets)
+    rows = []
+    for h, with_spot in ((hist_a, True), (hist_b, True), (hist_cross, False)):
+        i, j = h.window(lookback_days, last)
+        v = h.atm[used][i:j]
+        s = h.spot[i:j] if with_spot else np.ones(j - i)
+        ok = np.isfinite(v) & (v > 0) & np.isfinite(s) & (s > 0)
+        rows.append({d: (float(x), float(p)) for d, x, p, k in zip(h.dates[i:j], v, s, ok) if k})
+    common = sorted(set(rows[0]) & set(rows[1]) & set(rows[2]))
+    if len(common) < min_observations + 2:
+        raise HistoryError(
+            f"{names}: {len(common)} day(s) in the last {lookback_days:g} all three sheets quote "
+            f"a {used} at-the-money volatility and both legs a spot on; at least "
+            f"{min_observations + 2} are needed")
+    va = np.array([rows[0][d][0] for d in common])
+    vb = np.array([rows[1][d][0] for d in common])
+    vc = np.array([rows[2][d][0] for d in common])
+    rho = (vc * vc - va * va - vb * vb) / (2.0 * ca * cb * va * vb)
+    d_rho = np.diff(rho)
+    ret = (ca * np.diff(np.log([rows[0][d][1] for d in common]))
+           + cb * np.diff(np.log([rows[1][d][1] for d in common])))
+    gaps = [(b - a).days for a, b in zip(common[:-1], common[1:])]
+    if gaps and max(gaps) > 10:
+        warnings.append(f"the largest gap between the days all three sheets hold is {max(gaps)} "
+                        f"days; the series is not daily throughout the window")
+    sd, sr = float(np.sum(d_rho * d_rho)), float(np.sum(ret * ret))
+    if sd <= 0 or sr <= 0:
+        still = "the implied correlation" if sd <= 0 else f"{hist_cross.pair}"
+        raise HistoryError(f"{still} did not move over the window")
+    raw = max(-1.0, min(1.0, float(np.sum(d_rho * ret)) / math.sqrt(sd * sr)))
+    n = int(d_rho.size)
+    var = sd / n
+    noise = max(-2.0 * float(np.sum(d_rho[1:] * d_rho[:-1])) / (n - 1), 0.0)
+    share = min(noise / var, 1.0)
+    factor = 1.0 / math.sqrt(1.0 - share) if share < 1.0 else math.inf
+    if factor > CORR_SPOT_MAX_CORRECTION:
+        warnings.append(
+            f"the quotes' own noise is {share:.0%} of how much the implied correlation moved "
+            f"day to day; the correction for it is held at x{CORR_SPOT_MAX_CORRECTION:g}")
+        factor = CORR_SPOT_MAX_CORRECTION
+    value = max(-1.0, min(1.0, raw * factor))
+    se = (1.0 - raw * raw) / math.sqrt(n) * factor
+    if abs(value) < se:
+        warnings.append(f"the correlation-spot correlation of {value:+.3f} is inside one "
+                        f"standard error ({se:.3f}) of zero on {n} observations")
+    return RealizedCorrSpot(legs=legs, cross=hist_cross.pair, tenor=used, start=common[0],
+                            end=common[-1], observations=n, mean_rho=float(np.mean(rho)),
+                            raw=raw, noise_share=share, corr_spot=value, corr_spot_se=float(se),
+                            warnings=tuple(warnings))

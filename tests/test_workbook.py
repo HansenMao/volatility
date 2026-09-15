@@ -2477,6 +2477,26 @@ class TestCrossDependenceTab(unittest.TestCase):
                            "corr vol": None}])
         self.assertIsNone(book.dependence_at("AUDJPY", 0.5))
 
+    def test_the_correlation_spot_correlation_is_a_third_ladder(self):
+        """The input that leans the correlation vol with the cross, for its risk
+        reversal: its own ladder like the other two, and a tab written before
+        the column existed reads as none of it (``ROWS`` has no such key)."""
+        book = self.book(self.ROWS)
+        self.assertEqual(book.dependence_at("AUDJPY", 3.0).corr_spot, 0.0)
+        rows = [dict(self.ROWS[0], **{"corr spot corr": -0.2}),
+                dict(self.ROWS[1], **{"corr spot corr": -0.6})]
+        book = self.book(rows)
+        t1, t2 = book.tenor_years("AUDJPY", "1m"), book.tenor_years("AUDJPY", "1y")
+        self.assertEqual(book.dependence_at("AUDJPY", 3.0), moments.Dependence(0.8, 0.1, -0.6))
+        self.assertAlmostEqual(book.dependence_at("AUDJPY", 0.5 * (t1 + t2)).corr_spot, -0.4,
+                               places=12)
+        # Marked on its own, it is a dependence -- one that leans nothing, and
+        # the triangle says so rather than the tab refusing it.
+        book = self.book([{"pair": "AUDJPY", "tenor": "3m", "corr spot corr": -0.5}])
+        self.assertEqual(book.dependence_at("AUDJPY", 0.5), moments.Dependence(None, 0.0, -0.5))
+        from volkit import configsheets
+        self.assertIn("corr spot corr", configsheets.EDITABLE["CROSS_DEPENDENCE"][0])
+
     def test_a_row_the_tab_cannot_mean_is_refused_by_name(self):
         """A bad row is a warning naming the row, and no dependence at all --
         the wing ratios' rule, because a desk that wrote the tab meant it."""
@@ -2485,6 +2505,7 @@ class TestCrossDependenceTab(unittest.TestCase):
                 ({"pair": "AUDJPY", "tenor": "banana", "vol vol corr": 0.5}, "not a tenor"),
                 ({"pair": "AUDJPY", "tenor": "1m", "vol vol corr": 1.5}, "outside [-1, 1]"),
                 ({"pair": "AUDJPY", "tenor": "1m", "corr vol": 1.0}, "outside [0, 1)"),
+                ({"pair": "AUDJPY", "tenor": "1m", "corr spot corr": -1.5}, "corr spot corr"),
                 ({"pair": "AUDJPY", "tenor": "1M", "vol vol corr": 0.1}, "given twice")):
             rows = self.ROWS + [row] if words == "given twice" else [row]
             book = self.book(rows)

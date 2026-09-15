@@ -78,7 +78,7 @@ class Book:
     #: differently for it -- but read with the book so the marking screen and
     #: the command line share one answer about what a workbook says.
     vega_weights: VegaWeights = field(default_factory=VegaWeights)
-    #: The ``CROSS_DEPENDENCE`` tab, by cross: ``{TENOR: (vol_vol, corr_vol)}``
+    #: The ``CROSS_DEPENDENCE`` tab, by cross: ``{TENOR: (vol_vol, corr_vol, corr_spot)}``
     #: as typed.  Read once for the book like the wing ratios; placed on a
     #: cross's own calendar only when asked (:meth:`dependence_at`).
     cross_dependence: dict[str, dict[str, tuple]] = field(default_factory=dict)
@@ -297,14 +297,15 @@ class Book:
         between two rungs and flat outside them, the ``MarkedCorrelation``
         rule for the same reason -- a desk that stopped typing at 1Y meant the
         last rung to keep applying.  A blank correlation vol is none, and a
-        blank vol-vol correlation is no variance regimes.
+        blank vol-vol correlation is no variance regimes, and a blank
+        correlation-spot correlation is no lean.
         """
         from .moments import Dependence
 
         rows = self.cross_dependence.get(str(pair).upper())
         if not rows:
             return None
-        ladders: tuple[list, list] = ([], [])
+        ladders: tuple[list, list, list] = ([], [], [])
         for tenor, values in rows.items():
             years = self.tenor_years(pair, tenor)
             for ladder, value in zip(ladders, values):
@@ -317,8 +318,9 @@ class Book:
             ladder.sort()
             return float(np.interp(t, [p[0] for p in ladder], [p[1] for p in ladder]))
 
-        vol_vol, corr_vol = read(ladders[0]), read(ladders[1])
-        dependence = Dependence(vol_vol=vol_vol, corr_vol=corr_vol or 0.0)
+        vol_vol, corr_vol, corr_spot = (read(ladder) for ladder in ladders)
+        dependence = Dependence(vol_vol=vol_vol, corr_vol=corr_vol or 0.0,
+                                corr_spot=corr_spot or 0.0)
         return dependence if dependence.active else None
 
     def _default_calendars(self, path: str | Path | None) -> CalendarSet:

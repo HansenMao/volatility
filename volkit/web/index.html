@@ -1477,10 +1477,15 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
     what the market pays. Both can be marked per tenor on the workbook's
     <code>CROSS_DEPENDENCE</code> tab (Config window): <b>vol vol corr</b>, the correlation of the
     legs' variance regimes — how big each leg's regimes are is its own smile's kurtosis — and
-    <b>corr vol</b>, the volatility of the correlation. The copula's correlation is then re-solved so
-    the combined ATM stays where it was: the dependence moves the wings, never the level.
-    <b>Implied vol-vol</b> is the vol-vol correlation the marked fly asks for; <i>none</i> says how
-    far the legs reach instead. The change of measure between the legs' domestic currencies is still
+    <b>corr vol</b>, the volatility of the correlation. Neither adds a skew of its own, so the
+    cross's risk reversal would be only its legs' skews added up; the third input,
+    <b>corr spot corr</b>, is how the correlation moves with the cross (negative: it rises as the
+    cross falls, the risk-off cross) and leans the corr vol that way, which moves the risk reversal
+    and leaves the fly nearly where it was. It needs a corr vol to lean. The copula's correlation is
+    then re-solved so the combined ATM stays where it was: the dependence moves the wings, never
+    the level. <b>Implied vol-vol</b> is the vol-vol correlation the marked fly asks for, and
+    <b>implied corr spot</b> the correlation-spot correlation the marked 25-delta risk reversal asks
+    for; <i>none</i> says how far the legs reach instead. The change of measure between the legs' domestic currencies is still
     ignored; the <b>noise floor</b> is the same
     machinery run on each leg alone, where it should reproduce the input exactly. A difference
     smaller than the noise is not a difference.
@@ -3679,7 +3684,8 @@ async function corrLoad(){
     '<th title="marked less realized">Diff</th>'+
     '<th title="the window, in calendar days, and the returns in it">Window</th>'+
     '<th class="grp" title="the legs’ realized vol-vol correlation: daily changes in their log ATM over a year, ± one standard error">Vol-vol</th>'+
-    '<th title="how much the legs’ correlation moved between windows the tenor long, with what sampling alone scatters a window that short taken out, ± one standard error">Corr vol</th></tr></thead><tbody>'+
+    '<th title="how much the legs’ correlation moved between windows the tenor long, with what sampling alone scatters a window that short taken out, ± one standard error">Corr vol</th>'+
+    '<th title="how the correlation moves with the cross: daily changes in the correlation implied by the three ATMs against the cross’s return over a year, the quotes’ noise taken out, ± one standard error; needs the cross’s own sheet">Corr spot</th></tr></thead><tbody>'+
     r.rows.map(x=>{
       const d=x.dependence||{};
       const dn=(d.notes&&d.notes.length)?' title="'+esc(d.notes.join(' · '))+'"':'';
@@ -3693,9 +3699,10 @@ async function corrLoad(){
         '<td class="meta">'+num(x.window_days,0)+'d'+(x.observations?' · '+x.observations+' obs':'')+'</td>'+
         '<td class="grp"'+dn+'>'+(d.vol_vol==null?'—':sg(d.vol_vol)+'<span class="meta"> ±'+num(d.vol_vol_se,2)+'</span>')+'</td>'+
         '<td'+dn+'>'+(d.corr_vol==null?'—':num(d.corr_vol,3)+'<span class="meta"> ±'+num(d.corr_vol_se,2)+
-          (d.corr_vol_noise!=null?' · noise '+num(d.corr_vol_noise,2):'')+'</span>')+'</td></tr>';
+          (d.corr_vol_noise!=null?' · noise '+num(d.corr_vol_noise,2):'')+'</span>')+'</td>'+
+        '<td'+dn+'>'+(d.corr_spot==null?'—':sg(d.corr_spot)+'<span class="meta"> ±'+num(d.corr_spot_se,2)+'</span>')+'</td></tr>';
     }).join('')+'</tbody></table></div>'+
-    '<div class="meta" style="margin-top:4px">vol-vol and corr vol are what the legs&rsquo; history '+
+    '<div class="meta" style="margin-top:4px">vol-vol, corr vol and corr spot are what history '+
     'shows — physical, not priced. What to mark on <code>CROSS_DEPENDENCE</code> from them, with a '+
     'premium, is suggested in the Config window under that tab</div>';
 }
@@ -3863,10 +3870,11 @@ async function mxqRun(apply){
           ?'<td colspan="'+(F.length+1)+'" class="meta">'+esc(x.error)+'</td>'
           :'<td title="combined ATM '+vnum(x.atm)+' against the cross’s '+vnum(x.cross_atm)+
             '; legs '+x.leg_atm.map(vnum).join(' / ')+
-            ((x.vol_vol==null&&!x.corr_vol)?'; Gaussian copula':
+            ((x.vol_vol==null&&!x.corr_vol&&!x.corr_spot)?'; Gaussian copula':
               '; CROSS_DEPENDENCE vol-vol '+(x.vol_vol==null?'none':num(x.vol_vol,2))+
-              ', corr vol '+num(x.corr_vol,2)+', copula correlation '+num(x.copula_rho,3))+'">'+
-            num(x.rho,3)+((x.vol_vol==null&&!x.corr_vol)?'':' <span class="meta">dep</span>')+'</td>'+
+              ', corr vol '+num(x.corr_vol,2)+', corr spot '+num(x.corr_spot||0,2)+
+              ', copula correlation '+num(x.copula_rho,3))+'">'+
+            num(x.rho,3)+((x.vol_vol==null&&!x.corr_vol&&!x.corr_spot)?'':' <span class="meta">dep</span>')+'</td>'+
            F.map(f=>{
              const ratio=x.ratio_derived.indexOf(f)>=0;
              return '<td'+(ratio?' class="derived" title="derived by its ratio, so not written — tick the box above to write it"':'')+'>'+
@@ -5409,7 +5417,7 @@ function renderTriangle(d){
   const host=$('#antri'), rows=d.triangle;
   /* A dependence marked on CROSS_DEPENDENCE is what the legs were tied
      together with; the heading says so once, the rows say what it was. */
-  const marked=!!(rows&&rows.some(r=>r.vol_vol!=null||r.corr_vol));
+  const marked=!!(rows&&rows.some(r=>r.vol_vol!=null||r.corr_vol||r.corr_spot));
   $('#antrihead').textContent=rows&&rows.length?
     (d.pair+' vs '+d.legs.join(' and ')+' · coefficients ('+rows[0].coefficients.join(', ')+
      ') · correlation '+num(rows[0].rho,3)+
@@ -5419,9 +5427,10 @@ function renderTriangle(d){
   const LG=d.legs||['leg A','leg B'];
   let head='<th>Tenor</th><th>&rho;</th><th>implied &rho;</th>'+
     '<th class="grp">vega split</th><th>per &rho;</th>'+
-    '<th class="grp" title="the vol-vol correlation and correlation vol marked on CROSS_DEPENDENCE at this tenor">dependence</th>'+
+    '<th class="grp" title="the vol-vol correlation, correlation vol (&sigma;&rho;) and correlation-spot correlation (&rho;S) marked on CROSS_DEPENDENCE at this tenor">dependence</th>'+
     '<th title="the correlation the copula ran at: the curve&#39;s own, or the one holding the ATM under a marked dependence">copula &rho;</th>'+
-    '<th title="the vol-vol correlation at which the legs give the marked 25-delta butterfly, holding the marked correlation vol">implied vol-vol</th>';
+    '<th title="the vol-vol correlation at which the legs give the marked 25-delta butterfly, holding the marked correlation vol and correlation-spot correlation">implied vol-vol</th>'+
+    '<th title="the correlation-spot correlation at which the legs give the marked 25-delta risk reversal, holding the marked vol-vol correlation and correlation vol; searched only where a correlation vol is marked">implied corr spot</th>';
   AKEYS.forEach(k=>{head+='<th class="grp">'+k+' mark</th><th>'+k+' tri</th><th>diff</th>'});
   const body=rows.map(r=>{
     /* The vega split is a hedge ratio, not a volatility: it is printed plain,
@@ -5433,11 +5442,14 @@ function renderTriangle(d){
       anRaw(r.implied_correlation)+'</td>'+
       '<td class="grp" title="'+esc(LG[0]+' / '+LG[1]+' vega per unit of '+d.pair+' vega')+'">'+
       split+'</td><td>'+anSgn(r.rho_vega)+'</td>';
-    const dep=(r.vol_vol==null&&!r.corr_vol)?'—':
-      ((r.vol_vol==null?'—':anRaw(r.vol_vol,2))+(r.corr_vol?' · &sigma;&rho; '+r.corr_vol.toFixed(2):''));
+    const dep=(r.vol_vol==null&&!r.corr_vol&&!r.corr_spot)?'—':
+      ((r.vol_vol==null?'—':anRaw(r.vol_vol,2))+(r.corr_vol?' · &sigma;&rho; '+r.corr_vol.toFixed(2):'')+
+       (r.corr_spot?' · &rho;S '+(r.corr_spot>0?'+':'')+r.corr_spot.toFixed(2):''));
     const ivv=r.implied_vol_vol!=null?anRaw(r.implied_vol_vol,2):
       (r.implied_vol_vol_note?'<span class="pill warn" title="'+esc(r.implied_vol_vol_note)+'">none</span>':'—');
-    line+='<td class="grp">'+dep+'</td><td>'+anRaw(r.copula_rho)+'</td><td>'+ivv+'</td>';
+    const ics=r.implied_corr_spot!=null?anRaw(r.implied_corr_spot,2):
+      (r.implied_corr_spot_note?'<span class="pill warn" title="'+esc(r.implied_corr_spot_note)+'">none</span>':'—');
+    line+='<td class="grp">'+dep+'</td><td>'+anRaw(r.copula_rho)+'</td><td>'+ivv+'</td><td>'+ics+'</td>';
     AKEYS.forEach(k=>{
       const dv=r.difference[k], nf=r.noise[k], g=(r.gaussian||{})[k];
       const weak=(dv!=null&&nf!=null&&Math.abs(dv)<=nf);
@@ -6651,7 +6663,7 @@ function cfgDepPaint(i){
   /* A filled suggestion is shown as one, with where it came from on hover:
      it is the neighbours' number, not this tenor's. */
   const fl=(txt,how)=>how?'<span title="'+esc(how)+'"><i>~'+txt+'</i></span>':txt;
-  const anyFill=r.rows.some(x=>x.vol_vol_filled||x.corr_vol_filled);
+  const anyFill=r.rows.some(x=>x.vol_vol_filled||x.corr_vol_filled||x.corr_spot_filled);
   out.innerHTML='<div class="meta">'+esc(r.pair)+' off '+esc(r.legs.join(' / '))+' history · '+src+
     ' · corr vol over '+num(r.corr_vol_lookback,0)+' days'+(r.fill?' · gaps filled':'')+'</div>'+
     (r.unavailable?'<div class="msg bad">'+esc(r.unavailable)+'</div>':'')+
@@ -6661,12 +6673,19 @@ function cfgDepPaint(i){
     '<th title="the cross’s marked 25-delta fly">fly25</th>'+
     '<th title="the vol-vol correlation the marked fly implies at the correlation vol suggested for the tenor (measured, or read off the tenors that have one); hover a cell for which">vv implied</th>'+
     '<th title="implied less measured">premium</th><th title="the premium the suggestion uses">used</th>'+
-    '<th class="grp">&rarr; vol vol corr</th><th>&rarr; corr vol</th><th>marked now</th></tr></thead><tbody>'+
+    '<th class="grp">&rarr; vol vol corr</th><th>&rarr; corr vol</th>'+
+    '<th class="grp" title="measured correlation-spot correlation ± se: the three ATMs&rsquo; implied correlation against the cross&rsquo;s return, daily">cs measured</th>'+
+    '<th title="the cross’s marked 25-delta risk reversal">rr25</th>'+
+    '<th title="the correlation-spot correlation the marked risk reversal implies at the suggested vol-vol correlation and correlation vol">cs implied</th>'+
+    '<th title="implied less measured; the premium used comes from the same source as the vol-vol correlation&rsquo;s">premium</th>'+
+    '<th>&rarr; corr spot corr</th><th>marked now</th></tr></thead><tbody>'+
     r.rows.map(x=>{
       const m=x.measured||{};
       const why=[x.reason].concat(x.warnings||[],m.notes||[],
         x.vol_vol_filled?['vol vol corr '+x.vol_vol_filled]:[],
-        x.corr_vol_filled?['corr vol '+x.corr_vol_filled]:[]).filter(Boolean);
+        x.corr_vol_filled?['corr vol '+x.corr_vol_filled]:[],
+        x.corr_spot_filled?['corr spot corr '+x.corr_spot_filled]:[],
+        [x.corr_spot_reason,x.implied_corr_spot_note]).filter((w,k,all)=>w&&all.indexOf(w)===k);
       const note=why.length?' <span class="pill warn" title="'+esc(why.join(' · '))+'">note</span>':'';
       return '<tr><td>'+esc(x.tenor)+note+'</td>'+
         '<td>'+(m.vol_vol==null?'—':sg(m.vol_vol)+'<span class="meta"> ±'+num(m.vol_vol_se,2)+'</span>')+'</td>'+
@@ -6678,8 +6697,12 @@ function cfgDepPaint(i){
         '<td>'+sg(x.premium)+'</td><td>'+sg(x.premium_used)+'</td>'+
         '<td class="grp"><b>'+fl(sg(x.suggested_vol_vol),x.vol_vol_filled)+'</b></td><td><b>'+
           (x.suggested_corr_vol==null?'—':fl(num(x.suggested_corr_vol,3),x.corr_vol_filled))+'</b></td>'+
-        '<td class="meta">'+(x.marked_vol_vol==null&&!x.marked_corr_vol?'—':
-          sg(x.marked_vol_vol,2)+' / '+num(x.marked_corr_vol,2))+'</td></tr>';}).join('')+
+        '<td class="grp">'+(m.corr_spot==null?'—':sg(m.corr_spot)+'<span class="meta"> ±'+num(m.corr_spot_se,2)+'</span>')+'</td>'+
+        '<td>'+(x.marked_rr25==null?'—':vsgn(x.marked_rr25*100))+'</td>'+
+        '<td>'+sg(x.implied_corr_spot)+'</td><td>'+sg(x.corr_spot_premium)+'</td>'+
+        '<td><b>'+fl(sg(x.suggested_corr_spot),x.corr_spot_filled)+'</b></td>'+
+        '<td class="meta">'+(x.marked_vol_vol==null&&!x.marked_corr_vol&&!x.marked_corr_spot?'—':
+          sg(x.marked_vol_vol,2)+' / '+num(x.marked_corr_vol,2)+' / '+sg(x.marked_corr_spot,2))+'</td></tr>';}).join('')+
     '</tbody></table></div>'+
     (anyFill?'<div class="meta" style="margin-top:4px">~ filled from the tenors that have a suggestion '+
       '(hover for which); a filled vol-vol correlation does not give back that tenor&rsquo;s fly</div>':'')+
@@ -6691,21 +6714,31 @@ function cfgDepPaint(i){
   out.querySelector('.cfgduse').onclick=()=>{
     const t=CFG.tabs[i];
     cfgHarvest(i);
-    const vv='vol vol corr', cv='corr vol';
-    [vv,cv].forEach(c=>{if(t.columns.indexOf(c)<0){const at=t.columns.indexOf('note');
+    const vv='vol vol corr', cv='corr vol', cs='corr spot corr';
+    [vv,cv,cs].forEach(c=>{if(t.columns.indexOf(c)<0){const at=t.columns.indexOf('note');
       t.columns.splice(at<0?t.columns.length:at,0,c)}});
+    /* A corr spot corr typed where history suggests none is kept: the cross
+       may have no sheet of its own to measure it on. */
+    const lean={};
+    t.rows.forEach(row=>{if(String(row.pair||'').toUpperCase()===r.pair&&row[cs]!=null&&row[cs]!=='')
+      lean[String(row.tenor||'').toUpperCase()]=row});
     const keep=t.rows.filter(row=>String(row.pair||'').toUpperCase()!==r.pair);
     let n=0;
     const note=r.premium==='own'?'measured + own premium':r.premium==='none'?'measured, no premium':
       'measured + '+r.premium+' premium';
     r.rows.forEach(x=>{
-      if(x.suggested_vol_vol==null&&x.suggested_corr_vol==null)return;
+      if(x.suggested_vol_vol==null&&x.suggested_corr_vol==null&&x.suggested_corr_spot==null)return;
       const row={pair:r.pair,tenor:x.tenor};
       row[vv]=x.suggested_vol_vol==null?null:Math.round(x.suggested_vol_vol*1e3)/1e3;
       row[cv]=x.suggested_corr_vol==null?null:Math.round(x.suggested_corr_vol*1e3)/1e3;
       const fills=[x.vol_vol_filled?'vol vol corr '+x.vol_vol_filled:'',
-                   x.corr_vol_filled?'corr vol '+x.corr_vol_filled:''].filter(Boolean);
+                   x.corr_vol_filled?'corr vol '+x.corr_vol_filled:'',
+                   x.corr_spot_filled?'corr spot corr '+x.corr_spot_filled:''].filter(Boolean);
+      const had=lean[String(x.tenor).toUpperCase()];
+      row[cs]=x.suggested_corr_spot!=null?Math.round(x.suggested_corr_spot*1e3)/1e3:had?had[cs]:null;
+      delete lean[String(x.tenor).toUpperCase()];
       row.note=fills.length?note+'; '+fills.join('; '):note; keep.push(row); n++;});
+    Object.values(lean).forEach(row=>keep.push(Object.assign({},row,{[vv]:null,[cv]:null})));
     t.rows=keep;
     cfgPaintTabs('config');
     cfgDepPaint(i);

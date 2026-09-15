@@ -967,31 +967,40 @@ def cmd_analysis(args) -> int:
             if noise:
                 print("  noise floor (the same machinery run on each leg alone): "
                       + ", ".join(f"{k} {v * 100:.4f}" for k, v in noise.items()))
-        marked_any = any(r.vol_vol is not None or r.corr_vol for r in tri)
+        marked_any = any(r.vol_vol is not None or r.corr_vol or r.corr_spot for r in tri)
         if tri and (marked_any or not args.no_implied_vol_vol):
             # The dependence the legs are tied together with -- marked on the
             # CROSS_DEPENDENCE tab, or the Gaussian copula -- and the vol-vol
             # correlation the marked butterfly implies, which is what the tab
             # is marked against.
             print(f"\n  dependence — {'as marked on CROSS_DEPENDENCE' if marked_any else 'none marked: the Gaussian copula'}")
-            print(f"  {'tenor':<6}{'vol-vol':>9}{'corr vol':>10}{'copula rho':>12}"
-                  f"{'implied vol-vol':>17}{'fly25 gauss':>13}{'fly10 gauss':>13}")
+            print(f"  {'tenor':<6}{'vol-vol':>9}{'corr vol':>10}{'corr spot':>11}{'copula rho':>12}"
+                  f"{'implied vol-vol':>17}{'implied corr spot':>19}"
+                  f"{'fly25 gauss':>13}{'fly10 gauss':>13}{'rr25 gauss':>12}")
 
             def num(v, w, fmt):
                 return ("—" if v is None or v != v else f"{v:{fmt}}").rjust(w)
 
             for r in tri:
                 print(f"  {r.tenor:<6}{num(r.vol_vol, 9, '+.3f')}{num(r.corr_vol or None, 10, '.3f')}"
+                      f"{num(r.corr_spot or None, 11, '+.3f')}"
                       f"{num(r.copula_rho, 12, '+.4f')}{num(r.implied_vol_vol, 17, '+.3f')}"
-                      f"{pct(r.gaussian.get('fly25'), 3, 13)}{pct(r.gaussian.get('fly10'), 3, 13)}")
+                      f"{num(r.implied_corr_spot, 19, '+.3f')}"
+                      f"{pct(r.gaussian.get('fly25'), 3, 13)}{pct(r.gaussian.get('fly10'), 3, 13)}"
+                      f"{pct(r.gaussian.get('rr25'), 3, 12)}")
             print("  the copula's correlation is solved so a marked dependence holds the combined "
                   "ATM where the Gaussian copula puts it; the gauss columns are that copula's "
                   "flies, beside the marked law's in the table above. A vol-vol correlation of 0 "
                   "is independent variance regimes, which is a lower fly than the Gaussian "
-                  "copula's -- mark against the implied column, not against zero")
+                  "copula's -- mark against the implied column, not against zero. corr spot "
+                  "leans the correlation vol with the cross (negative: the correlation rises as "
+                  "the cross falls), which is the cross's risk reversal beyond its legs; its "
+                  "implied column is the one the marked rr25 asks for")
             for r in tri:
                 if r.implied_vol_vol_note:
                     print(f"  . {r.tenor}: {r.implied_vol_vol_note}")
+                if r.implied_corr_spot_note:
+                    print(f"  . {r.tenor}: {r.implied_corr_spot_note}")
         for r in tri:
             for w in r.warnings:
                 print(f"  ! {r.tenor}: {w}")
@@ -1011,7 +1020,9 @@ def cmd_analysis(args) -> int:
                   f"over {table.corr_vol_lookback_days:g} days")
             print(f"  {'tenor':<6}{'rho':>7}{'vv meas':>9}{'± se':>7}{'cv meas':>9}{'± se':>7}"
                   f"{'fly25 mk':>10}{'vv impl':>9}{'premium':>9}{'used':>8}"
-                  f"{'-> vol vol corr':>17}{'corr vol':>10}")
+                  f"{'-> vol vol corr':>17}{'corr vol':>10}"
+                  f"{'cs meas':>9}{'± se':>7}{'rr25 mk':>9}{'cs impl':>9}{'premium':>9}"
+                  f"{'-> corr spot corr':>19}")
 
             def cell(v, w, f, filled=""):
                 return ("—" if v is None or v != v else
@@ -1025,26 +1036,36 @@ def cmd_analysis(args) -> int:
                       f"{cell(r.implied_vol_vol, 9, '+.3f')}{cell(r.premium, 9, '+.3f')}"
                       f"{cell(r.premium_used, 8, '+.3f')}"
                       f"{cell(r.suggested_vol_vol, 17, '+.3f', r.vol_vol_filled)}"
-                      f"{cell(r.suggested_corr_vol, 10, '.3f', r.corr_vol_filled)}")
+                      f"{cell(r.suggested_corr_vol, 10, '.3f', r.corr_vol_filled)}"
+                      f"{cell(m.corr_spot, 9, '+.3f')}{cell(m.corr_spot_se, 7, '.3f')}"
+                      f"{pct(r.marked_rr25, 3, 9)}{cell(r.implied_corr_spot, 9, '+.3f')}"
+                      f"{cell(r.corr_spot_premium, 9, '+.3f')}"
+                      f"{cell(r.suggested_corr_spot, 19, '+.3f', r.corr_spot_filled)}")
             print("  measured is physical; the premium is what the marked fly charges on top, put "
                   "on the vol-vol\n  correlation with the correlation vol held at the one "
                   "suggested -- measured, or where none\n  was, what the book reads there off the "
-                  "tenors that have one. The suggestion goes on the\n  CROSS_DEPENDENCE tab by "
+                  "tenors that have one. The corr spot corr is measured daily off the three ATMs' "
+                  "implied\n  correlation against the cross's return, and its premium is what the "
+                  "marked rr25 charges on\n  top. The suggestion goes on the CROSS_DEPENDENCE tab by "
                   "hand or through the Config window -- this writes nothing")
-            if any(r.vol_vol_filled or r.corr_vol_filled for r in table.rows):
+            if any(r.vol_vol_filled or r.corr_vol_filled or r.corr_spot_filled for r in table.rows):
                 print("  ~ a tenor with no suggestion of its own, filled from the tenors that have "
                       "one the way\n  the book reads the tab (linear in time, flat outside); a "
                       "filled vol-vol correlation\n  does not give back that tenor's fly. "
                       "--no-dependence-fill leaves them blank")
             for r in table.rows:
                 fills = [f"{name} {how}" for name, how in (("vol vol corr", r.vol_vol_filled),
-                                                           ("corr vol", r.corr_vol_filled)) if how]
+                                                           ("corr vol", r.corr_vol_filled),
+                                                           ("corr spot corr", r.corr_spot_filled))
+                         if how]
                 unmeasured = tuple(n for n in r.measured.notes
-                                   if n.startswith("correlation vol not measured"))
+                                   if n.startswith(("correlation vol not measured",
+                                                    "correlation-spot correlation not measured")))
                 if r.implied_corr_vol_from and r.implied_vol_vol is not None:
                     fills.append(f"vv implied at corr vol {r.implied_corr_vol:.3f}, "
                                  f"{r.implied_corr_vol_from}")
-                for note in (r.reason,) + r.warnings + unmeasured + tuple(fills):
+                for note in dict.fromkeys((r.reason, r.corr_spot_reason, r.implied_corr_spot_note)
+                                          + r.warnings + unmeasured + tuple(fills)):
                     if note:
                         print(f"  . {r.tenor}: {note}")
 

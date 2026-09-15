@@ -1056,9 +1056,122 @@ class TestCrossDependence(unittest.TestCase):
         self.assertIsNone(low)
         self.assertIn("thinner than any variance regimes", why)
 
+    def test_a_lean_moves_the_risk_reversal_and_holds_the_atm_and_the_fly(self):
+        """The vol-vol correlation and the correlation vol are radially
+        symmetric and leave the cross's risk reversal at its legs' skews.  The
+        correlation-spot correlation is what moves it: the high correlation
+        leaning onto the falling cross (negative) widens a product cross's
+        downside, and the fly is left where the other two put it."""
+        base = self.held(vol_vol=0.5, corr_vol=0.15).table()
+        moved = {}
+        for zeta in (-0.7, -0.3, 0.3, 0.7):
+            law = self.held(vol_vol=0.5, corr_vol=0.15, corr_spot=zeta)
+            got = law.table()
+            self.assertEqual(law.corr_spot, zeta)
+            self.assertLess(abs(got["atm"] - self.gauss_table["atm"]), 2e-6, msg=zeta)
+            for key in ("fly25", "fly10"):
+                self.assertLess(abs(got[key] - base[key]), 5e-4, msg=f"{zeta} {key}")
+            moved[zeta] = (got["rr25"] - base["rr25"], got["rr10"] - base["rr10"])
+        self.assertEqual(self.co[0] * self.co[1], 1)
+        self.assertLess(moved[-0.7][0], moved[-0.3][0])
+        self.assertLess(moved[-0.3][0], -1e-3)
+        self.assertGreater(moved[0.3][0], 1e-3)
+        self.assertLess(moved[0.3][0], moved[0.7][0])
+        self.assertLess(moved[-0.7][1], moved[-0.7][0])          # more in the wing
+        # Nearly odd in the lean: the legs' own skews sit underneath both.
+        self.assertAlmostEqual(moved[0.7][0], -moved[-0.7][0], delta=5e-4)
+
+    def test_no_lean_is_the_regime_copula_the_leaning_tables_reduce_to(self):
+        """A lean too small to move anything runs the leaning score tables,
+        which integrate each leg's score law numerically; they are pinned
+        against the closed-form mixture law the unleaned copula reads."""
+        for vol_vol in (None, 0.5):
+            plain = moments._combine_dependent(self.da, self.db, self.co, self.rho, self.conv,
+                                               moments.Dependence(vol_vol, 0.15)).table()
+            lean = moments._combine_dependent(self.da, self.db, self.co, self.rho, self.conv,
+                                              moments.Dependence(vol_vol, 0.15, 1e-9)).table()
+            for key in ("atm", "rr25", "fly25", "rr10", "fly10"):
+                self.assertLess(abs(lean[key] - plain[key]), 5e-6, msg=f"{vol_vol} {key}")
+
+    def test_a_lean_keeps_each_legs_own_marginal(self):
+        """Tied to a partner that never moves, a leg must come back as itself
+        however hard the correlation leans -- the lean reweights the joint law
+        and the score tables undo what that does to each leg on its own."""
+        flat = moments.Distribution(x=np.array([-1e-9, 0.0, 1e-9]),
+                                    pdf=np.array([0.0, 1e9, 0.0]),
+                                    cdf=np.array([0.0, 0.5, 1.0]), t=self.da.t)
+        conv = DeltaConvention(False)
+        # Against the same leg on the same grid with no lean, so what is
+        # measured is the lean and not the two grids' difference.  A partner
+        # that never moves is the hardest case for the lean's quadrature --
+        # the whole reweighting falls on a direction the payoff ignores -- so
+        # the grid is refined until what is left is the marginal: on the
+        # default grid this case is off by a hundredth of a vol point and
+        # converging, and a real cross is within a thousandth there.
+        def law(zeta):
+            return moments._combine_dependent(self.da, flat, (1, 1), 0.3, conv,
+                                              moments.Dependence(None, 0.3, zeta),
+                                              nodes=481).table()
+        alone = law(0.0)
+        for zeta in (-0.7, moments.MAX_CORR_SPOT):
+            got = law(zeta)
+            for key in ("atm", "rr25", "fly25", "rr10", "fly10"):
+                self.assertLess(abs(got[key] - alone[key]), 3e-5,
+                                msg=f"{zeta} {key} {got[key] * 100:.4f} against {alone[key] * 100:.4f}")
+
+    def test_the_marked_number_is_the_correlation_the_lean_carries(self):
+        """``corr_spot`` is marked as a correlation -- the one history measures --
+        and the two-state law carries it by a lean whose correlation with the
+        cross's score is exactly ``zeta sqrt(2/pi)``.  Checked on the law itself:
+        the state's sign against the standardised score, over a fine grid."""
+        from scipy.special import ndtr
+        z = np.linspace(-9.0, 9.0, 200001)
+        pdf = np.exp(-0.5 * z * z) / math.sqrt(2.0 * math.pi)
+        for c in (-0.5, 0.3, moments.MAX_CORR_SPOT):
+            zeta = moments.Dependence(corr_vol=0.1, corr_spot=c).lean
+            p_high = 0.5 * np.asarray(moments._lean(zeta, z))       # P(high state | D)
+            got = float(np.trapezoid(pdf * z * (2.0 * p_high - 1.0), z))
+            self.assertAlmostEqual(got, c, places=6, msg=c)
+        self.assertEqual(moments.Dependence(corr_spot=0.95).lean, 1.0)
+        # More than two states can carry is priced at a full lean, and said.
+        full = moments._combine_dependent(self.da, self.db, self.co, self.rho, self.conv,
+                                          moments.Dependence(0.5, 0.15, moments.MAX_CORR_SPOT))
+        over = moments._combine_dependent(self.da, self.db, self.co, self.rho, self.conv,
+                                          moments.Dependence(0.5, 0.15, 0.95))
+        np.testing.assert_array_equal(over.weight, full.weight)
+        self.assertTrue(any("more than two correlation states" in w for w in over.warnings))
+        self.assertEqual(over.corr_spot, 0.95)
+
+    def test_a_lean_with_no_correlation_vol_moves_nothing_and_says_so(self):
+        plain = moments._combine_dependent(self.da, self.db, self.co, self.rho, self.conv,
+                                           moments.Dependence(0.5))
+        lean = moments._combine_dependent(self.da, self.db, self.co, self.rho, self.conv,
+                                          moments.Dependence(0.5, 0.0, -0.8))
+        np.testing.assert_array_equal(lean.xc, plain.xc)
+        np.testing.assert_array_equal(lean.weight, plain.weight)
+        self.assertTrue(any("moves nothing" in w for w in lean.warnings), lean.warnings)
+        self.assertTrue(moments.Dependence(corr_spot=-0.8).active)
+
+    def test_the_implied_corr_spot_recovers_the_one_a_risk_reversal_was_built_from(self):
+        target = self.held(vol_vol=0.5, corr_vol=0.15, corr_spot=-0.4).table()["rr25"]
+        got, note = moments.implied_corr_spot(self.da, self.db, self.co, self.rho, self.conv,
+                                              target, vol_vol=0.5, corr_vol=0.15,
+                                              target_atm=self.gauss_table["atm"])
+        self.assertEqual(note, "")
+        self.assertAlmostEqual(got, -0.4, delta=0.03)
+        far, why = moments.implied_corr_spot(self.da, self.db, self.co, self.rho, self.conv,
+                                             target - 0.05, vol_vol=0.5, corr_vol=0.15,
+                                             target_atm=self.gauss_table["atm"])
+        self.assertIsNone(far)
+        self.assertIn("more correlation vol", why)
+        none, why = moments.implied_corr_spot(self.da, self.db, self.co, self.rho, self.conv,
+                                              target, vol_vol=0.5)
+        self.assertIsNone(none)
+        self.assertIn("none is marked", why)
+
     def test_a_dependence_outside_its_range_is_refused(self):
         for bad in ({"vol_vol": 1.2}, {"vol_vol": float("nan")}, {"corr_vol": 1.0},
-                    {"corr_vol": -0.1}):
+                    {"corr_vol": -0.1}, {"corr_spot": 1.2}, {"corr_spot": float("nan")}):
             with self.assertRaises(ValueError, msg=bad):
                 moments.Dependence(**bad)
         with self.assertRaises(ValueError):

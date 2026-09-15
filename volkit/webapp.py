@@ -1817,7 +1817,7 @@ class BookService:
                     # The dependence the legs were tied together with at this
                     # tenor (CROSS_DEPENDENCE), and the copula correlation that
                     # held the ATM under it; null / 0 / rho for the Gaussian.
-                    "vol_vol": r.vol_vol, "corr_vol": r.corr_vol,
+                    "vol_vol": r.vol_vol, "corr_vol": r.corr_vol, "corr_spot": r.corr_spot,
                     "copula_rho": None if r.error else r.copula_rho,
                 })
             applied: list[str] = []
