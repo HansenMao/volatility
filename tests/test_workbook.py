@@ -422,6 +422,26 @@ class TestConfigurationIsMarkedNotWritten(unittest.TestCase):
         self.assertAlmostEqual(Book.from_excel(svc.path, ASOF).tenor_years("USDJPY", "1M"),
                                before, places=12)
 
+    def test_vega_weights_are_applied_to_the_loaded_book_without_a_reread(self):
+        """Nothing is built from the tab -- the bump and the window read it
+        when asked -- so Apply puts it on the book that is loaded, and
+        whatever the session holds stays exactly where it is."""
+        svc, wb = self._service()
+        stamp = wb.stat().st_mtime_ns
+        before = svc.book
+        tab = {t["sheet"]: t for t in svc.config_tabs()["tabs"]}["Vega Weights"]
+        self.assertTrue(tab["in_place"])
+        rows = [dict(r) for r in tab["rows"]]
+        first = next(r for r in rows if str(r.get("tenor")).upper() == "1W")
+        first["USDCNH"] = 3.1
+        out = svc.config_save({"sheet": "Vega Weights", "rows": rows})
+        self.assertIs(svc.book, before)
+        self.assertFalse(out["wrote"]["reread"])
+        self.assertTrue(svc.dirty)
+        self.assertEqual(svc.book.vega_weights.weight_for("USDCNH", "1W"), (3.1, "USDCNH"))
+        self.assertEqual(svc.config_tabs()["pending"], ["Vega Weights"])
+        self.assertEqual(wb.stat().st_mtime_ns, stamp)
+
     def test_a_column_no_reader_would_take_is_refused_before_it_is_applied(self):
         """The same rule the write had.  Held in a session instead, a heading
         the tab's own reader refuses is a setting that is accepted now and
@@ -2392,6 +2412,36 @@ class TestCrossDependenceTab(unittest.TestCase):
 
     def book(self, rows):
         return Book.from_excel(BOOK, ASOF, config={"CROSS_DEPENDENCE": rows})
+
+    def test_applying_the_tab_does_not_read_the_workbook_again(self):
+        """Nothing is built from the tab, so the window's Apply puts it on the
+        loaded book: the same book, whatever it holds, and still not the file."""
+        from volkit.webapp import BookService
+        wb = book_for("AUDUSD", "USDJPY", "AUDJPY")
+        stamp = wb.stat().st_mtime_ns
+        svc = BookService(str(wb), ASOF)
+        before = svc.book
+        before.warnings.append("cross dependence: an old complaint")
+        out = svc.config_save({"sheet": "CROSS_DEPENDENCE", "rows": self.ROWS})
+        self.assertIs(svc.book, before)
+        self.assertFalse(out["wrote"]["reread"])
+        self.assertTrue(svc.dirty)
+        self.assertEqual(svc.book.config_tabs["CROSS_DEPENDENCE"], self.ROWS)
+        self.assertEqual(svc.config_edits["CROSS_DEPENDENCE"], self.ROWS)
+        self.assertEqual(svc.book.dependence_at("AUDJPY", 3.0), moments.Dependence(0.8, 0.1))
+        self.assertNotIn("cross dependence: an old complaint", svc.book.warnings)
+        self.assertEqual(wb.stat().st_mtime_ns, stamp)
+        tab = {t["sheet"]: t for t in svc.config_tabs()["tabs"]}["CROSS_DEPENDENCE"]
+        self.assertTrue(tab["pending"] and tab["in_place"])
+        # The session file carries it as it carries any tab.
+        from volkit import session
+        self.assertEqual(session.capture(svc.book)["config"]["CROSS_DEPENDENCE"], self.ROWS)
+        # A tab the book is built from still rebuilds, and keeps this one.
+        with self.assertRaises(ValueError):
+            svc.book.reconfigure_in_place({"PEG_BANDS": []}, str(wb))
+        svc.config_save({"sheet": "HOLIDAYS", "rows": []})
+        self.assertIsNot(svc.book, before)
+        self.assertIn("AUDJPY", svc.book.cross_dependence)
 
     def test_the_tab_is_a_config_window_setting(self):
         from volkit import configsheets, session

@@ -896,9 +896,11 @@ def _book_read(book, pair: str, tenors: list[str], *, cut: str, source: str,
                method: str | None, where: str) -> tuple[kace.PillarRead | None, list[str]]:
     """Read what the book *can* mark of these tenors; the rest are named.
 
-    Reads only the tenors the sheet quotes (O/N always, it is a curve point),
-    so one unquoted tenor does not refuse the whole pair: coverage is reported
-    per tenor and the overlay may fill the gap.
+    Reads the tenors the sheet quotes, O/N (a curve point), and under
+    ``marks`` a tenor between two quoted ones, whose wings the surface
+    interpolates (``kace.read_pillars``).  A tenor before the first quote or
+    past the last is not read, so it does not refuse the whole pair: coverage
+    is reported per tenor and the overlay may fill the gap.
     """
     if pair not in book:
         return None, list(tenors)
@@ -906,17 +908,20 @@ def _book_read(book, pair: str, tenors: list[str], *, cut: str, source: str,
     quoted = {canonical_tenor(m.tenor) for m in surface.quoted_marks()}
     if not quoted:
         return None, list(tenors)
-    last = book.calendars.expiry_date(pair, max(quoted, key=pillar_years), book.clock.now.date())
+    today = book.clock.now.date()
+    first = book.calendars.expiry_date(pair, min(quoted, key=pillar_years), today)
+    last = book.calendars.expiry_date(pair, max(quoted, key=pillar_years), today)
     can: list[str] = []
     cannot: list[str] = []
     for t in tenors:
         if t == OVERNIGHT:
             can.append(t)
             continue
-        if source == "marks" and t not in quoted:
+        expiry = book.calendars.expiry_date(pair, t, today)
+        if source == "marks" and t not in quoted and expiry < first:
             cannot.append(t)
             continue
-        if book.calendars.expiry_date(pair, t, book.clock.now.date()) > last:
+        if expiry > last:
             cannot.append(t)
             continue
         can.append(t)

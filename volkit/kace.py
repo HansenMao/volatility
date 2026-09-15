@@ -39,7 +39,9 @@ Three things the sheet did are done differently here, on purpose:
   whichever tier is chosen; the tier decides only how wide the ATM two-way is
   at each of them, and a blank cell in a tier falls back to ``default`` cell
   by cell.  A tenor listed with no mark behind it is refused by name rather
-  than defaulted, and so is a tier the tab does not have.
+  than defaulted -- unless it sits between two quoted tenors, where the
+  surface's interpolated wings are posted and named -- and so is a tier the
+  tab does not have.
 
   The table used to be ``pair,tenor,spread``, which tied a width to a
   currency: a desk that wanted to post the same pair twice at two widths had
@@ -686,7 +688,11 @@ def read_pillars(book, pair: str, tenors, *, cut: str = "NY", source: str = "mar
     A pillar past the last quoted tenor is refused under either source: the
     curve would extrapolate an ATM and the smile a wing, and publishing that
     as a quoted mark is the quiet fiction this tool exists to remove.  Under
-    ``marks`` every pillar but O/N has to be quoted itself.
+    ``marks`` a pillar the sheet does not quote but which sits between two
+    tenors it does (an 18M between the 1Y and the 2Y) takes its wings off the
+    book's surface at its own expiry -- the interpolation every price there
+    already uses -- and its origin says between which two.  A pillar before
+    the first quoted tenor, O/N aside, is still refused.
     """
     pair = pair.upper()
     if source not in SOURCES:
@@ -705,14 +711,17 @@ def read_pillars(book, pair: str, tenors, *, cut: str = "NY", source: str = "mar
         raise KaceError(f"{where} lists only O/N; at least one quoted tenor is needed to "
                         f"carry the wings")
     have = sorted(marks, key=pillar_years)
-    unmarked = [t for t in quoted if t not in marks]
+    expiries = {t: book.calendars.expiry_date(pair, calendar_tenor(t), today) for t in tenors}
+    if have:
+        first_quoted = book.calendars.expiry_date(pair, calendar_tenor(have[0]), today)
+    unmarked = [t for t in quoted if t not in marks
+                and (not have or expiries[t] < first_quoted)]
     if source == "marks" and unmarked:
         raise KaceError(f"{where} lists {', '.join(unmarked)}, but the {pair} sheet "
                         f"quotes no wings there (it has {', '.join(have)}); "
                         f"a pillar with no mark behind it cannot be posted. A tenor the pair sheet "
                         f"quotes and CONFIG's TENORS column does not list is not read, so check "
                         f"that too; --wings fitted posts the smile's own wings at any pillar")
-    expiries = {t: book.calendars.expiry_date(pair, calendar_tenor(t), today) for t in tenors}
     if have:
         last_quoted = book.calendars.expiry_date(pair, calendar_tenor(have[-1]), today)
         beyond = [t for t in quoted if expiries[t] > last_quoted]
@@ -748,7 +757,21 @@ def read_pillars(book, pair: str, tenors, *, cut: str = "NY", source: str = "mar
     origin: dict[str, str] = {}
     for t in tenors:
         expiry = expiries[t]
-        if source == "marks":
+        if source == "marks" and t != OVERNIGHT and t not in marks:
+            # Between two quoted tenors: the surface's own wings at this
+            # expiry, which run from the one mark to the other.
+            when = cut_datetime(datetime.combine(expiry, datetime.min.time()).replace(tzinfo=UTC),
+                                cut, surface.atm.dst_aware_cuts)
+            wings[t] = (surface.risk_reversal(when, 0.25, method, cut) * 100.0,
+                        surface.risk_reversal(when, 0.10, method, cut) * 100.0,
+                        surface.strangle(when, 0.25, method, cut) * 100.0,
+                        surface.strangle(when, 0.10, method, cut) * 100.0)
+            below = max((m for m in have if pillar_years(m) < pillar_years(t)), key=pillar_years)
+            above = min((m for m in have if pillar_years(m) > pillar_years(t)), key=pillar_years)
+            origin[t] = f"interpolated between {below} and {above}"
+            notes.append(f"{t} is not quoted on the {pair} sheet; its wings are the surface's, "
+                         f"interpolated between the {below} and {above} marks")
+        elif source == "marks":
             # O/N borrows the shortest *posted* tenor's wings, as the sheet did.
             src = t if t in marks else quoted[0]
             m = marks[src]

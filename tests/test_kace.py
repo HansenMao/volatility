@@ -433,11 +433,31 @@ class TestKaceFeed(unittest.TestCase):
                 self.assertLess(abs(f.fly25 - m.fly25), 0.1, f.tenor)
         self.assertEqual(feed.notes, [n for n in feed.notes if "O/N" not in n])
 
+    def test_a_pillar_between_two_marks_takes_the_surfaces_wings_and_says_so(self):
+        """An 18M between a quoted 1Y and 2Y is on the surface, not missing.
+
+        The ATM was always the curve's; the wings are the surface's own at
+        that expiry, the interpolation every price there already uses, and
+        the pillar says between which two marks it was read.
+        """
+        from volkit import kace
+        rows = [("1W", 0.8), ("3W", 0.5), ("1M", 0.5)]
+        feed = kace.build(self._book(), "USDCNH", self._table(rows))
+        fitted = kace.build(self._book(), "USDCNH", self._table(rows), source="fitted")
+        by = {p.tenor: p for p in feed.pillars}
+        self.assertEqual(by["3W"].wings, "interpolated between 2W and 1M")
+        self.assertEqual((by["1W"].wings, by["1M"].wings), ("marks", "marks"))
+        three = next(p for p in fitted.pillars if p.tenor == "3W")
+        for f in ("rr25", "rr10", "fly25", "fly10"):
+            self.assertAlmostEqual(getattr(by["3W"], f), getattr(three, f), places=9)
+        self.assertTrue(any("3W is not quoted" in n for n in feed.notes))
+
     def test_a_pillar_with_no_mark_is_refused_by_name(self):
         from volkit import kace
+        # Before the first quoted tenor there is nothing to interpolate from.
         with self.assertRaises(kace.KaceError) as ctx:
-            kace.build(self._book(), "USDCNH", self._table([("1W", 0.8), ("3W", 0.5)]))
-        self.assertIn("3W", str(ctx.exception))
+            kace.build(self._book(), "USDCNH", self._table([("3D", 0.8), ("1W", 0.5)]))
+        self.assertIn("3D", str(ctx.exception))
         with self.assertRaises(kace.KaceError):
             kace.build(self._book(), "USDCNH", self._table([("O/N", 1.0)]))
         with self.assertRaises(kace.KaceError):

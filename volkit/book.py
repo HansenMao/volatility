@@ -24,15 +24,24 @@ from .atm import AtmCurve, BackboneParams
 from .black import DeltaConvention
 from .banded import Band, load_bands
 from .calendars import CalendarSet, DEFAULT_CALENDARS
-from .cross import CorrelationCurve, CrossAtmCurve, infer_leg_signs, load_cross_dependence
+from .cross import (CROSS_DEPENDENCE_SHEET, CorrelationCurve, CrossAtmCurve, infer_leg_signs,
+                    load_cross_dependence)
 from .events import EventBook, EventSchedule
 from .feed import MarketFeed
 from .marketdata import ExcelSource, MarketData, MarketDataError
 from .discount import DiscountCurves
 from .surface import VolSurface, WingRatio, load_wing_ratios
-from .vegaweights import VegaWeights, load_vega_weights
+from .vegaweights import VEGA_WEIGHTS_SHEET, VegaWeights, load_vega_weights
 from .timeutil import DAYS_IN_YEAR, Clock, parse_datetime
 from .timeweight import TimeWeighting
+
+
+#: The configuration tabs nothing is built from.  A book reads them once and is
+#: asked of them later, so applying one replaces its rows on the built book
+#: (:meth:`Book.reconfigure_in_place`) rather than reading the workbook again --
+#: a re-read is what puts a session's marks at risk.  A tab belongs here only
+#: if no surface, calendar or cache holds anything derived from it.
+IN_PLACE_TABS = frozenset({CROSS_DEPENDENCE_SHEET, VEGA_WEIGHTS_SHEET})
 
 
 @dataclass
@@ -250,6 +259,35 @@ class Book:
                 f"this workbook, so its rows are not read")
             del rows[pair]
         return rows
+
+    def reconfigure_in_place(self, tabs: dict, path: str | Path | None) -> None:
+        """Take a new set of configuration tabs on a built book, without building it.
+
+        Only for the tabs in :data:`IN_PLACE_TABS`, which nothing is built
+        from: the book reads them once and is asked of them later, so new rows
+        replace the old and every screen that asks next reads the new answer.
+        The marks on the book are not touched, because the book is not
+        rebuilt -- which is the point.  ``tabs`` is the session's whole
+        overlay, as :attr:`config_tabs` holds it; a tab outside the set is
+        refused rather than held on a book that was not built with it.
+        """
+        cfg = {k: [dict(r) for r in (v or [])] for k, v in tabs.items()}
+        moved = {k for k in set(cfg) | set(self.config_tabs)
+                 if cfg.get(k) != self.config_tabs.get(k)}
+        if moved - IN_PLACE_TABS:
+            raise ValueError(f"{', '.join(sorted(moved - IN_PLACE_TABS))} changes how the "
+                             f"book is built, so it is applied by reading the workbook again")
+        self.config_tabs = cfg
+        # Each tab's own loader, and the prefix its load warnings carry, so a
+        # complaint about the rows being replaced goes with them.
+        for sheet, attr, said, load in (
+                (CROSS_DEPENDENCE_SHEET, "cross_dependence", "cross dependence:",
+                 self._default_cross_dependence),
+                (VEGA_WEIGHTS_SHEET, "vega_weights", "vega weights:",
+                 self._default_vega_weights)):
+            if sheet in moved:
+                self.warnings = [w for w in self.warnings if not w.startswith(said)]
+                setattr(self, attr, load(path))
 
     def dependence_at(self, pair: str, t: float):
         """A cross's marked dependence at ``t`` years, or ``None`` for the Gaussian copula.

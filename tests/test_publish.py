@@ -989,6 +989,16 @@ class TestOverlay(_Fixture):
         with self.assertRaises(publish.PublishError):
             publish.compare(self.book, two, pairs=["USDJPY"])
 
+    def test_a_tenor_between_two_marks_is_read_off_the_book_not_left_missing(self):
+        """An 18M the sheet does not quote, between a 1Y and a 2Y it does, is
+        the surface's interpolation; before the first quote it is still not
+        the book's to supply."""
+        read, cannot = publish._book_read(self.book, "USDCNH", ["3D", "2W", "3W", "1M"],
+                                          cut="NY", source="marks", method=None, where="test")
+        self.assertEqual(cannot, ["3D"])
+        self.assertEqual(read.origin["3W"], "interpolated between 2W and 1M")
+        self.assertIn("3W", read.atm)
+
     def test_a_row_with_its_own_two_way_bypasses_the_tier(self):
         o = overlay.parse("pair,tenor,atm_bid,atm_ask\nUSDCNH,1W,4.0,4.5\n")
         b = publish.build("cos", self.book, self.tables, source="overlay", overlay=o)

@@ -136,6 +136,13 @@ and says *why*; this file says what is there and what must not be broken.
   one (an ATM and a wing out there would be extrapolated): each is a refusal
   naming the pair and tenor, and no file is written and no message posted.
   A refused run is still logged.
+- **A tenor between two quoted ones is the book's, interpolated.** An 18M the
+  sheet does not quote, between a quoted 1Y and 2Y, is not missing: the ATM
+  is the curve's (it always was) and under `wings=marks` the wings are the
+  surface's own at that expiry, the interpolation every price there uses
+  (`kace.read_pillars`).  Its origin reads `interpolated between 1Y and 2Y`
+  and a note says so.  A tenor before the first quoted one (O/N aside) is
+  still not the book's to supply.
 - **The file date is the book's valuation date, and a disagreement with the
   machine's date is said before writing** and needs `confirm_date`
   (`--confirm-date`) or an explicit `file_date`.  The Murex filenames and

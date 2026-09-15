@@ -31,7 +31,7 @@ import numpy as np
 
 from .atm import CUTS
 from .exotics import TOUCH_MODES
-from .book import Book
+from .book import IN_PLACE_TABS, Book
 from .events import event_entries, leg_weights, pair_legs
 from .cross import CROSS_DEPENDENCE_SHEET, CrossAtmCurve
 from .feed import FeedError, load_for
@@ -1974,6 +1974,9 @@ class BookService:
                 # thing they govern; the Config window shows the rest.
                 entry["where"] = ("export" if sheet in configsheets.EXPORT_TABS
                                   else "config")
+                # Whether Apply reads the workbook again, so the window's
+                # confirmation says what is about to happen.
+                entry["in_place"] = sheet in IN_PLACE_TABS
                 # What the screen can measure for this tab, rather than the
                 # tab's name: the page keys off the capability so a second
                 # measurable tab is a line here and not a name in the
@@ -2063,8 +2066,21 @@ class BookService:
                 raise ValueError("rows must be a list of objects, one per row of the tab")
             tabs = dict(self.config_edits)
             tabs[sheet] = rows
-            problems = self._rebuild(config=tabs)
-            notes = [f"{sheet}: {len(rows)} row(s) held in this session"]
+            # A tab nothing is built from (CROSS_DEPENDENCE) goes onto the book
+            # that is loaded: no re-read, so nothing the session holds is put
+            # at risk by it.  Every other tab changes how the workbook loads.
+            in_place = sheet in IN_PLACE_TABS and self.book is not None
+            if in_place:
+                session.check_config_tabs(tabs)
+                self.book.reconfigure_in_place(tabs, self.path)
+                self.config_edits = {k: [dict(r) for r in v] for k, v in tabs.items()}
+                self.dirty = True
+                problems = []
+            else:
+                problems = self._rebuild(config=tabs)
+            notes = [f"{sheet}: {len(rows)} row(s) held in this session"
+                     + (" (applied to the loaded book; the workbook was not read again)"
+                        if in_place else "")]
             notes.append("nothing has been written to the workbook yet -- press "
                          "Write to workbook to put this and the marks into it")
             # The change's own report is kept apart from the book's state:
@@ -2073,7 +2089,7 @@ class BookService:
             # something about crosses.
             return {"ok": True,
                     "wrote": {"tabs": [sheet], "notes": notes, "problems": problems,
-                              "written": "", "pending": True},
+                              "written": "", "pending": True, "reread": not in_place},
                     **self.state()}
 
     def config_pair(self, payload: dict) -> dict:

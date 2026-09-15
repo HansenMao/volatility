@@ -755,7 +755,9 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
             title="on a cross: its correlation at each tenor, read off the curve, beside the legs' realized correlation">
             <input type="checkbox" id="mcorrshow" style="width:auto"> correlation</label>
           <span class="meta" id="mquotenote" style="margin-left:9px"
-            title="a quote typed here replaces the pair sheet's for this session and refits that tenor; it is saved with the session and written into the sheet's own cell when the session is put back into the workbook"></span></h2>
+            title="a quote typed here replaces the pair sheet's for this session and refits that tenor; it is saved with the session and written into the sheet's own cell when the session is put back into the workbook"></span>
+          <button class="ghost" id="matmcopy" style="width:auto;padding:3px 9px;font-size:11px;margin-left:9px"
+            title="copy the marked ATM and the 25d / 10d RR and ST of every tenor, as a table that pastes into Excel">Copy table</button></h2>
         <div class="scroll"><table class="mark" id="matm"></table></div>
         <details class="hint" style="margin-top:7px"><summary>Which tenors are on this table,
           and what a <span class="pill">smile</span> row is</summary>The tenors on this table are the ones
@@ -3243,6 +3245,10 @@ const TERMC=['initial','final','decay'];
    will not calibrate is a fact about the row that was just typed into, and it
    belongs beside that table until the next edit answers differently. */
 let QPROB=[];
+/* The pair QPROB and QPASTE were said about.  Both are about one pair's
+   table: loadMarks drops them when it loads another, or the last pair's
+   refit complaint sits under this pair's tenors. */
+let QPAIR='';
 function quoteFields(){return (MARKS&&MARKS.quote_fields)||['rr_25','st_25','rr_10','st_10']}
 function quoteLabel(f){return (MARKS&&MARKS.quote_labels&&MARKS.quote_labels[f])||f}
 function paintMarks(){
@@ -3601,10 +3607,45 @@ function paintRatios(){
 }
 async function loadMarks(){
   const o=mq(); MARKS=await api('/api/marks?'+qs({pair:o.pair,cut:o.cut}));
+  if(o.pair!==QPAIR){QPROB=[];QPASTE='';QPAIR=o.pair}
   $('#manchor').checked=!!MARKS.anchor;
   paintMarks();
   corrLoad();
 }
+/* The ATM term structure as a table for a spreadsheet: tab-separated rows,
+   which is what Excel reads off the clipboard as cells.  Every quote column
+   goes whether its boxes are shown or not -- the copy is the marks, not the
+   view -- and a tenor the sheet does not quote carries what the fitted smile
+   reads there, as its row on the screen does.  Four decimals, like the quote
+   boxes: a copy is an export, and an export keeps its precision. */
+function atmTable(){
+  const QF=quoteFields(), cell=v=>(v==null||!isFinite(v))?'':v.toFixed(4);
+  return [['Tenor',MARKS.cut+' cut %'].concat(QF.map(quoteLabel))]
+    .concat(MARKS.atm.map(r=>{
+      const q=r.quotes||{}, imp=r.quotes_implied||{};
+      return [r.tenor,cell(r.cut)].concat(QF.map(f=>cell(q[f]!=null?q[f]:imp[f])));
+    }));
+}
+async function copyText(text){
+  if(navigator.clipboard&&window.isSecureContext){await navigator.clipboard.writeText(text);return}
+  /* Served to another machine over plain http the page is not a secure
+     context and has no navigator.clipboard; the old command still copies. */
+  const ta=document.createElement('textarea');
+  ta.value=text; ta.style.position='fixed'; ta.style.opacity='0';
+  document.body.appendChild(ta); ta.select();
+  try{if(!document.execCommand('copy'))throw new Error('the browser refused the copy')}
+  finally{ta.remove()}
+}
+$('#matmcopy').onclick=async()=>{
+  const b=$('#matmcopy'); b.dataset.title=b.dataset.title||b.title;
+  if(!MARKS||!MARKS.atm||!MARKS.atm.length){b.textContent='nothing to copy';return}
+  const rows=atmTable();
+  try{
+    await copyText(rows.map(r=>r.join('\t')).join('\r\n')+'\r\n');
+    b.textContent=`copied ${rows.length-1} tenors`; b.title='copied '+MARKS.pair+' at the '+MARKS.cut+' cut';
+  }catch(e){b.textContent='copy failed'; b.title='the clipboard refused: '+e.message}
+  clearTimeout(b._t); b._t=setTimeout(()=>{b.textContent='Copy table';b.title=b.dataset.title},2500);
+};
 $('#matmowshow').onchange=()=>{markingVisible();saveMarking();paintMarks()};
 $('#mquoteshow').onchange=()=>{saveMarking();paintMarks()};
 $('#mratioshow').onchange=()=>{saveMarking();paintMarks()};
@@ -6385,8 +6426,10 @@ function cfgPaintTabs(where){
       /* Not a confirmation about the workbook any more -- nothing is
          written -- but still one: it re-reads the book, which is a second or
          two and repaints every screen. */
-      cfgConfirm('Apply <b>'+esc(t.sheet)+'</b> to this session and read the book again on '+
-        'it? The workbook is untouched until <b>Write to workbook</b>.','Apply',
+      cfgConfirm('Apply <b>'+esc(t.sheet)+'</b> to this session'+
+        (t.in_place?' (the loaded book takes it as it is; the workbook is not read again)'
+                   :' and read the book again on it')+
+        '? The workbook is untouched until <b>Write to workbook</b>.','Apply',
         ()=>post('/api/config/save',{sheet:t.sheet,rows:t.rows}),where);};});
   root.querySelectorAll('.cfgaddcol').forEach(b=>{
     b.onclick=()=>{
@@ -6686,7 +6729,12 @@ function cfgConfirm(html,label,run,where){
          the state and every screen with it, and the tables here are rebuilt
          from what the book was built with rather than from what was typed
          into them. */
-      await boot(); await loadConfig(); await loadVersions(); await xLoadCfg();
+      /* A tab applied in place left the book as it was, so the screens are
+         not rebooted over it -- only the window, and the two readers of those tabs:
+         the analysis (cross dependence) and the marking bump (vega weights). */
+      if(r.wrote&&r.wrote.reread===false){
+        await loadConfig(); if(has('analysis'))loadAn(); if(has('marking'))bumpWeights();}
+      else{await boot(); await loadConfig(); await loadVersions(); await xLoadCfg();}
       R.show(said,false);
     }catch(e){c.classList.add('hide');R.show(e.message,true)}
   };
@@ -9124,6 +9172,13 @@ $('#mpair').onchange=async()=>{setMethodSel('#mmethod',$('#mpair').value);
      pair's levels under this pair's heading. */
   $('#mbumpout').innerHTML='';$('#mbumpcol').textContent='';
   $('#mxqout').innerHTML='';MXQ=null;
+  /* The same for every card's last word: the curve's Apply, the events'
+     reload or solve, and the two curve fits were about the pair they ran on.
+     A fit still says it is stale when its own inputs move on this pair. */
+  [$('#cmsg'),$('#emsg')].forEach(m=>{m.className='msg';m.textContent=''});
+  $('#mowfitout').innerHTML='';OWFIT=null;
+  $('#mcorrfitout').innerHTML='';CORRFIT=null;
+  $('#mcorrout').innerHTML='';
   await loadCurve();await loadMarks();await loadBand();redraw();bumpWeights()};
 $('#mcut').onchange=async()=>{await loadMarks();await loadBand();redraw()};
 $('#mmethod').onchange=redraw;

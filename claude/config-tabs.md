@@ -111,6 +111,15 @@ are part of the **session** now, and the shape is:
    the rows into `self.config_edits` and calls `_rebuild`, which captures the
    session, reads the workbook again **with the overlay**, and puts the marks
    back with `session.apply_document`. Nothing is written and nothing is lost.
+   **Except a tab nothing is built from** (`book.IN_PLACE_TABS`: `CROSS_DEPENDENCE` and
+   `Vega Weights`, added 2026-09-15): the book reads it once and is asked
+   of it later, so `Book.reconfigure_in_place` swaps its rows on the loaded
+   book and the workbook is not read again -- a re-read put whatever the
+   session held at risk for a setting that changes no surface. The response
+   says `reread: false` and the window refreshes itself and Analysis rather
+   than rebooting every screen (Analysis for the dependence, the marking
+   bump's weights for Vega Weights). A tab joins the set only if no surface,
+   calendar or cache holds anything derived from it.
 2. `Book.from_excel(config=...)` holds them as `Book.config_tabs` and hands
    them to every reader; `session.capture` writes them into the session file
    under `config`; `session.config_tabs_from_doc` reads them back.
