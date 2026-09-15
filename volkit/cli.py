@@ -329,7 +329,53 @@ def cmd_tenors(args) -> int:
         cut = surface.atm.cut_vol(book.clock.datetime_from_years(t), args.cut)
         print(f"  {tenor:<6}{surface.atm.term_vol(t) * 100:>10.4f}{cut * 100:>10.4f}"
               f"  {d.expiry:%Y-%m-%d}  {d.delivery:%Y-%m-%d}")
+    if args.correlation:
+        _print_correlation(args, book)
     return 0
+
+
+def _print_correlation(args, book) -> None:
+    """The marking card's correlation table: the cross curve at each tenor and
+    the legs' realized correlation, off ``analytics.correlation_table``."""
+    from . import analytics
+    from .history import load_history
+
+    pair = args.pair.upper()
+    history = None
+    if args.history:
+        history = load_history(args.history, book.pairs, vol_unit=args.vol_unit)
+        for problem in list(history.problems) + list(history.skipped_sheets):
+            print(f"  . {problem}", file=sys.stderr)
+    lookback = None if args.lookback in (None, "", "match") else float(args.lookback)
+    table = analytics.correlation_table(book, pair, history, lookback_days=lookback,
+                                        realized_basis=args.realized_basis)
+    print(f"\n  correlation {table.legs[0]} / {table.legs[1]}   realized over "
+          + (f"{lookback:g} days (every tenor)" if lookback else "a window matched to each tenor"))
+    print(f"  {'tenor':<6}{'marked':>9}{'realized':>10}{'± se':>8}{'diff':>9}{'days':>7}"
+          f"{'n':>6}{'vol-vol':>9}{'± se':>7}{'corr vol':>10}{'± se':>7}{'noise':>7}"
+          f"{'windows':>9}  basis")
+    dash = lambda v, f: "—" if v is None else format(v, f)
+    for r in table.rows:
+        d = r.dependence
+        dep = ("" if d is None else
+               f"{dash(d.vol_vol, '+.3f'):>9}{dash(d.vol_vol_se, '.3f'):>7}"
+               f"{dash(d.corr_vol, '.3f'):>10}{dash(d.corr_vol_se, '.3f'):>7}"
+               f"{dash(d.corr_vol_noise, '.3f'):>7}{dash(d.corr_vol_windows, '.1f'):>9}")
+        line = (f"  {r.tenor:<6}{r.marked:>+9.3f}{dash(r.realized, '+.3f'):>10}"
+                f"{dash(r.realized_se, '.3f'):>8}{dash(r.difference, '+.3f'):>9}"
+                f"{r.window_days:>7.0f}{r.observations:>6}{dep}  {r.basis or '—'}")
+        print(line + (f"   {r.error}" if r.error else ""))
+    if table.unavailable:
+        print(f"  ! {table.unavailable}")
+    else:
+        print("  vol-vol is the correlation of daily changes in the legs' log ATM over a year; "
+              "corr vol is how much\n  the correlation moved between windows the tenor long, "
+              "with 'noise' -- what sampling alone scatters\n  a window that short by -- taken "
+              "out. Both are what CROSS_DEPENDENCE is measured against: physical,\n  not priced")
+    for note in dict.fromkeys(w for r in table.rows for w in r.warnings):
+        print(f"  ! {note}", file=sys.stderr)
+    for note in dict.fromkeys(n for r in table.rows if r.dependence for n in r.dependence.notes):
+        print(f"  . {note}", file=sys.stderr)
 
 
 def cmd_vega(args) -> int:
@@ -695,8 +741,11 @@ def cmd_analysis(args) -> int:
         return f"{v * 100:+{w}.{d}f}"
 
     # Book.build expands the request to a cross's legs on its own, so asking for
-    # the cross alone still builds everything the triangle needs.
-    book = _book(args, [args.pair])
+    # the cross alone still builds everything the triangle needs -- and a cross
+    # named to lend its premium is built with it, legs and all.
+    lenders = [p.upper() for p in (args.dependence, args.premium)
+               if p and p.lower() not in ("own", "none") and p.upper() != args.pair.upper()]
+    book = _book(args, list(dict.fromkeys([args.pair] + lenders)))
     if args.feed:
         _feed(book, args.feed)
     hist = history = None
@@ -836,7 +885,8 @@ def cmd_analysis(args) -> int:
 
     if book.data.pairs[args.pair].is_cross:
         tri = analytics.triangle_table(book, args.pair, method=args.method, cut=args.cut,
-                                       with_noise=not args.no_noise)
+                                       with_noise=not args.no_noise,
+                                       implied_vol_vol=not args.no_implied_vol_vol)
         legs = book.data.pairs[args.pair].legs
         print(f"\ntriangle — {args.pair} against {legs[0]} and {legs[1]} "
               f"(coefficients {tri[0].coefficients if tri else '?'})")
@@ -870,9 +920,68 @@ def cmd_analysis(args) -> int:
             if noise:
                 print("  noise floor (the same machinery run on each leg alone): "
                       + ", ".join(f"{k} {v * 100:.4f}" for k, v in noise.items()))
+        marked_any = any(r.vol_vol is not None or r.corr_vol for r in tri)
+        if tri and (marked_any or not args.no_implied_vol_vol):
+            # The dependence the legs are tied together with -- marked on the
+            # CROSS_DEPENDENCE tab, or the Gaussian copula -- and the vol-vol
+            # correlation the marked butterfly implies, which is what the tab
+            # is marked against.
+            print(f"\n  dependence — {'as marked on CROSS_DEPENDENCE' if marked_any else 'none marked: the Gaussian copula'}")
+            print(f"  {'tenor':<6}{'vol-vol':>9}{'corr vol':>10}{'copula rho':>12}"
+                  f"{'implied vol-vol':>17}{'fly25 gauss':>13}{'fly10 gauss':>13}")
+
+            def num(v, w, fmt):
+                return ("—" if v is None or v != v else f"{v:{fmt}}").rjust(w)
+
+            for r in tri:
+                print(f"  {r.tenor:<6}{num(r.vol_vol, 9, '+.3f')}{num(r.corr_vol or None, 10, '.3f')}"
+                      f"{num(r.copula_rho, 12, '+.4f')}{num(r.implied_vol_vol, 17, '+.3f')}"
+                      f"{pct(r.gaussian.get('fly25'), 3, 13)}{pct(r.gaussian.get('fly10'), 3, 13)}")
+            print("  the copula's correlation is solved so a marked dependence holds the combined "
+                  "ATM where the Gaussian copula puts it; the gauss columns are that copula's "
+                  "flies, beside the marked law's in the table above. A vol-vol correlation of 0 "
+                  "is independent variance regimes, which is a lower fly than the Gaussian "
+                  "copula's -- mark against the implied column, not against zero")
+            for r in tri:
+                if r.implied_vol_vol_note:
+                    print(f"  . {r.tenor}: {r.implied_vol_vol_note}")
         for r in tri:
             for w in r.warnings:
                 print(f"  ! {r.tenor}: {w}")
+
+    if args.dependence is not None:
+        if not book.data.pairs[args.pair].is_cross:
+            print(f"\n  ! {args.pair} is not a cross, so it has no dependence between legs")
+        elif history is None:
+            print("\n  ! --dependence needs --history: the legs' dependence is measured on it")
+        else:
+            table = analytics.dependence_table(book, args.pair, history, premium=args.dependence,
+                                               method=args.method, cut=args.cut)
+            print(f"\ndependence — {args.pair} off {table.legs[0]} / {table.legs[1]} history, "
+                  f"suggestion is measured plus premium from {table.premium}")
+            print(f"  {'tenor':<6}{'rho':>7}{'vv meas':>9}{'± se':>7}{'cv meas':>9}{'± se':>7}"
+                  f"{'fly25 mk':>10}{'vv impl':>9}{'premium':>9}{'used':>8}"
+                  f"{'-> vol vol corr':>17}{'corr vol':>10}")
+
+            def cell(v, w, f):
+                return ("—" if v is None or v != v else format(v, f)).rjust(w)
+
+            for r in table.rows:
+                m = r.measured
+                print(f"  {r.tenor:<6}{r.rho:>+7.3f}{cell(m.vol_vol, 9, '+.3f')}"
+                      f"{cell(m.vol_vol_se, 7, '.3f')}{cell(m.corr_vol, 9, '.3f')}"
+                      f"{cell(m.corr_vol_se, 7, '.3f')}{pct(r.marked_fly25, 3, 10)}"
+                      f"{cell(r.implied_vol_vol, 9, '+.3f')}{cell(r.premium, 9, '+.3f')}"
+                      f"{cell(r.premium_used, 8, '+.3f')}{cell(r.suggested_vol_vol, 17, '+.3f')}"
+                      f"{cell(r.suggested_corr_vol, 10, '.3f')}")
+            print("  measured is physical; the premium is what the marked fly charges on top, put "
+                  "on the vol-vol\n  correlation with the correlation vol held at what was "
+                  "measured. The suggestion goes on the\n  CROSS_DEPENDENCE tab by hand or "
+                  "through the Config window -- this writes nothing")
+            for r in table.rows:
+                for note in (r.reason,) + r.warnings:
+                    if note:
+                        print(f"  . {r.tenor}: {note}")
 
     if args.relative_value:
         # The same function the screen calls, so a cell quoted off the grid
@@ -886,12 +995,21 @@ def cmd_analysis(args) -> int:
             "horizon_days": args.horizon, "lookback_days": args.lookback,
             "history_days": args.history_days, "annualisation": args.annualisation,
             "realized_basis": args.realized_basis, "triangle": True,
+            "triangle_basis": args.triangle_basis, "premium": args.premium,
             "weights": _weights(args.weight),
         }).run(book, history)
         cols = [c["name"] for c in grid.columns]
         labels = {c["name"]: c["label"] for c in grid.columns}
         print(f"\nrelative value — {grid.history_days:g}-day history, weights " +
               " / ".join(f"{k} {v:g}" for k, v in grid.weights.items()))
+        if grid.triangle:
+            print(f"  triangle priced on the {grid.triangle['basis']} dependence"
+                  + (f" (asked for {grid.triangle['asked']})"
+                     if grid.triangle['basis'] != grid.triangle['asked'] else "")
+                  + (f", premium {grid.triangle['premium']}"
+                     if grid.triangle['basis'] == "realized" else ""))
+            for tenor, src in grid.triangle["sources"].items():
+                print(f"    {tenor}: {src}")
 
         def grid_block(title: str, pick, fmt) -> None:
             print(f"  {title}")
@@ -1957,26 +2075,29 @@ def cmd_export(args) -> int:
     if args.compare:
         if ov is None:
             raise ValueError("--compare needs --overlay: it is the book against the overlay")
-        cmp = publish.compare(args.channel, book, tables, ov, pairs=args.pairs or None,
-                              tier=args.tier, multiplier=args.multiplier, wings=args.wings,
+        cmp = publish.compare(book, ov, pairs=args.pairs or None, wings=args.wings,
                               cut=args.cut)
-        print(f"{cmp['label']}: book against overlay {ov.name}, {len(cmp['pairs'])} pair(s)")
-        print(f"  {'pair':<7}{'tenor':<5}{'book bid':>9}{'book mid':>9}{'book ask':>9}"
-              f"{'ov bid':>9}{'ov mid':>9}{'ov ask':>9}{'d mid':>8}{'d bid':>8}{'d ask':>8}"
-              f"{'d rr25':>8}{'d bf25':>8}")
+        fields = cmp["fields"]
+        print(f"book against overlay {ov.name}, mids, {len(cmp['pairs'])} pair(s)")
+        print(f"  {'pair':<7}{'tenor':<6}" + "".join(f"{'book ' + f:>10}{'ov ' + f:>10}{'d ' + f:>9}"
+                                                    for f in fields))
+
+        def cell(v, width, sign=""):
+            return f"{'-':>{width}}" if v is None else f"{v:>{sign}{width}.3f}"
+
         for r in cmp["rows"]:
             x, y, d = r["book"], r["overlay"], r["diff"]
-            if not (x and y):
-                side = "book only" if x else "overlay only"
-                print(f"  {r['pair']:<7}{r['tenor']:<5}  {side}")
+            if x is None:
+                print(f"  {r['pair']:<7}{r['tenor']:<6}  overlay only -- the book cannot mark it")
                 continue
-            print(f"  {r['pair']:<7}{r['tenor']:<5}{x['bid']:>9.4f}{x['mid']:>9.4f}{x['ask']:>9.4f}"
-                  f"{y['bid']:>9.4f}{y['mid']:>9.4f}{y['ask']:>9.4f}{d['mid']:>+8.3f}"
-                  f"{d['bid']:>+8.3f}{d['ask']:>+8.3f}{d['rr25']:>+8.3f}{d['bf25']:>+8.3f}")
-        for r in cmp["book_refused"]:
-            print(f"  ! book: {r}")
-        for r in cmp["overlay_refused"]:
-            print(f"  ! overlay: {r}")
+            print(f"  {r['pair']:<7}{r['tenor']:<6}"
+                  + "".join(cell(x[f], 10) + cell(y[f], 10) + cell(d[f], 9, "+") for f in fields))
+        for p in cmp["by_pair"]:
+            if p["book_only"]:
+                print(f"  . {p['pair']}: the book quotes {', '.join(p['book_only'])}, the "
+                      f"overlay does not")
+        for r in cmp["refused"]:
+            print(f"  ! {r}")
         return 0
     sources = {p.strip().upper(): "book" for p in (args.book_pairs or []) if p.strip()}
     b = publish.build(args.channel, book, tables,
@@ -3327,6 +3448,16 @@ def build_parser() -> argparse.ArgumentParser:
     s = add_command("tenors", parents=[common], help="print the ATM term structure")
     s.add_argument("pair")
     s.add_argument("--cut", default="TK")
+    s.add_argument("--correlation", action="store_true",
+                   help="on a cross, also the correlation at each tenor beside the legs' "
+                        "realized correlation")
+    s.add_argument("--history", default=_default_history(),
+                   help="historical workbook (with --correlation)")
+    s.add_argument("--lookback", default="match",
+                   help="realized lookback in days, or 'match' to give each tenor its own "
+                        "(default)")
+    s.add_argument("--realized-basis", default="auto", choices=["auto", "forward", "spot"])
+    s.add_argument("--vol-unit", default="auto", choices=["auto", "percent", "decimal"])
     s.set_defaults(func=cmd_tenors)
 
     s = add_command("vega", parents=[common],
@@ -3404,8 +3535,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="with --overlay: pairs read from the book all the same, so a run "
                         "is not all from one source or all from the other")
     s.add_argument("--compare", action="store_true",
-                   help="with --overlay: print the book against the overlay -- mids and "
-                        "both sides at the channel's widths -- and stop")
+                   help="with --overlay: print the book's mids against the overlay's -- "
+                        "ATM and wings, no channel -- and stop")
     s.add_argument("--tier", help="the spreading tier (kACE, COS)")
     s.add_argument("--multiplier", metavar="X", help="multiply the widths; the mid stays")
     s.add_argument("--wings", default="marks", choices=list(kace.SOURCES),
@@ -3505,6 +3636,19 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--method", default="SVI")
     s.add_argument("--no-noise", action="store_true",
                    help="skip the triangle's reconstruction diagnostic (faster)")
+    s.add_argument("--no-implied-vol-vol", action="store_true",
+                   help="skip backing out the vol-vol correlation each tenor's marked "
+                        "butterfly implies (faster)")
+    s.add_argument("--dependence", nargs="?", const="own", default=None, metavar="PREMIUM",
+                   help="on a cross, the legs' measured dependence per tenor and what to mark on "
+                        "CROSS_DEPENDENCE: measured plus the cross's own premium (own, the "
+                        "default), none, or another cross's (a pair). Needs --history")
+    s.add_argument("--triangle-basis", default="realized", choices=["realized", "marked"],
+                   help="what the relative-value triangle ties a cross's legs together with: "
+                        "their realized dependence (default) or CROSS_DEPENDENCE")
+    s.add_argument("--premium", default="none", metavar="PREMIUM",
+                   help="the premium the realized triangle adds to the measured vol-vol "
+                        "correlation: none (default) or another cross's, named")
     # Kept on this command, and refused with an address rather than dropped:
     # the panel moved to the Monitor screen and argparse's "unrecognised
     # argument" would not say where it went.

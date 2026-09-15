@@ -621,6 +621,127 @@ file itself also moves slightly against the old build, because it now
 triangulates the legs' pillar ATMs rather than reading the cross's own curve
 (events and short add-on included).
 
+## 4b-vi. `CROSS_DEPENDENCE`: a cross's butterfly out of its legs, and one delta fix
+
+**Moves numbers only on crosses a `CROSS_DEPENDENCE` tab names.** The shipped
+workbook has none, so no number on it moves -- except the delta fix at the
+end, which moves the Analysis screen's triangle slightly on every cross.
+
+**Why.** The cross triangle (Analysis) and the marking screen's *Fill from the
+legs* read a cross's RR and fly by tying the two dollar legs' marked densities
+together with a **Gaussian copula** at the cross's correlation. On the desk's
+workbook the fly it gives sits below the market on every cross, and further
+below the lower the correlation: AUDJPY 1Y 25-delta fly 0.23 against 0.55
+marked, 10-delta 0.94 against 1.92 -- forty times the noise floor. It is the
+copula, not the grid. A Gaussian copula ties the *size* of the two legs' moves
+together only as roughly the square of the correlation, so on AUDJPY (rho 0.19)
+the legs' fat-tailed days almost never coincide, and it gives the correlation no
+volatility of its own. What a cross fly is paid for is exactly those two things.
+Moving the correlation does not help: 0.1 of it moves the 25-delta fly 0.03 and
+the ATM 0.4.
+
+**What was added.** Two inputs per cross and tenor, marked on a new
+configuration tab, `CROSS_DEPENDENCE` (`pair, tenor, vol vol corr, corr vol,
+note`, edited in the Config window like any other setting):
+
+* **`vol vol corr`**, in `[-1, 1]` -- the correlation of the two legs' variance
+  regimes. Each leg's volatility is lognormally uncertain by as much as **its
+  own smile's excess kurtosis** says (`moments.regime_dispersion`), so the
+  size of each leg's regimes is not a second input; the mark is only whether
+  they come together.
+* **`corr vol`**, in `[0, 1)` -- the volatility of the correlation: over the
+  option's life it is `rho - corr vol` or `rho + corr vol`, even odds.
+
+Each is linear in time between the tenors it is marked at and flat outside
+them; a blank cell is none of it. The copula's own correlation is re-solved so
+the **combined ATM stays where the Gaussian copula put it** -- the marking moves
+the wings, never the level -- and the triangle row keeps the Gaussian copula's
+numbers beside the marked law's. Deterministic (Gauss-Hermite over the regimes,
+the same Simpson score grid), no simulation. `moments.Dependence`,
+`moments.combine_holding_atm`, `Book.dependence_at`, `analytics._leg_law`.
+
+**What to mark against.** The triangle backs out, per tenor, the **implied
+vol-vol correlation** at which the legs give the cross's marked 25-delta fly
+(holding the marked correlation vol) -- the way the implied correlation is what
+an ATM is marked against. **Zero is not neutral**: independent regimes give a
+*thinner* fly than the Gaussian copula. Where no value in `[-1, 1]` reaches the
+marked fly, the row says how far the legs go. On the desk's workbook AUDJPY
+implies 0.2 at 1W rising to 0.8 at 2M and more than 1 beyond 3M (the rest is
+correlation vol); EURGBP, whose legs cancel, implies 0.9 at 1W falling to about
+zero by 6M.
+
+**To restore the old numbers**: delete the cross's rows from
+`CROSS_DEPENDENCE` (or the tab). An unmarked cross is the Gaussian copula to
+the last digit, and a test pins it.
+
+**The delta fix, which moves the Analysis triangle.** `triangle_table` handed
+the copula `surface.conv` and the noise floor `leg.conv` -- forward delta,
+`df_foreign = 1` -- while the marked smile it is compared with is read in the
+slice's spot delta (`slice_conv(t)`, §4 invariant). The two 25-delta strikes
+were not the same strike. Both now read `slice_conv(t)`, and so does the SABR
+shape read off the marked wings (`_sabr_shape`). AUDJPY 1Y triangle fly25 moved
+0.263 -> 0.232 and rr25 -1.97 -> -1.88; the noise floor fell from 0.045 to
+0.008 (fly25), because part of it had been the convention mismatch. The
+marking screen's implied quotes already used `slice_conv(t)` and do not move.
+There is no switch: it was wrong.
+
+## 4b-vii. The relative-value triangle is priced on the legs' realized dependence, and this moves its signal
+
+**Moves the relative-value grid's `triangle` signal, and so the score, on every
+cross** where the historical workbook has both legs. Nothing else moves: the
+Analysis triangle card, the marking screen and every export still use the
+marked dependence (`CROSS_DEPENDENCE`, or the Gaussian copula).
+
+**Why.** The triangle signal compared a cross's marked smile with its legs tied
+by the Gaussian copula at the cross's correlation. §4b-vi measured that copula
+putting every cross fly below the market; it also sits below what the legs'
+own history supports wherever their volatilities move together. So the signal
+read the wings of every such cross as rich, and the reason was the copula, not
+the mark.
+
+**What changed.**
+
+* **Measured dependence** (`history.realized_vol_vol`,
+  `history.realized_corr_vol`, `analytics.measure_dependence`). The vol-vol
+  correlation is the zero-mean correlation of daily changes in the two legs'
+  log ATM at the tenor, over a year (`DYNAMICS_DAYS`; a leg without the tenor is
+  read at its nearest quoted one, and named; a leg with no ATM at all is
+  refused rather than read off a rolling volatility, whose changes are
+  smoothed). The correlation vol is the spread of the legs' correlation over
+  rolling windows the tenor long across two years (`CORR_VOL_DAYS`), **less the
+  sampling noise** a window that short carries -- `(1 - rho^2)^2 / n` per
+  window -- floored at zero and said when it is. Without that subtraction, 1M
+  windows at rho 0.3 read a correlation vol of about 0.18 on a correlation
+  that never moved; a test pins it. Fewer than three independent windows is
+  refused. Both carry standard errors.
+* **The triangle signal** ties the legs at the measured vol-vol correlation
+  plus a **premium** (none by default, or another cross's -- never the
+  cross's own, which is backed out of the fly being compared against and would
+  zero the 25-delta wings by construction; refused) and the measured
+  correlation vol, holding the ATM as §4b-vi does. Each input is moved by its
+  standard error and how far the triangle moves across that band is added to
+  the noise floor (`TriangleRow.dependence_noise`), so a difference the history
+  cannot tell apart is shown and not scored. A cross whose legs have no history
+  falls back to the marked dependence and the grid says so.
+* **Suggestions** (`analytics.dependence_table`, `/api/dependence/realized`,
+  the Config window's *Suggest from the historical book* under
+  `CROSS_DEPENDENCE`, `volkit analysis PAIR --dependence [own|none|PAIR]`):
+  measured, the vol-vol correlation the marked fly implies at the measured
+  correlation vol, the premium between, and measured plus a premium to mark --
+  the cross's own (gives back its fly), none, or another cross's for a cross
+  with no market. Into the boxes only. The marking screen's correlation card
+  shows the measured vol-vol and correlation vol beside the realized
+  correlation.
+
+**What it reads as.** A rich triangle cell is now a cross pricing more
+dependence than its legs have shown (plus the premium named) -- the triangle's
+analogue of `level`, implied against realized, and like `level` it carries the
+premium the market charges unless one is named.
+
+**To restore the old signal**: the grid's *Triangle on* box to `marked`
+(`triangle_basis: marked`, `volkit analysis --relative-value --triangle-basis
+marked`) with no `CROSS_DEPENDENCE` rows for the cross.
+
 ## 4c. Analysis — new; two of its columns moved when the forward curve went in
 
 The analysis tab is new. The legacy tool had `rv.py`, whose `RV.calc` wrote
@@ -653,8 +774,9 @@ The conventions in it worth knowing before reading a number off it:
 * **The cross triangle for RR and fly is a choice, not an identity.** Two
   marginals and a correlation do not determine a joint distribution. The legs'
   densities are combined under a Gaussian copula, which assumes a tail
-  dependence the market does not quote, and the change of measure between the
-  legs' domestic currencies is not corrected for. The noise floor printed
+  dependence the market does not quote -- unless `CROSS_DEPENDENCE` marks one
+  (§4b-vi) -- and the change of measure between the legs' domestic currencies
+  is not corrected for. The noise floor printed
   beside it -- the same machinery run on each leg alone -- is the floor below
   which a difference means nothing. The at-the-money row *is* an identity and
   is computed as one.

@@ -190,6 +190,72 @@ def load_cross_correlations(path, *, overlay=None) -> dict[str, dict[str, float]
     return out
 
 
+#: The workbook tab of a cross's marked dependence beyond its correlation: the
+#: vol-vol correlation and the correlation vol the smile triangle ties the two
+#: legs together with (``moments.Dependence``).  The book reads it; a cross it
+#: does not name is the Gaussian copula.
+CROSS_DEPENDENCE_SHEET = "CROSS_DEPENDENCE"
+
+#: The tab's two value columns, as its header spells them.
+VOL_VOL_COLUMN = "vol vol corr"
+CORR_VOL_COLUMN = "corr vol"
+
+
+def load_cross_dependence(path, *, overlay=None) -> dict[str, dict[str, tuple]]:
+    """Read the workbook's ``CROSS_DEPENDENCE`` tab: pair, tenor, vol vol corr, corr vol.
+
+    ``{PAIR: {TENOR: (vol_vol, corr_vol)}}``, tenors as typed and either value
+    ``None`` where its cell is blank -- a desk may mark one without the other.
+    An absent tab is ``{}``: every cross is the Gaussian copula, which is what
+    every cross was before the tab existed.
+
+    Refused by row rather than dropped: a pair that is not a cross (a dollar
+    pair has no legs to tie together), a tenor that names no length, a vol-vol
+    correlation outside ``[-1, 1]``, a correlation vol outside ``[0, 1)``, and
+    one tenor given twice.  A row with neither value says nothing and is
+    skipped.
+    """
+    from . import configsheets
+    from .timeutil import TenorError, parse_tenor
+
+    rows = configsheets.read_rows(path, CROSS_DEPENDENCE_SHEET, required=("pair", "tenor"),
+                                  overlay=overlay)
+    if rows is None:
+        return {}
+    out: dict[str, dict[str, tuple]] = {}
+    bad: list[str] = []
+    for row in rows:
+        pair, tenor = row.text("pair").upper(), row.text("tenor")
+        if not pair or not tenor:
+            continue
+        where = f"{CROSS_DEPENDENCE_SHEET} row {row.number}: {pair} {tenor}"
+        vol_vol, corr_vol = row.real(VOL_VOL_COLUMN), row.real(CORR_VOL_COLUMN)
+        if vol_vol is None and corr_vol is None:
+            continue
+        if len(pair) != 6 or not pair.isalpha() or not is_cross(pair):
+            bad.append(f"{where} -- {pair} is not a cross, so it has no legs to tie together")
+            continue
+        try:
+            parse_tenor(tenor)
+        except (TenorError, ValueError) as exc:
+            bad.append(f"{where} -- {tenor!r} is not a tenor this reads ({exc})")
+            continue
+        if vol_vol is not None and not -1.0 <= vol_vol <= 1.0:
+            bad.append(f"{where} vol vol corr {vol_vol:g} is outside [-1, 1]")
+            continue
+        if corr_vol is not None and not 0.0 <= corr_vol < 1.0:
+            bad.append(f"{where} corr vol {corr_vol:g} is outside [0, 1)")
+            continue
+        ladder = out.setdefault(pair, {})
+        if any(k.upper() == tenor.upper() for k in ladder):
+            bad.append(f"{where} is given twice")
+            continue
+        ladder[tenor] = (vol_vol, corr_vol)
+    if bad:
+        raise ValueError("; ".join(bad))
+    return out
+
+
 @dataclass
 class CrossAtmCurve(AtmCurve):
     """ATM curve for a cross, from two leg curves and a correlation.

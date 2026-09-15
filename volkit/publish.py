@@ -1583,72 +1583,73 @@ WRITERS = {"bloomberg": write_bloomberg, "murex": write_murex, "cos": write_cos}
 # ---------------------------------------------------------------------------
 # book against overlay
 # ---------------------------------------------------------------------------
-def compare(channel_name: str, book, tables: ExportTables, overlay: overlay_mod.Overlay, *,
-            pairs=None, tier: str | None = None, multiplier=None, wings: str = "marks",
-            cut: str = "NY", methods=None) -> dict:
-    """The book against the overlay, mids and both sides, pair by pair and tenor by tenor.
+#: The mids a comparison lines up, in the overlay's own column names.
+COMPARED = overlay_mod.FIELDS
 
-    Two builds of the same channel -- every pair from the book, every pair
-    from the overlay -- joined on pair and tenor, so the two-ways compared
-    are the two-ways the channel would actually publish: the same tier or
-    market width, the same shade, the same wing widths on both.  Only the
-    pairs the overlay carries are compared; a pair or tenor one side cannot
-    supply is listed, not silently dropped.
+
+def compare(book, overlay: overlay_mod.Overlay, *, pairs=None, wings: str = "marks",
+            cut: str = "NY", methods=None) -> dict:
+    """The book's mids against the overlay's, pair by pair and tenor by tenor.
+
+    No channel, no width, no shade: the ATM and the four wings as the book
+    marks them (``kace.read_pillars``, the reader every channel uses) beside
+    the numbers the file carries, at the overlay's own pairs and tenors.  A
+    row carrying only an ATM two-way is compared at its mid.  A blank overlay
+    cell is not carried and compares as nothing -- it does not fall through
+    to the book here, which would read as agreement.  A tenor the book cannot
+    mark is listed as overlay-only; a tenor the book quotes and the file does
+    not is named per pair, not given a row.
     """
-    ch = channel(channel_name)
-    entries = tables.pairs_for(ch.key, book)
-    in_overlay = sorted({k[0] for k in overlay.rows})
-    wanted = {e.pair for e in entries if e.pair in in_overlay}
+    methods = methods or {}
+    in_overlay = overlay.pairs
+    wanted = set(in_overlay)
     if pairs:
-        wanted &= {str(p).strip().upper() for p in pairs}
+        wanted &= {overlay_mod._canon_pair(p) for p in pairs}
     if not wanted:
-        raise PublishError(f"the overlay carries none of the {ch.label} pairs"
+        raise PublishError("the overlay carries none of those pairs"
                            + (f" (it has {', '.join(in_overlay)})" if in_overlay else ""))
-    common = dict(tier=tier, multiplier=multiplier, wings=wings, cut=cut, methods=methods,
-                  pairs=sorted(wanted))
-    a = build(ch.key, book, tables, source="book", **common)
-    b = build(ch.key, book, tables, source="overlay", overlay=overlay, **common)
-    qa = {(q.pair, q.tenor): q for q in a.quotes}
-    qb = {(q.pair, q.tenor): q for q in b.quotes}
     rows: list[dict] = []
-    for key in sorted(set(qa) | set(qb), key=lambda k: (k[0], pillar_years(k[1]))):
-        x, y = qa.get(key), qb.get(key)
-        row = {"pair": key[0], "tenor": key[1],
-               "book": x.to_dict() if x else None, "overlay": y.to_dict() if y else None,
-               "diff": {}}
-        if x and y:
-            def d(a, b):
-                return (b - a) if (a == a and b == b) else None     # NaN: not carried
-            row["diff"] = {"mid": y.mid - x.mid, "bid": y.bid - x.bid, "ask": y.ask - x.ask,
-                           **{i: d(x.value(i), y.value(i)) for i in WING_INSTRUMENTS},
-                           **{f"{i}_bid": d(x.side(i)[0], y.side(i)[0])
-                              for i in WING_INSTRUMENTS},
-                           **{f"{i}_ask": d(x.side(i)[1], y.side(i)[1])
-                              for i in WING_INSTRUMENTS}}
-            row["origin"] = y.origin
-            row["same"] = all(v is None or abs(v) < 1e-9 for v in row["diff"].values())
-        rows.append(row)
-    by_pair: dict[str, dict] = {}
-    for row in rows:
-        entry = by_pair.setdefault(row["pair"], {"pair": row["pair"], "tenors": 0,
-                                                 "compared": 0, "max_mid": 0.0, "max_side": 0.0,
-                                                 "book_only": [], "overlay_only": []})
-        entry["tenors"] += 1
-        if row["diff"]:
-            entry["compared"] += 1
-            entry["max_mid"] = max(entry["max_mid"], abs(row["diff"]["mid"]))
-            entry["max_side"] = max(entry["max_side"], abs(row["diff"]["bid"]),
-                                    abs(row["diff"]["ask"]))
-        elif row["book"]:
-            entry["book_only"].append(row["tenor"])
-        elif row["overlay"]:
-            entry["overlay_only"].append(row["tenor"])
-    return {"channel": ch.key, "label": ch.label, "pairs": sorted(wanted),
-            "rows": rows, "by_pair": list(by_pair.values()),
-            "book_refused": a.refused, "overlay_refused": b.refused,
-            "overlay": overlay.record(),
-            "widths": {"source": ch.width, "tier": a.tier, "multiplier": a.multiplier,
-                       "wings_two_way": ch.wings_two_way}}
+    by_pair: list[dict] = []
+    refused: list[str] = []
+    for pair in sorted(wanted):
+        tenors = sorted({t for p, t in overlay.rows if p == pair}, key=pillar_years)
+        read = None
+        try:
+            read, _ = _book_read(book, pair, tenors, cut=cut, source=wings,
+                                 method=methods.get(pair), where="the overlay's tenors")
+        except (KaceError, ValueError, KeyError) as exc:
+            refused.append(f"{pair}: the book could not be read ({exc})")
+        quoted = ({canonical_tenor(m.tenor) for m in book[pair].quoted_marks()}
+                  if pair in book else set())
+        entry = {"pair": pair, "in_book": pair in book, "tenors": len(tenors), "compared": 0,
+                 "max_atm": 0.0, "max_wing": 0.0, "overlay_only": [],
+                 "book_only": sorted(quoted - set(tenors), key=pillar_years)}
+        for tenor in tenors:
+            given = overlay.rows[(pair, tenor)]
+            ov = {f: given.values.get(f) for f in COMPARED}      # a two-way's atm is its mid
+            bk = None
+            if read is not None and tenor in read.atm:
+                bk = dict(zip(COMPARED, (read.atm[tenor], *read.wings[tenor])))
+            row = {"pair": pair, "tenor": tenor, "book": bk, "overlay": ov, "diff": {},
+                   "two_way": given.two_way}
+            if bk is None:
+                entry["overlay_only"].append(tenor)
+            else:
+                row["diff"] = {f: (ov[f] - bk[f]) if ov[f] is not None else None
+                               for f in COMPARED}
+                row["same"] = all(v is None or abs(v) < 1e-9 for v in row["diff"].values())
+                row["origin"] = read.origin.get(tenor, "")
+                entry["compared"] += 1
+                d = row["diff"]
+                if d["atm"] is not None:
+                    entry["max_atm"] = max(entry["max_atm"], abs(d["atm"]))
+                entry["max_wing"] = max([entry["max_wing"]]
+                                        + [abs(d[f]) for f in COMPARED[1:] if d[f] is not None])
+            rows.append(row)
+        by_pair.append(entry)
+    return {"pairs": sorted(wanted), "fields": list(COMPARED), "rows": rows,
+            "by_pair": by_pair, "refused": refused, "wings": wings,
+            "overlay": overlay.record()}
 
 
 # ---------------------------------------------------------------------------

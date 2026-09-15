@@ -13,9 +13,22 @@ for the reasoning behind it. Read this file when working in the area above.
   ratio, so placing one needs the outright forward at the expiry. Without a
   feed for the pair it refuses and names the feed rather than guessing a level.
 - **The cross triangle for RR and fly assumes a Gaussian copula** between the
-  two legs and ignores the change of measure between their domestic
-  currencies. Both are stated in `moments.py` and bounded by the reported
-  noise floor; neither is corrected for.
+  two legs unless `CROSS_DEPENDENCE` marks a vol-vol correlation and a
+  correlation vol for the cross, and ignores the change of measure between the
+  legs' domestic currencies either way. The marked dependence is itself a
+  choice: lognormal variance regimes sized by each leg's own kurtosis, a
+  two-point correlation, and no link between the correlation and the regimes
+  (correlation rising *in* stress is not modelled). All stated in `moments.py`;
+  the change of measure is not corrected for.
+- **Measured dependence is physical and a premium is borrowed.** The realized
+  vol-vol correlation and correlation vol carry no risk premium; the
+  relative-value triangle adds none unless another cross's is named, and a
+  cross with no market of its own has no premium of its own to check the
+  borrowed one against. The vol-vol correlation is daily `dlog ATM`, which is
+  the model's log-variance shock only if the regimes are built of those
+  shocks; the correlation vol is net of sampling noise but thin on long tenors
+  (two years holds two 1Y windows, which is refused), and both depend on the
+  regime the history window happens to cover.
 - **Fair value is a first-order break-even**, not a valuation: it ignores the
   convexity of the gamma P&L in realized volatility and assumes the surface
   does not move.

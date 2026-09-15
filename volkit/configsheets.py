@@ -65,6 +65,11 @@ SHEETS: dict[str, str] = {
     "CROSS_CORR": "COS only: a cross's correlation typed per tenor, which the COS file "
                   "builds that cross's ATM with off its two dollar legs; the book keeps "
                   "its fitted correlation: pair, tenor, correlation, note",
+    "CROSS_DEPENDENCE": "how a cross's legs depend on each other beyond its correlation, "
+                        "per tenor, for the smile its legs imply: pair, tenor, vol vol corr "
+                        "(the correlation of the legs' variance regimes, -1 to 1), corr vol "
+                        "(the volatility of the correlation, 0 to 1), note -- a cross with "
+                        "no row is the Gaussian copula",
     "Vega Weights": "how far each tenor moves when the anchor moves one vol point: "
                     "tenor, default, and a column per pair that needs its own",
     # The export policy tables (claude/publishing-channels-design.md).  In the
@@ -119,6 +124,7 @@ EDITABLE: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "CONVENTIONS": (("pair", "premium", "atmf beyond", "delta", "fit cutoff"), ("pair",)),
     "WING_RATIOS": (("pair", "tenor", "st", "rr"), ("pair", "tenor")),
     "CROSS_CORR": (("pair", "tenor", "correlation", "note"), ("pair", "tenor")),
+    "CROSS_DEPENDENCE": (("pair", "tenor", "vol vol corr", "corr vol", "note"), ("pair", "tenor")),
     "Vega Weights": (("tenor", "default", "note"), ("tenor", "default")),
     "MARKET_WIDTHS": (("tenor", "note"), ("tenor",)),
     "ADD_UPS": (("pair", "overnight", "other", "note"), ("pair",)),

@@ -69,6 +69,7 @@ settings that go with them:
 | `MARKET_WIDTHS`, `ADD_UPS`, `SHADES`, `EXPORT_PAIRS` | the bulk export's policy: the Bloomberg widths, the mid shades, and which pairs each channel publishes — edited on the **Vol bulk processing** tab, not here |
 | `HOLIDAYS` | holiday dates no rule derives: `country, date, remove` |
 | `CONVENTIONS` | a pair's quoting conventions where they differ from the market's: `pair, premium, atmf beyond, delta, fit cutoff` |
+| `CROSS_DEPENDENCE` | how a cross's legs depend on each other beyond the correlation, for the smile its legs imply: `pair, tenor, vol vol corr, corr vol, note`. See *Cross triangle* under Analysis |
 
 Each is an ordinary table with a header row. A row whose first cell starts
 with `#` is a note and is skipped, wherever it sits — the tabs ship with the
@@ -404,7 +405,8 @@ move the screen.
   strangles **from the two dollar legs**, for a cross too thin to have a run of
   its own. Each leg's marked smile is tied to the other at the cross's own
   correlation (the curve its ATM is already built from) by the Analysis
-  screen's Gaussian-copula triangle, and the cross's smile is read off the
+  screen's triangle — a Gaussian copula, or the `CROSS_DEPENDENCE` tab's marks
+  for the cross, holding the ATM — and the cross's smile is read off the
   result: the RR is its risk reversal, the ST its *market* strangle, the
   convention the sheet's columns hold. **Show** lists what the legs imply at
   every tenor, with the quote on the row now beside it and a tick per tenor;
@@ -412,9 +414,10 @@ move the screen.
   nothing has been shown) as ordinary quotes, in one refit. They are saved,
   exported and taken off like any typed quote. A 10-delta wing a ratio derives
   is left to its ratio unless the box beside the buttons is ticked. The ATM
-  is not written. The copula knows nothing of tail dependence the market does
-  not quote, or of the change of measure between the legs' currencies and the
-  cross's, so read the result as a starting mark, not a market.
+  is not written. The copula knows nothing of a dependence `CROSS_DEPENDENCE`
+  does not mark, or of the change of measure between the legs' currencies and
+  the cross's, so read the result as a starting mark, not a market. Hover a
+  row's ρ for the dependence it was built with.
 
   These edits are saved with the session, and **Write to workbook** puts them
   into the pair sheet's own cells (a new tenor becomes a new row). That is the
@@ -440,6 +443,33 @@ move the screen.
   **`volkit migrate-wings --in-place`** once to read the multiples onto the tab
   and flatten the sheets to numbers; `volkit check` says whether a workbook has
   been through it.
+* **Correlation** — on a **cross** only, tick **correlation** in the heading for
+  a table of the cross's correlation tenor by tenor. **Marked ρ** is the
+  cross's own correlation curve (the initial, final and decay on the curve
+  card) read at each tenor's expiry — the number that tenor's ATM is built
+  from out of its two dollar legs — and needs no history. **Realized ρ** is the
+  correlation of the two legs' daily log returns, each leg as it is quoted
+  (EURUSD with USDJPY for EURJPY), on the days both history sheets hold, with
+  one standard error beside it and **Diff** = marked − realized. It is measured
+  the way the Analysis screen measures realized volatility: zero-mean, on the
+  forward to each tenor wherever both sheets can build one (a `spot` pill
+  where they cannot), over a **Lookback (days)** that is `match` — each tenor
+  its own length — or a number that holds every tenor to one window. A tenor
+  whose window holds too few days keeps its row and says so. The history is
+  the one loaded on the Analysis screen; without one the marked column still
+  shows and the table says why the realized one is empty. Nothing here is
+  written — mark the correlation on the curve card.
+  Two more columns say how the legs **depend** on each other beyond the
+  correlation. **Vol-vol** is the correlation of daily changes in the two legs'
+  ATM over the last year, ± one standard error. **Corr vol** is how much their
+  correlation moved between windows the tenor long over two years, with the
+  scatter that sampling alone gives a window that short (**noise**) taken out —
+  twenty days of returns scatter a correlation by about 0.2 even when it never
+  moves, and that is not a correlation vol. Both are what happened, not what the
+  market charges; *Suggest from the historical book* under `CROSS_DEPENDENCE` in
+  the Config window turns them into marks (see *Cross triangle* under Analysis).
+  `volkit tenors EURJPY --correlation --history vol_history.xlsx --lookback 90`
+  prints the same table.
 * **Fit the curve to the overwrites** — shown with the **overwrites** column,
   and only then. Tick the degrees of freedom the fit may move — **initial**,
   **final**, **decay**, **add-on** (on a plain pair the backbone's initial vol,
@@ -976,10 +1006,13 @@ Set the **pair**, **cut** and **interpolation** at the top, then:
 | Annualise realized | `weighted` divides by the same volatility time the model uses. `calendar` and `count` are the naive alternatives, shown in the table anyway |
 | Realized on | `forward` (the default) measures what the option's own underlying did, swap-point moves included, wherever the sheet quotes them. `spot` measures spot alone |
 | Triangle noise floor | on by default; untick it for a faster cross triangle |
+| Implied vol-vol | on by default: backs out, per tenor, the vol-vol correlation the cross's marked fly asks for. The slowest part of the triangle — untick it when you do not need it |
 | Wings as ρ / ν | reads the marked risk reversal and butterfly as a spot/volatility correlation and a vol of vol, against the same two measured from the history. Off by default — it is a fit per tenor |
 | ρ/ν wings | which wings to read that shape off: 25 or 10 delta |
 | History window (days) | how far back the relative-value grid measures each cell's own mean and how much it moves. Not the realized lookback: a month of a one-month volatility is far too short to say how much it moves |
 | Cross triangle | include the legs' view of a cross in the relative-value score. Untick it for a faster grid |
+| Triangle on | `realized` (default): the legs are tied at the dependence their **history** shows — measured vol-vol correlation and correlation vol — so a rich wing means the cross prices more dependence than its legs have shown. `marked`: at what `CROSS_DEPENDENCE` marks, or the Gaussian copula. A cross whose legs have no history uses `marked` and the header says so |
+| Premium | with `realized`: added to the measured vol-vol correlation. `none` (default) is history alone, like `level` is implied against realized with no premium; another cross's is what that cross's marked fly charges over its legs' history. Not the cross's own — that would zero its wings by construction |
 | Weights | what each relative-value signal is worth before renormalisation. **Score** re-runs, **Reset weights** puts the defaults back |
 | Historical workbook | your own file of past spot / forwards / quotes. **Historical workbook…** opens the **Config** window, where the path is typed and **Load history** reads it. One box for the whole tool: this screen, the monitor and the measured vega weighting all read the same file |
 
@@ -1085,7 +1118,9 @@ all shows its volatility points and no score; that is the honest answer, not a
 gap. A wing your sheet does not quote borrows the at-the-money's scale and says
 so in the detail. On a cross, a triangle difference smaller than the triangle's
 own noise floor is shown and not scored — the same rule the cross triangle card
-follows.
+follows. On `realized`, that floor also holds how far the triangle moves when
+the measured dependence is moved by its own standard error, so a difference the
+history cannot tell apart is not scored either.
 
 The **weights** boxes are yours. They are renormalised over whatever a cell
 actually has, so raising `carry` to 0.4 changes how much the roll matters
@@ -1233,6 +1268,52 @@ the variance triangle — the same expression the book itself is built on. The
 risk reversal and butterfly have no exact answer from two marginals and a
 correlation, so the legs' whole densities are combined under a Gaussian copula
 at the marked correlation.
+
+A Gaussian copula puts a cross's butterfly **below the market**, further below
+the lower the correlation: it barely lines up the two legs' big days, and it
+gives the correlation no volatility of its own. Both can be marked, per cross
+and tenor, on the workbook's `CROSS_DEPENDENCE` tab (Config window):
+
+* **vol vol corr** (−1 to 1) — how far the two legs' calm and stressed states
+  come together. How stressed each leg gets is not typed: it is what that leg's
+  own fly already says. A risk-off cross like AUDJPY sits near 1.
+* **corr vol** (0 to 1) — how much the correlation itself moves over the
+  option's life, e.g. `0.1` for 0.1 either side.
+
+Between the tenors you mark, each is a straight line in time; before the first
+and after the last it stays flat. The ATM does **not** move when you mark them —
+the copula's correlation is re-solved to hold it — only the wings do. The
+**dependence** column shows what is marked, **copula ρ** the correlation the
+copula ended up at, and hovering a **tri** cell shows the Gaussian copula's
+number beside it.
+
+**implied vol-vol** is the number to mark against: the vol-vol correlation at
+which the legs give your 25-delta fly. **Do not start from 0** — zero means the
+legs' regimes are independent, which gives a *thinner* fly than the Gaussian
+copula. *none* means no value from −1 to 1 gets there; hover it to see how far
+the legs reach and which way they miss (above the top is correlation vol, or
+something the legs do not carry). Delete a cross's rows to go back to the
+Gaussian copula exactly. The same marks reach **Fill from the legs** on the Vol
+marking screen.
+
+**Marking from history.** Under `CROSS_DEPENDENCE` in the Config window,
+*Suggest from the historical book* measures a cross per tenor: the legs'
+vol-vol correlation and correlation vol (as on the correlation card), the
+vol-vol correlation your marked fly implies at that correlation vol, and the
+**premium** between them. Pick where the premium comes from:
+
+* **its own marked fly** — the suggestion gives back the fly you have, at a
+  correlation vol history supports. For a liquid cross.
+* **none** — history alone; a starting point that carries no risk premium.
+* **another cross's** — the educated guess for a cross with no market: its legs'
+  history plus what a liquid cross like it charges (a JPY risk-off cross for
+  another, a CNH cross for another). Pick the lender for resemblance, and read
+  the result as a model mark.
+
+**Suggest into the tab** replaces that cross's rows in the boxes; nothing
+applies until you press **Apply**, and **Fill from the legs** then turns them
+into quotes. `volkit analysis EURJPY --history vol_history.xlsx --dependence
+EURGBP` prints the same table.
 
 A difference shown as `~0` is inside the **noise floor**: the same machinery run
 on each leg alone, where it should return exactly what it was given. Do not read
@@ -2026,14 +2107,16 @@ and **Save marks** writes only the rows inside the book and says how many it
 left out and which pairs and tenors they were. A number that should be marked
 is reverted, typed and marked.
 
-**Compare — book against overlay.** Choose whose widths to compare at (a
-channel: its tier or market width, its shade, its wing widths, the same on
-both sides) and press **Compare**: for every pair the overlay carries and
-every tenor, the book's bid / mid / ask beside the overlay's, the difference
-in mid, bid and ask, and — with *wings too* ticked — the same for each risk
-reversal and butterfly. Moves above the *flag above* box are coloured; a
-tenor one side cannot supply is listed as book-only or overlay-only rather
-than dropped.
+**Compare — book mids against overlay mids.** Press **Compare**: for every
+pair and tenor the overlay carries, the book's ATM mid beside the overlay's
+and the difference, and — with *wings too* ticked — the same for each risk
+reversal and butterfly. There is no channel here: no width, no shade, just
+the marks against the file (the book's wings come from the *wings* select on
+the Output side). A row given as an ATM two-way is compared at its mid and
+marked *2w*; a blank overlay cell shows as a dash rather than falling through
+to the book. Moves above the *flag above* box are coloured; a tenor the book
+cannot mark is listed as overlay-only, and the line under the table names the
+tenors the book quotes that the overlay does not.
 
 **Output — where the marks go, and which source each pair is read from.** The
 destination, and the pair picker: every pair the channel publishes, with a
@@ -2128,7 +2211,7 @@ went, and the outcome. The kACE feed tab's posts are in the same file; the old
 
 From the shell: `volkit export murex` (both Murex files; the old
 `murex_vol` and `murex_broker` still name it), `volkit export bloomberg --overlay
-run.csv --book-pairs USDJPY EURUSD --tolerance 0.5`, `volkit export bloomberg
+run.csv --book-pairs USDJPY EURUSD --tolerance 0.5`, `volkit export
 --overlay run.csv --compare`, `volkit export kace --pairs USDCNH USDJPY
 --pillars-only` (posts, with the same `--kace-url` / `--kace-user` options
 `volkit kace` takes), `--dry-run` to see the preflight and send or write
@@ -3327,8 +3410,9 @@ the fact list, and the first line says which it was.
   calendar and 252-day columns beside it are roughly a tenth lower by
   construction and are not the ones to compare against implied.
 * The cross triangle for the risk reversal and butterfly assumes a Gaussian
-  copula between the two legs and ignores the change of measure between their
-  domestic currencies. Read it against the noise floor printed under it.
+  copula between the two legs unless `CROSS_DEPENDENCE` marks the cross, and
+  ignores the change of measure between their domestic currencies either way.
+  Read it against the noise floor printed under it.
 * Fair value is a first-order break-even, not a valuation. It assumes the
   surface does not move and inherits every assumption in the realized number.
 * An exchange settlement volatility on an American-style option is not a

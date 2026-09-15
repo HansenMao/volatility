@@ -96,7 +96,7 @@ pricing    multi-leg strips, strike/expiry specs, per-leg error isolation, and
            the one-number reading of them the marking screen asks for
 configsheets the workbook's settings tabs -- PEG_BANDS, SPREADS (was
            KACE_SPREADS; the old name is read and renamed on write), HOLIDAYS,
-           WING_RATIOS, Vega Weights, and the export-policy tables
+           WING_RATIOS, Vega Weights, CROSS_DEPENDENCE, and the export-policy tables
            MARKET_WIDTHS, ADD_UPS, SHADES, WING_WIDTHS, EXPORT_PAIRS -- read one way,
            with
            '#' comment rows and a header found rather than assumed, and off
@@ -115,13 +115,18 @@ book       all pairs, built in dependency order
 listed     exchange traded options: paste parsing, least-squares SABR fit,
            comparison against the marked FX surface, and a position book with
            aggregated greeks both Black-Scholes and on the fitted smile
-moments    risk-neutral distribution from a smile; two combined into a cross
-history    historical spot / forwards / quotes; realized vol, skew, kurtosis
+moments    risk-neutral distribution from a smile; two combined into a cross,
+           by a Gaussian copula or by a marked dependence (CROSS_DEPENDENCE:
+           vol-vol correlation, correlation vol) holding the combined ATM
+history    historical spot / forwards / quotes; realized vol, skew, kurtosis;
+           a cross's legs' realized vol-vol correlation and correlation vol
+           (net of sampling noise), which CROSS_DEPENDENCE is measured against
 analytics  carry and roll, fair value, the cross triangle, indication pricing
 relvalue   one score per expiry and strike, in volatility points: implied
            against realized in level and in shape, the roll and the forward
-           carry, the cross triangle, and where each cell sits in its own
-           history
+           carry, the cross triangle (legs tied at their realized dependence
+           plus a named premium, its uncertainty in the noise floor), and
+           where each cell sits in its own history
 curves     several vol curves side by side, and the same curve on other dates
 monitor    small panels: what has moved between two points in time, per pair
 quotes     a broker run, in English or in columns: outrights, RR, fly, spreads,
@@ -554,8 +559,9 @@ and what is reported instead** — read it before "fixing" one.
 - No discount curve anywhere; all premiums are undiscounted forward values.
 - Half-day holidays are full days.
 - The band model needs a forward feed, and refuses rather than guessing.
-- The cross RR/fly triangle assumes a Gaussian copula and ignores the change of
-  measure between the legs' domestic currencies.
+- The cross RR/fly triangle assumes a Gaussian copula unless `CROSS_DEPENDENCE`
+  marks a vol-vol correlation and correlation vol, and ignores the change of
+  measure between the legs' domestic currencies either way.
 - Fair value is a first-order break-even, not a valuation.
 - Realized moments are projected onto a tenor assuming independence.
 - Listed-option comparisons are unadjusted for American exercise, futures-vs-

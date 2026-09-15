@@ -143,6 +143,9 @@ class TestConfigurationTabs(unittest.TestCase):
         # CONVENTIONS is optional for the same reason: a pair with no row takes
         # the market's conventions, and most pairs never need a row.
         optional = {"WING_RATIOS", "CONVENTIONS"}
+        # And CROSS_DEPENDENCE: a cross with no row is the Gaussian copula,
+        # which is what every cross was before the tab existed.
+        optional.add("CROSS_DEPENDENCE")
         # The export-policy tables are optional too: a desk that publishes
         # nothing has no business carrying them, and the channels refuse by
         # name until they are typed (`volkit export --init-tables` seeds).
@@ -2343,6 +2346,80 @@ class TestCrossVegaSplit(unittest.TestCase):
         rows = analytics.triangle_table(book, "AUDJPY", cut="NY", with_noise=False,
                                         tenors=["3m"])
         self.assertTrue(all(v == v for v in rows[0].leg_vega))
+
+
+class TestCrossDependenceTab(unittest.TestCase):
+    """``CROSS_DEPENDENCE``: how a cross's legs depend on each other beyond
+    one correlation, marked per tenor and read by the smile triangle.
+
+    A setting like every other: a tab of the workbook, edited in the Config
+    window, held by the session until the workbook is written.
+    """
+
+    ROWS = [
+        {"pair": "AUDJPY", "tenor": "1m", "vol vol corr": 0.4, "corr vol": None, "note": ""},
+        {"pair": "AUDJPY", "tenor": "1y", "vol vol corr": 0.8, "corr vol": 0.1,
+         "note": "risk-off"},
+    ]
+
+    def book(self, rows):
+        return Book.from_excel(BOOK, ASOF, config={"CROSS_DEPENDENCE": rows})
+
+    def test_the_tab_is_a_config_window_setting(self):
+        from volkit import configsheets, session
+        self.assertIn("CROSS_DEPENDENCE", configsheets.EDITABLE)
+        self.assertIn("CROSS_DEPENDENCE", configsheets.SHEETS)
+        self.assertNotIn("CROSS_DEPENDENCE", configsheets.EXPORT_TABS)
+        session.check_config_tabs({"CROSS_DEPENDENCE": self.ROWS})
+
+    def test_no_tab_is_the_gaussian_copula_everywhere(self):
+        book = Book.from_excel(BOOK, ASOF)
+        self.assertEqual(book.cross_dependence, {})
+        self.assertIsNone(book.dependence_at("AUDJPY", 0.5))
+
+    def test_each_input_is_its_own_ladder_linear_between_rungs_and_flat_outside(self):
+        book = self.book(self.ROWS)
+        t1, t2 = book.tenor_years("AUDJPY", "1m"), book.tenor_years("AUDJPY", "1y")
+        mid = 0.5 * (t1 + t2)
+        self.assertEqual(book.dependence_at("AUDJPY", t1), moments.Dependence(0.4, 0.1))
+        self.assertAlmostEqual(book.dependence_at("AUDJPY", mid).vol_vol, 0.6, places=12)
+        # Before the first rung and after the last, the rung keeps applying.
+        self.assertEqual(book.dependence_at("AUDJPY", 0.01), moments.Dependence(0.4, 0.1))
+        self.assertEqual(book.dependence_at("AUDJPY", 3.0), moments.Dependence(0.8, 0.1))
+        # The correlation vol was marked at one rung only: flat everywhere.
+        self.assertEqual(book.dependence_at("AUDJPY", mid).corr_vol, 0.1)
+        # A cross the tab does not name is untouched.
+        self.assertIsNone(book.dependence_at("EURJPY", mid))
+
+    def test_a_blank_input_is_none_of_it(self):
+        book = self.book([{"pair": "AUDJPY", "tenor": "3m", "vol vol corr": "",
+                           "corr vol": 0.2}])
+        self.assertEqual(book.dependence_at("AUDJPY", 0.5), moments.Dependence(None, 0.2))
+        book = self.book([{"pair": "AUDJPY", "tenor": "3m", "vol vol corr": None,
+                           "corr vol": None}])
+        self.assertIsNone(book.dependence_at("AUDJPY", 0.5))
+
+    def test_a_row_the_tab_cannot_mean_is_refused_by_name(self):
+        """A bad row is a warning naming the row, and no dependence at all --
+        the wing ratios' rule, because a desk that wrote the tab meant it."""
+        for row, words in (
+                ({"pair": "EURUSD", "tenor": "1m", "vol vol corr": 0.5}, "not a cross"),
+                ({"pair": "AUDJPY", "tenor": "banana", "vol vol corr": 0.5}, "not a tenor"),
+                ({"pair": "AUDJPY", "tenor": "1m", "vol vol corr": 1.5}, "outside [-1, 1]"),
+                ({"pair": "AUDJPY", "tenor": "1m", "corr vol": 1.0}, "outside [0, 1)"),
+                ({"pair": "AUDJPY", "tenor": "1M", "vol vol corr": 0.1}, "given twice")):
+            rows = self.ROWS + [row] if words == "given twice" else [row]
+            book = self.book(rows)
+            self.assertEqual(book.cross_dependence, {}, msg=row)
+            said = [w for w in book.warnings if w.startswith("cross dependence:")]
+            self.assertTrue(said and words in said[0], msg=(row, book.warnings))
+
+    def test_a_cross_this_workbook_does_not_carry_is_said_and_dropped(self):
+        book = self.book(self.ROWS + [{"pair": "EURCHF", "tenor": "1m", "vol vol corr": 0.3}])
+        self.assertNotIn("EURCHF", book.cross_dependence)
+        self.assertIn("AUDJPY", book.cross_dependence)
+        self.assertTrue(any("EURCHF" in w and "not a pair in this workbook" in w
+                            for w in book.warnings), book.warnings)
 
 
 if __name__ == "__main__":

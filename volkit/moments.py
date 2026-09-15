@@ -30,7 +30,16 @@ Two approximations are made and neither is hidden:
   effect on the shape is not, and is left in the answer.
 * **The copula.**  A Gaussian copula is an assumption about tail dependence
   that the market does not quote.  It is the reason two legs with fat tails
-  can produce a cross whose tails look thinner than they are.
+  can produce a cross whose tails look thinner than they are: the size of one
+  leg's move and the size of the other's are tied together only through the
+  correlation, roughly as its square, so on a low-correlation cross the two
+  legs' fat-tailed days almost never coincide, and a correlation fixed for
+  the life of the option has no volatility of its own.  Both are what a cross
+  butterfly is paid for, and both can be **marked** (:class:`Dependence`,
+  the workbook's ``CROSS_DEPENDENCE`` tab): a correlation between the legs'
+  variance regimes, whose size each leg's own smile supplies, and a
+  volatility of the correlation.  Unmarked, the copula is the Gaussian one
+  above, to the last digit.
 
 The size of both is bounded from below by the diagnostic in
 ``reconstruction_error``: run each *leg* through the same grid on its own and
@@ -44,7 +53,8 @@ import math
 from dataclasses import dataclass, field
 
 import numpy as np
-from scipy.special import ndtr
+from numpy.polynomial.hermite_e import hermegauss
+from scipy.special import ndtr, ndtri
 
 from . import black
 from .black import DeltaConvention
@@ -56,6 +66,15 @@ SPAN = 6.0
 NODES = 1601
 COPULA_SPAN = 5.5
 COPULA_NODES = 161
+# The marked-dependence copula (:class:`Dependence`) sums a tensor grid per
+# variance regime, so it runs on a coarser score grid, and its nodes are then
+# binned onto one uniform grid of log returns so every price read off it costs
+# the same whatever the regimes.  At these sizes it reproduces the Gaussian
+# copula's RR and fly to a thousandth of a vol point (a test pins it), and five
+# regime nodes per leg converge the 10-delta fly to about the same.
+DEPENDENCE_NODES = 121
+REGIME_NODES = 5
+DEPENDENCE_BINS = 4001
 
 
 @dataclass(frozen=True)
@@ -272,6 +291,64 @@ def triangle_coefficients(pair: str, leg_a: str, leg_b: str) -> tuple[int, int]:
     return coeff(leg_a), coeff(leg_b)
 
 
+@dataclass(frozen=True)
+class Dependence:
+    """How two legs depend on each other beyond one correlation.  Both marked.
+
+    ``vol_vol`` is the correlation between the two legs' **variance
+    regimes**: each leg's volatility is lognormally uncertain, and these are
+    the correlation of the two log-variance shocks.  How uncertain each leg's
+    volatility is is not a second input -- it is what that leg's own smile
+    already says, read off its distribution as excess kurtosis
+    (:func:`regime_dispersion`) -- so the only thing marked is whether the two
+    legs' calm and stressed states come together.  At ``+1`` they always do,
+    which is where a risk-off cross's butterfly lives; at ``0`` they never do.
+    ``None`` is no regimes at all, which is the Gaussian copula.
+
+    **The Gaussian copula is not ``vol_vol = 0``.**  It ties the size of the
+    two legs' moves together as roughly the square of the correlation, and
+    independent regimes tie them less than that, so a zero here marks a
+    butterfly *below* today's.  The triangle backs out the vol-vol correlation
+    the marked cross implies for exactly this reason: that is the number to
+    mark against, not zero.
+
+    ``corr_vol`` is the volatility of the correlation itself, in correlation
+    units: over the life of the option the correlation is ``rho - corr_vol``
+    or ``rho + corr_vol`` with even odds -- the smallest law with that mean and
+    that standard deviation.  Both ends must lie in ``[-1, 1]``.
+    """
+
+    vol_vol: float | None = None
+    corr_vol: float = 0.0
+
+    def __post_init__(self) -> None:
+        if self.vol_vol is not None:
+            v = float(self.vol_vol)
+            if not math.isfinite(v) or not -1.0 <= v <= 1.0:
+                raise ValueError(f"a vol-vol correlation must lie in [-1, 1], got {self.vol_vol!r}")
+        c = float(self.corr_vol)
+        if not math.isfinite(c) or not 0.0 <= c < 1.0:
+            raise ValueError(f"a correlation vol must lie in [0, 1), got {self.corr_vol!r}")
+
+    @property
+    def active(self) -> bool:
+        """Whether this is anything but the Gaussian copula."""
+        return self.vol_vol is not None or self.corr_vol > 0.0
+
+
+def regime_dispersion(excess_kurtosis: float) -> float:
+    """The variance of a leg's log-variance regime its own smile implies.
+
+    A normal variance mixture with a lognormal variance of log-variance ``s2``
+    has excess kurtosis ``3 (exp(s2) - 1)``, so ``s2 = log(1 + kurtosis / 3)``.
+    A smile with no excess kurtosis has no regimes to correlate.
+    """
+    k = float(excess_kurtosis)
+    if not math.isfinite(k) or k <= 0.0:
+        return 0.0
+    return math.log1p(k / 3.0)
+
+
 @dataclass
 class Combined:
     """A cross distribution built from two leg distributions and a correlation."""
@@ -286,6 +363,22 @@ class Combined:
     shift: float = 0.0             # log shift applied to reprice the forward
     convexity: float = 0.0         # rho * sd_a * sd_b, the part of it that is expected
     warnings: tuple[str, ...] = ()
+    #: The marked dependence this law was built with (:class:`Dependence`);
+    #: ``None`` and ``0`` for the Gaussian copula.
+    vol_vol: float | None = None
+    corr_vol: float = 0.0
+    #: Each leg's excess kurtosis, which sized its variance regimes; NaN where
+    #: no regimes were built.
+    leg_kurtosis: tuple[float, float] = (float("nan"), float("nan"))
+
+    def atm_vol(self) -> tuple[float, float]:
+        """This law's own at-the-money volatility and its strike, ``K/F``.
+
+        One pass of the delta-neutral strike is enough: it moves the ATM by
+        far less than the grid error, and iterating it would hide that.
+        """
+        atm_k = black.atm_strike(1.0, self.implied_vol(1.0), self.t, self.conv)
+        return self.implied_vol(atm_k), atm_k
 
     def moments(self) -> Moments:
         w = self.weight
@@ -336,10 +429,7 @@ class Combined:
 
     def table(self, deltas=(0.10, 0.25)) -> dict:
         """ATM, risk reversals and butterflies, in the book's own convention."""
-        atm_k = black.atm_strike(1.0, self.implied_vol(1.0), self.t, self.conv)
-        # One pass of the delta-neutral strike is enough: it moves the ATM by
-        # far less than the grid error, and iterating it would hide that.
-        atm = self.implied_vol(atm_k)
+        atm, atm_k = self.atm_vol()
         out = {"atm": atm, "atm_strike": atm_k}
         for d in deltas:
             kc, vc = self.delta_strike(d, True)
@@ -366,7 +456,7 @@ class Combined:
         strangle is a shape measured from the smile it belongs to.
         """
         if atm is None:
-            atm = self.implied_vol(black.atm_strike(1.0, self.implied_vol(1.0), self.t, self.conv))
+            atm = self.atm_vol()[0]
         t, d = self.t, abs(delta)
 
         def premium_gap(s: float) -> float:
@@ -386,7 +476,8 @@ class Combined:
 
 def combine(dist_a: Distribution, dist_b: Distribution, coefficients: tuple[int, int],
             rho: float, conv: DeltaConvention | bool = False, *,
-            nodes: int = COPULA_NODES, span: float = COPULA_SPAN) -> Combined:
+            nodes: int = COPULA_NODES, span: float = COPULA_SPAN,
+            dependence: Dependence | None = None) -> Combined:
     """Tie two leg distributions together with a Gaussian copula.
 
     The tensor grid is in the *normal scores* of the two legs, not in their
@@ -395,6 +486,12 @@ def combine(dist_a: Distribution, dist_b: Distribution, coefficients: tuple[int,
     with Simpson weights rather than Gauss-Hermite: the option payoff has a
     kink, and a quadrature tuned for smooth integrands converges badly across
     it.
+
+    A marked ``dependence`` that is active builds the regime copula of
+    :func:`_combine_dependent` instead, at ``rho`` as given -- which moves the
+    combined at-the-money as well as the wings.  :func:`combine_holding_atm`
+    is the caller that holds it; this one does as it is told.  An absent or
+    inactive one is this function exactly as it always was.
     """
     if not -1.0 <= rho <= 1.0:
         raise ValueError(f"correlation must lie in [-1, 1], got {rho!r}")
@@ -403,6 +500,10 @@ def combine(dist_a: Distribution, dist_b: Distribution, coefficients: tuple[int,
             f"the two legs are at different expiries ({dist_a.t:.6f}y and {dist_b.t:.6f}y); "
             f"a triangle only holds at a common maturity"
         )
+    if dependence is not None and dependence.active:
+        return _combine_dependent(dist_a, dist_b, coefficients, rho, conv, dependence,
+                                  nodes=DEPENDENCE_NODES if nodes == COPULA_NODES else nodes,
+                                  span=span)
     ca, cb = coefficients
     n = int(nodes) | 1
     z = np.linspace(-span, span, n)
@@ -463,6 +564,307 @@ def combine(dist_a: Distribution, dist_b: Distribution, coefficients: tuple[int,
     return Combined(xc=xc, weight=weight, t=dist_a.t, rho=float(rho),
                     coefficients=(ca, cb), conv=conv, clamped=clamped,
                     shift=shift, convexity=convexity, warnings=tuple(warnings))
+
+
+def _score_table(dist: Distribution, scales: np.ndarray, probs: np.ndarray, reach: float,
+                 points: int = 4001):
+    """A leg's log return as a function of its scaled score ``sqrt(W) Z``, tabulated.
+
+    The scaled score's own distribution function for the discrete ``W``, then
+    the leg's quantile at it -- composed once per law, so a regime copula pays
+    one interpolation per node rather than a sum over every regime and a
+    quantile search.  Also the scores beyond which the leg's grid is exhausted,
+    for the clamped-mass warning.
+    """
+    y = np.linspace(-reach, reach, points)
+    u = (probs[None, :] * ndtr(y[:, None] / scales[None, :])).sum(axis=1)
+    c = np.maximum.accumulate(dist.cdf)
+    u = np.maximum.accumulate(u)
+    limits = (float(np.interp(c[0], u, y)), float(np.interp(c[-1], u, y)))
+    return y, dist.quantile(u), limits
+
+
+def _combine_dependent(dist_a: Distribution, dist_b: Distribution,
+                       coefficients: tuple[int, int], rho: float,
+                       conv: DeltaConvention | bool, dependence: Dependence, *,
+                       nodes: int = DEPENDENCE_NODES, span: float = COPULA_SPAN,
+                       regime_nodes: int = REGIME_NODES,
+                       bins: int = DEPENDENCE_BINS) -> Combined:
+    """The copula with the two things a Gaussian one leaves out, both marked.
+
+    **Variance regimes.**  Each leg's normal score is scaled by the square root
+    of a variance regime ``W = exp(s e)``, normalised to mean one, where
+    ``s**2`` is that leg's :func:`regime_dispersion` -- its own smile's excess
+    kurtosis -- and the two shocks ``e`` are standard normals with correlation
+    ``vol_vol``.  The scaled score is mapped back to a probability through the
+    scaled score's *own* law (:func:`_mixture_cdf`), so each leg still takes
+    exactly the marginal its smile implies and the regimes change only how the
+    two move together.  The shocks are integrated by Gauss-Hermite, which is
+    right here where it is wrong for the payoff: ``exp(s e)`` is smooth.
+
+    **Correlation vol.**  The score correlation is ``rho - corr_vol`` or
+    ``rho + corr_vol``, each with probability one half.
+
+    Every (correlation, regime) pair is a tensor grid of its own, exactly as
+    :func:`combine` builds one, and the whole set is binned onto one uniform
+    grid of log returns by cloud-in-cell -- which keeps every node's mass and
+    mean exactly -- so a price read off the result costs what one off the
+    Gaussian copula does.  Deterministic: nothing is simulated.
+    """
+    ca, cb = coefficients
+    s = float(dependence.corr_vol)
+    ends = (float(rho),) if s == 0.0 else (float(rho) - s, float(rho) + s)
+    for r in ends:
+        if not -1.0 - 1e-12 <= r <= 1.0 + 1e-12:
+            raise ValueError(
+                f"a correlation vol of {s:.4g} around a correlation of {rho:.4g} reaches "
+                f"{r:.4g}, outside [-1, 1]")
+    ends = tuple(min(max(r, -1.0), 1.0) for r in ends)
+
+    kurt = (dist_a.moments().excess_kurtosis, dist_b.moments().excess_kurtosis)
+    lam = dependence.vol_vol
+    warnings: list[str] = []
+    if lam is None:
+        disp = (0.0, 0.0)
+    else:
+        disp = (regime_dispersion(kurt[0]), regime_dispersion(kurt[1]))
+        if disp == (0.0, 0.0):
+            warnings.append(
+                f"neither leg's smile carries any excess kurtosis at this expiry "
+                f"({kurt[0]:+.3g}, {kurt[1]:+.3g}), so there are no variance regimes for the "
+                f"vol-vol correlation of {lam:+.3g} to correlate and it moves nothing")
+
+    if disp == (0.0, 0.0):
+        w1 = w2 = np.ones(1)
+        probs = np.ones(1)
+    else:
+        m = max(int(regime_nodes), 1)
+        e, gw = hermegauss(m)
+        gw = gw / float(np.sum(gw))
+        e1 = np.repeat(e, m)
+        e2 = lam * e1 + math.sqrt(max(1.0 - lam * lam, 0.0)) * np.tile(e, m)
+        probs = np.repeat(gw, m) * np.tile(gw, m)
+        w1 = np.exp(math.sqrt(disp[0]) * e1)
+        w2 = np.exp(math.sqrt(disp[1]) * e2)
+        w1 = w1 / float(np.sum(probs * w1))
+        w2 = w2 / float(np.sum(probs * w2))
+    root1, root2 = np.sqrt(w1), np.sqrt(w2)
+    single = probs.size == 1
+
+    n = int(nodes) | 1
+    z = np.linspace(-span, span, n)
+    h = float(z[1] - z[0])
+    sw = _simpson_weights(n, h) * np.exp(-0.5 * z * z) / math.sqrt(2.0 * math.pi)
+    grid_w = sw[:, None] * sw[None, :]
+    reach = span * math.sqrt(2.0)
+    if single:
+        # No regimes: the scaled score is the score, and its law is exact.
+        c_a, c_b = np.maximum.accumulate(dist_a.cdf), np.maximum.accumulate(dist_b.cdf)
+        tab_a = tab_b = None
+        lim_a = (float(ndtri(max(c_a[0], 1e-300))), float(ndtri(min(c_a[-1], 1.0 - 1e-16))))
+        lim_b = (float(ndtri(max(c_b[0], 1e-300))), float(ndtri(min(c_b[-1], 1.0 - 1e-16))))
+    else:
+        y_a, x_a, lim_a = _score_table(dist_a, root1, probs, reach * float(root1.max()))
+        y_b, x_b, lim_b = _score_table(dist_b, root2, probs, reach * float(root2.max()))
+        tab_a, tab_b = (y_a, x_a), (y_b, x_b)
+
+    xs: list[np.ndarray] = []
+    ws: list[np.ndarray] = []
+    total = sum_a = sum_b = sum_ab = out_a = out_b = 0.0
+    leg_a_cache: dict[float, tuple[np.ndarray, np.ndarray]] = {}
+    for r in ends:
+        z2 = r * z[:, None] + math.sqrt(max(1.0 - r * r, 0.0)) * z[None, :]
+        for k in range(probs.size):
+            key = float(root1[k])
+            if key not in leg_a_cache:
+                y1 = key * z
+                xa = dist_a.quantile(ndtr(y1)) if single else np.interp(y1, *tab_a)
+                leg_a_cache[key] = (y1, xa)
+            y1, xa = leg_a_cache[key]
+            y2 = float(root2[k]) * z2
+            xb = dist_b.quantile(ndtr(y2)) if single else np.interp(y2, *tab_b)
+            wk = grid_w * (float(probs[k]) / len(ends))
+            xs.append((ca * xa[:, None] + cb * xb).ravel())
+            ws.append(wk.ravel())
+            row_w = wk.sum(axis=1)
+            total += float(row_w.sum())
+            sum_a += float(np.sum(row_w * xa))
+            sum_b += float(np.sum(wk * xb))
+            sum_ab += float(np.sum(wk * xa[:, None] * xb))
+            out_a += float(np.sum(row_w[(y1 < lim_a[0]) | (y1 > lim_a[1])]))
+            out_b += float(np.sum(wk[(y2 < lim_b[0]) | (y2 > lim_b[1])]))
+
+    xc = np.concatenate(xs)
+    weight = np.concatenate(ws)
+    weight = weight / float(np.sum(weight))     # the tails outside the grid are re-spread
+    lo, hi = float(xc.min()), float(xc.max())
+    nb = max(int(bins), 3)
+    grid = np.linspace(lo, hi, nb)
+    step = (hi - lo) / (nb - 1) if hi > lo else 1.0
+    pos = (xc - lo) / step
+    i0 = np.minimum(pos.astype(np.int64), nb - 2)
+    frac = pos - i0
+    mass = np.bincount(i0, weight * (1.0 - frac), nb) + np.bincount(i0 + 1, weight * frac, nb)
+    keep = mass > 0.0
+    grid, mass = grid[keep], mass[keep]
+
+    m_fwd = float(np.sum(mass * np.exp(grid)))
+    if not math.isfinite(m_fwd) or m_fwd <= 0:
+        raise ValueError("the combined distribution does not have a finite forward")
+    shift = math.log(m_fwd)
+    grid = grid - shift
+
+    mean_a, mean_b = sum_a / total, sum_b / total
+    cov = sum_ab / total - mean_a * mean_b
+    convexity = (math.log(max(dist_a.mgf(ca), 1e-300))
+                 + math.log(max(dist_b.mgf(cb), 1e-300))
+                 + ca * cb * cov)
+    clamped = max(out_a, out_b) / total
+    if clamped > 0.02:
+        warnings.append(
+            f"{clamped:.1%} of the copula grid falls outside the range the legs' own grids "
+            f"cover and was held at their extreme quantiles; the wings of the triangle are "
+            f"less reliable than the body"
+        )
+    if abs(shift - convexity) > 5e-3:
+        warnings.append(
+            f"the combined law needed a {shift:+.3%} shift to reprice its forward, where the "
+            f"triangle's own convexity accounts for {convexity:+.3%}. The {shift - convexity:+.3%} "
+            f"left over is grid truncation or the change of measure between the legs' domestic "
+            f"currencies and the cross's, neither of which this method corrects for"
+        )
+    return Combined(xc=grid, weight=mass, t=dist_a.t, rho=float(rho),
+                    coefficients=(ca, cb), conv=DeltaConvention.of(conv), clamped=clamped,
+                    shift=shift, convexity=convexity, warnings=tuple(warnings),
+                    vol_vol=None if lam is None else float(lam), corr_vol=s,
+                    leg_kurtosis=(float(kurt[0]), float(kurt[1])))
+
+
+def combine_holding_atm(dist_a: Distribution, dist_b: Distribution,
+                        coefficients: tuple[int, int], rho: float,
+                        conv: DeltaConvention | bool, dependence: Dependence | None, *,
+                        target_atm: float | None = None, rho_start: float | None = None,
+                        **grid) -> Combined:
+    """The cross at a marked dependence, with its at-the-money where it was.
+
+    The dependence is a statement about the *shape* of the cross -- how often
+    its legs' big days coincide -- and it is not allowed to move the level:
+    the cross's ATM is its curve's, built from ``rho``.  So the at-the-money
+    the Gaussian copula gives at ``rho`` is the target (``target_atm``, when
+    the caller already has it), and the copula's own correlation is solved,
+    bracketed, until the marked dependence gives the same one.  The law that
+    comes back carries that correlation as ``rho``; an inactive dependence is
+    the Gaussian copula at ``rho`` unchanged.  ``rho_start`` is where the
+    search begins, when a neighbouring solve already knows better than ``rho``.
+    """
+    if dependence is None or not dependence.active:
+        return combine(dist_a, dist_b, coefficients, rho, conv)
+    if target_atm is None:
+        target_atm = combine(dist_a, dist_b, coefficients, rho, conv).atm_vol()[0]
+    s = float(dependence.corr_vol)
+    lo_bound, hi_bound = -1.0 + s, 1.0 - s
+    if lo_bound > hi_bound:
+        raise ValueError(f"a correlation vol of {s:.4g} leaves no correlation inside [-1, 1]")
+    seen: dict[float, tuple[Combined, float]] = {}
+
+    def gap(r: float) -> float:
+        if r not in seen:
+            law = _combine_dependent(dist_a, dist_b, coefficients, r, conv, dependence, **grid)
+            miss = law.atm_vol()[0] - target_atm
+            # Within a millionth of volatility -- a ten-thousandth of a vol
+            # point -- is on target, and saying so stops Brent there instead
+            # of bisecting a bracket already narrower than anything shown.
+            seen[r] = (law, 0.0 if abs(miss) < 1e-6 else miss)
+        return seen[r][1]
+
+    start = min(max(float(rho if rho_start is None else rho_start), lo_bound), hi_bound)
+    # The bracket is aimed rather than guessed: the variance triangle says how
+    # far a unit of correlation moves the cross's ATM, ``ca cb sd_a sd_b /
+    # (sigma t)``, so one evaluation at the start predicts the root, and the
+    # bracket runs from the start to a little past the prediction.  Brent then
+    # polishes inside it; a prediction that misses is widened by the solver's
+    # own bracket search, within the bounds.
+    ca, cb = coefficients
+    slope = (ca * cb * dist_a.moments().sd * dist_b.moments().sd
+             / max(target_atm * dist_a.t, 1e-12))
+    g0 = gap(start)
+    step = -g0 / slope if slope != 0.0 else 0.0
+    step = math.copysign(max(abs(step) * 1.25, 1e-4), step if step != 0.0 else 1.0)
+    far = min(max(start + step, lo_bound), hi_bound)
+    what = (f"the correlation holding the combined ATM at {target_atm:.4%} under a vol-vol "
+            f"correlation of {dependence.vol_vol} and a correlation vol of {s:g}")
+    try:
+        root = solve_scalar(gap, start, lo_bound=lo_bound, hi_bound=hi_bound, xtol=2e-5,
+                            bracket=(min(start, far), max(start, far)), what=what)
+    except (ConvergenceError, ValueError) as exc:
+        raise ConvergenceError(
+            f"no copula correlation in [{lo_bound:+.3f}, {hi_bound:+.3f}] gives the combined "
+            f"at-the-money of {target_atm:.4%} under this dependence: {exc}") from None
+    gap(root)
+    return seen[root][0]
+
+
+#: The coarser grid :func:`implied_vol_vol` searches on.  The answer is read to
+#: a hundredth of a correlation, and at this size the 25-delta fly is within a
+#: thousandth of a vol point of the full grid's.
+IMPLIED_GRID = {"nodes": 81, "bins": 2001}
+
+
+def implied_vol_vol(dist_a: Distribution, dist_b: Distribution,
+                    coefficients: tuple[int, int], rho: float,
+                    conv: DeltaConvention | bool, target_fly: float, *,
+                    corr_vol: float = 0.0, delta: float = 0.25,
+                    target_atm: float | None = None) -> tuple[float | None, str]:
+    """The vol-vol correlation at which the legs give the marked cross butterfly.
+
+    What :class:`Dependence` is marked against, the way the implied
+    correlation is what a cross's ATM is marked against.  The ATM is held
+    (:func:`combine_holding_atm`) at every trial, so the answer moves the
+    butterfly and nothing else; ``corr_vol`` is held at what is marked.
+
+    ``(value, "")``, or ``(None, reason)`` when no vol-vol correlation in
+    ``[-1, 1]`` reaches the marked butterfly -- the reason says how far the
+    legs do reach, which is the useful half of that answer.
+    """
+    tag = f"fly{int(round(delta * 100))}"
+    if target_atm is None:
+        target_atm = combine(dist_a, dist_b, coefficients, rho, conv).atm_vol()[0]
+
+    held: dict[float, float] = {}
+
+    def fly(lam: float) -> float:
+        # Each trial starts from the correlation the nearest one held at.
+        near = min(held, key=lambda k: abs(k - lam)) if held else None
+        law = combine_holding_atm(dist_a, dist_b, coefficients, rho, conv,
+                                  Dependence(vol_vol=lam, corr_vol=corr_vol),
+                                  target_atm=target_atm,
+                                  rho_start=None if near is None else held[near], **IMPLIED_GRID)
+        held[lam] = law.rho
+        return float(law.table((delta,))[tag])
+
+    try:
+        at = {lam: fly(lam) - target_fly for lam in (-1.0, 0.0, 1.0)}
+    except (ValueError, ArithmeticError, ConvergenceError) as exc:
+        return None, f"the vol-vol correlation could not be searched: {exc}"
+    if at[0.0] == 0.0:
+        return 0.0, ""
+    for lo, hi in ((0.0, 1.0), (-1.0, 0.0)):
+        if at[lo] * at[hi] <= 0.0:
+            try:
+                return float(solve_scalar(lambda x: fly(x) - target_fly, 0.5 * (lo + hi),
+                                          bracket=(lo, hi), lo_bound=lo, hi_bound=hi,
+                                          xtol=5e-3, what="the implied vol-vol correlation")), ""
+            except (ValueError, ArithmeticError, ConvergenceError) as exc:
+                return None, f"the vol-vol correlation could not be solved: {exc}"
+    reach = sorted(v + target_fly for v in at.values())
+    why = ("so the rest is correlation vol, or something the legs do not carry"
+           if target_fly > reach[-1] else
+           "so the marked butterfly is thinner than any variance regimes make it -- the "
+           "Gaussian copula, which has none, is the nearer description")
+    return None, (
+        f"no vol-vol correlation in [-1, 1] gives the marked {int(round(delta * 100))}-delta "
+        f"butterfly of {target_fly:.3%}: the legs give between {reach[0]:.3%} and "
+        f"{reach[-1]:.3%} over that range, {why}")
 
 
 def reconstruction_error(dist: Distribution, conv: DeltaConvention | bool,

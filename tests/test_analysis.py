@@ -382,6 +382,84 @@ class TestAnalysis(unittest.TestCase):
         self.assertEqual(rows[0].coefficients, (1, 1))
         self.assertTrue(any("no density here" in w for w in rows[0].warnings))
 
+    def test_the_triangle_reads_its_deltas_in_the_slice_convention(self):
+        """The triangle handed ``surface.conv`` to the copula and ``leg.conv``
+        to the noise floor -- forward delta, ``df_foreign`` 1 -- while the
+        marked smile it is compared with is read in spot delta off
+        ``slice_conv(t)``.  Two different 25-delta strikes, compared as one."""
+        seen = {"combine": [], "reconstruction_error": []}
+        originals = {name: getattr(moments, name) for name in seen}
+
+        def spy(name):
+            def call(*args, **kwargs):
+                seen[name].append(args[4] if name == "combine" else args[1])
+                return originals[name](*args, **kwargs)
+            return call
+
+        for name in seen:
+            setattr(moments, name, spy(name))
+        try:
+            analytics.triangle_table(self.book, "EURJPY", cut="NY", tenors=["3m"])
+        finally:
+            for name, fn in originals.items():
+                setattr(moments, name, fn)
+        cross = self.book["EURJPY"]
+        t = cross.tenor_years("3m")
+        # The noise floor's own reconstruction also goes through ``combine``,
+        # each in its own leg's convention; the cross's is the first call.
+        self.assertEqual(seen["combine"][0], cross.slice_conv(t))
+        self.assertLess(seen["combine"][0].df_foreign, 1.0)
+        self.assertEqual(seen["reconstruction_error"],
+                         [self.book[leg].slice_conv(t) for leg in ("EURUSD", "USDJPY")])
+
+    def test_a_marked_dependence_fattens_the_triangle_and_keeps_the_gaussian_beside_it(self):
+        """The Gaussian copula put every cross butterfly below the market,
+        because it has no vol-vol correlation and no correlation vol.  Marked
+        on CROSS_DEPENDENCE, both reach the triangle; the ATM stays where the
+        Gaussian copula put it, and that copula's answer stays on the row."""
+        def book(config=None):
+            # Both built the same way: the legs' smiles are fitted on demand,
+            # after the feed, so their deltas are read in one convention.
+            made = Book.from_excel(BOOK, ASOF, config=config).load_all(["AUDJPY"])
+            made.feed = self.book.feed
+            return made
+
+        plain = analytics.triangle_table(book(), "AUDJPY", cut="NY", tenors=["3m"],
+                                         with_noise=False, implied_vol_vol=False)[0]
+        book = book({"CROSS_DEPENDENCE": [
+            {"pair": "AUDJPY", "tenor": "3m", "vol vol corr": 0.9, "corr vol": 0.1}]})
+        r = analytics.triangle_table(book, "AUDJPY", cut="NY", tenors=["3m"],
+                                     with_noise=False, implied_vol_vol=False)[0]
+        self.assertEqual((r.vol_vol, r.corr_vol), (0.9, 0.1))
+        self.assertEqual((plain.vol_vol, plain.corr_vol, plain.gaussian), (None, 0.0, {}))
+        self.assertEqual(plain.copula_rho, plain.rho)
+        self.assertNotAlmostEqual(r.copula_rho, r.rho, places=3)
+        for key, value in plain.triangle.items():
+            self.assertAlmostEqual(r.gaussian[key], value, places=12, msg=key)
+        self.assertAlmostEqual(r.triangle["atm"], plain.triangle["atm"], delta=2e-6)
+        self.assertGreater(r.triangle["fly25"], plain.triangle["fly25"])
+        self.assertGreater(r.triangle["fly10"], plain.triangle["fly10"])
+        # The cross's own marks and the variance triangle do not care.
+        self.assertEqual(r.marked, plain.marked)
+        self.assertEqual(r.variance_triangle_atm, plain.variance_triangle_atm)
+        # The marking screen's implied quotes are built from the same law.
+        q = analytics.implied_cross_quotes(book, "AUDJPY", cut="NY", tenors=["3m"])[0]
+        self.assertEqual((q.vol_vol, q.corr_vol), (0.9, 0.1))
+        self.assertAlmostEqual(q.copula_rho, r.copula_rho, places=12)
+        self.assertAlmostEqual(q.quotes["rr_25"], r.triangle["rr25"], places=12)
+
+    def test_the_triangle_backs_out_the_vol_vol_correlation_to_mark_against(self):
+        r = analytics.triangle_table(self.book, "EURJPY", cut="NY", tenors=["3m"],
+                                     with_noise=False)[0]
+        self.assertTrue(r.implied_vol_vol is not None or r.implied_vol_vol_note,
+                        "neither a vol-vol correlation nor the reason there is none")
+        if r.implied_vol_vol is not None:
+            self.assertLessEqual(abs(r.implied_vol_vol), 1.0)
+        off = analytics.triangle_table(self.book, "EURJPY", cut="NY", tenors=["3m"],
+                                       with_noise=False, implied_vol_vol=False)[0]
+        self.assertIsNone(off.implied_vol_vol)
+        self.assertEqual(off.implied_vol_vol_note, "")
+
     def test_a_pair_that_is_not_a_cross_has_no_triangle(self):
         with self.assertRaises(ValueError) as cm:
             analytics.triangle_table(self.book, "EURUSD", cut="NY")
@@ -602,6 +680,139 @@ class TestAnalysis(unittest.TestCase):
             self.assertIsNotNone(r.rho_difference, r.tenor)
 
 
+class TestPastTheAtmForwardBoundary(unittest.TestCase):
+    """Past a pair's ``atmf beyond`` tenor the smile table labels its
+    at-the-money row ``ATMF``, and the triangle, its noise floor and the SABR
+    shape all looked it up as ``"ATM"``: ``KeyError: 'ATM'`` took the whole
+    Analysis screen down on any cross whose tenors ran past 1Y."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.book = Book.from_excel(BOOK, ASOF).load_all(["EURJPY"])
+
+    def test_the_at_the_money_is_found_by_kind_not_label(self):
+        from volkit.surface import smile_points
+        s = self.book["EURJPY"]
+        t = s.tenor_years("2y")
+        self.assertTrue(s.slice_conv(t).atm_is_forward(t))
+        table = s.smile_table(self.book.clock.datetime_from_years(t), cut="NY")
+        atm = [r for r in table if r["kind"] == "atm"]
+        self.assertEqual([r["label"] for r in atm], ["ATMF"])
+        self.assertEqual(smile_points(table)["ATM"], atm[0]["vol"])
+
+    def test_the_triangle_reads_a_tenor_past_the_boundary(self):
+        rows = analytics.triangle_table(self.book, "EURJPY", cut="NY", tenors=["1y", "2y"])
+        for r in rows:
+            self.assertEqual([w for w in r.warnings if "could not" in w], [], r.tenor)
+            self.assertIn("fly25", r.marked, r.tenor)
+            self.assertIn("atm", r.noise, r.tenor)
+
+    def test_the_sabr_shape_reads_a_tenor_past_the_boundary(self):
+        s = self.book["EURJPY"]
+        t = s.tenor_years("2y")
+        expiry = self.book.clock.datetime_from_years(t)
+        warn = []
+        got = analytics._sabr_shape(s, expiry, t, float(s.atm_vol(expiry, "NY")), 0.25,
+                                    None, "NY", warn)
+        self.assertIsNotNone(got, warn)
+
+
+class TestCrossCorrelation(unittest.TestCase):
+    """A cross's correlation at each tenor, beside the legs' realized one."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.book = Book.from_excel(BOOK, ASOF).load_all(["EURJPY"])
+        cls.history = history.load_history(HISTORY, cls.book.pairs)
+
+    def test_the_realized_correlation_closes_the_variance_triangle(self):
+        """Zero-mean, on the days both legs hold: the one estimator for which
+        the cross's own realized volatility is the triangle of the legs' at
+        this correlation.  The sample's EURJPY is EURUSD x USDJPY, so the
+        three sheets agree to their rounding."""
+        h = self.history
+        rc = history.realized_correlation(h["EURUSD"], h["USDJPY"], 180)
+        vols = [history.realized(h[p], 180, basis="spot", annualisation="count").vol
+                for p in ("EURUSD", "USDJPY", "EURJPY")]
+        va, vb, vc = vols
+        self.assertEqual(rc.basis, "spot")
+        self.assertAlmostEqual(vc * vc, va * va + vb * vb + 2.0 * rc.rho * va * vb, delta=1e-4 * vc * vc)
+        # The legs as they are quoted: the sample is simulated at +0.40
+        # between EURUSD and USDJPY, which is the number the book marks.
+        whole = history.realized_correlation(h["EURUSD"], h["USDJPY"], 10_000)
+        self.assertLess(abs(whole.rho - 0.40), 3.0 * whole.rho_se)
+
+    def test_only_the_days_both_sheets_hold_are_paired(self):
+        a, b = self.history["EURUSD"], self.history["USDJPY"]
+        full = history.realized_correlation(a, b, 120)
+        i, j = b.window(120)
+        keep = [k for k in range(len(b.dates)) if k != j - 10]
+        thin = history.PairHistory(pair=b.pair, dates=[b.dates[k] for k in keep],
+                                   spot=b.spot[keep])
+        got = history.realized_correlation(a, thin, 120)
+        self.assertEqual(got.observations, full.observations - 1)
+        self.assertTrue(any("one sheet and not the other" in w for w in got.warnings))
+
+    def test_auto_is_spot_on_both_legs_when_one_cannot_build_the_forward(self):
+        a, b = self.history["EURUSD"], self.history["USDJPY"]
+        bare = history.PairHistory(pair=b.pair, dates=list(b.dates), spot=b.spot)
+        got = history.realized_correlation(a, bare, 180, basis="auto", basis_tenor="3M")
+        self.assertEqual(got.basis, "spot")
+        self.assertAlmostEqual(got.rho, history.realized_correlation(a, b, 180).rho, places=12)
+        self.assertTrue(any("spot rather than the forward" in w for w in got.warnings))
+        with self.assertRaises(history.HistoryError):
+            history.realized_correlation(a, bare, 180, basis="forward", basis_tenor="3M")
+        fwd = history.realized_correlation(a, b, 180, basis="auto", basis_tenor="3M")
+        self.assertEqual(fwd.basis, "forward")
+
+    def test_the_marked_column_is_the_curve_and_needs_no_history(self):
+        table = analytics.correlation_table(self.book, "EURJPY", None)
+        curve = self.book["EURJPY"].atm
+        self.assertEqual(table.legs, ("EURUSD", "USDJPY"))
+        self.assertIn("no historical workbook", table.unavailable)
+        self.assertEqual([r.tenor for r in table.rows], list(self.book.data.tenor_points))
+        for r in table.rows:
+            self.assertAlmostEqual(r.marked, float(curve.correlation(r.t)), places=15)
+            self.assertIsNone(r.realized)
+
+    def test_the_window_matches_each_tenor_unless_a_number_is_given(self):
+        matched = analytics.correlation_table(self.book, "EURJPY", self.history)
+        fixed = analytics.correlation_table(self.book, "EURJPY", self.history, lookback_days=90)
+        self.assertEqual(matched.unavailable, "")
+        by = {r.tenor.upper(): r for r in matched.rows}
+        self.assertAlmostEqual(by["1Y"].window_days, by["1Y"].t * 365.2425)
+        self.assertGreater(by["1Y"].observations, by["3M"].observations)
+        # A one-week window cannot hold enough returns: the row stays, with why.
+        self.assertIsNone(by["1W"].realized)
+        self.assertIn("at least", by["1W"].error)
+        for r in fixed.rows:
+            self.assertEqual(r.window_days, 90.0)
+            self.assertIsNotNone(r.realized, r.tenor)
+            self.assertAlmostEqual(r.difference, r.marked - r.realized, places=15)
+
+    def test_a_pair_that_is_not_a_cross_is_refused(self):
+        with self.assertRaises(ValueError):
+            analytics.correlation_table(self.book, "EURUSD", self.history)
+
+    def test_the_route_reads_the_lookback_box_and_writes_nothing(self):
+        from volkit.webapp import BookService
+        service = BookService(str(book_for("EURJPY", "EURUSD", "USDJPY")), ASOF,
+                              history_path=str(HISTORY))
+        out = service.cross_correlation({"pair": "eurjpy", "lookback_days": "match"})
+        self.assertIsNone(out["lookback_days"])
+        self.assertEqual(out["legs"], ["EURUSD", "USDJPY"])
+        self.assertEqual(out["unavailable"], "")
+        self.assertEqual([r["window_days"] for r in service.cross_correlation(
+            {"pair": "EURJPY", "lookback_days": "60"})["rows"]][:1], [60.0])
+        for bad in ("soon", "0", "-5", "nan"):
+            with self.assertRaises(ValueError, msg=bad):
+                service.cross_correlation({"pair": "EURJPY", "lookback_days": bad})
+        self.assertFalse(service.dirty)
+        bare = BookService(str(book_for("EURJPY", "EURUSD", "USDJPY")), ASOF)
+        self.assertIn("no historical workbook",
+                      bare.cross_correlation({"pair": "EURJPY"})["unavailable"])
+
+
 class TestAnalysisApi(unittest.TestCase):
     def test_the_payload_carries_no_number_a_browser_cannot_parse(self):
         """Python's json writes NaN, which JSON.parse refuses.
@@ -619,6 +830,29 @@ class TestAnalysisApi(unittest.TestCase):
         self.assertNotIn("NaN", text)
         self.assertNotIn("Infinity", text)
         self.assertEqual(_json.loads(text)["pair"], "EURUSD")
+
+    def test_a_cross_carries_its_dependence_through_both_routes(self):
+        """The triangle's dependence columns and the implied quotes' reach the
+        browser finite, and the page's *implied vol-vol* switch reaches the
+        triangle."""
+        import json as _json
+        from volkit.webapp import BookService, _finite
+        service = BookService(str(BOOK), ASOF, feed_path=str(FEED))
+        payload = service.analysis({"pair": "EURJPY", "cut": "NY", "noise": "0",
+                                    "implied": "0"})
+        text = _json.dumps(_finite(payload), default=str)
+        self.assertNotIn("NaN", text)
+        rows = _json.loads(text)["triangle"]
+        self.assertTrue(rows)
+        for r in rows:
+            self.assertIsNone(r["implied_vol_vol"], r["tenor"])
+            self.assertIn("copula_rho", r)
+            self.assertEqual((r["vol_vol"], r["corr_vol"], r["gaussian"]), (None, 0.0, {}))
+        quotes = service.cross_quotes({"pair": "EURJPY", "cut": "NY"})
+        for r in quotes["rows"]:
+            self.assertEqual((r["vol_vol"], r["corr_vol"]), (None, 0.0), r["tenor"])
+            if not r["error"]:
+                self.assertAlmostEqual(r["copula_rho"], r["rho"], places=12)
 
     def test_sections_fail_independently(self):
         from volkit.webapp import BookService
@@ -1628,6 +1862,205 @@ class TestHistory(unittest.TestCase):
                                                current=lo - 0.01).percentile, 0.0)
         self.assertEqual(history.implied_stats(h["EURUSD"], 3650, "atm", "3M",
                                                current=hi + 0.01).percentile, 100.0)
+
+
+def _simulated_legs(rho_path, *, vol_vol=0.7, days=750, seed=3):
+    """Two dollar legs' daily history with a known correlation path and a known
+    correlation between their at-the-money volatilities."""
+    from volkit.history import PairHistory
+    rng = np.random.default_rng(seed)
+    dates, d = [], date(2023, 1, 2)
+    while len(dates) < days:
+        if d.weekday() < 5:
+            dates.append(d)
+        d += timedelta(days=1)
+    rho_path = np.broadcast_to(np.asarray(rho_path, dtype=float), (days,))
+    z1 = rng.standard_normal(days)
+    z2 = rho_path * z1 + np.sqrt(1.0 - rho_path ** 2) * rng.standard_normal(days)
+    e1 = rng.standard_normal(days)
+    e2 = vol_vol * e1 + math.sqrt(1.0 - vol_vol ** 2) * rng.standard_normal(days)
+    a = PairHistory("EURUSD", dates=list(dates), spot=1.1 * np.exp(np.cumsum(0.006 * z1)),
+                    atm={"1M": 8.0 * np.exp(np.cumsum(0.03 * e1)),
+                         "3M": 8.0 * np.exp(np.cumsum(0.03 * e1))})
+    b = PairHistory("USDJPY", dates=list(dates), spot=140.0 * np.exp(np.cumsum(0.007 * z2)),
+                    atm={"1M": 9.0 * np.exp(np.cumsum(0.03 * e2))})
+    return a, b
+
+
+class TestRealizedDependence(unittest.TestCase):
+    """What a cross's legs' history says about the dependence CROSS_DEPENDENCE marks."""
+
+    def test_the_vol_vol_correlation_is_the_correlation_of_the_legs_atm_changes(self):
+        a, b = _simulated_legs(0.3, vol_vol=0.7)
+        got = history.realized_vol_vol(a, b, "1M")
+        self.assertAlmostEqual(got.rho, 0.7, delta=3 * got.rho_se)
+        self.assertEqual(got.tenors, ("1M", "1M"))
+        # A leg without the tenor is read at its nearest quoted one, and named.
+        near = history.realized_vol_vol(a, b, "3M")
+        self.assertEqual(near.tenors, ("3M", "1M"))
+        self.assertTrue(any("USDJPY" in w and "1M" in w for w in near.warnings))
+        b.atm.clear()
+        with self.assertRaises(history.HistoryError):
+            history.realized_vol_vol(a, b, "1M")
+
+    def test_a_constant_correlation_has_no_correlation_vol_however_much_its_windows_scatter(self):
+        """Twenty returns at rho 0.3 scatter by about 0.2 when the correlation
+        never moves at all. Read as a correlation vol, that sampling noise would
+        fatten every short-dated cross fly by a dependence that is not there."""
+        a, b = _simulated_legs(0.3)
+        got = history.realized_corr_vol(a, b, 30)
+        self.assertGreater(got.raw_sd, 0.1)
+        self.assertLess(got.corr_vol, 2 * got.corr_vol_se + 1e-12)
+        self.assertAlmostEqual(got.raw_sd, got.noise_sd, delta=0.05)
+
+    def test_a_correlation_that_moves_is_measured_net_of_its_noise(self):
+        path = 0.3 + 0.3 * np.sign(np.sin(np.arange(750) * 2 * np.pi / 126))
+        a, b = _simulated_legs(path)
+        got = history.realized_corr_vol(a, b, 30)
+        self.assertAlmostEqual(got.corr_vol, 0.3, delta=0.06)
+        self.assertLess(got.corr_vol, got.raw_sd)
+
+    def test_too_few_independent_windows_is_refused(self):
+        a, b = _simulated_legs(0.3)
+        with self.assertRaises(history.HistoryError) as cm:
+            history.realized_corr_vol(a, b, 365)
+        self.assertIn("independent", str(cm.exception))
+
+    def test_the_realized_correlation_is_unchanged_by_the_shared_pairing(self):
+        a, b = _simulated_legs(0.3)
+        common, ra, rb, used, _, _ = history._paired_returns(a, b, 365)
+        rho = float(np.sum(ra * rb) / math.sqrt(np.sum(ra * ra) * np.sum(rb * rb)))
+        self.assertAlmostEqual(history.realized_correlation(a, b, 365).rho, rho, places=15)
+
+    def test_a_measured_band_stays_inside_what_the_model_holds(self):
+        m = analytics.MeasuredDependence(vol_vol=0.95, vol_vol_se=0.1, corr_vol=0.05,
+                                         corr_vol_se=0.2)
+        for d in m.band(moments.Dependence(0.95, 0.05), rho=0.8):
+            self.assertLessEqual(d.vol_vol, 1.0)
+            self.assertLessEqual(d.corr_vol, 0.2)
+            self.assertGreaterEqual(d.corr_vol, 0.0)
+        none = analytics.measure_dependence(None, "EURUSD", "USDJPY", "1m", 0.08)
+        self.assertIsNone(none.vol_vol)
+        self.assertTrue(none.notes)
+
+
+class TestDependenceFromHistory(unittest.TestCase):
+    """The tables on the sample history, and the triangle priced on them."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.book = Book.from_excel(BOOK, ASOF).load_all(["EURJPY", "EURGBP"])
+        cls.book.feed = MarketFeed.load(FEED)
+        cls.history = history.load_history(HISTORY, cls.book.pairs)
+        cls.own = analytics.dependence_table(cls.book, "EURJPY", cls.history,
+                                             tenors=["1m", "3m"])
+
+    def test_the_correlation_card_carries_the_measured_dependence(self):
+        rows = analytics.correlation_table(self.book, "EURJPY", self.history,
+                                           tenors=["1m", "3m"]).rows
+        for r in rows:
+            self.assertIsNotNone(r.dependence)
+            self.assertIsNotNone(r.dependence.vol_vol, r.dependence.notes)
+            self.assertIsNotNone(r.dependence.corr_vol, r.dependence.notes)
+        plain = analytics.correlation_table(self.book, "EURJPY", None, tenors=["1m"]).rows[0]
+        self.assertIsNone(plain.dependence)
+
+    def test_the_own_premium_suggestion_gives_back_the_marked_fly(self):
+        """Marked as suggested, the triangle reproduces the cross's own fly --
+        at a correlation vol the history supports rather than one picked to fit."""
+        r = next(x for x in self.own.rows if x.tenor == "3m")
+        self.assertIsNotNone(r.suggested_vol_vol, r.reason)
+        self.assertAlmostEqual(r.premium, r.implied_vol_vol - r.measured.vol_vol, places=12)
+        self.assertAlmostEqual(r.suggested_vol_vol, r.implied_vol_vol, places=12)
+        book = Book.from_excel(BOOK, ASOF, config={"CROSS_DEPENDENCE": [
+            {"pair": "EURJPY", "tenor": "3m", "vol vol corr": r.suggested_vol_vol,
+             "corr vol": r.suggested_corr_vol}]}).load_all(["EURJPY"])
+        book.feed = self.book.feed
+        tri = analytics.triangle_table(book, "EURJPY", cut="NY", tenors=["3m"],
+                                       with_noise=False, implied_vol_vol=False)[0]
+        # The implied search runs on the coarser grid, and answers to 0.005.
+        self.assertAlmostEqual(tri.triangle["fly25"], tri.marked["fly25"], delta=5e-5)
+
+    def test_no_premium_is_history_alone_and_a_lender_lends_its_own(self):
+        none = analytics.dependence_table(self.book, "EURJPY", self.history, premium="none",
+                                          tenors=["3m"]).rows[0]
+        self.assertEqual(none.suggested_vol_vol, none.measured.vol_vol)
+        lender = analytics.dependence_table(self.book, "EURGBP", self.history,
+                                            tenors=["3m"]).rows[0]
+        lent = analytics.dependence_table(self.book, "EURJPY", self.history, premium="eurgbp",
+                                          tenors=["3m"]).rows[0]
+        self.assertEqual(lent.premium_source, "EURGBP")
+        if lender.premium is None:
+            self.assertIsNone(lent.suggested_vol_vol)
+            self.assertIn("EURGBP", lent.reason)
+        else:
+            self.assertAlmostEqual(lent.premium_used, lender.premium, places=12)
+        with self.assertRaises(ValueError):
+            analytics.dependence_table(self.book, "EURJPY", self.history, premium="EURUSD")
+
+    def test_the_relative_value_triangle_is_priced_on_the_realized_dependence(self):
+        """The Gaussian copula put every cross fly below its legs' history as
+        well as the market, so the triangle signal read every cross's wings
+        rich for a reason that was the copula. On realized, the triangle is the
+        legs tied at what they have shown, with its uncertainty in the floor."""
+        from volkit import relvalue
+        kw = dict(horizon_days=7, cut="NY", tenors=["1m", "3m"])
+        realized = relvalue.relative_value(self.book, "EURJPY", self.history["EURJPY"],
+                                           history=self.history, **kw)
+        marked = relvalue.relative_value(self.book, "EURJPY", self.history["EURJPY"],
+                                         history=self.history, triangle_basis="marked", **kw)
+        self.assertEqual(realized.triangle["basis"], "realized")
+        self.assertEqual(marked.triangle["basis"], "marked")
+        self.assertIn("measured on EURUSD/USDJPY history", realized.triangle["sources"]["3m"])
+        self.assertEqual(marked.triangle["sources"]["3m"], "Gaussian copula")
+
+        def triangle(grid, tenor, column):
+            row = next(r for r in grid.rows if r.tenor == tenor)
+            cell = next(c for c in row.cells if c.column == column)
+            return next(s for s in cell.signals if s.name == "triangle")
+
+        # The ATM is held, so its triangle does not care what the legs' wings do.
+        self.assertAlmostEqual(triangle(realized, "3m", "atm").value,
+                               triangle(marked, "3m", "atm").value, places=5)
+        self.assertNotAlmostEqual(triangle(realized, "3m", "10dc").value,
+                                  triangle(marked, "3m", "10dc").value, places=4)
+        rows = analytics.triangle_table(
+            self.book, "EURJPY", cut="NY", tenors=["3m"], implied_vol_vol=False,
+            dependence={"3m": moments.Dependence(0.2, 0.05)},
+            dependence_band={"3m": (moments.Dependence(0.3, 0.05),)})
+        self.assertGreater(rows[0].dependence_noise["fly25"], 0.0)
+        value, noise, _ = relvalue._triangle_difference(rows[0], next(
+            c for c in relvalue.COLUMNS if c.name == "25dc"))
+        self.assertGreater(noise, relvalue._triangle_difference(
+            analytics.TriangleRow(**{**rows[0].__dict__, "dependence_noise": {}}),
+            next(c for c in relvalue.COLUMNS if c.name == "25dc"))[1])
+
+    def test_the_triangle_cannot_borrow_its_own_premium_and_falls_back_without_history(self):
+        from volkit import relvalue
+        for own in ("own", "EURJPY"):
+            with self.assertRaises(relvalue.RelativeValueError):
+                relvalue.relative_value(self.book, "EURJPY", None, history=self.history,
+                                        premium=own, tenors=["3m"])
+        grid = relvalue.relative_value(self.book, "EURJPY", None, horizon_days=7, cut="NY",
+                                       tenors=["3m"])
+        self.assertEqual((grid.triangle["asked"], grid.triangle["basis"]), ("realized", "marked"))
+        self.assertTrue(any("no historical workbook" in w for w in grid.warnings))
+        panel = relvalue.panel_from_request({"pair": "EURJPY", "triangle_basis": "Marked",
+                                             "premium": "eurgbp"})
+        self.assertEqual((panel.triangle_basis, panel.premium), ("marked", "eurgbp"))
+
+    def test_the_route_suggests_and_the_config_window_offers_it(self):
+        from volkit.webapp import BookService
+        service = BookService(str(BOOK), ASOF, feed_path=str(FEED), history_path=str(HISTORY))
+        out = service.dependence_realized({"pair": "EURJPY", "premium": "none"})
+        self.assertEqual((out["sheet"], out["premium"]), ("CROSS_DEPENDENCE", "none"))
+        self.assertTrue(out["rows"])
+        tabs = {t["sheet"]: t for t in service.config_tabs()["tabs"]}
+        self.assertEqual(tabs["CROSS_DEPENDENCE"]["measure"], "dependence")
+        with self.assertRaises(ValueError):
+            service.dependence_realized({"pair": "EURUSD"})
+        with self.assertRaises(ValueError):
+            BookService(str(BOOK), ASOF).dependence_realized({"pair": "EURJPY"})
 
 
 if __name__ == "__main__":

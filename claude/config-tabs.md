@@ -48,6 +48,19 @@ the book's override; it moved when the desk said the ladder is a COS
 setting.  In `EXPORT_TABS`, edited on the Vol bulk processing screen, and
 seeded with the desk's eight CNH crosses by the same command as the rest.
 
+`CROSS_DEPENDENCE` (added 2026-09-15) is **the book's**, edited in the Config
+window: `pair`, `tenor`, `vol vol corr` (`[-1, 1]`), `corr vol` (`[0, 1)`),
+`note`. It marks how a cross's legs depend on each other beyond the
+correlation, for the smile its legs imply (the Analysis triangle and the
+marking screen's fill from the legs; `claude/screen-analysis.md`). Read by
+`cross.load_cross_dependence` into `Book.cross_dependence`; placed per tenor on
+the pair's calendar only when asked (`Book.dependence_at`), each input its own
+ladder, linear between rungs and flat outside; a blank cell is none of it. A
+row that is not a cross, not a tenor, out of range or given twice makes the
+whole tab a load warning and no dependence (the wing ratios' rule); a cross the
+workbook does not carry is a warning and dropped. No tab, no row, or both cells
+blank: the Gaussian copula, exactly as before.
+
 `market_feed.csv` stays a file on purpose: it is market data with an `asof`,
 overwritten daily, and a file is easier to overwrite than a tab in a workbook
 Excel may have open. It has since taken the **discount curves** as well (the

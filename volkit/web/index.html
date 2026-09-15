@@ -751,6 +751,9 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
           <label style="margin:0;display:flex;align-items:center;gap:5px;width:auto;font-size:11px"
             title="move one tenor and let the workbook's vega weights carry the rest of the curve">
             <input type="checkbox" id="mbumpshow" style="width:auto"> bump</label>
+          <label class="hide" id="mcorrlabel" style="margin:0;display:flex;align-items:center;gap:5px;width:auto;font-size:11px"
+            title="on a cross: its correlation at each tenor, read off the curve, beside the legs' realized correlation">
+            <input type="checkbox" id="mcorrshow" style="width:auto"> correlation</label>
           <span class="meta" id="mquotenote" style="margin-left:9px"
             title="a quote typed here replaces the pair sheet's for this session and refits that tenor; it is saved with the session and written into the sheet's own cell when the session is put back into the workbook"></span></h2>
         <div class="scroll"><table class="mark" id="matm"></table></div>
@@ -793,14 +796,16 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
             smile, and what Fill writes</summary>Each leg&rsquo;s <b>marked smile</b> is read as a
             distribution at the cross&rsquo;s expiry, the two are tied together at the
             cross&rsquo;s own <b>correlation</b> &mdash; the curve its ATM is already built from
-            &mdash; by a Gaussian copula, and the cross&rsquo;s smile is read off the result: the
-            same construction as the Analysis screen&rsquo;s cross triangle. The <b>RR</b> is the
+            &mdash; by a Gaussian copula, or by the dependence the workbook&rsquo;s
+            <code>CROSS_DEPENDENCE</code> tab marks for the cross (a vol-vol correlation and a
+            correlation vol, holding the ATM), and the cross&rsquo;s smile is read off the result:
+            the same construction as the Analysis screen&rsquo;s cross triangle. The <b>RR</b> is the
             smile&rsquo;s risk reversal; the <b>ST</b> is the <i>market</i> strangle, which is what
             the sheet&rsquo;s columns hold. Both are measured from the combined smile&rsquo;s own
             ATM. The ATM itself is not written: the cross&rsquo;s curve already is the triangle
-            of its legs&rsquo; ATMs. What the copula leaves out &mdash; tail dependence the
-            market does not quote, and the change of measure between the legs&rsquo; currencies
-            and the cross&rsquo;s &mdash; is left in the answer.
+            of its legs&rsquo; ATMs. What the copula leaves out &mdash; any dependence the tab
+            does not mark, and the change of measure between the legs&rsquo; currencies and the
+            cross&rsquo;s &mdash; is left in the answer.
             <b>Show</b> reads, <b>Fill</b> writes: it recomputes, then writes the ticked tenors
             (every tenor, before anything is shown) as ordinary quotes, in one block and one
             refit &mdash; saved with the session and taken off the way any quote is, by
@@ -817,6 +822,35 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
             a box here and that wing is quoted in its own right instead; the greyed number is
             what the workbook's <code>WING_RATIOS</code> tab holds.</details>
           <div class="row" style="margin-top:8px"><button class="danger" id="mclearratio">Clear ratio changes</button></div>
+        </div>
+        <!-- A cross's correlation, tenor by tenor: the curve its ATM is built
+             from, read at each tenor, beside what the two legs realized.
+             Reads only -- the correlation is marked on the curve card. -->
+        <div class="hide" id="mcorrrow" style="margin-top:11px">
+          <div class="row" style="flex-wrap:wrap;gap:8px;align-items:center">
+            <b style="font-size:12px;width:auto">Correlation</b>
+            <span class="meta" id="mcorrlegs" style="width:auto"></span>
+            <span class="grow"></span>
+            <label style="margin:0;display:flex;align-items:center;gap:5px;width:auto;font-size:11px">Lookback (days)
+              <input id="mcorrlook" value="match" style="width:74px"
+                title="The window the legs' realized correlation is measured over. 'match' gives each tenor its own length — a 1M correlation against one month of returns. Type a number instead and every tenor is measured over that one window."></label>
+          </div>
+          <div id="mcorrout" style="margin-top:6px"></div>
+          <details class="hint" style="margin-top:6px"><summary>What the two columns are</summary>
+            <b>Marked</b> is the cross&rsquo;s own correlation curve &mdash; its initial, final and
+            decay on the curve card &mdash; read at each tenor&rsquo;s expiry: the number the ATM on
+            the row is built from, out of its two dollar legs. It needs no history.
+            <b>Realized</b> is the correlation of the two legs&rsquo; daily log returns, each leg as
+            it is quoted (EURUSD with USDJPY for EURJPY), on the days both history sheets hold.
+            It is zero-mean like the Analysis screen&rsquo;s realized volatility, which makes it the
+            one correlation that closes the variance triangle against the three realized
+            volatilities, and it is measured on the <b>forward</b> to each tenor wherever both
+            sheets can build one and on spot for both legs otherwise &mdash; the row says which.
+            The window is the Analysis screen&rsquo;s: <code>match</code> gives each tenor its own
+            length, a number holds every tenor to that one. <b>&plusmn;</b> is one standard error,
+            <code>(1&minus;&rho;&sup2;)/&radic;n</code>, and <b>diff</b> is marked less realized.
+            The history is the one loaded on the Analysis screen. Nothing here is written: the
+            correlation is marked on the curve card.</details>
         </div>
         <details class="hint hide" id="mowpastehint" style="margin-top:7px"><summary>The
           overwrite column takes a block paste too</summary>A column of marks out of a
@@ -1205,6 +1239,9 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
       <option value="auto">forward</option><option value="spot">spot</option></select></div>
     <label style="margin:0;display:flex;align-items:center;gap:6px;width:auto;color:var(--muted);font-size:11px">
       <input type="checkbox" id="annoise" checked style="width:auto"> triangle noise floor</label>
+    <label style="margin:0;display:flex;align-items:center;gap:6px;width:auto;color:var(--muted);font-size:11px"
+      title="Back out, at every cross tenor, the vol-vol correlation at which the legs give the marked 25-delta butterfly -- the number the CROSS_DEPENDENCE tab is marked against. The slowest part of the triangle, so it can be switched off.">
+      <input type="checkbox" id="animplied" checked style="width:auto"> implied vol-vol</label>
     <label style="margin:0;display:flex;align-items:center;gap:6px;width:auto;color:var(--muted);font-size:11px">
       <input type="checkbox" id="ansabr" style="width:auto"> wings as &rho; / &nu;</label>
     <div class="f"><label>&rho;/&nu; wings</label><select id="ansabrd" style="width:74px">
@@ -1229,6 +1266,13 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
         <label style="margin:0;display:flex;align-items:center;gap:6px;width:auto;
                       color:var(--muted);font-size:11px">
           <input type="checkbox" id="rvtri" checked style="width:auto"> cross triangle</label>
+        <div class="f"><label>Triangle on</label>
+          <select id="rvtribasis" style="width:120px"
+            title="What the triangle ties a cross's legs together with. realized: the legs' measured vol-vol correlation and correlation vol (plus the premium beside this), with their standard errors in the noise floor, so a rich wing is a cross pricing more dependence than its legs have shown. marked: the CROSS_DEPENDENCE tab, or the Gaussian copula where it marks nothing.">
+            <option value="realized">realized</option><option value="marked">marked</option></select></div>
+        <div class="f"><label>Premium</label>
+          <select id="rvpremium" style="width:104px"
+            title="Added to the measured vol-vol correlation when the triangle is on realized: none (history alone), or another cross's premium -- what its marked fly charges over its own legs' history. Not the cross's own: that premium is backed out of the very fly the signal compares against."></select></div>
         <div class="f"><label>Weights</label>
           <div class="row" id="rvweights" style="gap:5px"></div></div>
         <div class="acts">
@@ -1266,7 +1310,9 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
     forward carry, as the volatility they are worth: an option that rolls down has to be cheaper
     to break even, so a mark that did not fall is rich by the difference), <b>history</b> (where
     this cell sits in its own recent history) and, on a cross, <b>triangle</b> (your mark against
-    what the two legs imply). The first three <i>add</i>: they are the fair-value break-even
+    what the two legs imply — tied, under <b>Triangle on: realized</b>, at the dependence their
+    history shows plus the <b>Premium</b> named, with that estimate&rsquo;s uncertainty in the noise
+    floor; under <b>marked</b>, at <code>CROSS_DEPENDENCE</code> or the Gaussian copula). The first three <i>add</i>: they are the fair-value break-even
     below moved out from the at-the-money to a strike, so their sum is the volatility-point figure
     in the small figure of the cell, and on the ATM column it is exactly the <b>Rich</b> column
     of the fair-value card. The other two answer a different question, so they are averaged into
@@ -1380,8 +1426,16 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
     triangle the book itself is built on. The risk reversal and butterfly have no exact answer from
     two marginals and a correlation, so each leg's whole marked density is read off its smile, the
     two are tied together with a Gaussian copula at the marked correlation, and the cross's smile is
-    integrated out. That assumes a dependence structure the market does not quote and ignores the
-    change of measure between the legs' domestic currencies; the <b>noise floor</b> is the same
+    integrated out. A Gaussian copula ties the size of the two legs' moves together only as the
+    correlation's square and gives the correlation no volatility, so it puts a cross butterfly below
+    what the market pays. Both can be marked per tenor on the workbook's
+    <code>CROSS_DEPENDENCE</code> tab (Config window): <b>vol vol corr</b>, the correlation of the
+    legs' variance regimes — how big each leg's regimes are is its own smile's kurtosis — and
+    <b>corr vol</b>, the volatility of the correlation. The copula's correlation is then re-solved so
+    the combined ATM stays where it was: the dependence moves the wings, never the level.
+    <b>Implied vol-vol</b> is the vol-vol correlation the marked fly asks for; <i>none</i> says how
+    far the legs reach instead. The change of measure between the legs' domestic currencies is still
+    ignored; the <b>noise floor</b> is the same
     machinery run on each leg alone, where it should reproduce the input exactly. A difference
     smaller than the noise is not a difference.
     The <b>vega split</b> differentiates the variance triangle instead of integrating it, and is
@@ -1524,12 +1578,11 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
         <div class="hint" style="margin-top:8px">Loaded, the overlay changes nothing: every other screen, the kACE feed sub-tab included, shows the marks as they were, and the Output side reads it only for the pairs set to <b>overlay</b> there. <b>Overwrite book</b> puts the ticked pairs&rsquo; rows onto the book itself (an ATM overwrite and typed quotes, the same as marking them by hand) after saving the session as it was (<code>pre-overlay-&lt;stamp&gt;.json</code>); <b>Revert</b> puts that back, whole. While anything is overwritten, <b>Write to workbook</b> refuses and a session save writes only the rows inside the book and says what it left out.</div>
       </section>
 
-      <section class="card"><h2>Compare <small>book against overlay, mids and both sides</small></h2>
+      <section class="card"><h2>Compare <small>book mids against overlay mids</small></h2>
         <div class="row" style="flex-wrap:wrap;gap:8px;align-items:flex-end">
-          <div class="f" title="whose widths and shades the two-ways are compared at -- the same tier, market width and shade on both sides"><label>At the widths of</label><select id="xcmpchan" style="width:150px"></select></div>
           <div class="f" title="the largest move, in vol points, to colour as a warning"><label>Flag above</label><input id="xcmptol" value="0.5" style="width:60px"></div>
           <button id="xcmpgo" style="width:auto;padding:6px 14px;font-size:12px">Compare</button>
-          <label class="mmchk" title="also the four wings, mid and both sides"><input type="checkbox" id="xcmpwings"> wings too</label>
+          <label class="mmchk" title="also the four wings: 25d and 10d risk reversal and butterfly"><input type="checkbox" id="xcmpwings"> wings too</label>
         </div>
         <div id="xcmp" style="margin-top:8px"><div class="etoempty">Load an overlay and press <b>Compare</b>.</div></div>
       </section>
@@ -3086,7 +3139,7 @@ function mq(){return{pair:$('#mpair').value,cut:$('#mcut').value,method:$('#mmet
 function saveMarking(){try{localStorage.setItem('volkit.marking',JSON.stringify(
   {atm_overwrites:$('#matmowshow').checked,quotes:$('#mquoteshow').checked,
    ratios:$('#mratioshow').checked,smile:$('#msmileshow').checked,
-   bump:$('#mbumpshow').checked,
+   bump:$('#mbumpshow').checked,corr:$('#mcorrshow').checked,corr_lookback:$('#mcorrlook').value,
    owfit_dof:owfitDof()}))}catch(e){}}
 function loadMarking(){
   let v=null; try{v=JSON.parse(localStorage.getItem('volkit.marking')||'null')}catch(e){}
@@ -3097,6 +3150,8 @@ function loadMarking(){
   $('#mquoteshow').checked=v.quotes!==false;
   $('#mratioshow').checked=!!v.ratios;
   $('#mbumpshow').checked=!!v.bump;
+  $('#mcorrshow').checked=!!v.corr;
+  if(typeof v.corr_lookback==='string'&&v.corr_lookback)$('#mcorrlook').value=v.corr_lookback;
   if(Array.isArray(v.owfit_dof))$$('#mowfitrow input[data-owdof]').forEach(
     i=>{i.checked=v.owfit_dof.indexOf(i.dataset.owdof)>=0});
   markingVisible();
@@ -3162,6 +3217,9 @@ function paintMarks(){
      and only a cross has legs to fill from. */
   $('#mxqrow').classList.toggle('hide',!(qcols&&MARKS.legs));
   $('#mxqlegs').textContent=MARKS.legs?(MARKS.legs.join(' × ')+', at the cross’s correlation'):'';
+  /* The correlation is a cross's alone, so the box is too. */
+  $('#mcorrlabel').classList.toggle('hide',!MARKS.legs);
+  $('#mcorrrow').classList.toggle('hide',!(MARKS.legs&&$('#mcorrshow').checked));
   mxqStale();
   // Two columns want to sit beside each other; anything more wants the card.
   $('#matm').className='mark'+((ow||qcols)?'':' tight');
@@ -3494,11 +3552,61 @@ async function loadMarks(){
   const o=mq(); MARKS=await api('/api/marks?'+qs({pair:o.pair,cut:o.cut}));
   $('#manchor').checked=!!MARKS.anchor;
   paintMarks();
+  corrLoad();
 }
 $('#matmowshow').onchange=()=>{markingVisible();saveMarking();paintMarks()};
 $('#mquoteshow').onchange=()=>{saveMarking();paintMarks()};
 $('#mratioshow').onchange=()=>{saveMarking();paintMarks()};
 $('#mbumpshow').onchange=()=>{markingVisible();saveMarking();bumpWeights()};
+$('#mcorrshow').onchange=()=>{saveMarking();paintMarks();corrLoad()};
+let CORRT=null;
+$('#mcorrlook').oninput=()=>{clearTimeout(CORRT);CORRT=setTimeout(()=>{saveMarking();corrLoad()},400)};
+/* ---- a cross's correlation, marked and realized ---------------------------
+   Read whenever the marks are, since a re-marked curve moves the marked
+   column, and only while the box is ticked on a cross.  A response that
+   arrives after a later request was sent is dropped: a slow read for the last
+   pair must not paint over this one's. */
+let CORRSEQ=0;
+async function corrLoad(){
+  if(!(MARKS&&MARKS.legs&&$('#mcorrshow').checked))return;
+  const out=$('#mcorrout'), seq=++CORRSEQ, pair=mq().pair;
+  if(!out.innerHTML)out.innerHTML='<span class="spin"></span> reading…';
+  let r;
+  try{r=await api('/api/marks/correlation?'+qs({pair:pair,lookback_days:$('#mcorrlook').value}))}
+  catch(e){if(seq===CORRSEQ)out.innerHTML='<div class="msg bad">'+esc(e.message)+'</div>';return}
+  if(seq!==CORRSEQ)return;
+  $('#mcorrlegs').textContent=r.legs.join(' / ')+' · realized over '+
+    (r.lookback_days?num(r.lookback_days,0)+' days (every tenor)':'a window matched to each tenor');
+  const sg=v=>(v==null||!isFinite(v))?'—':(v>0?'+':'')+num(v,3);
+  out.innerHTML=
+    (r.unavailable?'<div class="msg bad">'+esc(r.unavailable)+'</div>':'')+
+    '<div class="scroll"><table class="mark"><thead><tr><th>Tenor</th>'+
+    '<th title="the cross curve’s correlation at this tenor’s expiry">Marked ρ</th>'+
+    '<th title="the legs’ realized correlation over the window">Realized ρ</th>'+
+    '<th title="one standard error of the realized correlation">±</th>'+
+    '<th title="marked less realized">Diff</th>'+
+    '<th title="the window, in calendar days, and the returns in it">Window</th>'+
+    '<th class="grp" title="the legs’ realized vol-vol correlation: daily changes in their log ATM over a year, ± one standard error">Vol-vol</th>'+
+    '<th title="how much the legs’ correlation moved between windows the tenor long, with what sampling alone scatters a window that short taken out, ± one standard error">Corr vol</th></tr></thead><tbody>'+
+    r.rows.map(x=>{
+      const d=x.dependence||{};
+      const dn=(d.notes&&d.notes.length)?' title="'+esc(d.notes.join(' · '))+'"':'';
+      const note=x.warnings.length?' <span class="pill warn" title="'+esc(x.warnings.join(' · '))+'">note</span>':'';
+      const basis=x.basis==='spot'?' <span class="pill" title="measured on spot: the sheets cannot build the forward to this tenor on both legs">spot</span>':'';
+      return '<tr'+(isKeyTenor(x.tenor)?' class="key"':'')+'><td>'+esc(x.tenor)+basis+note+'</td>'+
+        '<td>'+sg(x.marked)+'</td>'+
+        (x.error
+          ?'<td colspan="3" class="meta">'+esc(x.error)+'</td>'
+          :'<td>'+sg(x.realized)+'</td><td class="meta">'+num(x.realized_se,3)+'</td><td>'+sg(x.difference)+'</td>')+
+        '<td class="meta">'+num(x.window_days,0)+'d'+(x.observations?' · '+x.observations+' obs':'')+'</td>'+
+        '<td class="grp"'+dn+'>'+(d.vol_vol==null?'—':sg(d.vol_vol)+'<span class="meta"> ±'+num(d.vol_vol_se,2)+'</span>')+'</td>'+
+        '<td'+dn+'>'+(d.corr_vol==null?'—':num(d.corr_vol,3)+'<span class="meta"> ±'+num(d.corr_vol_se,2)+
+          (d.corr_vol_noise!=null?' · noise '+num(d.corr_vol_noise,2):'')+'</span>')+'</td></tr>';
+    }).join('')+'</tbody></table></div>'+
+    '<div class="meta" style="margin-top:4px">vol-vol and corr vol are what the legs&rsquo; history '+
+    'shows — physical, not priced. What to mark on <code>CROSS_DEPENDENCE</code> from them, with a '+
+    'premium, is suggested in the Config window under that tab</div>';
+}
 /* Which column this pair's weights come from, and what the tab cannot weight,
    said *before* anything is bumped: a tenor with no weight does not move, and
    finding that out from the result table is finding it out one press late. */
@@ -3577,7 +3685,7 @@ async function mxqRun(apply){
       : ok+' of '+r.rows.length+' tenor(s) built from '+esc(r.legs.join(' × ')))+'</div>'+
     (r.problems&&r.problems.length?'<div class="msg bad">'+esc(r.problems.join(' · '))+'</div>':'')+
     '<div class="scroll" style="margin-top:6px"><table class="mark"><thead><tr><th></th><th>Tenor</th>'+
-    '<th title="the cross’s correlation at this tenor">ρ</th>'+
+    '<th title="the cross’s correlation at this tenor; hover a row for the dependence the legs were tied together with">ρ</th>'+
     F.map(f=>'<th>'+esc(quoteLabel(f))+'</th>').join('')+'</tr></thead><tbody>'+
     r.rows.map(x=>{
       const now=((MARKS&&MARKS.atm.find(a=>a.tenor.toUpperCase()===x.tenor.toUpperCase()))||{}).quotes||{};
@@ -3587,7 +3695,11 @@ async function mxqRun(apply){
         (x.error
           ?'<td colspan="'+(F.length+1)+'" class="meta">'+esc(x.error)+'</td>'
           :'<td title="combined ATM '+vnum(x.atm)+' against the cross’s '+vnum(x.cross_atm)+
-            '; legs '+x.leg_atm.map(vnum).join(' / ')+'">'+num(x.rho,3)+'</td>'+
+            '; legs '+x.leg_atm.map(vnum).join(' / ')+
+            ((x.vol_vol==null&&!x.corr_vol)?'; Gaussian copula':
+              '; CROSS_DEPENDENCE vol-vol '+(x.vol_vol==null?'none':num(x.vol_vol,2))+
+              ', corr vol '+num(x.corr_vol,2)+', copula correlation '+num(x.copula_rho,3))+'">'+
+            num(x.rho,3)+((x.vol_vol==null&&!x.corr_vol)?'':' <span class="meta">dep</span>')+'</td>'+
            F.map(f=>{
              const ratio=x.ratio_derived.indexOf(f)>=0;
              return '<td'+(ratio?' class="derived" title="derived by its ratio, so not written — tick the box above to write it"':'')+'>'+
@@ -3720,6 +3832,14 @@ async function applyMark(el){
   }catch(e){alert(e.message)}
 }
 document.addEventListener('change',e=>{if(e.target.dataset&&e.target.dataset.m)applyMark(e.target)});
+/* A pick list shuts on a click anywhere outside it, as a dropdown does. The
+   path is taken at dispatch, because ticking a pair repaints the list and the
+   clicked box may already be out of the page when the target is read. */
+document.addEventListener('click',e=>{
+  const path=e.composedPath?e.composedPath():[];
+  document.querySelectorAll('details.mmpick[open]').forEach(d=>{
+    if(path.indexOf(d)<0&&!d.contains(e.target))d.open=false});
+});
 
 /* ---- pasting a block into the ATM table ---------------------------------
    A marker keeps these numbers in a spreadsheet and marks a pair by moving
@@ -4886,7 +5006,7 @@ function anq(){return{
   lookback_days:$('#anlookback').value, annualisation:$('#anann').value,
   realized_basis:$('#anbasis').value, sabr:$('#ansabr').checked?'1':'0',
   sabr_delta:$('#ansabrd').value,
-  noise:$('#annoise').checked?'1':'0'};}
+  noise:$('#annoise').checked?'1':'0', implied:$('#animplied').checked?'1':'0'};}
 function saveAn(){try{localStorage.setItem('volkit.analysis',JSON.stringify(anq()))}catch(e){}}
 function loadAn(){
   let v=null; try{v=JSON.parse(localStorage.getItem('volkit.analysis')||'null')}catch(e){}
@@ -4896,6 +5016,7 @@ function loadAn(){
   set('#anhorizon',v.horizon_days); set('#anlookback',v.lookback_days); set('#anann',v.annualisation);
   set('#anbasis',v.realized_basis); set('#ansabrd',v.sabr_delta);
   if(v.noise!=null)$('#annoise').checked=v.noise!=='0';
+  if(v.implied!=null)$('#animplied').checked=v.implied!=='0';
   if(v.sabr!=null)$('#ansabr').checked=v.sabr==='1';
 }
 /* the tenor axis is categorical; the chart takes numbers, so index maps to label */
@@ -5106,14 +5227,21 @@ function renderShape(d){
 
 function renderTriangle(d){
   const host=$('#antri'), rows=d.triangle;
+  /* A dependence marked on CROSS_DEPENDENCE is what the legs were tied
+     together with; the heading says so once, the rows say what it was. */
+  const marked=!!(rows&&rows.some(r=>r.vol_vol!=null||r.corr_vol));
   $('#antrihead').textContent=rows&&rows.length?
     (d.pair+' vs '+d.legs.join(' and ')+' · coefficients ('+rows[0].coefficients.join(', ')+
-     ') · correlation '+num(rows[0].rho,3)):'';
+     ') · correlation '+num(rows[0].rho,3)+
+     (marked?' · dependence marked on CROSS_DEPENDENCE':' · Gaussian copula')):'';
   if(!rows||!rows.length){host.innerHTML='<div class="annone">'+esc(d.unavailable.triangle||
     'no triangle available')+'</div>';return}
   const LG=d.legs||['leg A','leg B'];
   let head='<th>Tenor</th><th>&rho;</th><th>implied &rho;</th>'+
-    '<th class="grp">vega split</th><th>per &rho;</th>';
+    '<th class="grp">vega split</th><th>per &rho;</th>'+
+    '<th class="grp" title="the vol-vol correlation and correlation vol marked on CROSS_DEPENDENCE at this tenor">dependence</th>'+
+    '<th title="the correlation the copula ran at: the curve&#39;s own, or the one holding the ATM under a marked dependence">copula &rho;</th>'+
+    '<th title="the vol-vol correlation at which the legs give the marked 25-delta butterfly, holding the marked correlation vol">implied vol-vol</th>';
   AKEYS.forEach(k=>{head+='<th class="grp">'+k+' mark</th><th>'+k+' tri</th><th>diff</th>'});
   const body=rows.map(r=>{
     /* The vega split is a hedge ratio, not a volatility: it is printed plain,
@@ -5125,10 +5253,16 @@ function renderTriangle(d){
       anRaw(r.implied_correlation)+'</td>'+
       '<td class="grp" title="'+esc(LG[0]+' / '+LG[1]+' vega per unit of '+d.pair+' vega')+'">'+
       split+'</td><td>'+anSgn(r.rho_vega)+'</td>';
+    const dep=(r.vol_vol==null&&!r.corr_vol)?'—':
+      ((r.vol_vol==null?'—':anRaw(r.vol_vol,2))+(r.corr_vol?' · &sigma;&rho; '+r.corr_vol.toFixed(2):''));
+    const ivv=r.implied_vol_vol!=null?anRaw(r.implied_vol_vol,2):
+      (r.implied_vol_vol_note?'<span class="pill warn" title="'+esc(r.implied_vol_vol_note)+'">none</span>':'—');
+    line+='<td class="grp">'+dep+'</td><td>'+anRaw(r.copula_rho)+'</td><td>'+ivv+'</td>';
     AKEYS.forEach(k=>{
-      const dv=r.difference[k], nf=r.noise[k];
+      const dv=r.difference[k], nf=r.noise[k], g=(r.gaussian||{})[k];
       const weak=(dv!=null&&nf!=null&&Math.abs(dv)<=nf);
-      line+='<td class="grp">'+anPct(r.marked[k])+'</td><td>'+anPct(r.triangle[k])+'</td><td'+
+      line+='<td class="grp">'+anPct(r.marked[k])+'</td><td'+
+        (g==null?'':' title="Gaussian copula '+anPct(g)+'"')+'>'+anPct(r.triangle[k])+'</td><td'+
         (weak?'':cls(dv))+'>'+(weak?'~0':anSgn(dv))+'</td>';});
     return line+'</tr>';});
   const noise={}; rows.forEach(r=>AKEYS.forEach(k=>{
@@ -5140,6 +5274,10 @@ function renderTriangle(d){
     'for the whole of '+esc(d.pair)+'&#39;s exactly</span>'+
     '<span><b>per &rho;</b> is what a whole unit of correlation is worth in '+esc(d.pair)+
     ' volatility points (a hundredth of it for 0.01) — risk no leg vega hedges</span>'+
+    '<span><b>implied vol-vol</b> is the correlation of the legs&#39; variance regimes at which '+
+    'they give the marked 25-delta fly: mark <code>CROSS_DEPENDENCE</code> against it. Zero is '+
+    'independent regimes, a <i>thinner</i> fly than the Gaussian copula&#39;s, so zero is not '+
+    'neutral'+(marked?'; hover a triangle cell for the Gaussian copula&#39;s number':'')+'</span>'+
     '<span>variance triangle ATM at '+esc(rows[0].tenor)+' <b>'+
     anPct(rows[0].variance_triangle_atm)+'%</b></span>'+
     '<span>the distribution triangle sits <b>'+anSgn(rows[0].smile_convexity)+
@@ -5204,16 +5342,29 @@ function rvPayload(){
   return {pair:a.pair, cut:a.cut, method:a.method, horizon_days:a.horizon_days,
           lookback_days:a.lookback_days, annualisation:a.annualisation,
           realized_basis:a.realized_basis, history_days:$('#rvhist').value,
-          triangle:$('#rvtri').checked?'1':'0', weights:rvWeights()};
+          triangle:$('#rvtri').checked?'1':'0', triangle_basis:$('#rvtribasis').value,
+          premium:$('#rvpremium').value||'none', weights:rvWeights()};
 }
+/* The crosses a premium can be borrowed from: every cross but the one scored. */
+function rvPremiumOptions(){
+  const sel=$('#rvpremium'), keep=sel.value||RVPREM||'none', pair=$('#anpair').value;
+  const crosses=(STATE.pairs||[]).filter(p=>isCrossPair(p)&&p!==pair);
+  sel.innerHTML='<option value="none">none</option>'+
+    crosses.map(p=>'<option value="'+esc(p)+'">'+esc(p)+'&rsquo;s</option>').join('');
+  sel.value=crosses.indexOf(keep)>=0?keep:'none';
+}
+let RVPREM='';
 function saveRv(){try{localStorage.setItem('volkit.relvalue',JSON.stringify(
   {history_days:$('#rvhist').value,triangle:$('#rvtri').checked,auto:$('#rvauto').checked,
+   triangle_basis:$('#rvtribasis').value,premium:$('#rvpremium').value,
    weights:rvWeights()}))}catch(e){}}
 function loadRv(){
   let v=null; try{v=JSON.parse(localStorage.getItem('volkit.relvalue')||'null')}catch(e){}
   if(!v)return;
   if(v.history_days)$('#rvhist').value=v.history_days;
   if(v.triangle!=null)$('#rvtri').checked=!!v.triangle;
+  if(v.triangle_basis)$('#rvtribasis').value=v.triangle_basis;
+  if(v.premium)RVPREM=v.premium;
   if(v.auto!=null)$('#rvauto').checked=!!v.auto;
   /* The weights are put back after the boxes exist, which is boot()'s job. */
   RVSAVED=(v.weights&&typeof v.weights==='object')?v.weights:null;
@@ -5250,6 +5401,9 @@ function renderRelValue(d){
     (d.lookback_days?d.lookback_days+'-day window (every tenor)':'matched to each tenor')+
     ' · '+d.history_days+'-day history'+
     (d.is_cross?' · cross of '+d.legs.join(' and '):'')+
+    (d.triangle&&d.triangle.basis&&d.triangle.basis!=='off'?' · triangle on '+d.triangle.basis+
+      (d.triangle.basis==='realized'?' dependence'+(d.triangle.premium!=='none'?' + '+d.triangle.premium+
+        '’s premium':''):' dependence'+(d.triangle.asked!==d.triangle.basis?' (realized unavailable)':'')):'')+
     (d.has_feed?'':' · no forward feed')):'';
   if(!d){host.innerHTML='';return}
   if(d.extreme_score!=null&&isFinite(d.extreme_score)&&d.extreme_score>0)RVFULL=d.extreme_score;
@@ -5502,6 +5656,8 @@ function scheduleRelValue(){
 $('#rvrun').onclick=runRelValue;
 $('#rvreset').onclick=rvResetWeights;
 $('#rvtri').onchange=scheduleRelValue;
+$('#rvtribasis').onchange=()=>{saveRv();scheduleRelValue()};
+$('#rvpremium').onchange=()=>{RVPREM=$('#rvpremium').value;saveRv();scheduleRelValue()};
 $('#rvauto').onchange=saveRv;
 $('#rvhist').oninput=scheduleRelValue;
 
@@ -5530,8 +5686,8 @@ function scheduleAnalysis(){
 }
 
 $('#anrun').onclick=()=>{runAnalysis(); runRelValue()};
-$('#anpair').onchange=()=>{setMethodSel('#anmethod',$('#anpair').value);scheduleAnalysis()};
-['#ancut','#anmethod','#antarget','#anann','#annoise','#anbasis','#ansabr','#ansabrd'].forEach(id=>{
+$('#anpair').onchange=()=>{setMethodSel('#anmethod',$('#anpair').value);rvPremiumOptions();scheduleAnalysis()};
+['#ancut','#anmethod','#antarget','#anann','#annoise','#animplied','#anbasis','#ansabr','#ansabrd'].forEach(id=>{
   $(id).onchange=scheduleAnalysis});
 ['#anhorizon','#anlookback'].forEach(id=>{$(id).oninput=scheduleAnalysis});
 
@@ -5549,6 +5705,7 @@ async function loadHistory(){
       (r.problems.length?' · '+r.problems.length+' note(s): '+r.problems.slice(0,2).join('; '):'');
     if(has('monitor')){renderCmp(); renderTiles(); await runMonitor(); await runCompare()}
     if(has('analysis')){await runAnalysis(); await runRelValue()}
+    if(has('marking'))corrLoad();
   }catch(e){st.innerHTML='<span style="color:var(--bad)">'+esc(e.message)+'</span>'}
 }
 $('#histload').onclick=loadHistory;
@@ -6054,7 +6211,7 @@ function cfgTabHtml(t,i,fold){
       'title="'+esc(t.shape||'')+'; blank cells in the column fall back to default">'+
       '<button class="ghost cfgaddcol" data-tab="'+i+
       '" style="width:auto;padding:4px 11px;font-size:11px">Add '+esc(t.open)+'</button>':'')+
-    '</div>'+(t.measure==='vega'?cfgVegaHtml(i):'')+end;
+    '</div>'+(t.measure==='vega'?cfgVegaHtml(i):t.measure==='dependence'?cfgDepHtml(i):'')+end;
 }
 /* Which folded tables are open, by sheet: this page's memory only, so a
    reload shuts them all again. */
@@ -6113,7 +6270,7 @@ function cfgPaintTabs(where){
       cfgPaintTabs(where);
       R.show(name+' is off '+t.sheet+' in this window; press Apply '+t.sheet+
         ' to take it off the book, and Write to workbook to take it out of the file',false);};});
-  if(where==='config')cfgVegaBind();
+  if(where==='config'){cfgVegaBind();cfgDepBind()}
 }
 /* One added column's name, as the tab's reader will spell it -- or '' when it
    is not one.  The same rule as configsheets.open_column_ok, on the box the
@@ -6233,6 +6390,111 @@ function cfgVegaPaint(i){
     cfgVegaPaint(i);
     cfgShow(n+' weight(s) suggested into the '+into+' column of '+t.sheet+
       '; check them and press Apply '+t.sheet,false);};
+}
+/* ---- a cross's dependence, measured and suggested into the tab ----------
+   The vega weighting's arrangement for CROSS_DEPENDENCE: what the legs'
+   history shows, plus a premium -- the cross's own marked fly's, none, or
+   another cross's for a cross with no market of its own -- goes into the
+   boxes for somebody to look at and apply, never onto the tab on its own. */
+let DEPR=null;
+let DEPUI={open:false,pair:'',premium:'own'};
+const isCrossPair=p=>/^[A-Z]{6}$/.test(p)&&p.slice(0,3)!=='USD'&&p.slice(3)!=='USD';
+function cfgDepHtml(i){
+  return '<details class="hint" style="margin-top:9px"'+(DEPUI.open?' open':'')+
+    '><summary>Suggest from the historical book</summary>'+
+    '<div style="margin:8px 0 0">For one cross, per tenor: the legs&rsquo; <b>measured</b> vol-vol '+
+    'correlation (daily changes in their log ATM over a year) and correlation vol (how much their '+
+    'correlation moved between windows the tenor long, sampling noise taken out); the vol-vol '+
+    'correlation the cross&rsquo;s marked 25-delta fly <b>implies</b> at that correlation vol; and '+
+    'the <b>premium</b> between them — what the market charges for dependence beyond what happened. '+
+    'The suggestion is measured plus a premium: the cross&rsquo;s <b>own</b> (it gives back its '+
+    'marked fly), <b>none</b> (history alone), or <b>another cross&rsquo;s</b> — the educated guess '+
+    'for a cross with no market of its own.</div>'+
+    '<div class="row" style="margin-top:8px;flex-wrap:wrap;gap:6px">'+
+    '<select class="cfgdpair" style="width:auto;padding:3px 6px"></select>'+
+    '<span class="meta">premium</span><select class="cfgdprem" style="width:auto;padding:3px 6px"></select>'+
+    '<button class="cfgdgo" style="width:auto;padding:4px 11px;font-size:11px;background:transparent;'+
+    'color:var(--ink);border:1px solid var(--line);font-weight:500">Measure</button></div>'+
+    '<div class="cfgdout" data-tab="'+i+'" style="margin-top:8px"></div></details>';
+}
+function cfgDepBind(){
+  const box=$('#cfgtabs').querySelector('.cfgdpair'); if(!box)return;
+  const i=+$('#cfgtabs').querySelector('.cfgdout').dataset.tab;
+  const crosses=(STATE.pairs||[]).filter(isCrossPair);
+  fillSel('.cfgdpair',crosses,DEPUI.pair||(isCrossPair(markingPair())?markingPair():crosses[0]));
+  const prem=$('#cfgtabs').querySelector('.cfgdprem');
+  prem.innerHTML='<option value="own">its own marked fly</option><option value="none">none</option>'+
+    crosses.map(p=>'<option value="'+esc(p)+'">'+esc(p)+'&rsquo;s</option>').join('');
+  prem.value=DEPUI.premium||'own';
+  const keep=()=>{DEPUI.pair=box.value;DEPUI.premium=prem.value};
+  box.onchange=keep; prem.onchange=keep;
+  box.closest('details').ontoggle=e=>{DEPUI.open=e.target.open};
+  if(DEPR)cfgDepPaint(i);
+  $('#cfgtabs').querySelector('.cfgdgo').onclick=async()=>{
+    keep();
+    const out=$('#cfgtabs').querySelector('.cfgdout');
+    out.innerHTML='<span class="spin"></span> measuring… (the implied vol-vol is a search per tenor)';
+    try{DEPR=await post('/api/dependence/realized',{pair:box.value,premium:prem.value,
+                                                     cut:mq().cut||'NY'})}
+    catch(e){DEPR=null;out.innerHTML='<div class="msg bad">'+esc(e.message)+'</div>';return}
+    cfgDepPaint(i);
+  };
+}
+function cfgDepPaint(i){
+  const out=$('#cfgtabs').querySelector('.cfgdout'); if(!out)return;
+  const r=DEPR; if(!r){out.innerHTML='';return}
+  const sg=(v,d)=>(v==null||!isFinite(v))?'—':(v>0?'+':'')+num(v,d==null?3:d);
+  const src=r.premium==='own'?'its own marked fly':r.premium==='none'?'no premium':r.premium+'&rsquo;s premium';
+  out.innerHTML='<div class="meta">'+esc(r.pair)+' off '+esc(r.legs.join(' / '))+' history · '+src+'</div>'+
+    (r.unavailable?'<div class="msg bad">'+esc(r.unavailable)+'</div>':'')+
+    '<div class="scroll" style="margin-top:6px"><table class="mark"><thead><tr><th>Tenor</th>'+
+    '<th title="measured vol-vol correlation ± se">vv measured</th>'+
+    '<th title="measured correlation vol ± se">cv measured</th>'+
+    '<th title="the cross’s marked 25-delta fly">fly25</th>'+
+    '<th title="the vol-vol correlation the marked fly implies at the measured correlation vol">vv implied</th>'+
+    '<th title="implied less measured">premium</th><th title="the premium the suggestion uses">used</th>'+
+    '<th class="grp">&rarr; vol vol corr</th><th>&rarr; corr vol</th><th>marked now</th></tr></thead><tbody>'+
+    r.rows.map(x=>{
+      const m=x.measured||{};
+      const why=[x.reason].concat(x.warnings||[],m.notes||[]).filter(Boolean);
+      const note=why.length?' <span class="pill warn" title="'+esc(why.join(' · '))+'">note</span>':'';
+      return '<tr><td>'+esc(x.tenor)+note+'</td>'+
+        '<td>'+(m.vol_vol==null?'—':sg(m.vol_vol)+'<span class="meta"> ±'+num(m.vol_vol_se,2)+'</span>')+'</td>'+
+        '<td>'+(m.corr_vol==null?'—':num(m.corr_vol,3)+'<span class="meta"> ±'+num(m.corr_vol_se,2)+'</span>')+'</td>'+
+        '<td>'+(x.marked_fly25==null?'—':vnum(x.marked_fly25*100))+'</td>'+
+        '<td'+(x.implied_note?' title="'+esc(x.implied_note)+'"':'')+'>'+sg(x.implied_vol_vol)+'</td>'+
+        '<td>'+sg(x.premium)+'</td><td>'+sg(x.premium_used)+'</td>'+
+        '<td class="grp"><b>'+sg(x.suggested_vol_vol)+'</b></td><td><b>'+
+          (x.suggested_corr_vol==null?'—':num(x.suggested_corr_vol,3))+'</b></td>'+
+        '<td class="meta">'+(x.marked_vol_vol==null&&!x.marked_corr_vol?'—':
+          sg(x.marked_vol_vol,2)+' / '+num(x.marked_corr_vol,2))+'</td></tr>';}).join('')+
+    '</tbody></table></div>'+
+    '<div class="row" style="margin-top:8px;align-items:center;gap:6px"><button class="cfgduse" '+
+    'style="width:auto;padding:4px 11px;font-size:11px;background:transparent;'+
+    'color:var(--ink);border:1px solid var(--line);font-weight:500">Suggest into the tab</button>'+
+    '<span class="meta">replaces '+esc(r.pair)+'&rsquo;s rows in the boxes above with the tenors that have '+
+    'a suggestion — nothing is applied until you press Apply</span></div>';
+  out.querySelector('.cfgduse').onclick=()=>{
+    const t=CFG.tabs[i];
+    cfgHarvest(i);
+    const vv='vol vol corr', cv='corr vol';
+    [vv,cv].forEach(c=>{if(t.columns.indexOf(c)<0){const at=t.columns.indexOf('note');
+      t.columns.splice(at<0?t.columns.length:at,0,c)}});
+    const keep=t.rows.filter(row=>String(row.pair||'').toUpperCase()!==r.pair);
+    let n=0;
+    const note=r.premium==='own'?'measured + own premium':r.premium==='none'?'measured, no premium':
+      'measured + '+r.premium+' premium';
+    r.rows.forEach(x=>{
+      if(x.suggested_vol_vol==null&&x.suggested_corr_vol==null)return;
+      const row={pair:r.pair,tenor:x.tenor};
+      row[vv]=x.suggested_vol_vol==null?null:Math.round(x.suggested_vol_vol*1e3)/1e3;
+      row[cv]=x.suggested_corr_vol==null?null:Math.round(x.suggested_corr_vol*1e3)/1e3;
+      row.note=note; keep.push(row); n++;});
+    t.rows=keep;
+    cfgPaintTabs('config');
+    cfgDepPaint(i);
+    cfgShow(n+' tenor(s) of '+r.pair+' suggested into '+t.sheet+'; check them and press Apply '+t.sheet,false);
+  };
 }
 function cfgConfirm(html,label,run,where){
   const R=CFG_ROOTS[where||'config'];
@@ -8428,32 +8690,28 @@ function xCell(v,d){return v==null?'—':num(v,d==null?VOLDP:d)}
 function xSgn(v,tol){if(v==null)return '—';const a=Math.abs(v);
   return '<span class="'+(tol!=null&&a>tol?'etowarn':(a<1e-9?'mqunrec':''))+'">'+(v>0?'+':'')+num(v,VOLDP)+'</span>'}
 async function xCompare(){
-  const ch=(XS.channels||[]).find(c=>c.key===$('#xcmpchan').value)||xChan();
   if(!xOverlay().loaded){$('#xcmp').innerHTML='<div class="etoempty">no overlay loaded</div>';return}
-  const body=Object.assign({},xPayload(),{channel:ch?ch.key:'',pairs:null});
-  delete body.pairs;
+  const p=xPayload(); const body={wings:p.wings,cut:p.cut,methods:p.methods};
   const stop=busy('#xstatus','comparing…');
   try{
     const r=await post('/api/export/compare',body);
     const tol=parseFloat($('#xcmptol').value); const T=isFinite(tol)?tol:null;
-    const wings=$('#xcmpwings').checked;
-    const W=['rr25','rr10','bf25','bf10'];
-    let h='<div class="mmstat"><span>'+esc(r.label)+' widths'+(r.widths.tier?' · '+esc(r.widths.tier)+' tier':'')+'</span><span>'+r.pairs.length+' pair(s)</span>'+
+    const F=$('#xcmpwings').checked?r.fields:['atm'];
+    const head={atm:'ATM',rr25:'RR 25',rr10:'RR 10',bf25:'BF 25',bf10:'BF 10'};
+    let h='<div class="mmstat"><span>'+r.pairs.length+' pair(s)</span><span>book wings: '+esc(r.wings)+'</span>'+
       '<span>overlay '+esc(String(r.overlay.sha256||'').slice(0,8))+'</span></div>';
-    h+='<div class="mmwide"><table class="mmxr"><thead><tr><th>Pair</th><th>Tenor</th><th colspan="3">Book bid / mid / ask</th><th colspan="3">Overlay bid / mid / ask</th><th>Δ mid</th><th>Δ bid</th><th>Δ ask</th>'+
-      (wings?W.map(w=>'<th>Δ '+esc(w)+'<br><span class="meta">mid · bid · ask</span></th>').join(''):'')+'<th></th></tr></thead><tbody>'+
+    h+='<div class="mmwide"><table class="mmxr"><thead><tr><th>Pair</th><th>Tenor</th>'+
+      F.map(f=>'<th colspan="3">'+esc(head[f]||f)+'<br><span class="meta">book · overlay · Δ</span></th>').join('')+'<th></th></tr></thead><tbody>'+
       r.rows.map(x=>{const a=x.book,b=x.overlay,d=x.diff||{};
-        if(!(a&&b))return '<tr><td><b>'+esc(x.pair)+'</b></td><td>'+esc(x.tenor)+'</td><td colspan="'+(wings?11:7)+'" class="meta" style="text-align:left">'+(a?'book only — the overlay has no '+esc(x.tenor)+' row':'overlay only — the book cannot supply '+esc(x.tenor))+'</td></tr>';
+        if(!a)return '<tr><td><b>'+esc(x.pair)+'</b></td><td>'+esc(x.tenor)+'</td><td colspan="'+(3*F.length+1)+'" class="meta" style="text-align:left">overlay only — the book cannot mark '+esc(x.tenor)+'</td></tr>';
         return '<tr><td><b>'+esc(x.pair)+'</b></td><td>'+esc(x.tenor)+'</td>'+
-          '<td class="mmv">'+xCell(a.bid)+'</td><td class="mmv">'+xCell(a.mid)+'</td><td class="mmv">'+xCell(a.ask)+'</td>'+
-          '<td class="mmv">'+xCell(b.bid)+'</td><td class="mmv">'+xCell(b.mid)+'</td><td class="mmv">'+xCell(b.ask)+'</td>'+
-          '<td class="mmv">'+xSgn(d.mid,T)+'</td><td class="mmv">'+xSgn(d.bid,T)+'</td><td class="mmv">'+xSgn(d.ask,T)+'</td>'+
-          (wings?W.map(w=>'<td class="mmv">'+xSgn(d[w],T)+' · '+xSgn(d[w+'_bid'],T)+' · '+xSgn(d[w+'_ask'],T)+'</td>').join(''):'')+
-          '<td class="meta" style="text-align:left">'+(x.same?'same':esc(x.origin||''))+'</td></tr>'}).join('')+
+          F.map(f=>'<td class="mmv">'+xCell(a[f])+'</td><td class="mmv">'+xCell(b[f])+(f==='atm'&&x.two_way?'<span class="meta" title="the overlay row carries an ATM two-way"> 2w</span>':'')+'</td><td class="mmv">'+xSgn(d[f],T)+'</td>').join('')+
+          '<td class="meta" style="text-align:left">'+(x.same?'same':'')+'</td></tr>'}).join('')+
       '</tbody></table></div>';
-    h+='<div class="meta" style="margin-top:6px">'+r.by_pair.map(p=>'<b>'+esc(p.pair)+'</b> '+p.compared+'/'+p.tenors+' compared, largest Δ mid '+num(p.max_mid,VOLDP)+', Δ side '+num(p.max_side,VOLDP)+
-      (p.book_only.length?', book only '+esc(p.book_only.join(' ')):'')+(p.overlay_only.length?', overlay only '+esc(p.overlay_only.join(' ')):'')).join('<br>')+'</div>';
-    if(r.book_refused.length||r.overlay_refused.length)h+='<div class="etowarn" style="margin-top:6px">'+r.book_refused.concat(r.overlay_refused).map(x=>'! '+esc(x)).join('<br>')+'</div>';
+    h+='<div class="meta" style="margin-top:6px">'+r.by_pair.map(p=>'<b>'+esc(p.pair)+'</b> '+p.compared+'/'+p.tenors+' compared'+(p.in_book?'':' (not in the book)')+
+      ', largest Δ ATM '+num(p.max_atm,VOLDP)+', Δ wing '+num(p.max_wing,VOLDP)+
+      (p.overlay_only.length?', overlay only '+esc(p.overlay_only.join(' ')):'')+(p.book_only.length?', book also quotes '+esc(p.book_only.join(' ')):'')).join('<br>')+'</div>';
+    if(r.refused.length)h+='<div class="etowarn" style="margin-top:6px">'+r.refused.map(x=>'! '+esc(x)).join('<br>')+'</div>';
     $('#xcmp').innerHTML=h;
     $('#xstatus').innerHTML='<span class="etonote">· compared '+r.rows.length+' pillar(s)</span>';
   }catch(e){$('#xcmp').innerHTML='<div class="out err"><div class="v">'+esc(e.message)+'</div></div>';stop();$('#xstatus').innerHTML=''}
@@ -8604,8 +8862,6 @@ async function xLoad(){
   const S=xSaved();
   fillSel('#xchan',(XS.channels||[]).map(c=>c.key),S.channel||'kace');
   $('#xchan').querySelectorAll('option').forEach(o=>{const c=(XS.channels||[]).find(x=>x.key===o.value);if(c)o.textContent=c.label});
-  fillSel('#xcmpchan',(XS.channels||[]).map(c=>c.key),S.cmpchan||'bloomberg');
-  $('#xcmpchan').querySelectorAll('option').forEach(o=>{const c=(XS.channels||[]).find(x=>x.key===o.value);if(c)o.textContent=c.label});
   fillSel('#xwings',XS.wings||['marks','fitted'],S.wings||'marks');
   $('#xlogchan').innerHTML='<option value="">every channel</option>'+(XS.channels||[]).map(c=>'<option value="'+esc(c.key)+'">'+esc(c.label)+'</option>').join('');
   if(S.logchan)$('#xlogchan').value=S.logchan;
@@ -8617,7 +8873,6 @@ async function xLoad(){
 }
 function xInit(){
   $('#xchan').onchange=()=>{xKeep({channel:$('#xchan').value});xApplyChannel()};
-  $('#xcmpchan').onchange=()=>xKeep({cmpchan:$('#xcmpchan').value});
   $('#xtier').onchange=()=>{const ch=xChan();if(ch)xKeep({['tier.'+ch.key]:$('#xtier').value})};
   $('#xwings').onchange=()=>xKeep({wings:$('#xwings').value});
   $('#xscn').onchange=()=>xKeep({scenario:$('#xscn').value});
@@ -8731,7 +8986,7 @@ async function boot(){
     // signal cannot be offered on the screen that the scorer never heard of.
     // Rebuilt on every reload, keeping whatever was typed, for the same
     // reason every select is rebuilt with fillSel.
-    loadRv(); rvWeightBoxes(); rvApplySaved();
+    loadRv(); rvPremiumOptions(); rvWeightBoxes(); rvApplySaved();
   }
   if(has('monitor')){
     const MOS=STATE.monitor||{};

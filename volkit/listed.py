@@ -946,6 +946,9 @@ class Anchor:
     listed_strike: float
     book_vol: float
     fit_vol: float
+    #: ``put``, ``atm`` or ``call``: the at-the-money is labelled ``ATMF``
+    #: past the pair's ``atmf beyond`` tenor, so the label is not a key.
+    kind: str = ""
 
     @property
     def diff(self) -> float:
@@ -973,7 +976,7 @@ class SurfaceComparison:
 
 
 def _rr_from_anchors(anchors, attr: str) -> dict[str, float]:
-    by = {a.label: getattr(a, attr) for a in anchors}
+    by = {("ATM" if a.kind == "atm" else a.label): getattr(a, attr) for a in anchors}
     out: dict[str, float] = {}
     for d in (25, 10):
         c, p = by.get(f"{d}d call"), by.get(f"{d}d put")
@@ -1026,7 +1029,7 @@ def compare_to_surface(fit: QuoteFit, surface, expiry, u: ListedUnderlying, *,
         anchors.append(Anchor(
             label=row["label"], fx_strike_ratio=float(row["strike"]), fx_strike=fx_k,
             listed_strike=listed_k, book_vol=float(row["vol"]),
-            fit_vol=float(lognormal_vol(listed_k, fit.params)),
+            fit_vol=float(lognormal_vol(listed_k, fit.params)), kind=row.get("kind", ""),
         ))
 
     lo, hi = min(fit.strikes), max(fit.strikes)

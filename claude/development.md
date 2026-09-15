@@ -26,6 +26,8 @@ python -m volkit analysis USDJPY --history files/history_sample.xlsx --sabr \
     --realized-basis forward          # wings as (rho, nu), realized on the forward
 python -m volkit analysis EURJPY --history files/history_sample.xlsx --horizon 7 \
     --relative-value --weight carry=0.4   # score the whole expiry / strike grid
+python -m volkit tenors EURJPY --correlation --history files/history_sample.xlsx \
+    --lookback match                  # a cross's correlation, marked and realized
 python -m volkit mm EURUSD --target-source quotes < run.txt   # the fit, on its own
 python -m volkit mm EURUSD --file run.txt --request ask.txt --fallback-tier default
 python -m volkit mm EURUSD --request ask.txt --target-source none   # the quote, on its own

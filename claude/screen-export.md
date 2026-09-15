@@ -51,8 +51,8 @@ and says *why*; this file says what is there and what must not be broken.
 - **The screen** (`p-export`, between Analysis and Market maker).  Left, the
   Input half: the file (path or pasted rows), one line per pair it carries
   (rows, tenors, whether the book holds them, a tick), **Overwrite book for
-  ticked**, Revert, Clear; then **Compare** -- the book against the overlay
-  at a chosen channel's widths, mids and both sides, the wings too.  Right,
+  ticked**, Revert, Clear; then **Compare** -- the book's mids against the overlay's, the ATM
+  and the wings, no channel.  Right,
   the Output half: destination, the pair picker with a book/overlay select
   beside every pair the overlay carries (and *from overlay* / *from book*
   for all of them at once), tier, multiplier, wings, scenario, tolerance,
@@ -182,12 +182,16 @@ and says *why*; this file says what is there and what must not be broken.
   on a written-over pair reads the book -- the rows are on it -- and the
   notes say so.  `reload(discard=True)` drops the applied state with the
   session.
-- **Compare** (`publish.compare`, `/api/export/compare`, `--compare`) builds
-  the channel twice -- every pair from the book, every pair from the overlay
-  -- and joins on pair and tenor, so the two-ways compared are the ones the
-  channel would publish: same tier or market width, same shade, same wing
-  widths on both.  Mid, bid and ask for the ATM and each wing; a tenor one
-  side cannot supply is listed as book-only or overlay-only.
+- **Compare** (`publish.compare`, `/api/export/compare`, `--compare`) is
+  **mids only, no channel**: the book's ATM and four wings read at the
+  overlay's own pairs and tenors (`_book_read`, so the same pillars every
+  channel reads) beside the file's numbers.  No width, no shade, no
+  `EXPORT_PAIRS` list -- a pair no channel publishes is still compared.  An
+  ATM two-way row compares at its mid (`two_way` on the row).  A blank
+  overlay cell is `None` and compares as nothing: it does **not** fall
+  through to the book, which would read as agreement.  A tenor the book
+  cannot mark is overlay-only; tenors the book quotes and the file lacks are
+  named per pair (`by_pair[].book_only`), not given rows.
 - **kACE under an overlay:** a pair read whole off the book goes through
   `kace.build` with its daily series; a pair read from the overlay, or one
   the book does not hold, goes pillars-only and the notes say so.

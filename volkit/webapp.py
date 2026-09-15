@@ -33,7 +33,7 @@ from .atm import CUTS
 from .exotics import TOUCH_MODES
 from .book import Book
 from .events import event_entries, leg_weights, pair_legs
-from .cross import CrossAtmCurve
+from .cross import CROSS_DEPENDENCE_SHEET, CrossAtmCurve
 from .feed import FeedError, load_for
 from .listed import (GREEK_FIELDS, UNDERLYINGS, WEIGHTINGS, panel_from_request,
                      positions_from_request)
@@ -51,8 +51,8 @@ from .quotes import FLY_CONVENTIONS
 from .quotes import VOL_UNITS as QUOTE_VOL_UNITS
 from .surface import PARAM_NAMES, QUOTE_FIELDS, QUOTE_LABELS, RATIO_WINGS
 from . import vegaweights
-from .analytics import (TARGETS, carry_table, fair_value_table, implied_cross_quotes,
-                        realized_table, triangle_table)
+from .analytics import (TARGETS, carry_table, correlation_table, dependence_table, fair_value_table,
+                        implied_cross_quotes, realized_table, triangle_table)
 from .relvalue import HISTORY_DAYS, SHARED, SIGNALS, WEIGHTS
 from .relvalue import panel_from_request as relvalue_panel_from_request
 from .banded import BAND_MODES, BandTreatment, band_panel
@@ -1576,6 +1576,40 @@ class BookService:
                     "present": weights.present, "column": weights.column_for(pair),
                     "pairs": list(weights.pairs), "rows": rows}
 
+    def dependence_realized(self, payload: dict) -> dict:
+        """A cross's dependence off its legs' history, and what to mark on CROSS_DEPENDENCE.
+
+        ``analytics.dependence_table``: per tenor the measured vol-vol
+        correlation and correlation vol, the vol-vol correlation the cross's
+        marked fly implies at that correlation vol, the premium between them,
+        and a suggestion of measured plus a premium -- the cross's own
+        (``premium: own``), none, or another cross's named.  A suggestion for
+        the Config window's boxes and nothing more, like the realized vega
+        weighting: nothing is written and the book does not move.
+        """
+        with self._lock:
+            pair = str(payload.get("pair") or "").strip().upper()
+            if not pair:
+                raise ValueError("name the cross whose dependence is to be measured")
+            if self.history is None:
+                raise ValueError(
+                    "no historical workbook is loaded, so there is nothing to measure a "
+                    "cross's dependence on. Load one on the Analysis screen, or start volkit "
+                    "with --history")
+            spec = self.book.data.pairs.get(pair)
+            if spec is None or not spec.is_cross:
+                raise ValueError(f"{pair} is not a cross in this workbook, so it has no "
+                                 f"dependence between legs")
+            cut = str(payload.get("cut") or "NY")
+            method = payload.get("method") or None
+            table = dependence_table(self.book, pair, self.history,
+                                     premium=str(payload.get("premium") or "own"),
+                                     method=method, cut=cut,
+                                     tenors=self._atm_tenors(self.book[pair]))
+            return {"pair": table.pair, "legs": list(table.legs), "premium": table.premium,
+                    "sheet": CROSS_DEPENDENCE_SHEET, "unavailable": table.unavailable,
+                    "rows": [asdict(r) for r in table.rows]}
+
     def vega_realized(self, payload: dict) -> dict:
         """The same shape, measured off the historical book over a lookback.
 
@@ -1751,6 +1785,11 @@ class BookService:
                     "atm": None if r.error else r.atm * 100.0,
                     "cross_atm": None if r.error else r.cross_atm * 100.0,
                     "leg_atm": None if r.error else [v * 100.0 for v in r.leg_atm],
+                    # The dependence the legs were tied together with at this
+                    # tenor (CROSS_DEPENDENCE), and the copula correlation that
+                    # held the ATM under it; null / 0 / rho for the Gaussian.
+                    "vol_vol": r.vol_vol, "corr_vol": r.corr_vol,
+                    "copula_rho": None if r.error else r.copula_rho,
                 })
             applied: list[str] = []
             problems: list[str] = []
@@ -1770,6 +1809,41 @@ class BookService:
             spec = self.book.data.pairs[pair]
             return {"pair": pair, "legs": list(spec.legs), "cut": cut,
                     "applied": applied, "problems": problems, "rows": out_rows}
+
+    def cross_correlation(self, q: dict) -> dict:
+        """A cross's correlation at each tenor on its ATM table, and the legs'
+        realized correlation beside it (``analytics.correlation_table``).
+
+        Reads and writes nothing.  ``lookback_days`` is the Analysis screen's
+        box: ``match`` (or empty) gives each tenor its own window, a number
+        holds every tenor to that one.  No history is not an error -- the
+        marked column needs none, and the response says why the realized one
+        is empty.
+        """
+        with self._lock:
+            pair = str(q.get("pair") or "").strip().upper()
+            if not pair:
+                raise ValueError("name the cross whose correlation is to be shown")
+            raw = q.get("lookback_days")
+            lookback = None
+            if raw not in (None, "") and str(raw).strip().lower() != "match":
+                try:
+                    lookback = float(raw)
+                except (TypeError, ValueError):
+                    raise ValueError(f"a lookback is 'match' or a number of days, got "
+                                     f"{raw!r}") from None
+                if not math.isfinite(lookback) or lookback <= 0:
+                    raise ValueError(f"a lookback window is a positive number of days, "
+                                     f"got {raw!r}")
+            basis = q.get("realized_basis") or "auto"
+            surface = self.book[pair]
+            table = correlation_table(self.book, pair, self.history, lookback_days=lookback,
+                                      realized_basis=basis,
+                                      tenors=self._atm_tenors(surface))
+            return {"pair": table.pair, "legs": list(table.legs),
+                    "lookback_days": table.lookback_days, "realized_basis": basis,
+                    "unavailable": table.unavailable,
+                    "rows": [asdict(r) for r in table.rows]}
 
     # -- the session file -------------------------------------------------
     # -- the workbook's configuration tabs --------------------------------
@@ -1845,6 +1919,9 @@ class BookService:
                 # that answers 404 is worse than not offering it.
                 entry["measure"] = ("vega"
                                     if (sheet == vegaweights.VEGA_WEIGHTS_SHEET
+                                        and "marking" in screens.enabled())
+                                    else "dependence"
+                                    if (sheet == CROSS_DEPENDENCE_SHEET
                                         and "marking" in screens.enabled())
                                     else "")
                 out.append(entry)
@@ -2265,6 +2342,7 @@ class BookService:
             lookback = None if lookback_raw in (None, "", "match") else float(lookback_raw)
             annualisation = q.get("annualisation") or "weighted"
             with_noise = str(q.get("noise", "1")).lower() not in ("0", "false", "no")
+            with_implied = str(q.get("implied", "1")).lower() not in ("0", "false", "no")
             # What "realized" is measured on.  ``auto`` uses the forward to
             # each tenor wherever the sheet quotes the swap points, because an
             # implied volatility is a volatility of the forward.
@@ -2319,7 +2397,8 @@ class BookService:
             if out["is_cross"]:
                 try:
                     out["triangle"] = [asdict(r) for r in triangle_table(
-                        self.book, pair, method=method, cut=cut, with_noise=with_noise)]
+                        self.book, pair, method=method, cut=cut, with_noise=with_noise,
+                        implied_vol_vol=with_implied)]
                 except ValueError as exc:
                     out["unavailable"]["triangle"] = str(exc)
             else:
@@ -3243,17 +3322,15 @@ class BookService:
             return out
 
     def export_compare(self, payload: dict) -> dict:
-        """The book against the overlay for the channel's two-ways: mids and both sides."""
+        """The book's mids against the overlay's: ATM and wings, no channel."""
         req = self._export_request(payload)
         with self._lock:
             if self.book is None:
                 raise ValueError(self.load_error or "no workbook is loaded")
             if self.overlay is None:
                 raise publish.PublishError("no overlay is loaded on the Input side to compare")
-            return publish.compare(req["channel_key"], self.book, self.export_tables,
-                                   self.overlay, pairs=req["pairs"], tier=req["tier"],
-                                   multiplier=req["multiplier"], wings=req["wings"],
-                                   cut=req["cut"], methods=req["methods"])
+            return publish.compare(self.book, self.overlay, pairs=req["pairs"],
+                                   wings=req["wings"], cut=req["cut"], methods=req["methods"])
 
     def export_run(self, payload: dict) -> dict:
         """Send: post the kACE messages one pair at a time, or write the file.
@@ -3580,6 +3657,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self.service.workbook_versions(q))
             elif url.path == "/api/marks":
                 self._json(self.service.marks(q))
+            elif url.path == "/api/marks/correlation":
+                self._json(self.service.cross_correlation(q))
             elif url.path == "/api/curve":
                 self._json(self.service.curve(q))
             elif url.path == "/api/rrfly":
@@ -3739,6 +3818,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self.service.config_save(payload))
             elif url.path == "/api/vega/realized":
                 self._json(self.service.vega_realized(payload))
+            elif url.path == "/api/dependence/realized":
+                self._json(self.service.dependence_realized(payload))
             elif url.path == "/api/atm/bump":
                 self._json(self.service.atm_bump(payload))
             elif url.path == "/api/atm/fit":

@@ -509,6 +509,29 @@ class TestWebAssets(unittest.TestCase):
         self.assertIn("$('#mxqgo').onclick=()=>mxqRun(false)", js.replace(" ", ""))
         self.assertIn("$('#mxqapply').onclick=()=>mxqRun(true)", js.replace(" ", ""))
 
+    def test_the_correlation_table_is_offered_on_a_cross_only_and_reads_only(self):
+        """Only a cross has a correlation, so only a cross has the box; the
+        table is a GET and never a marking route, and its lookback box takes
+        the Analysis screen's 'match'."""
+        page = _source("volkit", "web", "index.html")
+        js = page.split("<script>")[1].split("</script>")[0]
+        i = page.index('id="mcorrshow"')
+        tag = page[page.rindex("<input", 0, i):page.index(">", i)]
+        self.assertNotIn("checked", tag)
+        self.assertIn('<label class="hide" id="mcorrlabel"', page)
+        self.assertIn('<div class="hide" id="mcorrrow"', page)
+        self.assertIn('id="mcorrlook" value="match"', page)
+        paint = js.split("function paintMarks(){")[1].split("\nasync function loadMarks")[0]
+        self.assertIn("$('#mcorrlabel').classList.toggle('hide',!MARKS.legs)", paint)
+        body = js.split("async function corrLoad(){")[1].split("\n}")[0].replace(" ", "")
+        self.assertIn("api('/api/marks/correlation?'", body)
+        self.assertIn("lookback_days:$('#mcorrlook').value", body)
+        self.assertNotIn("post(", body)
+        self.assertNotIn("/api/marks/correlation", js.split("const MARKING_ROUTES=")[1].split("];")[0])
+        from volkit import screens
+        owner = {r: sc.name for sc in screens.SCREENS for r in sc.routes}
+        self.assertEqual(owner.get("/api/marks/correlation"), "marking")
+
     def test_the_fit_to_the_overwrites_is_shown_only_with_the_overwrite_column(self):
         """Its target curve is the overwrite column, so it opens and shuts with
         it; and like the bump, Propose and Apply are one route with a flag."""

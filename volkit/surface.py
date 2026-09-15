@@ -1352,20 +1352,42 @@ class VolSurface:
         rows = []
         for d in sorted(deltas, reverse=True):
             kp, vp = sl.strike_from_delta(-d, False)
-            rows.append({"label": f"{int(d * 100)}d put", "delta": -d, "strike": kp, "vol": vp})
+            rows.append({"label": f"{int(d * 100)}d put", "kind": "put", "delta": -d,
+                         "strike": kp, "vol": vp})
         # The ATM anchor is the straddle or the forward by the pair's convention
         # at this tenor; its delta is read rather than assumed, because at the
         # forward it is not 50 and the row would otherwise say what it is not.
+        # Its label is therefore not a key -- ``ATM`` inside the pair's
+        # ``atmf beyond`` tenor, ``ATMF`` past it -- and ``kind`` is: reading
+        # the row by its label lost every tenor past the boundary
+        # (``smile_points``).
         atm_delta = float(black.delta(sl.forward, sl.strikes[2], sl.atm_vol, sl.t, True,
                                       sl.conv))
         rows.append({"label": sl.conv.atm_label(sl.t) if sl.conv.atm_is_forward(sl.t)
-                     else "ATM", "delta": atm_delta, "strike": sl.strikes[2],
+                     else "ATM", "kind": "atm", "delta": atm_delta, "strike": sl.strikes[2],
                      "vol": sl.atm_vol})
         for d in sorted(deltas):
             kc, vc = sl.strike_from_delta(d, True)
-            rows.append({"label": f"{int(d * 100)}d call", "delta": d, "strike": kc, "vol": vc})
+            rows.append({"label": f"{int(d * 100)}d call", "kind": "call", "delta": d,
+                         "strike": kc, "vol": vc})
         return rows
 
     def invalidate(self) -> None:
         self._slices.clear()
         self.atm.invalidate()
+
+
+def smile_points(table) -> dict[str, float]:
+    """``VolSurface.smile_table``'s volatilities by point, the at-the-money
+    under ``ATM`` whatever its row is labelled.
+
+    The label is for the screen and names the strike the convention uses at
+    that tenor, so past the pair's ``atmf beyond`` it reads ``ATMF``; a caller
+    after "the at-the-money" wants the row's ``kind``.  Looking it up by label
+    raised ``KeyError: 'ATM'`` on every tenor past the boundary.
+    """
+    out = {r["label"]: r["vol"] for r in table if r.get("kind") != "atm"}
+    for r in table:
+        if r.get("kind") == "atm":
+            out["ATM"] = r["vol"]
+    return out

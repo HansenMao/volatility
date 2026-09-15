@@ -106,7 +106,8 @@ SCREENS: tuple[Screen, ...] = (
                 "/api/daily", "/api/curve", "/api/events", "/api/events/workbook", "/api/events/weights",
                 "/api/rrfly", "/api/export/daily", "/api/band", "/api/band/fit", "/api/vol",
                 "/api/kace", "/api/export/kace", "/api/kace/post",
-                "/api/vega", "/api/vega/realized", "/api/atm/bump", "/api/atm/fit"),
+                "/api/vega", "/api/vega/realized", "/api/atm/bump", "/api/atm/fit",
+                "/api/marks/correlation", "/api/dependence/realized"),
         commands=("tenors", "daily", "events", "validate", "band", "kace", "vega"),
     ),
     Screen(

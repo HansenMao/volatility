@@ -18,11 +18,13 @@ import math
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
+import numpy as np
+
 from .atm import AtmCurve, BackboneParams
 from .black import DeltaConvention
 from .banded import Band, load_bands
 from .calendars import CalendarSet, DEFAULT_CALENDARS
-from .cross import CorrelationCurve, CrossAtmCurve, infer_leg_signs
+from .cross import CorrelationCurve, CrossAtmCurve, infer_leg_signs, load_cross_dependence
 from .events import EventBook, EventSchedule
 from .feed import MarketFeed
 from .marketdata import ExcelSource, MarketData, MarketDataError
@@ -67,6 +69,10 @@ class Book:
     #: differently for it -- but read with the book so the marking screen and
     #: the command line share one answer about what a workbook says.
     vega_weights: VegaWeights = field(default_factory=VegaWeights)
+    #: The ``CROSS_DEPENDENCE`` tab, by cross: ``{TENOR: (vol_vol, corr_vol)}``
+    #: as typed.  Read once for the book like the wing ratios; placed on a
+    #: cross's own calendar only when asked (:meth:`dependence_at`).
+    cross_dependence: dict[str, dict[str, tuple]] = field(default_factory=dict)
     #: The configuration tabs this session holds instead of the workbook's:
     #: ``{SHEET: [row dicts]}``, as the configuration window shows them.  A
     #: peg band or a holiday marked on that window is not written into the
@@ -89,6 +95,7 @@ class Book:
         book.bands = book._default_bands(bands or path)
         book.wing_ratios = book._default_wing_ratios(path)
         book.vega_weights = book._default_vega_weights(path)
+        book.cross_dependence = book._default_cross_dependence(path)
         book.calendars = calendars if calendars is not None else book._default_calendars(path)
         book._retired_tabs(path)
         return book
@@ -220,6 +227,61 @@ class Book:
         except (OSError, ValueError) as exc:
             self.warnings.append(f"vega weights: {exc}")
             return VegaWeights()
+
+    def _default_cross_dependence(self, path: str | Path | None) -> dict[str, dict[str, tuple]]:
+        """The ``CROSS_DEPENDENCE`` tab, or nothing if the workbook has not got it.
+
+        Absent is the ordinary case and every cross is the Gaussian copula, as
+        before the tab existed.  A tab that cannot be read is a warning and no
+        dependence -- a desk that wrote one meant it to apply -- and so is a
+        row for a cross this workbook does not carry, which is dropped by name
+        rather than held against a pair nothing will ask about.
+        """
+        if path is None:
+            return {}
+        try:
+            rows = load_cross_dependence(path, overlay=self.config_tabs)
+        except (OSError, ValueError) as exc:
+            self.warnings.append(f"cross dependence: {exc}")
+            return {}
+        for pair in [p for p in rows if p not in self.data.pairs]:
+            self.warnings.append(
+                f"cross dependence: CROSS_DEPENDENCE names {pair}, which is not a pair in "
+                f"this workbook, so its rows are not read")
+            del rows[pair]
+        return rows
+
+    def dependence_at(self, pair: str, t: float):
+        """A cross's marked dependence at ``t`` years, or ``None`` for the Gaussian copula.
+
+        Each input is its own ladder over the tenors that carry it, placed at
+        each tenor's calendar expiry on the pair's calendar: linear in time
+        between two rungs and flat outside them, the ``MarkedCorrelation``
+        rule for the same reason -- a desk that stopped typing at 1Y meant the
+        last rung to keep applying.  A blank correlation vol is none, and a
+        blank vol-vol correlation is no variance regimes.
+        """
+        from .moments import Dependence
+
+        rows = self.cross_dependence.get(str(pair).upper())
+        if not rows:
+            return None
+        ladders: tuple[list, list] = ([], [])
+        for tenor, values in rows.items():
+            years = self.tenor_years(pair, tenor)
+            for ladder, value in zip(ladders, values):
+                if value is not None:
+                    ladder.append((years, float(value)))
+
+        def read(ladder):
+            if not ladder:
+                return None
+            ladder.sort()
+            return float(np.interp(t, [p[0] for p in ladder], [p[1] for p in ladder]))
+
+        vol_vol, corr_vol = read(ladders[0]), read(ladders[1])
+        dependence = Dependence(vol_vol=vol_vol, corr_vol=corr_vol or 0.0)
+        return dependence if dependence.active else None
 
     def _default_calendars(self, path: str | Path | None) -> CalendarSet:
         """The shared calendars plus whatever the ``HOLIDAYS`` tab adds.

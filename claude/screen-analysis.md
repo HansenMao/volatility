@@ -141,6 +141,61 @@ is built out of them.
   ever needs their product, and getting the product right while getting the
   individual signs wrong leaves the ATM correct and flips the RR. A test pins
   both against each other.
+- **The copula's dependence can be marked** (added 2026-09-15). A Gaussian
+  copula ties the size of the legs' moves together only as roughly the
+  correlation's square and gives the correlation no volatility, so it put every
+  cross fly below the desk's marks (AUDJPY 1Y fly25 0.23 against 0.55).
+  `CROSS_DEPENDENCE` (`Book.dependence_at`, linear in time between rungs, flat
+  outside) marks a **vol-vol correlation** -- the correlation of the legs'
+  lognormal variance regimes, each sized by its own smile's excess kurtosis
+  (`moments.regime_dispersion`), so the only input is whether they coincide --
+  and a **correlation vol** (`rho +/- corr_vol`, even odds). `moments.Dependence`
+  holds them; `combine(..., dependence=)` builds the regime copula
+  (`_combine_dependent`: Gauss-Hermite over the regimes, a coarser Simpson score
+  grid, each leg's scaled-score law composed with its quantile into one table,
+  cloud-in-cell onto one log-return grid). **An inactive dependence is the
+  existing code path, untouched**, and a test pins the regime path with no
+  regimes against it to 1e-5. **The ATM is held**: `combine_holding_atm` solves
+  the copula's own correlation (bracket aimed by the variance triangle's slope,
+  Brent, stopped within 1e-6 of vol) so the combined ATM is the Gaussian
+  copula's at the curve's `rho`; `analytics._leg_law` is the one place the
+  triangle and the implied quotes build a law. The row carries `vol_vol`,
+  `corr_vol`, `copula_rho`, and the Gaussian copula's numbers under `gaussian`.
+  **`implied_vol_vol`** is the vol-vol correlation at which the legs give the
+  marked 25-delta fly, holding the marked correlation vol (`moments.implied_vol_vol`,
+  on `IMPLIED_GRID`, probing -1, 0, +1 and then Brent); `None` with a note that
+  says which side the legs miss on. Zero is **not** neutral: independent regimes
+  are thinner than the Gaussian copula, which is why the implied column exists.
+  It adds about two seconds to a cross's triangle, so it is a switch
+  (`implied_vol_vol`, `--no-implied-vol-vol`, the *implied vol-vol* checkbox)
+  and `relvalue` switches it off.
+- **The triangle reads its deltas in the slice's convention** (fixed
+  2026-09-15). It handed the copula `surface.conv` and the noise floor
+  `leg.conv`, forward delta, against a marked smile read off `slice_conv(t)` in
+  spot delta; `_sabr_shape` did the same. All three read `slice_conv(t)` now
+  and a test spies on what `combine` and `reconstruction_error` are handed.
+- **The dependence is measured, not only marked** (added 2026-09-15).
+  `history.realized_vol_vol` is the zero-mean correlation of daily `dlog ATM`
+  on the two legs at the tenor over `DYNAMICS_DAYS` (nearest quoted tenor per
+  leg, named; no rolling fallback -- a smoothed series' changes are not the
+  changes). `history.realized_corr_vol` is the spread of the legs' zero-mean
+  correlation over rolling windows the tenor long across `CORR_VOL_DAYS`,
+  **minus** the mean sampling variance `(1-rho^2)^2/n`, floored at zero and
+  said; its standard error is from the *independent* window count (returns
+  over window length), and fewer than three is refused. Both share
+  `history._paired_returns` with `realized_correlation`, so the three are
+  measured on one set of returns. `analytics.measure_dependence` measures both
+  halves independently (`MeasuredDependence`, with `band(dep, rho)` one
+  standard error either side, inside the model's bounds); the correlation card
+  carries it (`CorrelationRow.dependence`). `analytics.dependence_table` adds
+  the vol-vol correlation the marked fly implies **at the measured correlation
+  vol** (one fly identifies one number, so the premium is put on the vol-vol
+  correlation), the premium, and a suggestion of measured plus a premium --
+  `own`, `none`, or a lender cross's at the same tenor (built in the book, or
+  refused by name). `BookService.dependence_realized` /
+  `/api/dependence/realized` (a marking-screen route, read-only) feeds the
+  Config window's `measure: "dependence"` on `CROSS_DEPENDENCE`, the vega
+  weighting's arrangement: into the boxes, never onto the tab.
 - **The same copula fills a thin cross's quotes** on the marking screen
   (`analytics.implied_cross_quotes`, `BookService.cross_quotes`,
   `/api/marks/cross`). `_cross_legs` is the one set-up it shares with the
@@ -152,6 +207,27 @@ is built out of them.
   writes is ordinary quote overwrites through `webapp._write_quote_block`, the
   paste's all-or-nothing block, and a ratio-derived 10-delta wing is skipped
   unless `override_ratios` is set.
+- **A cross's correlation is shown beside what its legs realized** on the
+  marking screen's ATM card (`analytics.correlation_table`,
+  `BookService.cross_correlation`, `/api/marks/correlation`, `volkit tenors
+  PAIR --correlation`). The marked column is `curve.correlation(t)` at each
+  tenor's expiry and needs no history. The realized column is
+  `history.realized_correlation`: the legs **as quoted** -- the sign the cross
+  curve's correlation is marked in, with the triangle's coefficients left to
+  the triangle -- paired **only on the days both sheets hold**, and
+  **zero-mean**, because that is the estimator for which the cross's own
+  realized volatility over the same rows is exactly the variance triangle of
+  the legs' at this correlation; a test pins it against the sample's EURJPY.
+  The window is `realized_table`'s (`None` matches the tenor) and so is the
+  basis, except that `auto` falls back to spot on **both** legs when either
+  cannot build the forward -- a forward on one leg against spot on the other
+  correlates two different things. Read-only: a GET, not a marking route.
+- **The at-the-money row of a smile table is found by `kind`, never by label**
+  (`surface.smile_points`). The label names the convention's strike at that
+  tenor -- `ATM` inside the pair's `atmf beyond`, `ATMF` past it -- and the
+  triangle, its noise floor and the SABR shape all read `by["ATM"]`, so any
+  cross with a tenor past the boundary raised `KeyError: 'ATM'` and took the
+  Analysis screen down; the listed comparison lost its fly there silently.
 - Every combined distribution is renormalised onto its own forward. The shift
   is compared against the triangle's known convexity (the legs' MGFs at the
   coefficients plus `rho*sd_a*sd_b`); only the unexplained remainder warns.
@@ -181,6 +257,19 @@ is built out of them.
     they drift apart. `history` (the cell's own z-score) and `triangle` (a
     cross against its legs) answer different questions and are kept out of
     that sum.
+  - **The triangle signal is priced on the legs' realized dependence**
+    (`relative_value(history=, triangle_basis="realized", premium="none")`,
+    `relvalue._realized_dependence`): measured vol-vol correlation plus the
+    premium named, measured correlation vol, the band of each moved by its
+    standard error passed to `triangle_table(dependence=, dependence_band=,
+    dependence_source=)`, and `_triangle_difference` adds `dependence_noise` to
+    the grid noise. The own premium (or the cross itself named) is refused: it
+    is backed out of the fly under comparison. No history for a leg, or a
+    realized build that fails, falls back to `marked` with a warning, and
+    `RelativeValue.triangle` says what was asked, what was used, the premium
+    and every tenor's source. `Panel` reads `triangle_basis` and `premium`;
+    `relvalue` never pays for the implied vol-vol search except for a lender's
+    premium. Before this the copula alone made every cross's wings read rich.
   - **The at-the-money carries no shape by statement**, not by two near-equal
     numbers cancelling: the at-the-money *is* the level. And a statement is
     not a measurement, so it is **shown and not scored** (`Signal.scorable`).

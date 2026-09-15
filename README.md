@@ -1190,10 +1190,11 @@ The panel has two halves. **Input**, on the left:
   **Revert** puts that back. While any pair is written over, **Write to
   workbook** refuses — an overlay is not marked — and a session save writes
   the intersection and says what it dropped.
-* **Compare.** The book against the overlay at a chosen channel's widths and
-  shades: bid, mid and ask for the ATM and each wing, pair by pair and tenor
-  by tenor, the largest moves flagged, and a tenor one side cannot supply
-  listed rather than dropped.
+* **Compare.** The book's mids against the overlay's -- the ATM and, with
+  *wings too*, each risk reversal and butterfly -- at the overlay's own pairs
+  and tenors, with no channel, width or shade. The largest moves are
+  flagged, a blank overlay cell compares as nothing, and a tenor the book
+  cannot mark is listed as overlay-only rather than dropped.
 
 **Output**, on the right:
 

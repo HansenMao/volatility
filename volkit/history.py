@@ -961,3 +961,326 @@ def vol_dynamics(hist: PairHistory, lookback_days: float, tenor: str, *,
                        rho=rho, nu=nu, rho_se=rho_se, nu_se=nu_se,
                        vol_mean=float(np.mean(vol)), vol_time=vt,
                        warnings=tuple(warnings))
+
+
+@dataclass(frozen=True)
+class RealizedCorrelation:
+    """How two dollar legs actually moved together over one window."""
+
+    legs: tuple[str, str]
+    start: date
+    end: date
+    observations: int
+    rho: float
+    rho_se: float
+    #: ``spot`` or ``forward``, and always the same for both legs.
+    basis: str = "spot"
+    basis_tenor: str | None = None
+    warnings: tuple[str, ...] = ()
+
+
+def realized_correlation(hist_a: PairHistory, hist_b: PairHistory, lookback_days: float, *,
+                         end: date | None = None, basis: str = "spot",
+                         basis_tenor: str | None = None,
+                         min_observations: int = 10) -> RealizedCorrelation:
+    """The realized correlation of two legs' log returns, as each leg is quoted.
+
+    It is the number a cross's correlation curve is marked as
+    (``cross.CrossAtmCurve``): the correlation of ``dlog EURUSD`` with
+    ``dlog USDJPY`` for EURJPY, of the legs as they are written, with how they
+    compose into the cross left to the triangle's own signs.  Measured on the
+    rows **both** sheets hold and on nothing else -- a return on one leg over a
+    day the other sheet skipped pairs a one-day move with a two-day one.
+
+    **Zero-mean**, like :func:`realized`: ``sum(ra rb) / sqrt(sum ra^2 sum rb^2)``.
+    Beyond the drift argument that makes the volatility zero-mean, it is the
+    estimator that closes the variance triangle -- the cross's own realized
+    volatility over the same rows is exactly
+    ``sigma_a^2 + sigma_b^2 + 2 ca cb rho sigma_a sigma_b`` with this ``rho``,
+    so a realized correlation and three realized volatilities cannot disagree.
+    No annualisation enters it: whatever the clock, it cancels.
+
+    ``basis`` means what it means for :func:`realized`.  ``forward`` measures
+    the forward to ``basis_tenor`` on both legs; ``auto`` does that where
+    both sheets can build the forward and falls back to spot on **both** where
+    either cannot, saying so -- a forward on one leg and spot on the other is a
+    correlation between two different things.
+    """
+    common, ra, rb, used, tenor, warnings = _paired_returns(
+        hist_a, hist_b, lookback_days, end=end, basis=basis, basis_tenor=basis_tenor,
+        min_observations=min_observations)
+    legs = (hist_a.pair, hist_b.pair)
+    sa, sb = float(np.sum(ra * ra)), float(np.sum(rb * rb))
+    if sa <= 0 or sb <= 0:
+        still = legs[0] if sa <= 0 else legs[1]
+        raise HistoryError(f"{still} did not move over the window, so it has no correlation "
+                           f"with anything")
+    rho = max(-1.0, min(1.0, float(np.sum(ra * rb)) / math.sqrt(sa * sb)))
+    n = int(ra.size)
+    rho_se = (1.0 - rho * rho) / math.sqrt(n) if n > 2 else float("nan")
+    if math.isfinite(rho_se) and abs(rho) < rho_se:
+        warnings.append(f"the realized correlation of {rho:+.3f} is inside one standard error "
+                        f"({rho_se:.3f}) of zero on {n} observations")
+    return RealizedCorrelation(legs=legs, start=common[0], end=common[-1], observations=n,
+                               rho=rho, rho_se=rho_se, basis=used,
+                               basis_tenor=(tenor if used == "forward" else None),
+                               warnings=tuple(warnings))
+
+
+def _paired_returns(hist_a: PairHistory, hist_b: PairHistory, lookback_days: float, *,
+                    end: date | None = None, basis: str = "spot",
+                    basis_tenor: str | None = None, min_observations: int = 10):
+    """Two legs' daily log returns on the days both sheets hold, and how they were read.
+
+    ``(common_dates, ra, rb, basis_used, tenor, warnings)`` -- the pairing
+    :func:`realized_correlation` measures on, shared with
+    :func:`realized_corr_vol` so the correlation and its volatility are
+    measured on one set of returns, never two.
+    """
+    if basis not in RETURN_BASES:
+        raise ValueError(f"unknown basis {basis!r}; expected one of {RETURN_BASES}")
+    legs = (hist_a.pair, hist_b.pair)
+    for h in (hist_a, hist_b):
+        if not h.spot.size:
+            raise HistoryError(f"{h.pair}: the sheet has no spot column, so nothing was realized")
+        if not h.dates:
+            raise HistoryError(f"{h.pair}: no dated rows")
+    warnings: list[str] = []
+    # One window on one calendar: a sheet that runs a day longer than the other
+    # would otherwise open its window a day later.
+    last = end or min(hist_a.dates[-1], hist_b.dates[-1])
+    if end is None and hist_a.dates[-1] != hist_b.dates[-1]:
+        warnings.append(f"the two sheets end on different days ({legs[0]} "
+                        f"{hist_a.dates[-1]}, {legs[1]} {hist_b.dates[-1]}); the window "
+                        f"ends on {last}, the last day both have")
+
+    tenor = basis_tenor.upper() if basis_tenor else None
+    used = "spot"
+    series: list[np.ndarray] = [hist_a.spot, hist_b.spot]
+    if basis in ("forward", "auto"):
+        why = None
+        found = []
+        if tenor is None:
+            why = "no tenor was named, so there is no swap-point column to use"
+        else:
+            for h in (hist_a, hist_b):
+                fwd, note = forward_series(h, tenor)
+                if fwd is None:
+                    why = (f"{h.pair}'s sheet quotes no forward or swap points at all "
+                           f"(it has {', '.join(h.tenors) or 'none'})")
+                    break
+                found.append((fwd, f"{h.pair}: {note}" if note else ""))
+        if why is None:
+            series = [f for f, _ in found]
+            warnings.extend(n for _, n in found if n)
+            used = "forward"
+        elif basis == "forward":
+            raise HistoryError(f"{legs[0]}/{legs[1]}: a forward-basis realized correlation "
+                               f"needs a forward series on both legs, but {why}")
+        else:
+            warnings.append(f"correlated on spot rather than the forward on both legs: {why}")
+
+    levels = []
+    for h, s in ((hist_a, series[0]), (hist_b, series[1])):
+        i, j = h.window(lookback_days, last)
+        px = s[i:j]
+        ok = np.isfinite(px) & (px > 0)
+        levels.append({d: float(v) for d, v, k in zip(h.dates[i:j], px, ok) if k})
+    common = sorted(set(levels[0]) & set(levels[1]))
+    alone = len(set(levels[0]) ^ set(levels[1]))
+    if alone:
+        warnings.append(f"{alone} row(s) in the window are usable on one sheet and not the "
+                        f"other and were skipped")
+    if len(common) < min_observations + 1:
+        raise HistoryError(
+            f"{legs[0]}/{legs[1]}: {len(common)} day(s) both sheets hold in the last "
+            f"{lookback_days:g} days; at least {min_observations + 1} are needed")
+    ra = np.diff(np.log([levels[0][d] for d in common]))
+    rb = np.diff(np.log([levels[1][d] for d in common]))
+    gaps = [(b - a).days for a, b in zip(common[:-1], common[1:])]
+    if gaps and max(gaps) > 10:
+        warnings.append(f"the largest gap between the days both sheets hold is {max(gaps)} "
+                        f"days; the series is not daily throughout the window")
+    return common, ra, rb, used, tenor, warnings
+
+
+#: How far back a correlation's *volatility* is measured.  It is a dispersion
+#: across windows each a tenor long, so it needs several of them: two years
+#: holds eight one-quarter windows, and a one-year tenor is still thin on it
+#: and says so.
+CORR_VOL_DAYS = 730.0
+
+
+@dataclass(frozen=True)
+class RealizedVolVol:
+    """How the two legs' at-the-money volatilities moved together."""
+
+    legs: tuple[str, str]
+    tenors: tuple[str, str]          # the ATM column each leg was read on
+    start: date
+    end: date
+    observations: int
+    rho: float
+    rho_se: float
+    warnings: tuple[str, ...] = ()
+
+
+def realized_vol_vol(hist_a: PairHistory, hist_b: PairHistory, tenor: str,
+                     lookback_days: float = DYNAMICS_DAYS, *, end: date | None = None,
+                     min_observations: int = 20) -> RealizedVolVol:
+    """The realized vol-vol correlation: daily log changes in the two legs' ATM.
+
+    What ``moments.Dependence.vol_vol`` is marked as -- the correlation of the
+    legs' log-variance shocks -- measured the one way a history can: the
+    correlation of ``dlog ATM`` on one leg with ``dlog ATM`` on the other, at
+    the tenor, on the days both sheets quote it.  A log variance is twice a
+    log volatility, so the correlation is the same number.  **Zero-mean**, like
+    every correlation here.
+
+    Over :data:`DYNAMICS_DAYS` by default rather than the tenor: it is a
+    property of the process, like ``vol_dynamics``' ``nu``, and needs a year of
+    changes rather than a month of them.  A leg whose sheet does not quote the
+    tenor is read at its nearest quoted one, and named; a leg with no ATM
+    column at all is refused -- a rolling realized volatility's changes are
+    smoothed by the window, and a correlation of two smoothed series is not
+    the correlation of the things smoothed.
+    """
+    legs = (hist_a.pair, hist_b.pair)
+    key = str(tenor).upper()
+    warnings: list[str] = []
+    columns = []
+    used = []
+    for h in (hist_a, hist_b):
+        col, name = h.atm.get(key), key
+        if col is None:
+            near = nearest_quoted_tenor(h.atm, key)
+            if near is None:
+                raise HistoryError(
+                    f"{h.pair}'s sheet quotes no at-the-money volatility at any tenor, so how "
+                    f"its volatility moves with {legs[1] if h is hist_a else legs[0]}'s cannot "
+                    f"be measured")
+            col, name = h.atm[near], near
+            warnings.append(f"{h.pair}'s sheet quotes no at-the-money volatility at {key}; "
+                            f"its {near} column was used instead")
+        columns.append(col)
+        used.append(name)
+    last = end or min(hist_a.dates[-1], hist_b.dates[-1])
+    levels = []
+    for h, col in zip((hist_a, hist_b), columns):
+        i, j = h.window(lookback_days, last)
+        v = col[i:j]
+        ok = np.isfinite(v) & (v > 0)
+        levels.append({d: float(x) for d, x, k in zip(h.dates[i:j], v, ok) if k})
+    common = sorted(set(levels[0]) & set(levels[1]))
+    if len(common) < min_observations + 1:
+        raise HistoryError(
+            f"{legs[0]}/{legs[1]}: {len(common)} day(s) in the last {lookback_days:g} both "
+            f"sheets quote an at-the-money volatility on; at least {min_observations + 1} are "
+            f"needed for how the two move together")
+    x = np.diff(np.log([levels[0][d] for d in common]))
+    y = np.diff(np.log([levels[1][d] for d in common]))
+    sx, sy = float(np.sum(x * x)), float(np.sum(y * y))
+    if sx <= 0 or sy <= 0:
+        still = legs[0] if sx <= 0 else legs[1]
+        raise HistoryError(f"{still}'s at-the-money volatility did not move over the window")
+    rho = max(-1.0, min(1.0, float(np.sum(x * y)) / math.sqrt(sx * sy)))
+    n = int(x.size)
+    rho_se = (1.0 - rho * rho) / math.sqrt(n)
+    if abs(rho) < rho_se:
+        warnings.append(f"the realized vol-vol correlation of {rho:+.3f} is inside one "
+                        f"standard error ({rho_se:.3f}) of zero on {n} observations")
+    return RealizedVolVol(legs=legs, tenors=(used[0], used[1]), start=common[0],
+                          end=common[-1], observations=n, rho=rho, rho_se=rho_se,
+                          warnings=tuple(warnings))
+
+
+@dataclass(frozen=True)
+class RealizedCorrVol:
+    """How much the legs' correlation moved from one tenor-long window to the next."""
+
+    legs: tuple[str, str]
+    window_days: float
+    window_returns: int              # returns in each rolling window
+    windows: int                     # rolling windows measured
+    independent_windows: float       # returns / window_returns
+    start: date
+    end: date
+    mean_rho: float
+    raw_sd: float                    # the spread of the windows' correlations as measured
+    noise_sd: float                  # what sampling alone gives a window that short
+    corr_vol: float                  # sqrt(raw^2 - noise^2), floored at zero
+    corr_vol_se: float
+    basis: str = "spot"
+    warnings: tuple[str, ...] = ()
+
+
+def realized_corr_vol(hist_a: PairHistory, hist_b: PairHistory, window_days: float,
+                      lookback_days: float = CORR_VOL_DAYS, *, end: date | None = None,
+                      basis: str = "spot", basis_tenor: str | None = None,
+                      min_windows: float = 3.0, min_window_returns: int = 10) -> RealizedCorrVol:
+    """The realized volatility of a correlation, with its sampling noise taken out.
+
+    The legs' correlation is measured on every rolling window ``window_days``
+    long across the lookback (zero-mean, on the returns
+    :func:`realized_correlation` uses), and the spread of those correlations is
+    **not** the answer: a correlation from ``n`` returns has a sampling
+    standard error of ``(1 - rho^2) / sqrt(n)``, so twenty returns at
+    ``rho = 0.3`` scatter by 0.2 when the true correlation never moves at all.
+    Read as a correlation vol, that noise would fatten every short-dated cross
+    butterfly by a dependence that does not exist.  So the variance of the
+    windows' correlations less the average sampling variance is the variance
+    of the correlation itself, floored at zero and said when it is.
+
+    ``corr_vol_se`` is the uncertainty of that from how many *independent*
+    windows the lookback holds -- the rolling windows overlap, so it is the
+    returns over the window length, not the window count.  Fewer than
+    ``min_windows`` of them is refused: two quarters are not a dispersion.
+    """
+    common, ra, rb, used, _, warnings = _paired_returns(
+        hist_a, hist_b, lookback_days, end=end, basis=basis, basis_tenor=basis_tenor,
+        min_observations=min_window_returns)
+    legs = (hist_a.pair, hist_b.pair)
+    span = max((common[-1] - common[0]).days, 1)
+    n = int(round(ra.size * float(window_days) / span))
+    if n < min_window_returns:
+        raise HistoryError(
+            f"{legs[0]}/{legs[1]}: a {window_days:g}-day window holds about {n} return(s) on "
+            f"these sheets; at least {min_window_returns} are needed for a correlation in each")
+    independent = ra.size / n
+    if independent < min_windows:
+        raise HistoryError(
+            f"{legs[0]}/{legs[1]}: {span} days of history holds {independent:.1f} independent "
+            f"{window_days:g}-day window(s); at least {min_windows:g} are needed to say how "
+            f"much a correlation that long moves")
+    csum = lambda v: np.concatenate(([0.0], np.cumsum(v)))  # noqa: E731
+    s_ab, s_aa, s_bb = csum(ra * rb), csum(ra * ra), csum(rb * rb)
+    ab, aa, bb = s_ab[n:] - s_ab[:-n], s_aa[n:] - s_aa[:-n], s_bb[n:] - s_bb[:-n]
+    ok = (aa > 0) & (bb > 0)
+    if not np.any(ok):
+        raise HistoryError(f"{legs[0]}/{legs[1]}: no window in which both legs moved")
+    rho = np.clip(ab[ok] / np.sqrt(aa[ok] * bb[ok]), -1.0, 1.0)
+    raw_var = float(np.var(rho))
+    noise_var = float(np.mean((1.0 - rho * rho) ** 2) / n)
+    true_var = raw_var - noise_var
+    if true_var <= 0.0:
+        warnings.append(
+            f"the windows' correlations scatter by {math.sqrt(raw_var):.3f}, which is no more "
+            f"than sampling alone gives {n} returns ({math.sqrt(noise_var):.3f}); the "
+            f"correlation's own volatility is indistinguishable from zero")
+    corr_vol = math.sqrt(max(true_var, 0.0))
+    # The variance of a variance estimate on k independent windows is about
+    # 2 var^2 / (k - 1); carried to the standard deviation by the delta method,
+    # or taken as the square root of that bound where the estimate is zero.
+    var_se = raw_var * math.sqrt(2.0 / max(independent - 1.0, 1.0))
+    corr_vol_se = var_se / (2.0 * corr_vol) if corr_vol > 0 else math.sqrt(var_se)
+    corr_vol_se = min(corr_vol_se, math.sqrt(var_se))
+    if independent < 2.0 * min_windows:
+        warnings.append(
+            f"only {independent:.1f} independent {window_days:g}-day windows in the lookback; "
+            f"the correlation vol is a thin estimate (se {corr_vol_se:.3f})")
+    return RealizedCorrVol(legs=legs, window_days=float(window_days), window_returns=n,
+                           windows=int(rho.size), independent_windows=float(independent),
+                           start=common[0], end=common[-1], mean_rho=float(np.mean(rho)),
+                           raw_sd=math.sqrt(raw_var), noise_sd=math.sqrt(noise_var),
+                           corr_vol=corr_vol, corr_vol_se=float(corr_vol_se), basis=used,
+                           warnings=tuple(warnings))

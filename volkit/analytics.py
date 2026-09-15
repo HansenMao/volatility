@@ -26,9 +26,10 @@ from . import black, moments, sabr
 from .cross import CrossAtmCurve
 from .numerics import ConvergenceError
 from .marketdata import open_workbook
-from .history import (DYNAMICS_DAYS, Realized, SeriesStats, implied_stats, realized,
+from .history import (DYNAMICS_DAYS, HistoryError, Realized, SeriesStats, implied_stats,
+                      realized, realized_corr_vol, realized_correlation, realized_vol_vol,
                       vol_dynamics)
-from .surface import VolSurface
+from .surface import VolSurface, smile_points
 from .timeutil import Clock, TenorError, parse_datetime, parse_tenor, tenor_to_years
 
 DEFAULT_LADDER = (-0.20, -0.15, -0.10, -0.05, 0.0, 0.05, 0.10, 0.15, 0.20)
@@ -980,14 +981,14 @@ def _sabr_shape(surface, expiry, t: float, atm: float, delta: float,
     """
     tag = f"{int(round(delta * 100))}"
     try:
-        table = surface.smile_table(expiry, deltas=(delta,), method=method, cut=cut)
-        by = {r["label"]: r["vol"] for r in table}
+        by = smile_points(surface.smile_table(expiry, deltas=(delta,), method=method,
+                                              cut=cut))
         call, put = by.get(f"{tag}d call"), by.get(f"{tag}d put")
         if call is None or put is None:
             raise ValueError(f"the marked smile has no {tag} delta wings")
         rr = float(call) - float(put)
         fly = 0.5 * (float(call) + float(put)) - float(by["ATM"])
-        shape = sabr.fit_smile_shape(atm, rr, fly, delta, t, surface.conv)
+        shape = sabr.fit_smile_shape(atm, rr, fly, delta, t, surface.slice_conv(t))
         warn.extend(shape.warnings)
         return shape, rr, fly
     except (ValueError, ArithmeticError, ConvergenceError, KeyError) as exc:
@@ -1033,6 +1034,60 @@ class TriangleRow:
     leg_vega: tuple[float, float] = (float("nan"), float("nan"))
     rho_vega: float = float("nan")
     warnings: tuple[str, ...] = ()
+    #: The dependence marked at this tenor on the ``CROSS_DEPENDENCE`` tab
+    #: (``moments.Dependence``): ``None`` and ``0`` where nothing is marked,
+    #: which is the Gaussian copula.
+    vol_vol: float | None = None
+    corr_vol: float = 0.0
+    #: The correlation the copula ran at: ``rho`` for the Gaussian copula, and
+    #: under a marked dependence the one that holds the combined ATM where the
+    #: Gaussian copula puts it (``moments.combine_holding_atm``).
+    copula_rho: float = float("nan")
+    #: What the Gaussian copula gives, keyed like ``triangle``, on a row where a
+    #: dependence is marked -- so what the marking added is on the row -- and
+    #: empty where it is not, because ``triangle`` already is that.
+    gaussian: dict[str, float] = field(default_factory=dict)
+    #: The vol-vol correlation at which the legs give the cross's marked
+    #: 25-delta butterfly, holding the marked correlation vol -- the number the
+    #: ``CROSS_DEPENDENCE`` tab is marked against -- or ``None`` with the reason.
+    implied_vol_vol: float | None = None
+    implied_vol_vol_note: str = ""
+    #: Where the dependence the legs were tied with came from: the
+    #: ``CROSS_DEPENDENCE`` tab, the Gaussian copula, or what the caller named
+    #: (the relative-value grid's measured one says what it measured).
+    dependence_source: str = ""
+    #: How far the triangle moves across the caller's band of dependences --
+    #: the estimation uncertainty of a measured one -- keyed like ``triangle``.
+    #: Kept apart from ``noise``, which is the grid's error and nothing else.
+    dependence_noise: dict[str, float] = field(default_factory=dict)
+
+
+#: ``_leg_law``'s marker for "read the dependence off the book".
+_FROM_BOOK = object()
+
+
+def _leg_law(book, pair: str, da, db, coefficients, rho: float, conv, t: float,
+             dependence=_FROM_BOOK):
+    """The cross's law out of its two legs at one expiry, and the Gaussian one.
+
+    ``(law, gaussian, dependence)``.  With nothing marked on
+    ``CROSS_DEPENDENCE`` the law *is* the Gaussian copula at the curve's
+    correlation.  With a dependence marked it is that dependence, at the
+    copula correlation that keeps the combined ATM where the Gaussian copula
+    puts it -- so the marking moves the wings and never the level.  The one
+    place the triangle and the implied quotes build a law, so they cannot
+    tie one cross's legs together two ways.  A ``dependence`` given (``None``
+    included, which is the Gaussian copula) is used instead of the book's --
+    how the relative-value grid ties the legs at what their history shows.
+    """
+    gaussian = moments.combine(da, db, coefficients, rho, conv)
+    if dependence is _FROM_BOOK:
+        dependence = book.dependence_at(pair, t)
+    if dependence is None:
+        return gaussian, gaussian, None
+    law = moments.combine_holding_atm(da, db, coefficients, rho, conv, dependence,
+                                      target_atm=gaussian.atm_vol()[0])
+    return law, gaussian, dependence
 
 
 def _cross_legs(book, pair: str):
@@ -1071,7 +1126,8 @@ def _cross_legs(book, pair: str):
 
 def triangle_table(book, pair: str, *, method: str | None = None, cut: str = "NY",
                    deltas=(0.10, 0.25), with_noise: bool = True,
-                   tenors=None) -> list[TriangleRow]:
+                   tenors=None, implied_vol_vol: bool = True, dependence=None,
+                   dependence_band=None, dependence_source=None) -> list[TriangleRow]:
     """Compare a cross's marked smile with the one its two legs imply.
 
     The at-the-money row has an exact answer and gets one: the variance
@@ -1092,6 +1148,20 @@ def triangle_table(book, pair: str, *, method: str | None = None, cut: str = "NY
     convexity of its own smile.  ``smile_convexity`` is that gap, reported so
     it is not mistaken for a marking error -- it is typically a fifth of a
     volatility point and it is what the book's own construction leaves out.
+
+    A dependence marked on ``CROSS_DEPENDENCE`` (``Book.dependence_at``) is
+    what the legs are tied together with instead, holding the same combined
+    ATM (:func:`_leg_law`); the row carries it, and the Gaussian copula's
+    answer beside it.  ``implied_vol_vol`` backs out, on every row, the
+    vol-vol correlation that gives the marked 25-delta butterfly -- the
+    expensive part of the table, and the only reason to switch it off.
+
+    ``dependence`` (``{tenor: Dependence or None}``) replaces the book's at the
+    tenors it names, with ``dependence_source`` (``{tenor: str}``) saying what
+    it is; ``dependence_band`` (``{tenor: (Dependence, ...)}``) is evaluated
+    around it and how far the triangle moves across it is the row's
+    ``dependence_noise``.  That is how the relative-value grid prices the
+    triangle on the legs' measured dependence and its uncertainty.
     """
     surface, curve, (leg_a, leg_b), (ca, cb) = _cross_legs(book, pair)
 
@@ -1101,15 +1171,24 @@ def triangle_table(book, pair: str, *, method: str | None = None, cut: str = "NY
         expiry = book.clock.datetime_from_years(t)
         warn: list[str] = []
         rho = float(np.asarray(curve.correlation(t)))
+        conv = surface.slice_conv(t)
+        dep = None
+        given = dependence is not None and tenor in dependence
         try:
+            dep = dependence[tenor] if given else book.dependence_at(pair, t)
+            source = ((dependence_source or {}).get(tenor, "") if given
+                      else "CROSS_DEPENDENCE" if dep is not None else "")
+            source = source or ("Gaussian copula" if dep is None else "given")
             da = moments.distribution_from_surface(book[leg_a], expiry, method=method,
                                                    cut=cut, label=leg_a)
             db = moments.distribution_from_surface(book[leg_b], expiry, method=method,
                                                    cut=cut, label=leg_b)
-            comb = moments.combine(da, db, (ca, cb), rho, surface.conv)
+            comb, gauss, dep = _leg_law(book, pair, da, db, (ca, cb), rho, conv, t,
+                                        dependence=dep)
             got = comb.table(deltas)
+            gauss_got = got if dep is None else gauss.table(deltas)
             warn.extend(comb.warnings)
-        except (ValueError, ArithmeticError, ZeroDivisionError) as exc:
+        except (ValueError, ArithmeticError, ZeroDivisionError, ConvergenceError) as exc:
             # The row is kept, empty, with the reason on it.  Dropping it here
             # left the whole table silently short -- and when every tenor
             # failed, silently empty.
@@ -1119,11 +1198,13 @@ def triangle_table(book, pair: str, *, method: str | None = None, cut: str = "NY
                 marked={}, triangle={}, difference={}, noise={},
                 variance_triangle_atm=nan, smile_convexity=nan, leg_atm=(nan, nan),
                 implied_correlation=None, leg_vega=(nan, nan), rho_vega=nan,
-                warnings=tuple(warn) + (f"the triangle could not be built: {exc}",)))
+                warnings=tuple(warn) + (f"the triangle could not be built: {exc}",),
+                vol_vol=None if dep is None else dep.vol_vol,
+                corr_vol=0.0 if dep is None else dep.corr_vol))
             continue
 
-        table = surface.smile_table(expiry, deltas=tuple(deltas), method=method, cut=cut)
-        by = {r["label"]: r["vol"] for r in table}
+        by = smile_points(surface.smile_table(expiry, deltas=tuple(deltas), method=method,
+                                              cut=cut))
         marked = {"atm": float(surface.atm_vol(expiry, cut))}
         for d in deltas:
             tag = f"{int(round(d * 100))}"
@@ -1135,12 +1216,40 @@ def triangle_table(book, pair: str, *, method: str | None = None, cut: str = "NY
 
         triangle = {k: float(got[k]) for k in marked if k in got}
         difference = {k: triangle[k] - marked[k] for k in triangle}
+        gaussian = ({} if dep is None
+                    else {k: float(gauss_got[k]) for k in marked if k in gauss_got})
+        implied_vv, implied_vv_note = None, ""
+        if implied_vol_vol and "fly25" in marked:
+            implied_vv, implied_vv_note = moments.implied_vol_vol(
+                da, db, (ca, cb), rho, conv, marked["fly25"],
+                corr_vol=0.0 if dep is None else dep.corr_vol,
+                target_atm=float(gauss_got["atm"]))
+
+        dep_noise: dict[str, float] = {}
+        band = (dependence_band or {}).get(tenor) or ()
+        if band:
+            # The band and its centre on one grid, so the spread is the
+            # dependence's and not the difference between two grids.
+            try:
+                def held(d):
+                    return moments.combine_holding_atm(
+                        da, db, (ca, cb), rho, conv, d, target_atm=float(gauss_got["atm"]),
+                        **moments.IMPLIED_GRID).table(deltas)
+                centre = held(dep)
+                for alt in band:
+                    moved = held(alt)
+                    for k in marked:
+                        if k in moved and k in centre:
+                            dep_noise[k] = max(dep_noise.get(k, 0.0), abs(moved[k] - centre[k]))
+            except (ValueError, ArithmeticError, ConvergenceError) as exc:
+                warn.append(f"the dependence's uncertainty could not be priced, so it is not in "
+                            f"the noise floor: {exc}")
 
         noise: dict[str, float] = {}
         if with_noise:
             for leg, dist in ((leg_a, da), (leg_b, db)):
                 ref = _leg_reference(book[leg], expiry, method, cut, deltas)
-                err = moments.reconstruction_error(dist, book[leg].conv, ref, deltas)
+                err = moments.reconstruction_error(dist, book[leg].slice_conv(t), ref, deltas)
                 for key, value in err.items():
                     noise[key] = max(noise.get(key, 0.0), abs(value))
 
@@ -1160,6 +1269,11 @@ def triangle_table(book, pair: str, *, method: str | None = None, cut: str = "NY
             smile_convexity=triangle.get("atm", float("nan")) - var_atm,
             leg_atm=(va, vb), implied_correlation=implied_rho,
             leg_vega=(dva, dvb), rho_vega=drho, warnings=tuple(warn),
+            vol_vol=None if dep is None else dep.vol_vol,
+            corr_vol=0.0 if dep is None else dep.corr_vol,
+            copula_rho=comb.rho, gaussian=gaussian,
+            implied_vol_vol=implied_vv, implied_vol_vol_note=implied_vv_note,
+            dependence_source=source, dependence_noise=dep_noise,
         ))
     return rows
 
@@ -1186,6 +1300,11 @@ class ImpliedQuoteRow:
     leg_atm: tuple[float, float]
     warnings: tuple[str, ...] = ()
     error: str = ""
+    #: The dependence marked at this tenor and the copula correlation it ran
+    #: at -- :class:`TriangleRow`'s three, for the same law.
+    vol_vol: float | None = None
+    corr_vol: float = 0.0
+    copula_rho: float = float("nan")
 
 
 def implied_cross_quotes(book, pair: str, *, method: str | None = None, cut: str = "NY",
@@ -1203,8 +1322,10 @@ def implied_cross_quotes(book, pair: str, *, method: str | None = None, cut: str
     Read, never written: the marking screen writes what it is handed as
     ordinary quote overwrites.  The ATM is not among them -- the cross's curve
     already is the variance triangle of its legs.  The assumptions are the
-    triangle's (``moments.py``, CLAUDE.md §7): a Gaussian copula, and no
-    change of measure between the legs' domestic currencies and the cross's.
+    triangle's (``moments.py``, CLAUDE.md §7): a Gaussian copula unless the
+    ``CROSS_DEPENDENCE`` tab marks the cross otherwise (:func:`_leg_law`, the
+    triangle's own), and no change of measure between the legs' domestic
+    currencies and the cross's.
     """
     surface, curve, (leg_a, leg_b), (ca, cb) = _cross_legs(book, pair)
     rows: list[ImpliedQuoteRow] = []
@@ -1214,7 +1335,9 @@ def implied_cross_quotes(book, pair: str, *, method: str | None = None, cut: str
         expiry = book.clock.datetime_from_years(t)
         rho = float(np.asarray(curve.correlation(t)))
         warn: list[str] = []
+        dependence = None
         try:
+            dependence = book.dependence_at(pair, t)
             cross_atm = float(surface.atm_vol(expiry, cut))
             leg_atm = (float(book[leg_a].atm_vol(expiry, cut)),
                        float(book[leg_b].atm_vol(expiry, cut)))
@@ -1223,7 +1346,8 @@ def implied_cross_quotes(book, pair: str, *, method: str | None = None, cut: str
             db = moments.distribution_from_surface(book[leg_b], expiry, method=method,
                                                    cut=cut, label=leg_b)
             warn.extend(f"{d.label}: {w}" for d in (da, db) for w in d.warnings)
-            comb = moments.combine(da, db, (ca, cb), rho, surface.slice_conv(t))
+            comb, _, dependence = _leg_law(book, pair, da, db, (ca, cb), rho,
+                                           surface.slice_conv(t), t)
             warn.extend(comb.warnings)
             got = comb.table((0.10, 0.25))
             quotes = {"rr_25": float(got["rr25"]), "rr_10": float(got["rr10"]),
@@ -1240,14 +1364,368 @@ def implied_cross_quotes(book, pair: str, *, method: str | None = None, cut: str
                     + "), which a sheet cannot hold")
             rows.append(ImpliedQuoteRow(tenor=tenor, t=t, rho=rho, quotes=quotes,
                                         atm=float(got["atm"]), cross_atm=cross_atm,
-                                        leg_atm=leg_atm, warnings=tuple(warn)))
+                                        leg_atm=leg_atm, warnings=tuple(warn),
+                                        vol_vol=None if dependence is None else dependence.vol_vol,
+                                        corr_vol=0.0 if dependence is None else dependence.corr_vol,
+                                        copula_rho=comb.rho))
         except (ValueError, ArithmeticError, ConvergenceError) as exc:
             # The row is kept, empty, with the reason on it -- the triangle's
             # own rule, for the same reason.
             rows.append(ImpliedQuoteRow(tenor=tenor, t=t, rho=rho, quotes={}, atm=nan,
                                         cross_atm=nan, leg_atm=(nan, nan),
-                                        warnings=tuple(warn), error=str(exc)))
+                                        warnings=tuple(warn), error=str(exc),
+                                        vol_vol=None if dependence is None else dependence.vol_vol,
+                                        corr_vol=0.0 if dependence is None else dependence.corr_vol))
     return rows
+
+
+@dataclass(frozen=True)
+class CorrelationRow:
+    """A cross's correlation at one tenor: as marked, and as it was realized.
+
+    ``marked`` is the cross curve's correlation read at the tenor's expiry --
+    the number its ATM is built from there, interpolated off the curve's
+    initial / final / decay -- and needs no history.  ``realized`` is the
+    legs' realized correlation over ``window_days`` and is ``None``, with the
+    reason in ``error``, when it could not be measured.
+    """
+
+    tenor: str
+    t: float
+    marked: float
+    window_days: float
+    realized: float | None = None
+    realized_se: float | None = None
+    difference: float | None = None       # marked - realized
+    observations: int = 0
+    basis: str | None = None
+    start: str | None = None
+    end: str | None = None
+    warnings: tuple[str, ...] = ()
+    error: str = ""
+    #: The legs' realized vol-vol correlation and correlation vol at this
+    #: tenor (:func:`measure_dependence`) -- what ``CROSS_DEPENDENCE`` is
+    #: measured against.  ``None`` without a history.
+    dependence: "MeasuredDependence | None" = None
+
+
+@dataclass(frozen=True)
+class MeasuredDependence:
+    """A cross's dependence at one tenor as its two legs' history shows it.
+
+    Physical, not priced: the market charges for dependence breaking down in a
+    stress, and a history does not.  ``notes`` carries what could not be
+    measured and why, each half independently -- a sheet with no ATM column
+    still has a correlation vol, and a short history still has a vol-vol.
+    """
+
+    vol_vol: float | None = None
+    vol_vol_se: float | None = None
+    vol_vol_observations: int = 0
+    vol_vol_tenors: tuple[str, ...] = ()
+    corr_vol: float | None = None
+    corr_vol_se: float | None = None
+    corr_vol_raw: float | None = None        # the windows' scatter as measured
+    corr_vol_noise: float | None = None      # what sampling alone gives
+    corr_vol_windows: float | None = None    # independent windows in the lookback
+    window_days: float = 0.0
+    basis: str | None = None
+    notes: tuple[str, ...] = ()
+
+    def band(self, dependence: "moments.Dependence", rho: float):
+        """The dependences one standard error either side of ``dependence``.
+
+        The vol-vol correlation moved by its own standard error, and the
+        correlation vol by its own, each kept inside what the model can hold
+        at ``rho`` -- the uncertainty a measured dependence carries into a
+        triangle, and so into a noise floor.
+        """
+        out = []
+        vv, cv = dependence.vol_vol, dependence.corr_vol
+        if vv is not None and self.vol_vol_se:
+            for step in (-self.vol_vol_se, self.vol_vol_se):
+                out.append(moments.Dependence(min(max(vv + step, -1.0), 1.0), cv))
+        if self.corr_vol_se:
+            cap = max(1.0 - abs(rho) - 1e-6, 0.0)
+            for step in (-self.corr_vol_se, self.corr_vol_se):
+                alt = min(max(cv + step, 0.0), cap)
+                if alt != cv:
+                    out.append(moments.Dependence(vv, alt))
+        return tuple(d for d in out if d != dependence)
+
+
+def measure_dependence(history, leg_a: str, leg_b: str, tenor: str, t: float, *,
+                       window_days: float | None = None,
+                       basis: str = "auto") -> MeasuredDependence:
+    """The legs' realized vol-vol correlation and correlation vol at one tenor.
+
+    The vol-vol correlation is :func:`history.realized_vol_vol` at the tenor
+    over its own year; the correlation vol is :func:`history.realized_corr_vol`
+    on windows the tenor long (or ``window_days``), on the basis the realized
+    correlation beside it is measured on.  Either half that cannot be measured
+    is ``None`` with its reason in ``notes``.
+    """
+    window = float(window_days) if window_days else t * 365.2425
+    notes: list[str] = []
+    missing = [leg for leg in (leg_a, leg_b) if history is None or leg not in history]
+    if missing:
+        return MeasuredDependence(window_days=window, notes=(
+            ("no historical workbook is loaded" if history is None else
+             f"the historical workbook has no sheet for {' or '.join(missing)}")
+            + ", so the legs' dependence cannot be measured",))
+    vv = cv = None
+    try:
+        vv = realized_vol_vol(history[leg_a], history[leg_b], tenor)
+        notes.extend(f"vol-vol: {w}" for w in vv.warnings)
+    except (HistoryError, ValueError, ArithmeticError) as exc:
+        notes.append(f"vol-vol correlation not measured: {exc}")
+    try:
+        cv = realized_corr_vol(history[leg_a], history[leg_b], window, basis=basis,
+                               basis_tenor=tenor)
+        notes.extend(f"correlation vol: {w}" for w in cv.warnings)
+    except (HistoryError, ValueError, ArithmeticError) as exc:
+        notes.append(f"correlation vol not measured: {exc}")
+    return MeasuredDependence(
+        vol_vol=None if vv is None else vv.rho,
+        vol_vol_se=None if vv is None else vv.rho_se,
+        vol_vol_observations=0 if vv is None else vv.observations,
+        vol_vol_tenors=() if vv is None else vv.tenors,
+        corr_vol=None if cv is None else cv.corr_vol,
+        corr_vol_se=None if cv is None else cv.corr_vol_se,
+        corr_vol_raw=None if cv is None else cv.raw_sd,
+        corr_vol_noise=None if cv is None else cv.noise_sd,
+        corr_vol_windows=None if cv is None else cv.independent_windows,
+        window_days=window, basis=None if cv is None else cv.basis, notes=tuple(notes))
+
+
+@dataclass(frozen=True)
+class CorrelationTable:
+    pair: str
+    legs: tuple[str, str]
+    lookback_days: float | None           # None: matched to each tenor
+    rows: list[CorrelationRow]
+    #: Why no row has a realized figure, when the reason is the same for all
+    #: of them (no history, or no sheet for a leg); empty otherwise.
+    unavailable: str = ""
+
+
+def correlation_table(book, pair: str, history=None, *, lookback_days: float | None = None,
+                      realized_basis: str = "auto", tenors=None) -> CorrelationTable:
+    """A cross's correlation term structure beside the legs' realized correlation.
+
+    The marked half is the cross's own curve at each tenor and is built with or
+    without a history, so no historical workbook never empties it.  The
+    realized half is :func:`history.realized_correlation` on the two legs'
+    sheets, windowed the way :func:`realized_table` windows a realized
+    volatility: ``lookback_days`` of ``None`` matches each tenor -- a one-month
+    correlation against one month of returns -- and a number holds every tenor
+    to that one window.  On ``auto`` each tenor is measured on the forward to
+    it wherever both legs' sheets can build one, which is the realized
+    volatility's own basis.  A tenor that cannot be measured keeps its row and
+    its reason.
+    """
+    spec = book.data.pairs.get(pair)
+    if spec is None or not spec.is_cross:
+        raise ValueError(f"{pair} is not a cross in this workbook, so it has no correlation")
+    surface = book[pair]
+    curve = surface.atm
+    if not isinstance(curve, CrossAtmCurve):
+        raise ValueError(f"{pair} is marked as a cross but its ATM curve is not a cross curve")
+    leg_a, leg_b = spec.legs
+    unavailable = ""
+    if history is None:
+        unavailable = ("no historical workbook is loaded, so there is no realized correlation "
+                       "to compare against")
+    else:
+        missing = [leg for leg in (leg_a, leg_b) if leg not in history]
+        if missing:
+            unavailable = (f"the historical workbook has no sheet for {' or '.join(missing)}, "
+                           f"so the legs' realized correlation cannot be measured; it holds "
+                           f"{', '.join(sorted(history.pairs)) or 'no readable sheets'}")
+    rows: list[CorrelationRow] = []
+    for tenor in (tenors or book.data.tenor_points):
+        t = surface.tenor_years(tenor)
+        marked = float(np.asarray(curve.correlation(t)))
+        window = float(lookback_days) if lookback_days else t * 365.2425
+        if unavailable:
+            rows.append(CorrelationRow(tenor=tenor, t=t, marked=marked, window_days=window))
+            continue
+        measured = measure_dependence(history, leg_a, leg_b, tenor, t, window_days=window,
+                                      basis=realized_basis)
+        try:
+            rc = realized_correlation(history[leg_a], history[leg_b], window,
+                                      basis=realized_basis, basis_tenor=tenor)
+        except Exception as exc:  # noqa: BLE001 - one bad tenor must not kill the table
+            rows.append(CorrelationRow(tenor=tenor, t=t, marked=marked, window_days=window,
+                                       error=str(exc), dependence=measured))
+            continue
+        rows.append(CorrelationRow(
+            tenor=tenor, t=t, marked=marked, window_days=window, realized=rc.rho,
+            realized_se=rc.rho_se, difference=marked - rc.rho,
+            observations=rc.observations, basis=rc.basis, start=rc.start.isoformat(),
+            end=rc.end.isoformat(), warnings=rc.warnings, dependence=measured))
+    return CorrelationTable(pair=pair, legs=(leg_a, leg_b), lookback_days=lookback_days,
+                            rows=rows, unavailable=unavailable)
+
+
+#: The premium sources a dependence suggestion can take: the cross's own marked
+#: butterfly, none at all, or -- anything else -- another cross's, named.
+PREMIUM_OWN, PREMIUM_NONE = "own", "none"
+
+
+@dataclass(frozen=True)
+class DependenceRow:
+    """One tenor of :func:`dependence_table`: measured, implied, and suggested."""
+
+    tenor: str
+    t: float
+    rho: float
+    measured: MeasuredDependence
+    #: What ``CROSS_DEPENDENCE`` marks here now (``None`` / 0 for nothing).
+    marked_vol_vol: float | None = None
+    marked_corr_vol: float = 0.0
+    marked_fly25: float | None = None
+    #: The vol-vol correlation the marked 25-delta fly asks for, holding the
+    #: **measured** correlation vol, and the premium it carries over the
+    #: measured vol-vol correlation.  The premium is put on the vol-vol
+    #: correlation alone: one butterfly identifies one number.
+    implied_vol_vol: float | None = None
+    implied_note: str = ""
+    premium: float | None = None
+    #: The premium the suggestion uses and where it came from.
+    premium_used: float | None = None
+    premium_source: str = PREMIUM_OWN
+    suggested_vol_vol: float | None = None
+    suggested_corr_vol: float | None = None
+    reason: str = ""
+    warnings: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class DependenceTable:
+    pair: str
+    legs: tuple[str, str]
+    premium: str
+    rows: list[DependenceRow]
+    unavailable: str = ""
+
+
+def dependence_table(book, pair: str, history, *, premium: str = PREMIUM_OWN,
+                     method: str | None = None, cut: str = "NY", tenors=None,
+                     basis: str = "auto") -> DependenceTable:
+    """A cross's dependence per tenor: what history shows, what its fly implies, what to mark.
+
+    ``measured`` is :func:`measure_dependence` -- physical.  ``implied_vol_vol``
+    is the vol-vol correlation the cross's marked 25-delta butterfly asks for
+    with the correlation vol held at what was measured, and ``premium`` is the
+    gap: what the market charges for dependence beyond what happened.
+
+    The **suggestion** is measured plus a premium: ``premium="own"`` takes the
+    cross's own (so on a liquid cross the suggestion reproduces its market
+    fly, at a correlation vol history supports); ``"none"`` takes none, which
+    is history alone; a **pair** takes that cross's premium at the same tenor --
+    the educated guess for a cross with no market of its own, borrowed from
+    the nearest cross that has one.  The correlation vol suggested is the
+    measured one, kept inside what the model can hold at the cross's
+    correlation.  A suggestion goes into the Config window's boxes and nowhere
+    else.
+    """
+    surface, curve, (leg_a, leg_b), _ = _cross_legs(book, pair)
+    names = list(tenors or book.data.tenor_points)
+    premium = str(premium or PREMIUM_OWN).strip()
+    analog: dict[str, DependenceRow] = {}
+    source = premium.lower() if premium.lower() in (PREMIUM_OWN, PREMIUM_NONE) else premium.upper()
+    if source not in (PREMIUM_OWN, PREMIUM_NONE):
+        if source == pair:
+            source = PREMIUM_OWN
+        else:
+            spec = book.data.pairs.get(source)
+            if spec is None or not spec.is_cross:
+                raise ValueError(f"{source} is not a cross in this workbook, so it has no "
+                                 f"premium to lend {pair}")
+            if source not in book:
+                raise ValueError(f"{source} is not built in this book, so it has no premium "
+                                 f"to lend {pair}")
+            analog = {r.tenor.upper(): r for r in dependence_table(
+                book, source, history, premium=PREMIUM_OWN, method=method, cut=cut,
+                tenors=names, basis=basis).rows}
+    unavailable = ""
+    if history is None:
+        unavailable = "no historical workbook is loaded, so the legs' dependence cannot be measured"
+    measured = {tenor: measure_dependence(history, leg_a, leg_b, tenor,
+                                          surface.tenor_years(tenor), basis=basis)
+                for tenor in names}
+
+    # The implied vol-vol correlation holds the measured correlation vol, so
+    # a suggestion of measured corr vol plus this vol-vol gives back the fly.
+    held: dict[str, object] = {}
+    for tenor in names:
+        t = surface.tenor_years(tenor)
+        rho = float(np.asarray(curve.correlation(t)))
+        cv = measured[tenor].corr_vol or 0.0
+        cv = min(cv, max(1.0 - abs(rho) - 1e-6, 0.0))
+        held[tenor] = moments.Dependence(None, cv) if cv > 0 else None
+    tri = {r.tenor: r for r in triangle_table(
+        book, pair, method=method, cut=cut, tenors=names, with_noise=False,
+        implied_vol_vol=True, dependence=held,
+        dependence_source={k: "measured correlation vol" for k in names})}
+
+    rows: list[DependenceRow] = []
+    for tenor in names:
+        t = surface.tenor_years(tenor)
+        rho = float(np.asarray(curve.correlation(t)))
+        m = measured[tenor]
+        r = tri.get(tenor)
+        now = book.dependence_at(pair, t)
+        warnings: list[str] = []
+        implied = None if r is None else r.implied_vol_vol
+        implied_note = "" if r is None else (r.implied_vol_vol_note or "; ".join(
+            w for w in r.warnings if "could not be built" in w))
+        own = None if implied is None or m.vol_vol is None else implied - m.vol_vol
+        if source == PREMIUM_OWN:
+            used = own
+            why_none = (implied_note if implied is None else
+                        "the vol-vol correlation was not measured")
+        elif source == PREMIUM_NONE:
+            used, why_none = 0.0, "the vol-vol correlation was not measured"
+        else:
+            a = analog.get(tenor.upper())
+            used = None if a is None else a.premium
+            why_none = (f"{source} has no {tenor} row" if a is None else
+                        f"{source} has no premium at {tenor}: "
+                        f"{a.implied_note or 'its vol-vol correlation was not measured'}")
+        vv = None
+        reason = ""
+        if m.vol_vol is None:
+            reason = next((n for n in m.notes if n.startswith("vol-vol")), "") or m.notes[0] \
+                if m.notes else "the vol-vol correlation was not measured"
+        elif used is None:
+            reason = why_none
+        else:
+            vv = m.vol_vol + used
+            if not -1.0 <= vv <= 1.0:
+                warnings.append(f"measured {m.vol_vol:+.3f} plus a premium of {used:+.3f} is "
+                                f"{vv:+.3f}, held at {max(-1.0, min(1.0, vv)):+.0f}: the rest of "
+                                f"the fly is correlation vol or something the legs do not carry")
+                vv = max(-1.0, min(1.0, vv))
+        cv = m.corr_vol
+        if cv is not None:
+            cap = max(1.0 - abs(rho) - 1e-6, 0.0)
+            if cv > cap:
+                warnings.append(f"a measured correlation vol of {cv:.3f} around a correlation of "
+                                f"{rho:+.3f} reaches past 1, so it is held at {cap:.3f}")
+                cv = cap
+        rows.append(DependenceRow(
+            tenor=tenor, t=t, rho=rho, measured=m,
+            marked_vol_vol=None if now is None else now.vol_vol,
+            marked_corr_vol=0.0 if now is None else now.corr_vol,
+            marked_fly25=None if r is None else r.marked.get("fly25"),
+            implied_vol_vol=implied, implied_note=implied_note, premium=own,
+            premium_used=used, premium_source=source,
+            suggested_vol_vol=vv, suggested_corr_vol=cv, reason=reason,
+            warnings=tuple(warnings)))
+    return DependenceTable(pair=pair, legs=(leg_a, leg_b), premium=source, rows=rows,
+                           unavailable=unavailable)
 
 
 def _vega_split(va: float, vb: float, rho: float, ca: int, cb: int,
@@ -1299,8 +1777,8 @@ def _vega_split(va: float, vb: float, rho: float, ca: int, cb: int,
 
 
 def _leg_reference(surface, expiry, method, cut, deltas) -> dict[str, float]:
-    table = surface.smile_table(expiry, deltas=tuple(deltas), method=method, cut=cut)
-    by = {r["label"]: r["vol"] for r in table}
+    by = smile_points(surface.smile_table(expiry, deltas=tuple(deltas), method=method,
+                                          cut=cut))
     out = {"atm": by["ATM"]}
     for d in deltas:
         tag = f"{int(round(d * 100))}"

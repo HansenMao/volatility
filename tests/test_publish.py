@@ -945,32 +945,42 @@ class TestOverlay(_Fixture):
         with self.assertRaises(publish.PublishError):
             publish.build("bloomberg", self.book, self.tables, sources={"USDJPY": "overlay"})
 
-    def test_the_comparison_puts_both_sides_at_the_channels_widths(self):
-        cmp = publish.compare("bloomberg", self.book, self.tables, self.overlay)
-        self.assertEqual(cmp["pairs"], ["USDJPY"])
+    def test_the_comparison_is_mids_only_at_the_overlays_pairs_and_tenors(self):
+        cmp = publish.compare(self.book, self.overlay)
+        self.assertEqual(cmp["pairs"], ["AUDHKD", "EURUSD", "HKDCNH", "USDJPY"])
+        self.assertEqual(cmp["fields"], ["atm", "rr25", "rr10", "bf25", "bf10"])
         rows = {(r["pair"], r["tenor"]): r for r in cmp["rows"]}
+        self.assertEqual(len(rows), 16)                  # one row per overlay row, no more
         r = rows[("USDJPY", "1M")]
+        self.assertEqual(set(r["book"]), set(cmp["fields"]))
         self.assertAlmostEqual(r["diff"]["rr25"], -2.5 - r["book"]["rr25"])
-        self.assertAlmostEqual(r["diff"]["rr25_bid"], r["diff"]["rr25"])
-        self.assertAlmostEqual(r["diff"]["mid"], 0.0)
-        self.assertAlmostEqual(r["diff"]["bid"], 0.0)
-        # Both sides at the same width and shade: the book's bid is its
-        # shaded mid less half the market width, and so is the overlay's.
-        self.assertAlmostEqual(r["book"]["ask"] - r["book"]["bid"], 0.7)
-        self.assertAlmostEqual(r["overlay"]["ask"] - r["overlay"]["bid"], 0.7)
+        # A blank overlay cell is not carried: no number, and no false agreement.
+        self.assertIsNone(r["overlay"]["atm"])
+        self.assertIsNone(r["diff"]["atm"])
         self.assertFalse(r["same"])
-        self.assertTrue(rows[("USDJPY", "1W")]["same"])
+        self.assertNotIn("bid", r["book"])               # no channel, no two-way
         by = {p["pair"]: p for p in cmp["by_pair"]}
-        self.assertEqual(by["USDJPY"]["compared"], 9)
-        self.assertAlmostEqual(by["USDJPY"]["max_mid"], 0.0)
-        # The overlay's own two-way is compared as given.
+        self.assertEqual(by["USDJPY"]["compared"], 1)
+        self.assertIn("1W", by["USDJPY"]["book_only"])
+        self.assertAlmostEqual(by["USDJPY"]["max_wing"], abs(r["diff"]["rr25"]))
+        # A pair the book does not hold, and a tenor it cannot mark, are overlay-only.
+        self.assertFalse(by["AUDHKD"]["in_book"])
+        self.assertEqual(len(by["AUDHKD"]["overlay_only"]), 9)
+        self.assertIsNone(rows[("AUDHKD", "1M")]["book"])
+        self.assertEqual(by["EURUSD"]["overlay_only"], ["3Y"])
+        # The book's mids are the pillars every channel reads.
+        read = kace.read_pillars(self.book, "USDJPY", ["1M"])
+        self.assertAlmostEqual(r["book"]["atm"], read.atm["1M"])
+        self.assertEqual(publish.compare(self.book, self.overlay, pairs=["usdjpy"])["pairs"],
+                         ["USDJPY"])
+        # An ATM given as a two-way is compared at its mid.
         two = overlay.parse("pair,tenor,atm_bid,atm_ask\nUSDCNH,1W,4.0,4.5\n")
-        cmp = publish.compare("cos", self.book, self.tables, two)
-        r = cmp["rows"][0]
-        self.assertEqual((r["overlay"]["bid"], r["overlay"]["ask"]), (4.0, 4.5))
-        self.assertAlmostEqual(r["book"]["ask"] - r["book"]["bid"], 0.8)
+        r = publish.compare(self.book, two)["rows"][0]
+        self.assertEqual(r["overlay"]["atm"], 4.25)
+        self.assertTrue(r["two_way"])
+        self.assertAlmostEqual(r["diff"]["atm"], 4.25 - r["book"]["atm"])
         with self.assertRaises(publish.PublishError):
-            publish.compare("murex", self.book, self.tables, two)   # no USDCNH there
+            publish.compare(self.book, two, pairs=["USDJPY"])
 
     def test_a_row_with_its_own_two_way_bypasses_the_tier(self):
         o = overlay.parse("pair,tenor,atm_bid,atm_ask\nUSDCNH,1W,4.0,4.5\n")
@@ -1031,8 +1041,8 @@ class TestOverlayOnTheService(unittest.TestCase):
         self.assertEqual(built["overlay"]["rows"], 16)
         self.assertEqual(built["preflight"]["sources"]["overlay"], ["USDJPY"])
         # The comparison route, and the state's per-pair view of the file.
-        cmp = svc.export_compare({"channel": "bloomberg"})
-        self.assertEqual(cmp["pairs"], ["USDJPY"])
+        cmp = svc.export_compare({})
+        self.assertEqual(cmp["pairs"], ["AUDHKD", "EURUSD", "HKDCNH", "USDJPY"])
         per = {e["pair"]: e for e in svc.overlay_state()["per_pair"]}
         self.assertTrue(per["USDJPY"]["in_book"])
         self.assertFalse(per["AUDHKD"]["in_book"])

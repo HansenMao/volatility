@@ -61,9 +61,12 @@ rather than added in:
   at-the-money, risk reversal and butterfly at the same delta, which is the
   same arithmetic the marked wing is read with.
 * ``triangle`` -- for a cross only: the cell's marked volatility against the
-  one its two legs imply, out of ``analytics.triangle_table``.  A difference
-  inside the triangle's own noise floor is not a difference and is reported
-  but **not scored**, which is the rule that section already follows.
+  one its two legs imply, out of ``analytics.triangle_table``, with the legs
+  tied together at their **realized** dependence (measured vol-vol correlation
+  plus a named premium, measured correlation vol) unless the panel asks for
+  the marked one.  A difference inside the triangle's own noise floor -- the
+  grid's error plus the dependence's estimation uncertainty -- is not a
+  difference and is reported but **not scored**.
 
 All five are already in **volatility points**, and that is the unit the score
 is in: the composite is the weighted mean of whichever signals a cell has,
@@ -122,7 +125,9 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from . import black, sabr
-from .analytics import MIN_ROLLED_DAYS, carry_table, triangle_table
+from .analytics import (MIN_ROLLED_DAYS, PREMIUM_NONE, PREMIUM_OWN, carry_table,
+                        dependence_table, measure_dependence, triangle_table)
+from . import moments
 from .history import DYNAMICS_DAYS, realized as measure_realized, vol_dynamics
 from .numerics import ConvergenceError
 from .timeutil import tenor_to_years
@@ -424,6 +429,11 @@ class RelativeValue:
     #: threshold instead of on a copy of it -- the same arrangement as the
     #: signal weights in ``/api/state``.
     extreme_score: float = EXTREME_SCORE
+    #: What a cross's triangle signal was priced on: ``basis`` (``realized``,
+    #: ``marked`` -- which is also what an unavailable realized one fell back
+    #: to -- or ``off``), what was ``asked``, the ``premium`` named, and each
+    #: tenor's dependence ``sources``.  Empty for a pair that is not a cross.
+    triangle: dict = field(default_factory=dict)
 
 
 def resolve_weights(given=None) -> dict[str, float]:
@@ -656,6 +666,68 @@ def _measured_smile_shape(realized_vol: float, rho: float, nu: float, t: float,
     return float(sabr.lognormal_vol(strike_ratio, p)) - realized_vol
 
 
+#: What the triangle signal ties a cross's legs together with.  ``realized``:
+#: the legs' measured vol-vol correlation and correlation vol, plus the premium
+#: named -- none, or another cross's.  ``marked``: the ``CROSS_DEPENDENCE``
+#: tab, or the Gaussian copula where it marks nothing.
+TRIANGLE_BASES = ("realized", "marked")
+
+
+def _realized_dependence(book, pair: str, history, names, *, premium: str, method, cut,
+                         basis: str):
+    """The triangle's dependence per tenor off the legs' history, and its band.
+
+    ``({tenor: Dependence}, {tenor: band}, {tenor: source}, notes)``.  The
+    vol-vol correlation is measured plus the premium, the correlation vol is
+    measured, and the band is each moved by its own standard error -- so a
+    triangle difference inside what the history cannot tell apart is inside
+    the noise floor and is not scored.  A tenor whose vol-vol correlation was
+    not measured takes the measured correlation vol alone and says so.
+    """
+    surface = book[pair]
+    curve = surface.atm
+    leg_a, leg_b = book.data.pairs[pair].legs
+    lend: dict[str, object] = {}
+    if premium not in (PREMIUM_NONE,):
+        lend = {r.tenor.upper(): r for r in dependence_table(
+            book, premium, history, premium=PREMIUM_OWN, method=method, cut=cut,
+            tenors=names, basis=basis).rows}
+    deps, bands, sources, notes = {}, {}, {}, []
+    for tenor in names:
+        t = surface.tenor_years(tenor)
+        rho = float(np.asarray(curve.correlation(t)))
+        m = measure_dependence(history, leg_a, leg_b, tenor, t, basis=basis)
+        cap = max(1.0 - abs(rho) - 1e-6, 0.0)
+        cv = min(m.corr_vol or 0.0, cap)
+        add = 0.0
+        said = "no premium"
+        if premium != PREMIUM_NONE:
+            row = lend.get(tenor.upper())
+            if row is None or row.premium is None:
+                why = ("no such tenor" if row is None else
+                       row.implied_note or "its vol-vol correlation was not measured")
+                notes.append(f"{tenor}: {premium} lends no premium ({why}); the triangle there "
+                             f"is priced on the {leg_a}/{leg_b} history alone")
+            else:
+                add, said = row.premium, f"{premium}'s premium {row.premium:+.2f}"
+        vv = None if m.vol_vol is None else min(max(m.vol_vol + add, -1.0), 1.0)
+        if vv is None:
+            notes.append(f"{tenor}: the vol-vol correlation was not measured "
+                         f"({'; '.join(m.notes) or 'no reason given'}), so the triangle there "
+                         f"carries the measured correlation vol alone")
+        dep = moments.Dependence(vv, cv)
+        deps[tenor] = dep if dep.active else None
+        bands[tenor] = m.band(dep, rho) if dep.active else ()
+        sources[tenor] = (
+            f"measured on {leg_a}/{leg_b} history: vol-vol "
+            + ("not measured" if m.vol_vol is None else
+               f"{m.vol_vol:+.2f} (se {m.vol_vol_se:.2f})")
+            + f", {said}, correlation vol "
+            + ("not measured" if m.corr_vol is None else
+               f"{cv:.2f} (se {m.corr_vol_se:.2f})"))
+    return deps, bands, sources, notes
+
+
 def _triangle_difference(row, col: GridColumn):
     """The triangle's quoted differences read at one strike.
 
@@ -663,7 +735,9 @@ def _triangle_difference(row, col: GridColumn):
     butterfly.  A call at that delta is ``atm + fly + rr/2``, so the same
     combination of the differences is the difference at the call's strike.
     The noise floor is combined the same way and without cancellation --
-    errors do not have signs to net off.
+    errors do not have signs to net off -- and it is the grid's error plus how
+    far the triangle moves across the uncertainty of the dependence it was
+    priced on (``dependence_noise``).
     """
     tag = f"{int(round(col.delta * 100))}"
     parts = [("atm", 1.0)]
@@ -675,7 +749,8 @@ def _triangle_difference(row, col: GridColumn):
         if key not in row.difference:
             return None, None, f"the triangle has no {key} at {row.tenor}"
         value += share * float(row.difference[key])
-        noise += abs(share) * abs(float(row.noise.get(key, 0.0)))
+        noise += abs(share) * (abs(float(row.noise.get(key, 0.0)))
+                               + abs(float(getattr(row, "dependence_noise", {}).get(key, 0.0))))
     return value, noise, ""
 
 
@@ -684,7 +759,9 @@ def relative_value(book, pair: str, hist=None, *, horizon_days: float = 30.0,
                    method: str | None = None,
                    cut: str = "NY", annualisation: str = "weighted",
                    realized_basis: str = "auto", weights=None,
-                   tenors=None, with_triangle: bool = True) -> RelativeValue:
+                   tenors=None, with_triangle: bool = True, history=None,
+                   triangle_basis: str = "realized",
+                   premium: str = PREMIUM_NONE) -> RelativeValue:
     """Score every expiry and strike of one pair's surface for relative value.
 
     Returns a grid of :class:`Cell`, one per tenor and column, each carrying
@@ -700,6 +777,20 @@ def relative_value(book, pair: str, hist=None, *, horizon_days: float = 30.0,
     be scored on its own points.  A pair that is not a cross simply has no
     triangle signal, and the weight is renormalised away rather than counted
     as a zero.
+
+    **The triangle is priced on the legs' realized dependence** by default
+    (``triangle_basis="realized"``, which needs ``history`` -- the whole
+    historical book, since the legs are other sheets): their measured vol-vol
+    correlation plus ``premium`` (none, or another cross's) and their measured
+    correlation vol, with the estimation uncertainty of both in the noise
+    floor.  The Gaussian copula it replaced put every cross fly below its legs'
+    history as well as below the market, so the signal read every cross's
+    wings as rich for a reason that was the copula.  Read this way, a rich
+    wing is a cross pricing more dependence than its legs have shown plus the
+    premium named -- the triangle's analogue of ``level``, implied against
+    realized.  ``"marked"`` prices it on ``CROSS_DEPENDENCE`` as the Analysis
+    triangle does, and a cross whose legs have no history falls back to that
+    and says so.
     """
     if pair not in book:
         raise RelativeValueError(f"{pair} is not built in this book")
@@ -735,10 +826,48 @@ def relative_value(book, pair: str, hist=None, *, horizon_days: float = 30.0,
 
     tri: dict[str, object] = {}
     tri_note = ""
+    if triangle_basis not in TRIANGLE_BASES:
+        raise RelativeValueError(f"the triangle is priced on one of {TRIANGLE_BASES}, got "
+                                 f"{triangle_basis!r}")
+    premium = str(premium or PREMIUM_NONE).strip()
+    premium = premium.lower() if premium.lower() in (PREMIUM_NONE, PREMIUM_OWN) else premium.upper()
+    if premium == PREMIUM_OWN or (is_cross and premium == pair.upper()):
+        raise RelativeValueError(
+            "the triangle cannot borrow the cross's own premium: that premium is backed out "
+            "of the very fly the signal compares against, so the 25-delta wings would read "
+            "zero by construction. Name another cross's, or none")
+    used_basis = "marked"
     if is_cross and with_triangle:
+        legs = tuple(info.legs)
+        extra: dict[str, object] = {}
+        if triangle_basis == "realized":
+            missing = [leg for leg in legs if history is None or leg not in history]
+            if missing:
+                why = ("no historical workbook is loaded" if history is None else
+                       f"the historical workbook has no sheet for {' or '.join(missing)}")
+                warnings.append(f"the triangle is priced on the marked dependence "
+                                f"(CROSS_DEPENDENCE, or the Gaussian copula) because {why}, so "
+                                f"the legs' realized dependence cannot be measured")
+            else:
+                try:
+                    deps, bands, sources, notes = _realized_dependence(
+                        book, pair, history, names, premium=premium, method=method, cut=cut,
+                        basis=realized_basis)
+                except (ValueError, ArithmeticError, ConvergenceError) as exc:
+                    warnings.append(f"the triangle is priced on the marked dependence because "
+                                    f"the realized one could not be built: {exc}")
+                else:
+                    extra = {"dependence": deps, "dependence_band": bands,
+                             "dependence_source": sources}
+                    warnings.extend(notes)
+                    used_basis = "realized"
         try:
+            # The implied vol-vol correlation is a marking aid, not a signal:
+            # the grid reads the difference, and paying for the search here
+            # would slow every cross's grid for a column it never shows.
             tri = {r.tenor: r for r in triangle_table(
-                book, pair, method=method, cut=cut, tenors=names)}
+                book, pair, method=method, cut=cut, tenors=names, implied_vol_vol=False,
+                **extra)}
         except (ValueError, ArithmeticError, ConvergenceError) as exc:
             tri_note = str(exc)
     elif is_cross:
@@ -906,6 +1035,11 @@ def relative_value(book, pair: str, hist=None, *, horizon_days: float = 30.0,
         rows=tuple(rows), summary=summarise(rows), unavailable=unavailable,
         managed=managed, warnings=tuple(dict.fromkeys(warnings)),
         extreme_score=EXTREME_SCORE,
+        triangle={} if not is_cross else {
+            "basis": used_basis if with_triangle else "off",
+            "asked": triangle_basis, "premium": premium,
+            "sources": {k: getattr(v, "dependence_source", "") for k, v in tri.items()},
+        },
     )
 
 
@@ -1198,6 +1332,8 @@ class Panel:
     realized_basis: str = "auto"
     weights: dict[str, float] = field(default_factory=lambda: dict(WEIGHTS))
     with_triangle: bool = True
+    triangle_basis: str = "realized"
+    premium: str = PREMIUM_NONE
 
     def run(self, book, history=None) -> RelativeValue:
         hist = None
@@ -1208,7 +1344,8 @@ class Panel:
             lookback_days=self.lookback_days, history_days=self.history_days,
             method=self.method, cut=self.cut, annualisation=self.annualisation,
             realized_basis=self.realized_basis, weights=self.weights,
-            with_triangle=self.with_triangle)
+            with_triangle=self.with_triangle, history=history,
+            triangle_basis=self.triangle_basis, premium=self.premium)
 
 
 def _number(payload: dict, key: str, default: float) -> float:
@@ -1262,4 +1399,6 @@ def panel_from_request(payload: dict | None) -> Panel:
         realized_basis=str(p.get("realized_basis") or "auto"),
         weights=resolve_weights(weights),
         with_triangle=_flag(p, "triangle", True),
+        triangle_basis=str(p.get("triangle_basis") or "realized").strip().lower(),
+        premium=str(p.get("premium") or PREMIUM_NONE).strip(),
     )

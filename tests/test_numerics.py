@@ -960,6 +960,130 @@ class TestMoments(unittest.TestCase):
                             (1, 1), 0.3, DeltaConvention(False))
 
 
+class TestCrossDependence(unittest.TestCase):
+    """The marked dependence the smile triangle ties a cross's legs together with.
+
+    The Gaussian copula put every cross butterfly below the market: it ties
+    the size of the legs' moves together only as the correlation's square, and
+    it gives the correlation no volatility.  ``moments.Dependence`` marks both.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        book = Book.from_excel(BOOK, ASOF).load_all(["EURJPY"])
+        book.feed = MarketFeed.load(FEED)
+        surface, curve, (leg_a, leg_b), cls.co = analytics._cross_legs(book, "EURJPY")
+        cls.t = surface.tenor_years("6m")
+        expiry = ASOF.datetime_from_years(cls.t)
+        cls.rho = float(curve.correlation(cls.t))
+        cls.conv = surface.slice_conv(cls.t)
+        cls.da = moments.distribution_from_surface(book[leg_a], expiry, method="SVI", cut="NY")
+        cls.db = moments.distribution_from_surface(book[leg_b], expiry, method="SVI", cut="NY")
+        cls.gauss = moments.combine(cls.da, cls.db, cls.co, cls.rho, cls.conv)
+        cls.gauss_table = cls.gauss.table()
+
+    def held(self, **dependence):
+        return moments.combine_holding_atm(self.da, self.db, self.co, self.rho, self.conv,
+                                           moments.Dependence(**dependence),
+                                           target_atm=self.gauss_table["atm"])
+
+    def test_nothing_marked_is_the_gaussian_copula_to_the_last_digit(self):
+        for dependence in (None, moments.Dependence()):
+            law = moments.combine(self.da, self.db, self.co, self.rho, self.conv,
+                                  dependence=dependence)
+            np.testing.assert_array_equal(law.xc, self.gauss.xc)
+            np.testing.assert_array_equal(law.weight, self.gauss.weight)
+        law = moments.combine_holding_atm(self.da, self.db, self.co, self.rho, self.conv, None)
+        self.assertEqual(law.table(), self.gauss_table)
+
+    def test_the_regime_grid_with_no_regimes_reproduces_the_gaussian_copula(self):
+        """The coarser score grid and the binning the dependent law runs on are
+        pinned against the Gaussian copula they reduce to: a correlation vol
+        too small to move anything, and no regimes."""
+        law = moments._combine_dependent(self.da, self.db, self.co, self.rho, self.conv,
+                                         moments.Dependence(corr_vol=1e-12))
+        got = law.table()
+        for key in ("atm", "rr25", "fly25", "rr10", "fly10"):
+            self.assertLess(abs(got[key] - self.gauss_table[key]), 1e-5,
+                            msg=f"{key} {got[key] * 100:.4f} against {self.gauss_table[key] * 100:.4f}")
+
+    def test_a_marked_dependence_moves_the_wings_and_holds_the_atm(self):
+        flies = []
+        for vol_vol in (0.0, 0.5, 1.0):
+            law = self.held(vol_vol=vol_vol)
+            got = law.table()
+            self.assertLess(abs(got["atm"] - self.gauss_table["atm"]), 2e-6, msg=vol_vol)
+            flies.append((got["fly25"], got["fly10"]))
+            self.assertEqual(law.vol_vol, vol_vol)
+            self.assertGreater(min(law.leg_kurtosis), 0.0)
+        # The more the legs' variance regimes coincide, the fatter the cross.
+        self.assertLess(flies[0][0], flies[1][0])
+        self.assertLess(flies[1][0], flies[2][0])
+        self.assertLess(flies[0][1], flies[2][1])
+        # Coinciding always, the legs give a fatter cross than the Gaussian
+        # copula does; never coinciding, a thinner one -- which is why zero is
+        # not where a desk starts marking, and the class says so.
+        self.assertGreater(flies[2][0], self.gauss_table["fly25"])
+        self.assertLess(flies[0][0], self.gauss_table["fly25"])
+
+    def test_a_correlation_vol_fattens_the_cross_and_holds_the_atm(self):
+        got = self.held(corr_vol=0.2).table()
+        self.assertLess(abs(got["atm"] - self.gauss_table["atm"]), 2e-6)
+        self.assertGreater(got["fly25"], self.gauss_table["fly25"])
+        self.assertGreater(got["fly10"], self.gauss_table["fly10"])
+
+    def test_the_held_atm_is_held_by_the_copula_correlation(self):
+        law = self.held(vol_vol=1.0)
+        self.assertNotAlmostEqual(law.rho, self.rho, places=3)
+        # Rebuilt at that correlation without the solve, it is the same law.
+        again = moments.combine(self.da, self.db, self.co, law.rho, self.conv,
+                                dependence=moments.Dependence(vol_vol=1.0))
+        self.assertAlmostEqual(again.table()["fly25"], law.table()["fly25"], places=12)
+
+    def test_the_implied_vol_vol_recovers_the_one_a_butterfly_was_built_from(self):
+        target = self.held(vol_vol=0.6).table()["fly25"]
+        got, note = moments.implied_vol_vol(self.da, self.db, self.co, self.rho, self.conv,
+                                            target, target_atm=self.gauss_table["atm"])
+        self.assertEqual(note, "")
+        self.assertAlmostEqual(got, 0.6, delta=0.03)
+
+    def test_a_butterfly_no_vol_vol_reaches_says_how_far_the_legs_go(self):
+        high, why = moments.implied_vol_vol(self.da, self.db, self.co, self.rho, self.conv,
+                                            5.0 * self.gauss_table["fly25"])
+        self.assertIsNone(high)
+        self.assertIn("correlation vol", why)
+        low, why = moments.implied_vol_vol(self.da, self.db, self.co, self.rho, self.conv, 0.0)
+        self.assertIsNone(low)
+        self.assertIn("thinner than any variance regimes", why)
+
+    def test_a_dependence_outside_its_range_is_refused(self):
+        for bad in ({"vol_vol": 1.2}, {"vol_vol": float("nan")}, {"corr_vol": 1.0},
+                    {"corr_vol": -0.1}):
+            with self.assertRaises(ValueError, msg=bad):
+                moments.Dependence(**bad)
+        with self.assertRaises(ValueError):
+            moments.combine(self.da, self.db, self.co, 0.95, self.conv,
+                            dependence=moments.Dependence(corr_vol=0.1))
+
+    def test_a_smile_with_no_kurtosis_has_no_regimes(self):
+        self.assertEqual(moments.regime_dispersion(0.0), 0.0)
+        self.assertEqual(moments.regime_dispersion(-0.4), 0.0)
+        self.assertAlmostEqual(moments.regime_dispersion(3.0), math.log(2.0), places=15)
+
+        class Lognormal(moments.Distribution):
+            # A flat smile's grid carries a trace of kurtosis from its own
+            # differencing; this is the lognormal it stands for, exactly.
+            def moments(self):
+                m = super().moments()
+                return moments.Moments(m.mean, m.variance, 0.0, 0.0)
+
+        flat_a, flat_b = (Lognormal(x=d.x, pdf=d.pdf, cdf=d.cdf, t=d.t)
+                          for d in (_flat_distribution(v, 0.5) for v in (0.10, 0.12)))
+        law = moments.combine(flat_a, flat_b, (1, 1), 0.3, DeltaConvention(False),
+                              dependence=moments.Dependence(vol_vol=0.5))
+        self.assertTrue(any("no variance regimes" in w for w in law.warnings), law.warnings)
+
+
 class TestSmileParameterShifts(unittest.TestCase):
     def test_a_shift_moves_the_level_and_keeps_the_term_structure(self):
         """An overwrite replaces a parameter and flattens its term structure;
