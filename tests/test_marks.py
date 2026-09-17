@@ -726,6 +726,95 @@ class TestWingRatios(unittest.TestCase):
         self.assertEqual(s.warnings, [])
 
 
+class TestWingRatioBlockAndColumn(unittest.TestCase):
+    """The ratio table's paste and its per-column clear.
+
+    A marker keeps the multiples in a spreadsheet beside the quotes, and the
+    table took neither: a pasted column went into one box with its line breaks
+    stripped, and the only way back to the workbook's own numbers was the
+    button that cleared the whole table -- so giving one wing back meant
+    emptying it at every tenor by hand, one request and one refit each.
+    """
+
+    def setUp(self):
+        from volkit.webapp import BookService
+        self.svc = BookService(str(BOOK), ASOF)
+
+    def rows(self):
+        return {r["tenor"].upper(): r
+                for r in self.svc.marks({"pair": "USDJPY"})["ratios"]}
+
+    def test_a_block_of_ratios_is_written_as_one_edit(self):
+        out = self.svc.overwrite({"pair": "USDJPY", "kind": "ratios", "cells": [
+            {"tenor": "1M", "wing": "st", "value": 3.5},
+            {"tenor": "3M", "wing": "st", "value": 3.25},
+            {"tenor": "3M", "wing": "rr", "value": 1.9}]})
+        self.assertEqual(out["problems"], [])
+        rows = self.rows()
+        self.assertAlmostEqual(rows["1M"]["st"], 3.5)
+        self.assertAlmostEqual(rows["3M"]["st"], 3.25)
+        self.assertAlmostEqual(rows["3M"]["rr"], 1.9)
+        self.assertTrue(rows["3M"]["marked"])
+
+    def test_a_blank_cell_of_a_block_leaves_that_multiple_alone(self):
+        """A gap in somebody's grid is not the decision to quote a wing in its
+        own right.  That is made in one box, and stays there."""
+        self.svc.overwrite({"pair": "USDJPY", "kind": "ratio",
+                            "tenor": "3M", "wing": "st", "value": 4.0})
+        self.svc.overwrite({"pair": "USDJPY", "kind": "ratios", "cells": [
+            {"tenor": "3M", "wing": "st", "value": None},
+            {"tenor": "3M", "wing": "rr", "value": 1.9}]})
+        self.assertAlmostEqual(self.svc.book["USDJPY"].effective_ratio("3M").st, 4.0)
+        self.assertAlmostEqual(self.svc.book["USDJPY"].effective_ratio("3M").rr, 1.9)
+
+    def test_a_block_of_ratios_that_is_refused_writes_none_of_it(self):
+        """Half a pasted column is not a column anybody typed.  The tenor is
+        checked here as the ATM block checks its own: a multiple stored where
+        no row reads it is a mark that silently does nothing."""
+        self.svc.overwrite({"pair": "USDJPY", "kind": "ratio",
+                            "tenor": "1M", "wing": "st", "value": 3.5})
+        for cells, says in (
+                ([{"tenor": "3M", "wing": "st", "value": 3.25},
+                  {"tenor": "3M", "wing": "st", "value": "much"}], "much"),
+                ([{"tenor": "3M", "wing": "st", "value": 3.25},
+                  {"tenor": "4M", "wing": "st", "value": 3.3}], "4M is not a tenor"),
+                ([{"tenor": "3M", "wing": "st", "value": 3.25},
+                  {"tenor": "3M", "wing": "wings", "value": 3.3}], "unknown wing")):
+            with self.assertRaises(ValueError) as cm:
+                self.svc.overwrite({"pair": "USDJPY", "kind": "ratios", "cells": cells})
+            self.assertIn("nothing was written", str(cm.exception))
+            self.assertIn(says, str(cm.exception))
+            s = self.svc.book["USDJPY"]
+            self.assertNotIn("3M", s.ratio_overwrites)
+            self.assertAlmostEqual(s.effective_ratio("1M").st, 3.5)
+        with self.assertRaises(ValueError):
+            self.svc.overwrite({"pair": "USDJPY", "kind": "ratios", "cells": []})
+
+    def test_a_wing_with_no_tenor_clears_that_column_and_leaves_the_other(self):
+        """What the ✕ in a column heading posts.  A wing with no tenor used to
+        be read as "every change", because the wing was only looked at once a
+        tenor had been named -- one post that cleared the table when the desk
+        had asked for one multiplier."""
+        s = self.svc.book["USDJPY"]
+        for tenor in ("1M", "3M"):
+            self.svc.overwrite({"pair": "USDJPY", "kind": "ratio",
+                                "tenor": tenor, "wing": "st", "value": 3.5})
+            self.svc.overwrite({"pair": "USDJPY", "kind": "ratio",
+                                "tenor": tenor, "wing": "rr", "value": 1.9})
+        self.svc.overwrite({"pair": "USDJPY", "kind": "clear_ratio", "wing": "st"})
+        for tenor in ("1M", "3M"):
+            self.assertAlmostEqual(s.effective_ratio(tenor).rr, 1.9)
+            self.assertNotIn("st", s.ratio_overwrites[tenor.upper()])
+        # And the whole table is still what no wing at all means.
+        self.svc.overwrite({"pair": "USDJPY", "kind": "clear_ratio"})
+        self.assertEqual(s.ratio_overwrites, {})
+
+    def test_clearing_a_wing_nothing_is_called_is_refused(self):
+        """A clear that silently does nothing is a button that lies."""
+        with self.assertRaises(ValueError):
+            self.svc.overwrite({"pair": "USDJPY", "kind": "clear_ratio", "wing": "wings"})
+
+
 class TestCrossQuotesFromLegs(unittest.TestCase):
     """A thin cross's RR and ST filled from its two dollar legs."""
 

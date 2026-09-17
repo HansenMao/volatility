@@ -387,9 +387,27 @@ class VolSurface:
 
     def clear_ratio_overwrite(self, tenor: str | None = None,
                               wing: str | None = None) -> None:
-        """Give a multiplier, a tenor, or every change back to the tab."""
+        """Give a multiplier, a tenor, a column, or every change back to the tab.
+
+        A wing with **no tenor** is that whole column, which is what the screen
+        asks for from the column's own heading.  It used to be read as "every
+        change", because the wing was only looked at once a tenor had been
+        named -- one post that cleared the table when the desk meant one
+        multiplier.  Clearing a column row by row from the browser instead
+        would be one request per tenor with the curve refitted between them.
+        """
+        if wing is not None and wing not in RATIO_WINGS:
+            raise ValueError(
+                f"unknown wing {wing!r}; expected one of {', '.join(RATIO_WINGS)}")
         if tenor is None:
-            self.ratio_overwrites.clear()
+            if wing is None:
+                self.ratio_overwrites.clear()
+                return
+            for key in list(self.ratio_overwrites):
+                edits = self.ratio_overwrites[key]
+                edits.pop(wing, None)
+                if not edits:
+                    self.ratio_overwrites.pop(key, None)
             return
         key = str(tenor).upper()
         if wing is None:

@@ -117,6 +117,43 @@ def _write_quote_block(surface, cells) -> None:
         raise ValueError(f"nothing was written: {exc}") from None
 
 
+def _write_ratio_block(surface, cells) -> None:
+    """Write a block of wing multipliers onto one surface, all of them or none.
+
+    The ratio table's half of the spreadsheet paste, kept to the same
+    discipline as the quotes': a block refused at row nine must not leave the
+    pair holding a column of multiples nobody typed, so every cell is written
+    against a snapshot and the snapshot is put back if any one of them is
+    refused.  The caller refits once, after the last cell.
+
+    Cells are ``{tenor, wing, value}``.  A **blank** cell is left as it was --
+    it is a gap in somebody's grid.  It is deliberately *not* read as taking
+    the wing off its ratio: that is a decision about one wing, made in one box,
+    and reading it out of an empty spreadsheet cell would quote a wing in its
+    own right because a column was short.  The tenor is checked against the
+    table, as the ATM block checks its own: a multiple stored at a tenor no row
+    reads is a mark that silently does nothing.
+    """
+    if not isinstance(cells, list) or not cells:
+        raise ValueError("a block of ratios needs at least one cell")
+    known = {str(row["tenor"]).upper() for row in surface.ratio_rows()}
+    keep = {t: dict(v) for t, v in surface.ratio_overwrites.items()}
+    try:
+        for cell in cells:
+            tenor = str(cell.get("tenor") or "").strip()
+            if tenor.upper() not in known:
+                raise ValueError(
+                    f"{tenor or '(blank)'} is not a tenor on the ratio table")
+            raw = cell.get("value")
+            if raw is None or raw == "":
+                continue
+            surface.overwrite_ratio(tenor, cell.get("wing"), float(raw))
+    except Exception as exc:  # noqa: BLE001 - reported to the browser
+        surface.ratio_overwrites.clear()
+        surface.ratio_overwrites.update(keep)
+        raise ValueError(f"nothing was written: {exc}") from None
+
+
 class BookService:
     """Thread-safe wrapper around a Book, with the request handlers."""
 
@@ -1514,6 +1551,12 @@ class BookService:
                 surface.overwrite_ratio(
                     q["tenor"], q["wing"],
                     None if raw in (None, "") else float(raw))
+                refit = True
+            elif kind == "ratios":
+                # A block of multipliers written together, all or none; the fit
+                # happens once, after the last cell, as it does for a single
+                # one.
+                _write_ratio_block(surface, q.get("cells"))
                 refit = True
             elif kind == "clear_ratio":
                 surface.clear_ratio_overwrite(q.get("tenor") or None, q.get("wing") or None)

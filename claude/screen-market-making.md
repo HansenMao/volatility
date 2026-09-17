@@ -333,6 +333,27 @@ line came first.
 - A **column header** is recognised (no digits, two or more header words) and
   reported as passed over rather than as a line that could not be read: a
   spreadsheet paste brings one, and it is not an error.
+- **A time is not a number the line carries.** It is consumed as the stamp, and
+  `_squash` turns `09:41` into `0941`, which matches `_NUMBER` -- so the rule
+  that reads a currency straight after a number as the currency a *premium* is
+  quoted in read the `eur` of `09:41 eur 1M ATM 8.20/8.60` that way and refused
+  the line for quoting a premium on an at-the-money. Every line of a chat-window
+  paste carries that stamp, so the whole run priced nothing. `prev_raw` is empty
+  where the token before was a timestamp; the rule itself is untouched, and a
+  stamped line whose price really is a premium still reads as one. The wrapper a
+  chat window put round the time is not part of it either: `[09:41]`, `(09:41)`
+  and `<09:41>` are one time, stripped in `_as_timestamp`.
+- **A direction word only opens a leg where there is one to open.** `buy 1M atm
+  sell 3M atm` is two legs, and the rule used to look no further than the word:
+  `1M ATM 8.20/8.60 bought` opened a leg with no instrument in it, stranded the
+  price on the leg before, and the line was refused for carrying two numbers
+  where a strike goes. What counts as a leg to open is an expiry or an
+  instrument after the word (`_leg_follows`) -- nothing a run puts *after* a
+  price names either, because that half of the line is what became of the
+  quote, not another quote. Left in the one segment the word is read where it
+  always was, as the line's own side. The words that are only colour --
+  `buyer`, `given`, `paid`, `offered on` -- were never grammar and are dropped
+  or noted as before.
 - A date alone is an expiry; a date **followed by a time** is a timestamp.
   Reading one as the other moves a quote to a tenor nobody asked for. A
   time-only line takes the last date above it; a run with no date anywhere is

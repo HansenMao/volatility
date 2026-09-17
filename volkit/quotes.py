@@ -582,8 +582,13 @@ def _as_timestamp(token: str) -> tuple[str | None, str | None] | None:
     Either half may be missing: a bare ``09:15`` has no date, and a date on its
     own is an expiry rather than a timestamp -- which is why a lone date is not
     matched here.
+
+    The wrapper a chat window put round it is not part of the time.  Brokers
+    stamp a line ``[09:41]``, ``(09:41)`` and ``<09:41>``; all three are the
+    same time, and the one that is not stripped arrives as a token nothing
+    reads and takes the line down with it.
     """
-    tok = token.strip().strip("[]()")
+    tok = token.strip().strip("[]()<>")
     m = _STAMP.match(tok)
     if m:
         return m.group(1), m.group(2)
@@ -737,6 +742,28 @@ class _Line:
     today: date | None = None
 
 
+#: What a leg of a structure has to name: an instrument, or a wing of one.
+_LEG_WORDS = frozenset(_ATM + _STRADDLE + _RR + _FLY + _SMILE_FLY + _STRANGLE
+                       + _CALL + _PUT)
+
+
+def _leg_follows(tokens: list[list], today) -> bool:
+    """Is there another leg after this point, or is the rest a trailing note?
+
+    A direction word only opens a leg where there is one to open.  What counts
+    is an expiry or an instrument: every leg of a structure names one of the
+    two, and nothing a run puts *after* a price -- a size, a counterparty, the
+    word that says who dealt -- names either.
+    """
+    for tok, _column in tokens:
+        word = _squash(tok)
+        if word in _LEG_WORDS or _DELTA.match(word):
+            return True
+        if _as_timestamp(tok) is None and _as_expiry(tok, today) is not None:
+            return True
+    return False
+
+
 def _consume(line: str, state: _Line) -> None:
     """Pull every recognised token out of the line, leaving only the price.
 
@@ -789,13 +816,22 @@ def _consume(line: str, state: _Line) -> None:
     # The legs.  'vs' is a boundary and not a word, so the tokens on each side
     # of it are consumed separately and never see each other.
     segments: list[list[list]] = [[]]
-    for tok, column in tokens:
+    for n, (tok, column) in enumerate(tokens):
         word = _squash(tok)
         if word in _LEG_SEP:
             segments.append([])
             state.explicit_spread = True
-        elif word in _BUY + _SELL and word not in ("+", "-") and segments[-1]:
+        elif word in _BUY + _SELL and word not in ("+", "-") and segments[-1] \
+                and _leg_follows(tokens[n + 1:], state.today):
             # 'buy 1M atm sell 3M atm': the second word starts the second leg.
+            #
+            # Only where there is a second leg to start.  A run says what
+            # became of a line after it has quoted it -- 'EURUSD 1M ATM
+            # 8.20/8.60 bought' -- and a direction word at the end of a line
+            # opened a leg with no instrument in it, which stranded the price
+            # on the leg before and refused a line that reads perfectly well.
+            # Left in the one segment the word is read where it always was, as
+            # the line's own side.
             segments.append([[tok, column]])
             state.explicit_spread = True
         else:
@@ -847,7 +883,15 @@ def _consume_tokens(tokens: list[list], columns: int, state: _Line) -> None:
             tok = _BPS_NUM.sub(lambda m: m.group(1), tok)
         word = _squash(tok)
         nxt = _squash(tokens[i + 1][0]) if i + 1 < len(tokens) else ""
-        prev_raw = tokens[i - 1][0].replace("%", "") if i else ""
+        # The token before, for the rules that read a number off it.  A
+        # timestamp is not one: it has already been consumed as the moment the
+        # line was given, and `_squash` turns '09:41' into '0941', which
+        # matches `_NUMBER`.  Left in, a run stamped in front of the desk's
+        # three-letter shorthand -- '09:41 eur 1M ATM 8.20/8.60' -- read 'eur'
+        # as the currency a premium was quoted in and the whole line was
+        # refused for quoting a premium on an at-the-money.
+        prev_tok = tokens[i - 1][0] if i else ""
+        prev_raw = "" if _as_timestamp(prev_tok) is not None else prev_tok.replace("%", "")
         at_start, first = first, False
 
         # The pair the line is about.  'eur/usd', 'EURUSD', 'usdjpy:'.

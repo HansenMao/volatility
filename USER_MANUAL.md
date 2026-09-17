@@ -439,6 +439,21 @@ move the screen.
   a ratio would recompute is a number that changes back when you leave the
   field. The multiples live on the workbook's `WING_RATIOS` tab.
 
+  This table takes a **block paste** the same way the quotes above it do. Copy
+  the multiples out of a spreadsheet, click the box the block starts in and
+  paste: it fills right across the wing columns and down the tenors from there,
+  in one write and one refit. A leading **tenor column** is matched by name
+  rather than by position and a **header row** is dropped. A blank cell is left
+  as it was — taking a wing off its ratio is still done by emptying its own
+  box, because a gap in a spreadsheet is not that decision — and one cell that
+  is not a number refuses the whole block, so half a pasted table is never
+  written.
+
+  The **✕** in a column heading gives that multiplier back to the tab at every
+  tenor; **Clear ratio changes** below does the whole table. Clearing one
+  column used to mean emptying its box at every tenor by hand, one request and
+  one refit each.
+
   They used to be Excel formulas in the pair sheets, which is why this exists:
   `ST 10D` was `=ST 25D * 3.25` and `RR 10D` was `=RR 25D * 1.85`, a different
   multiple per pair *and* per tenor, and the tool could not see any of it.
@@ -1746,11 +1761,20 @@ one**. That is what tells `3M, 7.75, 8.30` (a choice price at the 7.75 strike)
 from `3M 7.75 8.30` (the two-way at-the-money). If you write columns, write the
 commas.
 
-**Timestamps and requotes.** A line may start with `09:15`, `2024-02-28 09:15`
-or `[09:15]`. When two lines quote the *same thing*, **the later timestamp
+**Timestamps and requotes.** A line may start with `09:15`, `2024-02-28 09:15`,
+`[09:15]`, `(09:15)` or `<09:15>` — the wrapper a chat window put round the
+time is not part of it — and a broker's name may sit in front of the stamp.
+When two lines quote the *same thing*, **the later timestamp
 wins** — whichever order they were pasted in, so a stale line pasted at the
 bottom of the run cannot become the live market. Without timestamps to compare,
 the later line wins, because that is the only ordering an untimed line carries.
+
+**What a run puts after the price.** `buyer`, `given`, `paid`, `offered on`,
+`bought`, `sold`, `long`, `short` — a run says what became of a line once it
+has quoted it, and the quote still stands. A direction word only starts a
+second leg where there is one to start, which means an expiry or an instrument
+after it: `buy 1M atm sell 3M atm` is two legs and `1M ATM 8.20/8.60 bought` is
+one quote the desk bought.
 
 The quote that lost is not thrown away. It is listed under the paste with the
 line that beat it, so a mistyped update shows up as a quote that went missing

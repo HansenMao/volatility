@@ -131,6 +131,40 @@ class TestQuoteParsing(unittest.TestCase):
         for _, _, why in run.skipped:
             self.assertTrue(why)
 
+    def test_a_direction_word_at_the_end_of_a_line_is_not_a_second_leg(self):
+        """A run says what became of a line after it has quoted it.
+
+        ``buy 1M atm sell 3M atm`` made the second word start the second leg,
+        and the rule looked no further than the word: ``1M ATM 8.20/8.60
+        bought`` opened a leg with no instrument in it, stranded the price on
+        the leg before, and the line was refused for carrying two numbers
+        where a strike goes.  The word only opens a leg where there is one --
+        an expiry or an instrument after it -- and otherwise it is read where
+        it always was, as the line's own side.
+        """
+        for word in ("bought", "sold", "long", "short", "own"):
+            with self.subTest(word=word):
+                run = self.parse(f"1M ATM 8.20/8.60 {word}")
+                self.assertEqual(list(run.skipped), [], run.skipped)
+                self.assertEqual(run.quotes[0].instrument, "atm")
+                self.assertAlmostEqual(run.quotes[0].bid, 0.082)
+        # A size after the word is still not a leg; a tenor after it still is.
+        sized = self.parse("1M ATM 8.20/8.60 bought 50mm")
+        self.assertEqual(list(sized.skipped), [], sized.skipped)
+        self.assertEqual(sized.quotes[0].instrument, "atm")
+        legs = self.parse("buy 1M atm sell 3M atm 0.30/0.55")
+        self.assertEqual(list(legs.skipped), [], legs.skipped)
+        self.assertEqual(legs.quotes[0].instrument, "structure")
+        self.assertEqual([str(leg.expiry) for leg in legs.quotes[0].legs], ["1M", "3M"])
+
+    def test_a_word_a_run_puts_after_the_price_leaves_the_quote_standing(self):
+        """``buyer``, ``given``, ``offered on``: colour, not grammar."""
+        for tail in ("buyer", "given", "paid", "offered on", "buyer of 50mm"):
+            with self.subTest(tail=tail):
+                run = self.parse(f"1M ATM 8.20/8.60 {tail}")
+                self.assertEqual(list(run.skipped), [], run.skipped)
+                self.assertAlmostEqual(run.quotes[0].ask, 0.086)
+
     def test_a_vega_profile_reads_tenors_and_reports_the_rest(self):
         profile, notes, skipped = quotes.parse_vega_profile("1M 250\n3M -120\nnope 4\n1M 50")
         self.assertEqual(profile, {"1M": 300.0, "3M": -120.0})
@@ -431,6 +465,30 @@ class TestQuoteTimestamps(unittest.TestCase):
         self.assertEqual(run.quotes[0].label, "")
         self.assertEqual(run.quotes[1].label, "broker a")
         self.assertEqual(run.quotes[1].timestamp_text, "")
+
+    def test_a_time_in_front_of_a_pair_shorthand_is_still_a_time(self):
+        """The bug this was written after.
+
+        ``_squash`` turns ``09:41`` into ``094123``, which matches a number,
+        and the rule that reads a currency straight after a number as the
+        currency a *premium* is quoted in read the whole run's ``eur`` that
+        way.  Every line of a chat-window paste -- where the stamp is what the
+        window put in front of it -- was then refused for quoting a premium on
+        an at-the-money, and the desk saw a run in which nothing priced.
+        """
+        for prefix in ("09:41", "09:41:23", "(09:41)", "<09:41>", "[09:41]",
+                       "JPM 09:41"):
+            with self.subTest(prefix=prefix):
+                run = self.parse(f"{prefix} eur 1M ATM 8.20/8.60")
+                self.assertEqual(list(run.skipped), [], run.skipped)
+                self.assertEqual(run.quotes[0].instrument, "atm")
+                self.assertAlmostEqual(run.quotes[0].bid, 0.082)
+                self.assertEqual(run.quotes[0].timestamp_text[:5], "09:41")
+        # The same stamp in front of a line whose price really is a premium
+        # still leaves it one: the fix takes the *time* out of the reckoning,
+        # not the rule.
+        premium = self.parse("09:41 1M 1.1000 call 0.0125/0.0135 usd").quotes[0]
+        self.assertEqual(premium.quote_kind, "premium")
 
     def test_a_superseded_quote_is_kept_rather_than_dropped(self):
         """A line read, understood and then silently discarded is the failure

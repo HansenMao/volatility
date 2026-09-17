@@ -754,9 +754,15 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
           <label class="hide" id="mcorrlabel" style="margin:0;display:flex;align-items:center;gap:5px;width:auto;font-size:11px"
             title="on a cross: its correlation at each tenor, read off the curve, beside the legs' realized correlation">
             <input type="checkbox" id="mcorrshow" style="width:auto"> correlation</label>
-          <span class="meta" id="mquotenote" style="margin-left:9px"
+          <!-- The note gives way and the button does not: min-width:0 lets the
+               span shrink past its own text (a flex item will not, by default)
+               and the ellipsis says it was cut, with the whole of it on hover.
+               A paste note long enough to shove Copy table off the row is the
+               bug this was written after. -->
+          <span class="meta" id="mquotenote"
+            style="margin-left:9px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
             title="a quote typed here replaces the pair sheet's for this session and refits that tenor; it is saved with the session and written into the sheet's own cell when the session is put back into the workbook"></span>
-          <button class="ghost" id="matmcopy" style="width:auto;padding:3px 9px;font-size:11px;margin-left:9px"
+          <button class="ghost" id="matmcopy" style="flex:none;width:auto;padding:3px 9px;font-size:11px;margin-left:9px"
             title="copy the marked ATM and the 25d / 10d RR and ST of every tenor, as a table that pastes into Excel">Copy table</button></h2>
         <div class="scroll"><table class="mark" id="matm"></table></div>
         <details class="hint" style="margin-top:7px"><summary>Which tenors are on this table,
@@ -822,7 +828,17 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
             multiple of its 25-delta ones — <code>ST 10d = ST 25d &times; st</code>. Where a
             multiple is set the wing is <i>derived</i> and its box above is read-only. Empty
             a box here and that wing is quoted in its own right instead; the greyed number is
-            what the workbook's <code>WING_RATIOS</code> tab holds.</details>
+            what the workbook's <code>WING_RATIOS</code> tab holds.
+            <br><br>This table takes a <b>block paste</b> the way the quotes above do. Copy the
+            multiples out of a spreadsheet, click the box the block starts in and paste: it
+            fills right across the wing columns and down the tenors from there, in one write
+            and one refit. A leading <b>tenor column</b> is matched by name rather than by
+            position and a <b>header row</b> is dropped. A blank cell is left as it was &mdash;
+            taking a wing off its ratio is still done by emptying its own box, because a gap in
+            a spreadsheet is not that decision &mdash; and one cell that is not a number
+            refuses the whole block. The <b>&times;</b> in a column heading gives that
+            multiplier back to the tab at every tenor; the button below does the whole
+            table.</details>
           <div class="row" style="margin-top:8px"><button class="danger" id="mclearratio">Clear ratio changes</button></div>
         </div>
         <!-- A cross's correlation, tenor by tenor: the curve its ATM is built
@@ -3260,17 +3276,24 @@ function paintMarks(){
   if(!MARKS)return;
   const ow=$('#matmowshow').checked;
   const nown=MARKS.atm.filter(r=>r.overwrite!=null).length;
-  const nq=MARKS.atm.filter(r=>r.quotes_marked).length;
   $('#matmowcount').textContent=(!ow&&nown)?`· ${nown} marked`:'';
   owfitStale();
   corrfitStale();
   const qn=$('#mquotenote');
-  /* Three things want this line, and they are not equals: a refusal beats
-     what the last paste did, and both beat the standing count of re-quoted
-     tenors. */
-  qn.textContent=QPROB.length?QPROB.join(' · ')
-    :(QPASTE||(nq?`${nq} tenor${nq===1?'':'s'} re-quoted`:''));
+  /* Two things want this line, and they are not equals: a refusal beats what
+     the last paste did.  There is no third -- a standing count of re-quoted
+     tenors used to sit here and never left, and the row that was re-quoted
+     says so on its own with a dot, which is where somebody looking for it
+     looks.  A line that is always on is a line nobody reads and a line that
+     crowds the button beside it. */
+  const msg=QPROB.length?QPROB.join(' · '):QPASTE;
+  qn.textContent=msg;
   qn.className=QPROB.length?'msg bad':'meta';
+  /* Truncated to keep Copy table where it is, so the whole of it goes in the
+     tooltip; with nothing to say the span explains itself again, which is why
+     what it says is taken once before the first message overwrites it. */
+  qn.dataset.title=qn.dataset.title||qn.title;
+  qn.title=msg||qn.dataset.title;
   const qcols=$('#mquoteshow').checked, QF=qcols?quoteFields():[];
   /* Each paste note belongs to the column it describes and goes with it. */
   $('#mqpastehint').classList.toggle('hide',!qcols);
@@ -3581,26 +3604,37 @@ window.addEventListener('resize',()=>{
    than two more columns on the one above: a multiple is not a volatility, and
    a row of vol points with two bare numbers in the middle of it reads as a
    quote somebody typed in the wrong unit. */
+/* RR before ST, to match the quote columns this table sits under: the card
+   above reads RR 25d, ST 25d, RR 10d, ST 10d, and an eye that has just come
+   down that row should not have to swap the pair over to read the multiples
+   that made it. The server's own map is keyed, not ordered, so the order is
+   declared here; a wing the map grows that this list does not name keeps its
+   place at the end rather than disappearing.  Declared once and read by both
+   the paint and the paste: two orders for one table is a pasted block landing
+   in the column beside the one it was dropped on. */
+const RATIO_ORDER=['rr','st'];
+function ratioFields(){
+  const W=(MARKS&&MARKS.wings)||{st:'st_10',rr:'rr_10'};
+  return Object.keys(W).sort((a,b)=>{
+    const i=RATIO_ORDER.indexOf(a),j=RATIO_ORDER.indexOf(b);
+    return (i<0?RATIO_ORDER.length:i)-(j<0?RATIO_ORDER.length:j)});
+}
+function ratioLabel(n){return String(n).toUpperCase()+' 10d / 25d'}
 function paintRatios(){
   const host=$('#mratio'), on=$('#mratioshow').checked;
   $('#mratiorow').classList.toggle('hide',!on);
-  const rows=(MARKS&&MARKS.ratios)||[], W=(MARKS&&MARKS.wings)||{st:'st_10',rr:'rr_10'};
-  /* RR before ST, to match the quote columns this table sits under: the card
-     above reads RR 25d, ST 25d, RR 10d, ST 10d, and an eye that has just come
-     down that row should not have to swap the pair over to read the multiples
-     that made it. The server's own map is keyed, not ordered, so the order is
-     declared here; a wing the map grows that this list does not name keeps
-     its place at the end rather than disappearing. */
-  const RATIO_ORDER=['rr','st'];
-  const names=Object.keys(W).sort((a,b)=>{
-    const i=RATIO_ORDER.indexOf(a),j=RATIO_ORDER.indexOf(b);
-    return (i<0?RATIO_ORDER.length:i)-(j<0?RATIO_ORDER.length:j)});
+  const rows=(MARKS&&MARKS.ratios)||[];
+  const names=ratioFields();
   const marked=rows.filter(r=>r.marked).length;
   $('#mrationote').textContent=on?'':(marked?`${marked} changed`:'');
   if(!on){host.innerHTML='';return}
+  /* The heading is where a column is named, so it is where a column is given
+     back: one post for the whole column, rather than the desk emptying each
+     box down the table and refitting the curve between every one of them. */
   host.innerHTML=`<thead><tr><th>Tenor</th>`+
     names.map(n=>`<th title="${esc(n.toUpperCase())} 10d = ${esc(n.toUpperCase())} 25d times this">`+
-      esc(n.toUpperCase())+' 10d / 25d</th>').join('')+`</tr></thead><tbody>`+
+      esc(ratioLabel(n))+`<span class="x" data-clearwing="${esc(n)}"
+        title="give every tenor's ${esc(n.toUpperCase())} multiple back to the workbook's tab">&times;</span></th>`).join('')+`</tr></thead><tbody>`+
     (rows.length?rows.map(r=>`<tr><td>${esc(r.tenor)}`+
       (r.marked?' <span class="owdot" title="changed">&bull;</span>':'')+'</td>'+
       names.map(n=>`<td><input data-m="ratio" data-wing="${esc(n)}" data-tenor="${esc(r.tenor)}"
@@ -3612,7 +3646,7 @@ function paintRatios(){
 }
 async function loadMarks(){
   const o=mq(); MARKS=await api('/api/marks?'+qs({pair:o.pair,cut:o.cut}));
-  if(o.pair!==QPAIR){QPROB=[];QPASTE='';QPAIR=o.pair}
+  if(o.pair!==QPAIR){QPROB=[];setQPaste('');QPAIR=o.pair}
   $('#manchor').checked=!!MARKS.anchor;
   paintMarks();
   corrLoad();
@@ -3882,7 +3916,7 @@ async function mxqRun(apply){
            }).join(''))+'</tr>';}).join('')+'</tbody></table></div>'+
     '<div class="meta" style="margin-top:4px">implied, with the quote on the row now in brackets</div>';
   mxqStale();
-  if(apply){QPROB=r.problems||[];QPASTE='';await loadMarks();await redraw();schedulePrice()}
+  if(apply){QPROB=r.problems||[];setQPaste('');await loadMarks();await redraw();schedulePrice()}
 }
 $('#mxqgo').onclick=()=>mxqRun(false);
 $('#mxqapply').onclick=()=>mxqRun(true);
@@ -3967,6 +4001,20 @@ $('#mowfitapply').onclick=()=>owfitRun(true);
 $$('#mowfitrow input[data-owdof]').forEach(i=>i.onchange=saveMarking);
 $('#mclearratio').onclick=async()=>{await post('/api/overwrite',{pair:mq().pair,kind:'clear_ratio'});
   await loadMarks();await redraw();schedulePrice()};
+/* The ✕ in a ratio column's heading.  Delegated, because the table is
+   repainted on every read and a handler bound to a cell would be bound to a
+   heading that is no longer in the page. */
+$('#mratio').onclick=async e=>{
+  const t=e.target;
+  if(!t||!t.dataset||!t.dataset.clearwing)return;
+  setQPaste('');
+  try{
+    const r=await post('/api/overwrite',
+      {pair:mq().pair,kind:'clear_ratio',wing:t.dataset.clearwing});
+    QPROB=(r&&r.problems)||[];
+  }catch(err){alert(err.message);return}
+  await loadMarks();await redraw();schedulePrice();
+};
 $('#msmileshow').onchange=()=>{markingVisible();saveMarking();paintMarks()};
 /* A term structure is marked as a whole row: three coefficients are one
    curve, and a server that took them one at a time would spend two of the
@@ -3985,7 +4033,7 @@ function termBody(param){
 async function applyMark(el){
   const o=mq(), v=el.value.trim();
   /* What the last paste did is about the last paste, not about this box. */
-  QPASTE='';
+  setQPaste('');
   try{
     if(el.dataset.m==='atm'){
       if(v==='')await post('/api/overwrite',{pair:o.pair,kind:'clear_atm',tenor:el.dataset.tenor});
@@ -4048,6 +4096,20 @@ document.addEventListener('click',e=>{
    it, and a paste that crossed from the one to the other would be writing two
    different kinds of thing from one drag of a mouse. */
 let QPASTE='';
+/* A paste note is a receipt, not a state: it says what the drag of a mouse
+   just did, and once it has been read it is only in the way of the button
+   beside it.  So it goes of its own accord.  A *refusal* does not -- nothing
+   was written and the block is still there to be fixed -- so QPROB is left to
+   stand until the next edit answers it. */
+const QPASTE_MS=6000;
+let QPASTET=0;
+function setQPaste(s){
+  QPASTE=s||'';
+  clearTimeout(QPASTET);
+  /* Re-read through paintMarks rather than written into the span, so the line
+     comes back to whatever outranks it -- a refusal raised meanwhile stays. */
+  if(QPASTE)QPASTET=setTimeout(()=>{QPASTE='';if(MARKS)paintMarks()},QPASTE_MS);
+}
 /* Vol points as a sheet writes them: 8.20, "8.20", " 8.2 ", 1,234 or 8.2%.
    Blank comes back as '' and a word as null, and the two are not the same
    answer -- one is a cell to leave alone and the other refuses the paste. */
@@ -4068,19 +4130,32 @@ function qpGrid(text){
 /* The columns a block can fill, and what one is called, for the kind of box
    it was dropped on.  The overwrite is a single column; the quotes are
    however many the surface quotes. */
-function qpCols(kind){return kind==='atm'?['atm']:quoteFields()}
-function qpLabel(kind,f){return kind==='atm'?'overwrite':quoteLabel(f)}
+function qpCols(kind){
+  return kind==='atm'?['atm']:(kind==='ratio'?ratioFields():quoteFields());
+}
+function qpLabel(kind,f){
+  return kind==='atm'?'overwrite':(kind==='ratio'?ratioLabel(f):quoteLabel(f));
+}
+/* Which table the block is read against, which attribute names a column in it,
+   and which rows it has.  The ratio table is its own table with its own tenor
+   list -- it reaches tenors the quotes do not -- so a block dropped on it is
+   planned against that list and never the one above. */
+function qpHost(kind){return kind==='ratio'?'#mratio':'#matm'}
+function qpKey(kind){return kind==='ratio'?'wing':'field'}
+function qpTenors(kind){
+  return ((kind==='ratio'?(MARKS&&MARKS.ratios):(MARKS&&MARKS.atm))||[]).map(r=>r.tenor);
+}
 function qpBox(kind,tenor,field){
+  const key=qpKey(kind);
   return Array.prototype.slice.call(
-    document.querySelectorAll('#matm input[data-m="'+kind+'"]'))
-    .filter(b=>b.dataset.tenor===tenor&&(kind==='atm'||b.dataset.field===field))[0]||null;
+    document.querySelectorAll(qpHost(kind)+' input[data-m="'+kind+'"]'))
+    .filter(b=>b.dataset.tenor===tenor&&(kind==='atm'||b.dataset[key]===field))[0]||null;
 }
 /* The block, read against the table it was dropped on.  Nothing is posted
    from here: it answers with the cells it would write and everything it could
    not, so the refusal and the note are decided in one place. */
 function qpPlan(el,text){
-  const kind=el.dataset.m, QF=qpCols(kind),
-        tenors=(MARKS&&MARKS.atm||[]).map(r=>r.tenor);
+  const kind=el.dataset.m, QF=qpCols(kind), tenors=qpTenors(kind);
   let g=qpGrid(text);
   const noNum=r=>r.every(c=>typeof qpNum(c)!=='number');
   const anyWord=r=>r.some(c=>qpNum(c)===null);
@@ -4088,7 +4163,7 @@ function qpPlan(el,text){
   let labels=null;
   if(g.length&&g.every(r=>qpNum(r[0])===null&&String(r[0]||'').trim()!==''))
     {labels=g.map(r=>r[0]); g=g.map(r=>r.slice(1))}
-  const c0=Math.max(0,QF.indexOf(el.dataset.field));
+  const c0=Math.max(0,QF.indexOf(el.dataset[qpKey(kind)]));
   const r0=Math.max(0,tenors.indexOf(el.dataset.tenor));
   const out={cells:[],bad:[],derived:[],unknown:[],blank:0,past:0};
   g.forEach((row,i)=>{
@@ -4113,9 +4188,10 @@ function qpPlan(el,text){
   return out;
 }
 async function blockPaste(el,text){
-  const kind=el.dataset.m, what=kind==='atm'?'overwrite':'quote';
+  const kind=el.dataset.m,
+        what=kind==='atm'?'overwrite':(kind==='ratio'?'ratio':'quote');
   const plan=qpPlan(el,text);
-  QPASTE='';
+  setQPaste('');
   if(plan.bad.length){
     QPROB=['nothing was pasted: '+plan.bad.slice(0,3).join(' · ')+
            (plan.bad.length>3?' · and '+(plan.bad.length-3)+' more':'')+
@@ -4124,7 +4200,7 @@ async function blockPaste(el,text){
   }
   if(!plan.cells.length){
     QPROB=[];
-    QPASTE='nothing in that paste landed on a '+what+' box';
+    setQPaste('nothing in that paste landed on a '+what+' box');
     paintMarks();return;
   }
   const note=[plan.cells.length+' '+what+'(s) pasted'];
@@ -4135,15 +4211,26 @@ async function blockPaste(el,text){
     (kind==='atm'?' overwrite column':' table')+' ignored');
   QPROB=[];
   /* The overwrite column has no field to send: one column is one number a
-     tenor, and the server writes them against a snapshot the same way. */
+     tenor, and the server writes them against a snapshot the same way.  A
+     ratio's column is a wing rather than a quote field, and it is sent under
+     that name so the server never has to guess which table it came off. */
   const cells=kind==='atm'
-    ?plan.cells.map(c=>({tenor:c.tenor,value:c.value})):plan.cells;
+    ?plan.cells.map(c=>({tenor:c.tenor,value:c.value}))
+    :(kind==='ratio'
+      ?plan.cells.map(c=>({tenor:c.tenor,wing:c.field,value:c.value}))
+      :plan.cells);
   try{
+    /* Each kind is written out where it is posted rather than picked into a
+       variable: a test reads the kinds this page can post straight off the
+       source and checks the server handles every one of them, and it cannot
+       read one that is computed. */
     const r=kind==='atm'
       ?await post('/api/overwrite',{pair:mq().pair,kind:'atm_block',cells:cells})
+      :kind==='ratio'
+      ?await post('/api/overwrite',{pair:mq().pair,kind:'ratios',cells:cells})
       :await post('/api/overwrite',{pair:mq().pair,kind:'quotes',cells:cells});
     QPROB=(r&&r.problems)||[];
-    QPASTE=note.join(' · ');
+    setQPaste(note.join(' · '));
   }catch(e){QPROB=[e.message]}
   await loadMarks(); await redraw(); schedulePrice();
 }
@@ -4151,8 +4238,10 @@ async function blockPaste(el,text){
    block: the browser's own paste does that better than we would. */
 document.addEventListener('paste',e=>{
   const el=e.target;
-  if(!el||!el.dataset||(el.dataset.m!=='quote'&&el.dataset.m!=='atm'))return;
-  if(!el.closest||!el.closest('#matm'))return;
+  if(!el||!el.dataset)return;
+  const pk=el.dataset.m;
+  if(pk!=='quote'&&pk!=='atm'&&pk!=='ratio')return;
+  if(!el.closest||!el.closest(qpHost(pk)))return;
   const text=((e.clipboardData||window.clipboardData)||{getData:()=>''}).getData('text');
   if(!/[\t\n\r]/.test(String(text||'')))return;
   e.preventDefault();
