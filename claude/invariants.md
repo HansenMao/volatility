@@ -463,6 +463,17 @@ for the reasoning behind it. Read this file when working in the area above.
   `volkit.marking` like every other piece of panel state. The marks are
   discarded -- that is the point of a reload -- but putting a marker on a
   different pair is a change nobody asked for.
+- **Emptying a column and giving it back to the tab are two answers, and a
+  control must say which it is.** The ratio table's column heading empties the
+  column (`VolSurface.empty_ratio_column`: every wing in it off its ratio, a
+  null per tenor, which is what emptying each box does); *Clear ratio changes*
+  drops the session's edits (`clear_ratio_overwrite`) and gives the table back
+  to the workbook's `WING_RATIOS` tab. The heading used to post the second:
+  on a desk book every multiple comes off that tab, so there was no overwrite
+  to drop, nothing moved, and the control looked broken on every row that
+  mattered. A test fixture with the tab *absent* is what hid it -- the generated
+  workbook has no `WING_RATIOS`, so every test before that one exercised
+  multiples typed in the session, which is the one case where the two agree.
 - **A card may be shut, but a mark may not be hidden.** The marking screen's
   ATM table shows the marked cut volatility and no longer shows the fitted
   curve beside it: the curve underneath a mark says nothing about the mark in

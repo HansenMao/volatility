@@ -2464,3 +2464,123 @@ class TestDependenceFromHistory(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRelativeValueOnAPeggedPair(unittest.TestCase):
+    """The band signal, and the two lognormal ones standing down for it.
+
+    The grid used to *diagnose* a pegged pair rather than answer for one: the
+    level, shape and history signals all read a volatility as the width of a
+    lognormal distribution, and all the module did about it was emit a warning
+    saying so. The band signal is the comparison that was missing -- the
+    marked smile against the regime mixture at the marked hazard -- and where
+    it can be built the two it replaces stand down with a reason.
+    """
+
+    BAND = Band("EURUSD", 1.05, 1.12, "synthetic, for the test only")
+
+    def grid(self, *, band=True, mode="warn", tenors=("3M",)):
+        from volkit import relvalue
+        from volkit.banded import BandTreatment
+
+        book = Book.from_excel(BOOK, ASOF).load_all(["EURUSD"])
+        book.feed = MarketFeed.load(FEED)
+        surface = book["EURUSD"]
+        if band:
+            surface.band = self.BAND
+            surface.forward_lookup = lambda t: book.forward_at("EURUSD", t)
+            surface.set_band_treatment(BandTreatment(mode=mode))
+        return relvalue.relative_value(book, "EURUSD", None, horizon_days=7, cut="NY",
+                                       tenors=list(tenors))
+
+    def cells(self, grid):
+        return {c.column: c for r in grid.rows for c in r.cells}
+
+    def test_the_lognormal_signals_stand_down_and_the_band_is_scored(self):
+        cells = self.cells(self.grid())
+        wing = cells["25dc"]
+        by = wing.signal
+        self.assertIsNotNone(by["band"].value)
+        self.assertTrue(by["band"].used)
+        for name in ("level", "shape"):
+            self.assertIsNone(by[name].value, name)
+            self.assertFalse(by[name].used, name)
+            self.assertIn("lognormal", by[name].message)
+            self.assertIn("band signal", by[name].message)
+
+    def test_the_at_the_money_is_the_models_input_so_it_is_shown_not_scored(self):
+        """The mixture's concentration is solved to reprice this very option,
+        so the cell is an input and its value is zero by construction. The same
+        statement the shape signal makes at the at-the-money, for the same
+        reason -- and averaging it in would drag the score toward the middle."""
+        band = self.cells(self.grid())["atm"].signal["band"]
+        self.assertEqual(band.value, 0.0)
+        self.assertFalse(band.scorable)
+        self.assertFalse(band.used)
+        self.assertIn("input", band.message)
+
+    def test_the_richness_is_band_plus_carry_rather_than_three_missing_signals(self):
+        """Summing the declared three would be ``None`` on every cell of a
+        pair that has a perfectly good answer."""
+        from volkit import relvalue
+
+        for cell in self.cells(self.grid()).values():
+            parts = [cell.signal[n].value for n in relvalue.BAND_ADDITIVE]
+            if any(v is None for v in parts):
+                self.assertIsNone(cell.richness, cell.column)
+            else:
+                self.assertAlmostEqual(cell.richness, sum(parts), places=12)
+
+    def test_a_band_marked_off_leaves_the_lognormal_comparisons_alone(self):
+        """``off`` is a deliberate statement that the range is not defended,
+        so the signals it would have replaced are the right ones again."""
+        by = self.cells(self.grid(mode="off"))["25dc"].signal
+        self.assertIsNone(by["band"].value)
+        self.assertIn("not defended", by["band"].message)
+
+    def test_a_pair_with_no_band_says_so_where_the_signal_would_be(self):
+        by = self.cells(self.grid(band=False))["25dc"].signal
+        self.assertIsNone(by["band"].value)
+        self.assertIn("PEG_BANDS", by["band"].message)
+
+    def test_the_declared_weight_is_unchanged_so_confidence_still_compares(self):
+        """The contract ``Cell.confidence`` states: the score's share of the
+        declared weight. Band occupies level and shape's slot rather than
+        adding a sixth dial -- a sixth would put 0.50 of permanently
+        unavailable weight on every cell of every pair, and a constant
+        deduction is not information."""
+        from volkit import relvalue
+
+        self.assertNotIn("band", relvalue.WEIGHTS)
+        w = relvalue.cell_weights(relvalue.WEIGHTS)
+        self.assertAlmostEqual(w["band"],
+                               sum(relvalue.WEIGHTS[n] for n in relvalue.BAND_REPLACES),
+                               places=12)
+        banded, plain = self.grid(), self.grid(band=False)
+        self.assertAlmostEqual(sum(banded.weights.values()),
+                               sum(plain.weights.values()), places=12)
+        for grid in (banded, plain):
+            for cell in self.cells(grid).values():
+                if cell.score is None:
+                    continue
+                used = [s for s in cell.signals if s.used]
+                self.assertAlmostEqual(
+                    cell.confidence,
+                    sum(s.weight for s in used) / sum(grid.weights.values()), places=12)
+
+    def test_the_grid_says_it_is_band_native_rather_than_only_raising_a_hand(self):
+        grid = self.grid()
+        said = " ".join(grid.warnings)
+        self.assertIn("band", said)
+        self.assertIn("stood down", said)
+        self.assertIn("peg-carry", said)     # where the forward's own answer lives
+
+    def test_the_page_is_offered_the_band_signal_with_its_derived_weight(self):
+        """The CLI and the page both render from ``SIGNALS``, so a signal the
+        grid scores and the page cannot show would be invisible."""
+        from volkit import relvalue
+
+        offered = {s["name"]: s for s in self.grid().signals}
+        self.assertIn("band", offered)
+        self.assertAlmostEqual(offered["band"]["weight"],
+                               relvalue.cell_weights(relvalue.WEIGHTS)["band"], places=12)

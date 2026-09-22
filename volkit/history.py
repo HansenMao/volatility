@@ -177,6 +177,11 @@ def parse_header(header: str) -> Column | None:
     return Column(header=raw, field=field_name, tenor=tenor, delta=delta)
 
 
+def extra_key(header: str) -> str:
+    """The lookup key for an unrecognised column: letters and digits, lowercased."""
+    return re.sub(r"[^a-z0-9]+", "", str(header).lower())
+
+
 def _is_date_header(header) -> bool:
     return str(header).strip().lower().replace("_", " ") in _DATE_WORDS
 
@@ -192,6 +197,15 @@ class PairHistory:
     atm: dict[str, np.ndarray] = field(default_factory=dict)
     rr: dict[str, dict[str, np.ndarray]] = field(default_factory=dict)   # rr["25"]["1M"]
     bf: dict[str, dict[str, np.ndarray]] = field(default_factory=dict)
+    # Numeric columns this module has no reading of, kept under their own
+    # heading rather than dropped.  A sheet is somebody's file and a column on
+    # it was put there on purpose; a desk that adds one -- the HKMA aggregate
+    # balance beside USDHKD, say -- should be able to ask for it by name
+    # instead of finding it discarded with a note.  Deliberately **not** part
+    # of ``columns`` or of the volatility-unit vote: nothing here has a known
+    # field, so nothing here may influence how the understood columns are read.
+    extras: dict[str, np.ndarray] = field(default_factory=dict)
+    extra_names: dict[str, str] = field(default_factory=dict)   # key -> header as written
     columns: list[Column] = field(default_factory=list)
     problems: list[str] = field(default_factory=list)
 
@@ -212,6 +226,16 @@ class PairHistory:
         i = int(np.searchsorted(np.array(self.dates), first, side="left"))
         j = int(np.searchsorted(np.array(self.dates), last, side="right"))
         return i, j
+
+    def extra(self, header: str) -> np.ndarray | None:
+        """A column kept under its own heading, asked for however it is spelled.
+
+        Matched on letters and digits only and without case, so ``"BAL CLOS
+        Index"``, ``"bal_clos_index"`` and ``"BALCLOSIndex"`` are one column.
+        A sheet's header is whatever Bloomberg pasted into it and is not
+        something a caller should have to reproduce exactly.
+        """
+        return self.extras.get(extra_key(header))
 
     def series(self, field_name: str, tenor: str, delta: int = 25) -> np.ndarray | None:
         key = tenor.upper()
@@ -347,10 +371,23 @@ def _read_sheet(book: pd.ExcelFile, sheet: str, pair: str, vol_unit: str = "auto
         if col is date_col:
             continue
         spec = parse_header(col)
-        if spec is None:
-            hist.problems.append(f"column {str(col)!r} was not understood and is unused")
-            continue
         values = pd.to_numeric(df[col], errors="coerce").to_numpy(dtype=float)
+        if spec is None:
+            # Not a field this module models -- but it is still a column
+            # somebody put on the sheet, so it is kept by name rather than
+            # dropped with a note.  It takes no part in the volatility-unit
+            # vote below, because nothing is known about what it measures.
+            if np.all(np.isnan(values)):
+                hist.problems.append(
+                    f"column {str(col)!r} was not understood and holds no numbers, so it is unused")
+                continue
+            key = extra_key(col)
+            if not key:
+                hist.problems.append(f"column {str(col)!r} has no readable heading and is unused")
+                continue
+            hist.extras[key] = values
+            hist.extra_names[key] = str(col)
+            continue
         if np.all(np.isnan(values)):
             hist.problems.append(f"column {str(col)!r} holds no numbers")
             continue

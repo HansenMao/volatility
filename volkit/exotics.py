@@ -273,3 +273,150 @@ def european_digital(spot: float, strike: float, t: float, forward: float,
                          skew_adjustment=fair - flat, ramp=ramp_pct,
                          strikes=(k_lo, k_hi), vols=(vol_fn(k_lo), vol_fn(k_hi)),
                          notional_ratio=1.0 / width, overhedge_cost=price - fair)
+
+
+@dataclass
+class BandTouchResult(TouchResult):
+    """A touch under the regime mixture, split by the regime that caused it."""
+
+    #: Probability the barrier was hit with the peg still intact.
+    intact: float = 0.0
+    #: Probability it was hit only because the peg broke -- the whole of the
+    #: answer for a barrier outside the band, and the part a lognormal price
+    #: gets wrong for one inside it.
+    broken: float = 0.0
+    #: Probability the peg broke at all over the life, ``1 - exp(-hazard t)``.
+    break_probability: float = 0.0
+    lognormal_probability: float = 0.0
+    reachable_in_band: bool = True
+
+
+def band_touch(spot: float, barrier: float, band, t: float, forward: float,
+               zone, jump, *, is_no_touch: bool = False, paths: int = 40_000,
+               steps: int = 128, seed: int = 12345) -> BandTouchResult:
+    """Touch probability for a pair whose spot lives inside a defended band.
+
+    Everything else in this module prices a touch off a lognormal, which on a
+    pegged pair is wrong in both directions at once.  Inside the band it
+    **overstates** the chance of reaching a level, because a lognormal has no
+    idea the edges are defended and its diffusion does not die as it
+    approaches one.  Outside the band it prices a touch that can only happen
+    if the peg breaks *as though it were ordinary diffusion*, which is the
+    same error the smile module exists to correct (§6) -- and a double
+    no-touch struck on the Convertibility Undertakings is exactly that trade.
+
+    So the path is the regime mixture's, not a lognormal's:
+
+    * while the peg holds, the band position follows the Jacobi target-zone
+      diffusion (``targetzone.py``), whose volatility vanishes at both edges;
+    * the peg breaks at a Poisson time with the **marked** hazard, weak or
+      strong side by the marked share, and from there the pair is an ordinary
+      lognormal at the marked post-break volatility, started at the jump
+      level.
+
+    Monte Carlo, because a first passage under a state-dependent diffusion has
+    no closed form.  The Brownian-bridge correction that removes discrete-
+    monitoring bias is applied with the diffusion coefficient **frozen at each
+    step's start**: exact for the lognormal leg as it is elsewhere in this
+    module, and an approximation for the Jacobi leg, where the coefficient
+    moves within the step.  It errs toward *under*-counting touches near an
+    edge, where the true coefficient is falling -- the conservative direction
+    for a no-touch seller and the reported one either way.
+    """
+    if t <= 0:
+        raise ValueError(f"time to expiry must be positive, got {t!r}")
+    if spot <= 0 or barrier <= 0:
+        raise ValueError(f"spot and barrier must be positive, got {spot!r}, {barrier!r}")
+    width = band.upper - band.lower
+    x0 = (spot - band.lower) / width
+    xb = (barrier - band.lower) / width
+    is_up = barrier > spot
+    hazard = float(getattr(jump, "hazard", 0.0))
+    p_break = 1.0 - math.exp(-hazard * t)
+
+    rng = np.random.default_rng(seed)
+    dt = t / steps
+    sqdt = math.sqrt(dt)
+    kappa, sigma, m = float(zone.kappa), float(zone.sigma), float(zone.m)
+
+    # When the peg breaks, and on which side.
+    tau = (rng.exponential(1.0 / hazard, paths) if hazard > 0
+           else np.full(paths, math.inf))
+    weak = rng.random(paths) < float(getattr(jump, "weak_share", 1.0))
+    broke = tau <= t
+
+    x = np.full(paths, min(max(x0, 1e-9), 1.0 - 1e-9))
+    survive = np.ones(paths)          # probability of NOT having touched
+    hit_intact = np.zeros(paths, dtype=bool)
+    reachable = 0.0 < xb < 1.0
+
+    for i in range(steps):
+        t0, t1 = i * dt, (i + 1) * dt
+        live = (tau > t0)             # the peg is still intact over this step
+        if not live.any():
+            break
+        vol_x = sigma * np.sqrt(np.clip(x * (1.0 - x), 0.0, None))
+        x_next = x + kappa * (m - x) * dt + vol_x * sqdt * rng.standard_normal(paths)
+        x_next = np.clip(x_next, 1e-12, 1.0 - 1e-12)
+        if reachable:
+            hit = (x_next >= xb) | (x >= xb) if is_up else (x_next <= xb) | (x <= xb)
+            # Brownian bridge with the diffusion frozen at the step's start.
+            with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+                expo = -2.0 * (xb - x) * (xb - x_next) / np.maximum(vol_x ** 2 * dt, 1e-300)
+                p_cross = np.exp(np.minimum(expo, 0.0))
+            valid = (x < xb) & (x_next < xb) if is_up else (x > xb) & (x_next > xb)
+            p_cross = np.where(valid & live, p_cross, 0.0)
+            survive = np.where(live, survive * (1.0 - p_cross), survive)
+            survive = np.where(hit & live, 0.0, survive)
+            hit_intact |= hit & live
+        x = np.where(live, x_next, x)
+
+    # The peg-intact leg's touch probability, path by path.
+    touched_intact = np.where(hit_intact, 1.0, 1.0 - survive)
+    # A path whose peg broke can only have touched *before* the break through
+    # the leg above; after it, the lognormal leg answers.
+    intact_only = np.where(broke, 0.0, touched_intact)
+
+    # The break leg: a lognormal from the jump level over the time that is
+    # left, priced with the closed form rather than simulated -- it is an
+    # ordinary flat-barrier touch once the jump has happened.
+    weak_jump = float(getattr(jump, "weak_jump", 0.0))
+    strong_jump = float(getattr(jump, "strong_jump", 0.0))
+    weak_vol = float(getattr(jump, "weak_vol", 0.10))
+    strong_vol = float(getattr(jump, "strong_vol", 0.10))
+    after = np.zeros(paths)
+    idx = np.flatnonzero(broke)
+    for j in idx:
+        level = forward * (math.exp(weak_jump) if weak[j] else math.exp(-strong_jump))
+        left = t - float(tau[j])
+        if left <= 0:
+            after[j] = 1.0 if ((level >= barrier) if is_up else (level <= barrier)) else 0.0
+            continue
+        vol = weak_vol if weak[j] else strong_vol
+        if (level >= barrier) if is_up else (level <= barrier):
+            after[j] = 1.0          # the jump itself carried it through
+            continue
+        after[j] = touch_probability(level, barrier, vol, left, 0.0, is_up=is_up)
+    # Before the break the path was still in the band, so it may have touched
+    # there too; the two are combined as "either".
+    before_break = np.where(broke, touched_intact, 0.0)
+    combined = np.where(broke, 1.0 - (1.0 - before_break) * (1.0 - after), intact_only)
+
+    p = float(np.mean(combined))
+    se = float(np.std(combined, ddof=1) / math.sqrt(paths))
+    price = (1.0 - p) if is_no_touch else p
+    lognormal = touch_probability(spot, barrier, weak_vol, t,
+                                  implied_drift(spot, forward, t), is_up=is_up)
+    return BandTouchResult(
+        price=price, probability=p, barrier_used=barrier,
+        method=f"regime mixture, monte carlo ({paths:,} paths x {steps} steps, "
+               f"Jacobi band + Poisson break)",
+        std_error=se,
+        unhedged_price=(1.0 - lognormal) if is_no_touch else lognormal,
+        overhedge_cost=0.0,
+        intact=float(np.mean(intact_only)),
+        broken=float(np.mean(np.where(broke, combined, 0.0))),
+        break_probability=float(np.mean(broke)),
+        lognormal_probability=float(lognormal),
+        reachable_in_band=reachable,
+    )

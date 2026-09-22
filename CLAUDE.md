@@ -32,15 +32,16 @@ sheet it was written against is kept as `files/vol_marks_legacy_format.xlsx`
 against it -- and the comparison still runs from `legacy/`. volkit reads
 either (§4).
 
-- ~37,000 lines across 52 modules, 1145 tests, `unittest` only (no pytest).
-  Tests live in fifteen modules under `tests/`, sharing `tests/_support.py`:
+- ~37,000 lines across 54 modules, 1332 tests, `unittest` only (no pytest).
+  Tests live in seventeen modules under `tests/`, sharing `tests/_support.py`:
   `test_numerics`, `test_calendar`, `test_marketdata`, `test_pricing`,
-  `test_marks`, `test_workbook`, `test_marketmaker`, `test_quotegrammar`,
-  `test_screens`, `test_listed`, `test_analysis`, `test_kace`, plus
-  `test_agent.py` (the desk agent, §17), `test_marking.py` (the marking
-  agent, §18) and `test_publish.py` (the bulk export, §22). The first twelve
-  were one 15,008-line `test_volkit.py`; they are split so a change to one
-  area can be re-run on its own in seconds.
+  `test_pegcarry`, `test_targetzone`, `test_marks`, `test_workbook`,
+  `test_marketmaker`,
+  `test_quotegrammar`, `test_screens`, `test_listed`, `test_analysis`,
+  `test_kace`, plus `test_agent.py` (the desk agent, §17), `test_marking.py`
+  (the marking agent, §18) and `test_publish.py` (the bulk export, §22). The
+  first twelve were one 15,008-line `test_volkit.py`; they are split so a
+  change to one area can be re-run on its own in seconds.
 - Runtime deps: numpy, scipy, pandas, openpyxl, xlwt (the Murex `.xls`
   writer, pure Python). Plus `tzdata` on Windows.
 - Deliberately no `pysabr`, `xlrd`, `tkcalendar`, and no web framework.
@@ -82,6 +83,22 @@ sabr       Hagan 2002 + calibration (closed-form alpha, global sweep)
 smile      arbitrage-constrained SVI, vanna-volga, cached slices
 banded     pegged pairs: Beta-on-band body + hazard-rate jump leg, and the
            marked treatment deciding how much the surface takes notice of it
+targetzone the band as a *process*: the Jacobi (Wright-Fisher) target zone
+           whose support is exactly the band, whose volatility dies at each
+           defended edge, and whose stationary law is exactly the Beta body
+           ``banded`` already prices with, at concentration 2k/sigma^2. Both
+           conditional moments are closed form, so today's band position gives
+           the body at every horizon; estimated off the spot history, it turns
+           the concentration from a free parameter into a measurement and the
+           at-the-money into a prediction. Measures, never marks
+pegcarry   the same peg read off the *forward* market: the largest hazard the
+           traded swap points can support, in closed form and with no vol
+           input, beside the one the wings propose; how much of the forward's
+           gap from spot the marked break actually explains, which is what
+           tells a carry-driven forward from a fear-driven one; the two money-
+           market legs and the basis between them, off the feed's own OIS
+           rows; and the aggregate balance off the history sheet, which is the
+           state variable a defended peg runs on
 events     dated vol bumps, weighted per currency and superposed per pair,
            joint height calibration, and the one table they all live in --
            the workbook's EVENTS sheet in memory
@@ -91,7 +108,10 @@ vegaweights how far each tenor moves when one of them is moved: the workbook's
            same shape measured off the historical book
 cross      cross pairs from two legs and a correlation
 surface    ATM + smile, greeks, delta strikes, RR / fly
-exotics    digitals, one-touch / no-touch, overhedge buffers
+exotics    digitals, one-touch / no-touch, overhedge buffers; and, for a
+           pegged pair priced under BAND, the touch the regime mixture gives
+           instead -- a Jacobi path inside the band plus a Poisson break --
+           because a defended edge is not reachable by diffusion at all
 pricing    multi-leg strips, strike/expiry specs, per-leg error isolation, and
            the one-number reading of them the marking screen asks for
 configsheets the workbook's settings tabs -- PEG_BANDS, SPREADS (was
@@ -120,6 +140,8 @@ moments    risk-neutral distribution from a smile; two combined into a cross,
            vol-vol correlation, correlation vol, and the correlation-spot
            correlation that leans it for the RR) holding the combined ATM
 history    historical spot / forwards / quotes; realized vol, skew, kurtosis;
+           and any column it has no reading of, kept by its own heading
+           (``PairHistory.extras``) rather than discarded with a note;
            a cross's legs' realized vol-vol correlation and correlation vol
            (net of sampling noise), and its implied correlation's daily
            correlation with the cross (net of quote noise), which
@@ -129,7 +151,11 @@ relvalue   one score per expiry and strike, in volatility points: implied
            against realized in level and in shape, the roll and the forward
            carry, the cross triangle (legs tied at their realized dependence
            plus a named premium, its uncertainty in the noise floor), and
-           where each cell sits in its own history
+           where each cell sits in its own history. On a pegged pair the level
+           and shape signals stand down and the band signal is scored in their
+           place -- the marked smile against the regime mixture at the same
+           strike -- because neither of them is a comparison where the
+           distribution is bounded
 curves     several vol curves side by side, and the same curve on other dates
 monitor    small panels: what has moved between two points in time, per pair
 quotes     a broker run, in English or in columns: outrights, RR, fly, spreads,
@@ -562,6 +588,14 @@ and what is reported instead** — read it before "fixing" one.
 - No discount curve anywhere; all premiums are undiscounted forward values.
 - Half-day holidays are full days.
 - The band model needs a forward feed, and refuses rather than guessing.
+- A touch on a pegged pair is lognormal unless the pair is priced under `BAND`
+  *and* a target zone has been measured from its history; with no zone the
+  lognormal still answers and `pricing_method` says which engine ran. The
+  overhedge buffers bend the barrier, which the mixture path does not
+  implement, so a leg asking for one also falls back.
+- The target zone's `kappa` is weakly identified -- a decade of daily data
+  still leaves it loose -- so the concentration is reported with a range and
+  the panel warns when the pull is not distinguishable from zero.
 - The cross RR/fly triangle assumes a Gaussian copula unless `CROSS_DEPENDENCE`
   marks a vol-vol correlation, correlation vol and correlation-spot correlation, and ignores the change of
   measure between the legs' domestic currencies either way.
@@ -570,7 +604,8 @@ and what is reported instead** — read it before "fixing" one.
 - Listed-option comparisons are unadjusted for American exercise, futures-vs-
   forward convexity and the exchange settlement time.
 - The relative-value carry signal stretches a first-order break-even into the
-  wings; the shape signal inherits SABR's lack of mean reversion.
+  wings; the shape signal inherits SABR's lack of mean reversion (on a pegged
+  pair it stands down for the band signal, which does not).
 - The managed-float reading is a heuristic on measured numbers and is **not**
   the authority — the workbook's `PEG_BANDS` tab is (§6).
 - The carry weight is not tapered by the regime, on purpose.
@@ -581,7 +616,7 @@ and what is reported instead** — read it before "fixing" one.
 rules.** The essentials:
 
 ```
-python -m unittest discover -s tests -t .   # 1145 tests, ~15m
+python -m unittest discover -s tests -t .   # 1332 tests, ~15m
 python -m unittest tests.test_workbook      # one area, while working on it
 PYTHONUTF8=0 LC_ALL=C python -m unittest discover -s tests -t .  # as a cp1252 box
 python -m volkit check                      # validate the workbook

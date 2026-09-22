@@ -276,6 +276,14 @@ class VolSurface:
     # refuses rather than guessing a level.  Signature: (t years) -> forward
     # or None.
     forward_lookup: object | None = None
+    # The Jacobi target-zone process estimated off this pair's own spot
+    # history (``targetzone.TargetZone``), attached by ``Book
+    # .attach_target_zones`` when a history workbook is loaded.  It is what
+    # lets a *path-dependent* payout know the edges are defended: a touch
+    # priced under ``BAND`` reads it, and without one the touch falls back to
+    # the lognormal and says so.  It is measured, never marked -- unlike the
+    # band treatment beside it, which is the desk's own judgement.
+    target_zone: object | None = None
     # The base currency's discount factor at an expiry, from the feed's OIS
     # rows and forwards, for reading spot deltas.  The Book sets this; without it
     # every delta is a forward delta and the slice says so.  Signature:
@@ -385,16 +393,49 @@ class VolSurface:
         self.ratio_overwrites.setdefault(key, {})[wing] = (
             None if value is None else check_ratio(wing, key, value))
 
+    def empty_ratio_column(self, wing: str) -> list[str]:
+        """Take one wing off its ratio at **every tenor that has one**.
+
+        What the screen's column heading asks for, and what emptying every box
+        down that column does one at a time: the wings are quoted in their own
+        right afterwards and the boxes above them become typeable.
+
+        It is deliberately not ``clear_ratio_overwrite``.  That gives a column
+        back to the workbook's ``WING_RATIOS`` tab, which is the right answer
+        for a multiple this session typed and **no answer at all** for one the
+        tab supplied -- there is no overwrite to drop, so the number does not
+        move and the control looks broken.  That is the bug this exists after:
+        on a desk workbook every ratio comes off the tab, so the heading did
+        nothing on every row that mattered.
+
+        A null per tenor rather than an absence, because "no multiple here" and
+        "no opinion" are different answers and only the first survives a
+        session save.  Tenors with no multiple in force are left alone rather
+        than filled with nulls nobody asked for.  Returns the tenors it moved.
+        """
+        if wing not in RATIO_WINGS:
+            raise ValueError(f"unknown wing {wing!r}; expected one of {', '.join(RATIO_WINGS)}")
+        moved: list[str] = []
+        for row in self.ratio_rows():
+            key = str(row["tenor"]).upper()
+            if getattr(self.effective_ratio(key), wing) is None:
+                continue
+            self.overwrite_ratio(key, wing, None)
+            moved.append(key)
+        return moved
+
     def clear_ratio_overwrite(self, tenor: str | None = None,
                               wing: str | None = None) -> None:
         """Give a multiplier, a tenor, a column, or every change back to the tab.
 
-        A wing with **no tenor** is that whole column, which is what the screen
-        asks for from the column's own heading.  It used to be read as "every
-        change", because the wing was only looked at once a tenor had been
-        named -- one post that cleared the table when the desk meant one
+        A wing with **no tenor** is that whole column.  It used to be read as
+        "every change", because the wing was only looked at once a tenor had
+        been named -- one post that cleared the table when the desk meant one
         multiplier.  Clearing a column row by row from the browser instead
         would be one request per tenor with the curve refitted between them.
+
+        Back to the *tab*, which is not the same as emptying the column -- see
+        :meth:`empty_ratio_column`.
         """
         if wing is not None and wing not in RATIO_WINGS:
             raise ValueError(

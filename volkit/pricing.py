@@ -735,10 +735,32 @@ def _price_leg(book, leg: OptionLeg) -> LegResult:
             raise ValueError(f"barrier must be positive, got {barrier!r}")
         band_note(barrier)
 
+        # A touch under BAND is the one payout in this module that a
+        # lognormal gets wrong in *both* directions: inside a defended band it
+        # overstates the chance of reaching a level, because its diffusion
+        # does not die as it nears an edge, and outside one it prices a touch
+        # that can only happen on a break as ordinary diffusion.  A double
+        # no-touch struck on the Convertibility Undertakings is exactly that
+        # trade.  The mixture answers it where the pair has both a band and a
+        # *measured* process to walk inside it; with no zone attached the
+        # lognormal still answers, and `pricing_method` says which ran.
+        use_band = ((leg.method or surface.method) == "BAND"
+                    and getattr(surface, "band", None) is not None
+                    and getattr(surface, "target_zone", None) is not None
+                    # The overhedge buffers shift or bend the barrier, which
+                    # the mixture path does not implement; a leg asking for
+                    # one gets the lognormal that does, and says so.
+                    and str(leg.overhedge or "none").strip().lower() in ("", "none"))
+
         def touch_value(spot_x: float, fwd_x: float, shift: float) -> exotics.TouchResult:
             # The barrier is where the vol is read: that is the level whose
             # dynamics the payout actually depends on.
             v = vol_at(barrier, fwd=fwd_x, shift=shift)
+            if use_band:
+                return exotics.band_touch(
+                    spot_x, barrier, surface.band_treatment.effective_band(surface.band),
+                    t, fwd_x, surface.target_zone, surface.band_treatment.jump,
+                    is_no_touch=(product == "no_touch"))
             return exotics.one_touch(
                 spot_x, barrier, v, t, fwd_x, is_no_touch=(product == "no_touch"),
                 mode=leg.overhedge, buffer_pct=float(leg.buffer_pct or 0.0),

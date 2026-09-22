@@ -10,7 +10,7 @@ shape of the suite and the two rules that keep it fast and keep it honest.
 
 ## The layout
 
-1,145 tests in fifteen modules under `tests/`, `unittest` only. Twelve of them
+1,332 tests in seventeen modules under `tests/`, `unittest` only. Twelve of them
 were one file:
 
 ```
@@ -22,6 +22,8 @@ tests/test_numerics.py     Black, SABR, smile shape, moments, numeric kernels
 tests/test_calendar.py     dates, calendars, events, settlement conventions
 tests/test_marketdata.py   the feed, market boxes, cross levels from the legs
 tests/test_pricing.py      pricing, the book, banded/peg smiles
+tests/test_pegcarry.py     the swap points' bound on peg-break risk
+tests/test_targetzone.py   the band as a process, and touches inside it
 tests/test_marks.py        marking a curve, a smile, a quote; held fits going stale
 tests/test_workbook.py     config tabs, sessions, reload, vega weights
 tests/test_marketmaker.py  the model, its API, the panel

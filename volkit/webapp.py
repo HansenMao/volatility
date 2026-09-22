@@ -54,7 +54,13 @@ from . import vegaweights
 from .analytics import (TARGETS, carry_table, correlation_table, dependence_table, fair_value_table,
                         fit_correlation_curve, implied_cross_quotes, realized_table,
                         triangle_table)
-from .relvalue import HISTORY_DAYS, SHARED, SIGNALS, WEIGHTS
+from .relvalue import HISTORY_DAYS, SHARED, SIGNALS, WEIGHTS, cell_weights
+
+#: What the page shows beside each signal name.  ``band`` is derived from
+#: the two it replaces rather than declared, so the page reads it from the
+#: same function the grid scores with (``relvalue.cell_weights``) instead of
+#: keeping a second copy of the arithmetic.
+SIGNAL_WEIGHTS = cell_weights(WEIGHTS)
 from .relvalue import panel_from_request as relvalue_panel_from_request
 from .banded import BAND_MODES, BandTreatment, band_panel
 from .curves import CURVE_FIELDS, CURVE_KINDS, FIELD_LABELS, KIND_LABELS
@@ -224,6 +230,7 @@ class BookService:
         # book: it is a different file with a different life, and a failure to
         # read it must not stop the marks loading.
         self.history = None
+        self.zones: dict = {}
         self.history_path = history_path
         self.history_error: str | None = None
         # The knowledge bank is the desk's own file and has a different life
@@ -444,7 +451,8 @@ class BookService:
                     # page shows them and can send its own back; declared
                     # once, in relvalue.py, so the panel cannot offer a
                     # signal the scorer has never heard of.
-                    "signals": [{"key": k, "label": v, "weight": WEIGHTS[k],
+                    "signals": [{"key": k, "label": v, "weight": SIGNAL_WEIGHTS[k],
+                                 "derived": k not in WEIGHTS,
                                  "shared": k in SHARED} for k, v in SIGNALS],
                     "history_days": HISTORY_DAYS,
                 },
@@ -1558,6 +1566,14 @@ class BookService:
                 # one.
                 _write_ratio_block(surface, q.get("cells"))
                 refit = True
+            elif kind == "empty_ratio_column":
+                # The heading's X: every wing in the column taken off its
+                # ratio, which is what emptying each of its boxes does. Not
+                # `clear_ratio` -- that gives the column back to the workbook's
+                # tab, and on a book whose ratios all come off that tab there
+                # is no overwrite to drop and nothing moves.
+                surface.empty_ratio_column(q.get("wing") or "")
+                refit = True
             elif kind == "clear_ratio":
                 surface.clear_ratio_overwrite(q.get("tenor") or None, q.get("wing") or None)
                 refit = True
@@ -2434,6 +2450,13 @@ class BookService:
                                             vol_unit=(payload or {}).get("vol_unit") or "auto")
                 self.history_path = path
                 self.history_error = None
+                # A banded pair's *path-dependent* payouts need a measured
+                # process to walk inside the band, and the history is the only
+                # place it comes from.  Attached here rather than in the Book,
+                # which does not own the history; a pair with no sheet or too
+                # short a window simply keeps no zone and its touches stay
+                # lognormal, saying so.
+                self.zones = self.book.attach_target_zones(self.history) if self.book else {}
             except HistoryError as exc:
                 self.history = None
                 self.history_path = path
@@ -2643,6 +2666,64 @@ class BookService:
             self.dirty = True
             out = self.band(payload)
             out["warnings"] = list(dict.fromkeys(list(out["warnings"]) + warnings))
+            return out
+
+    def band_dynamics(self, q: dict) -> dict:
+        """The band read as a *process*, estimated off this pair's spot history.
+
+        The third source of evidence about one marked thing, beside the band
+        card's own *Fit from the wings* (the option market) and the swap-points
+        card (the forward market). This one is the spot series: it measures the
+        Beta concentration instead of solving it from the at-the-money, which
+        turns the at-the-money into a prediction.
+
+        Read-only and GET-only, like the swap points. It marks nothing, and
+        only the *spread* of the estimate is ever handed to the pricer -- the
+        mean stays the forward's.
+        """
+        from .targetzone import dynamics_panel
+
+        with self._lock:
+            if self.book is None:
+                raise ValueError(self.load_error or "no workbook is loaded")
+            pair = q["pair"]
+            if pair not in self.book:
+                raise ValueError(f"{pair} is not built in this book")
+            hist = None
+            if self.history is not None and pair in self.history:
+                hist = self.history[pair]
+            tenors = [q["tenor"]] if q.get("tenor") else list(self.book.data.tenor_points)
+            days = q.get("days")
+            return dynamics_panel(self.book, pair, hist, tenors,
+                                  cut=q.get("cut", "NY"),
+                                  days=float(days) if days else None)
+
+    def peg_carry(self, q: dict) -> dict:
+        """What the traded swap points say about break risk, for one pair.
+
+        Read-only and GET-only, deliberately: it marks nothing and takes no
+        volatility input, so there is no payload to post and nothing for the
+        browser to own. The treatment it reads is whatever ``set_band`` last
+        marked -- the ceiling depends on the jump specification, so the card
+        is re-read after an Apply rather than kept.
+
+        The loaded history goes in for the aggregate balance alone. It is the
+        state variable a defended peg runs on and it is not on the feed, so
+        without a history workbook the panel says so rather than leaving the
+        block empty.
+        """
+        from .pegcarry import peg_carry_panel
+
+        with self._lock:
+            if self.book is None:
+                raise ValueError(self.load_error or "no workbook is loaded")
+            pair = q["pair"]
+            if pair not in self.book:
+                raise ValueError(f"{pair} is not built in this book")
+            tenors = [q["tenor"]] if q.get("tenor") else list(self.book.data.tenor_points)
+            out = peg_carry_panel(self.book, pair, tenors, cut=q.get("cut", "NY"),
+                                  history=self.history)
+            out["has_feed"] = bool(self.book.market_level(pair, 1.0)["feed"])
             return out
 
     # -- market maker -----------------------------------------------------
@@ -3825,6 +3906,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self.service.session_state(q))
             elif url.path == "/api/band":
                 self._json(self.service.band(q))
+            elif url.path == "/api/peg-carry":
+                self._json(self.service.peg_carry(q))
+            elif url.path == "/api/band/dynamics":
+                self._json(self.service.band_dynamics(q))
             elif url.path == "/api/mm/bank":
                 self._json(self.service.bank_state(q))
             elif url.path == "/api/term":

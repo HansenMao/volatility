@@ -1167,9 +1167,30 @@ class TestWebAssets(unittest.TestCase):
         # And every weight box the panel paints is a signal the scorer
         # declares: the boxes are built from the server's own list, so a
         # weight cannot reach the screen that `resolve_weights` would refuse.
-        from volkit.relvalue import SIGNALS, WEIGHTS
-        self.assertEqual([n for n, _ in SIGNALS], list(WEIGHTS))
+        #
+        # `band` is the one signal that is *derived* rather than declared -- it
+        # stands in for level and shape on a pegged pair and carries their
+        # combined weight -- so it has no entry in WEIGHTS and must never be
+        # posted. The page paints it disabled and under a different id prefix,
+        # which is what keeps it out of `rvWeights()`; an editable box for it
+        # would post a name `resolve_weights` refuses.
+        from volkit.relvalue import SIGNALS, WEIGHTS, cell_weights
+        declared = [n for n, _ in SIGNALS if n in WEIGHTS]
+        self.assertEqual(declared, list(WEIGHTS))
+        derived = [n for n, _ in SIGNALS if n not in WEIGHTS]
+        self.assertEqual(derived, ["band"])
+        # every signal, declared or derived, still has a weight to show
+        weights = cell_weights(WEIGHTS)
+        for name, _ in SIGNALS:
+            self.assertIn(name, weights)
         self.assertIn("rvw-", js, "the weight boxes are not built from the server's list")
+        boxes = js.split("function rvWeightBoxes(){")[1].split("\n}")[0]
+        self.assertIn("s.derived?'rvd-':'rvw-'", boxes,
+                      "a derived weight must not get an editable box")
+        self.assertIn("disabled", boxes)
+        payload = js.split("function rvWeights(){")[1].split("\n}")[0]
+        self.assertIn("'#rvw-'", payload)
+        self.assertNotIn("rvd-", payload, "a derived weight must never be posted")
 
     def test_the_band_card_fields_are_all_understood_by_the_server(self):
         """The band treatment is marked on the screen and read in one place."""
@@ -1192,6 +1213,42 @@ class TestWebAssets(unittest.TestCase):
         from volkit import screens
         owner = {r: s.name for s in screens.SCREENS for r in s.routes}
         self.assertEqual(owner["/api/band/fit"], "marking")
+
+    def test_no_element_id_is_used_twice(self):
+        """A duplicate id binds ``$('#id')`` to whichever came first.
+
+        The other id test asks whether a lookup resolves *at all*, which a
+        duplicate passes: both copies exist. What it cannot see is that one of
+        them is now unreachable -- the spinner writes to the head and the card
+        keeps a stale second copy, or worse, a form field is read off the wrong
+        node. It was introduced the moment the band card moved into a window
+        and its heading was carried along with the head's own spans.
+        """
+        import collections
+        import re as _re
+        html = _source("volkit", "web", "index.html")
+        markup = _re.sub(r"<script>.*?</script>", "", html, flags=_re.S)
+        counts = collections.Counter(_re.findall(r'id="([^"]+)"', markup))
+        self.assertEqual({k: v for k, v in counts.items() if v > 1}, {})
+
+    def test_the_band_window_leaves_its_mark_on_the_screen_behind_it(self):
+        """§4: a card may be shut, but a mark may not be hidden.
+
+        The band card is now a window, so what a desk sees without opening it
+        is the trigger -- and the trigger has to carry the treatment, the
+        edges and the fact that the band has something to say, or a marked
+        hazard is invisible behind a closed window.
+        """
+        html = _source("volkit", "web", "index.html")
+        js = html.split("<script>")[1].split("</script>")[0]
+        painter = js.split("function renderBand(){")[1].split("\n}")[0]
+        for target in ("$('#bandtrigedges')", "$('#bandmarked')", "$('#bandtrigwarn')"):
+            self.assertIn(target, painter, f"the trigger never shows {target}")
+        # and the window shuts itself when the screen moves off a pegged pair
+        loader = js.split("async function loadBand(){")[1].split("\n}")[0]
+        self.assertIn("bandClose()", loader)
+        # Escape shuts it, like the other two windows
+        self.assertIn("bandIsOpen()", js)
 
     def test_every_element_id_referenced_by_the_script_exists(self):
         import re as _re
@@ -1234,6 +1291,53 @@ class TestScreens(unittest.TestCase):
             self.screens.enabled.cache_clear()
 
         self.addCleanup(restore)
+
+    #: Routes that deliberately belong to no screen, because more than one
+    #: reads them: the workbook and session, the feed, the config tabs and the
+    #: startup state.  Listed rather than inferred, so a route that belongs to
+    #: a screen cannot quietly join them -- which is exactly what happened to
+    #: ``/api/peg-carry`` when it was added: unowned, it answered in a build
+    #: the marking tab had been excluded from, and §14 says an excluded
+    #: screen's routes are refused by name.
+    SHARED_ROUTES = {
+        "/api/state", "/api/reload", "/api/auto",
+        "/api/config", "/api/config/pair", "/api/config/save",
+        "/api/feed", "/api/feed/refresh", "/api/history",
+        "/api/session", "/api/session/load", "/api/session/save",
+        "/api/session/export",
+        "/api/workbook/restore", "/api/workbook/versions",
+        "/api/marks/cross",
+    }
+
+    def test_every_dispatched_route_is_owned_by_a_screen_or_is_shared(self):
+        """A route no screen owns is a route no build can turn off.
+
+        ``screens.route_refusal`` works off ownership, so an unowned route
+        answers in every build -- including one the owning tab was excluded
+        from.  The pair of set comparisons is the point: the first catches a
+        route that was added and never claimed, the second a screen claiming
+        one the server does not dispatch.
+        """
+        import re as _re
+        from volkit import screens
+        src = _source("volkit", "webapp.py")
+        routes = set(_re.findall(r'url\.path == "(/api/[^"]+)"', src))
+        owned = {r for s in screens.SCREENS for r in s.routes}
+        self.assertEqual(routes - owned - self.SHARED_ROUTES, set(),
+                         "these routes are dispatched but no screen owns them")
+        self.assertEqual(owned - routes, set(),
+                         "these routes are owned by a screen but never dispatched")
+
+    def test_the_band_cards_three_sources_are_all_the_marking_screens(self):
+        """The band card asks one question of three markets -- the wings, the
+        forward and the spot series -- and all three have to disappear
+        together when the tab does."""
+        from volkit import screens
+        owner = {r: s.name for s in screens.SCREENS for r in s.routes}
+        for route in ("/api/band", "/api/band/fit", "/api/band/dynamics", "/api/peg-carry"):
+            self.assertEqual(owner.get(route), "marking", route)
+        marking = next(s for s in screens.SCREENS if s.name == "marking")
+        self.assertIn("peg-carry", marking.commands)
 
     def test_a_source_tree_has_every_screen(self):
         self.assertEqual(self.screens.enabled(), self.screens.ALL)

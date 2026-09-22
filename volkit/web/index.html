@@ -671,12 +671,19 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
         <div class="msg" id="cmsg"></div>
       </section>
 
-      <section class="card" id="bandcard">
+      <!-- The band work is three read-outs and a form and had grown taller than
+           the column it sat in, so it opens in a window. What stays behind is
+           this: a mark may not be hidden because a card is shut (§4), so the
+           treatment, the edges and the count of anything the band wants said
+           are on the trigger itself. -->
+      <section class="card hide" id="bandtrigger">
         <h2>Managed band <span class="grow"></span>
-          <span class="meta" id="bandstatus"></span>
-          <span class="meta" id="bandedges"></span></h2>
-        <div id="banderr"></div>
-        <div id="bandbody"></div>
+          <span class="meta" id="bandtrigedges"></span></h2>
+        <div class="row" style="align-items:center">
+          <button id="bandopen" style="width:auto">Open band card</button>
+          <span class="meta" id="bandmarked"></span>
+        </div>
+        <div id="bandtrigwarn"></div>
       </section>
 
       <section class="card">
@@ -836,9 +843,14 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
             position and a <b>header row</b> is dropped. A blank cell is left as it was &mdash;
             taking a wing off its ratio is still done by emptying its own box, because a gap in
             a spreadsheet is not that decision &mdash; and one cell that is not a number
-            refuses the whole block. The <b>&times;</b> in a column heading gives that
-            multiplier back to the tab at every tenor; the button below does the whole
-            table.</details>
+            refuses the whole block.
+            <br><br>The two ways out are not the same thing. The <b>&times;</b> in a column
+            heading <b>empties</b> that column: every tenor's wing comes off its ratio and is
+            quoted in its own right, which is what emptying each box below does, and the
+            10-delta boxes above become typeable. <b>Clear ratio changes</b> goes the other
+            way &mdash; it drops what this session changed and gives the table back to the
+            workbook's <code>WING_RATIOS</code> tab, so on a book whose multiples all come off
+            that tab it has nothing to undo.</details>
           <div class="row" style="margin-top:8px"><button class="danger" id="mclearratio">Clear ratio changes</button></div>
         </div>
         <!-- A cross's correlation, tenor by tenor: the curve its ATM is built
@@ -1365,7 +1377,7 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
     this cell's signals, which is the number a mark is moved by and a price is made in — the
     small one under it is the break-even richness (level, shape and carry alone), and the tint is
     a second reading of the big number rather than the only one. Click a cell to take it apart.
-    Five signals:
+    Six signals, of which any one cell is offered five:
     <b>level</b> (marked at-the-money less realized), <b>shape</b> (your smile's shape at this
     strike less the shape the <i>measured</i> &rho; and &nu; imply — the wings against what
     volatility actually did, not against another quote), <b>carry</b> (minus the roll and the
@@ -1374,8 +1386,17 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
     this cell sits in its own recent history) and, on a cross, <b>triangle</b> (your mark against
     what the two legs imply — tied, under <b>Triangle on: realized</b>, at the dependence their
     history shows plus the <b>Premium</b> named, with that estimate&rsquo;s uncertainty in the noise
-    floor; under <b>marked</b>, at <code>CROSS_DEPENDENCE</code> or the Gaussian copula). The first three <i>add</i>: they are the fair-value break-even
-    below moved out from the at-the-money to a strike, so their sum is the volatility-point figure
+    floor; under <b>marked</b>, at <code>CROSS_DEPENDENCE</code> or the Gaussian copula).
+    On a <b>pegged pair</b> the first two are not comparisons at all — both read a volatility as
+    the width of a lognormal distribution the pair does not have — so where the band model can
+    price the expiry they stand down with their reason and <b>band</b> takes their place and their
+    combined weight: your smile less the regime mixture's, at the same strike, at the hazard and
+    jumps marked on the band card. Its at-the-money is zero by statement, because the mixture is
+    calibrated to that very option, so the signal is a reading of the <i>wings</i>. What the
+    forward market says about the same hazard is the swap-points card on the marking screen, and
+    this grid does not repeat it. The first three <i>add</i>: they are the fair-value break-even
+    below moved out from the at-the-money to a strike (<b>band</b> and <b>carry</b> on a pegged
+    pair), so their sum is the volatility-point figure
     in the small figure of the cell, and on the ATM column it is exactly the <b>Rich</b> column
     of the fair-value card. The other two answer a different question, so they are averaged into
     the score but kept out of that sum. Every signal is already in volatility points and the
@@ -2147,6 +2168,36 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
      between, so the band between the two rows is a straight line drawn
      between two calibrations. The panel says that in as many words rather
      than letting a smooth picture imply a model that is not there. -->
+<div class="modal hide" id="bandmodal">
+ <div class="sheet">
+  <div class="sheethead">
+    <h2>Managed band</h2>
+    <span class="meta" id="bandstatus"></span>
+    <span class="meta" id="bandedges"></span>
+    <div class="grow"></div>
+    <button class="ghost" id="bandclose" style="width:auto;padding:5px 12px;font-size:12px">Close</button>
+  </div>
+  <div class="sheetbody">
+      <section class="card" id="bandcard">
+        <!-- The window's own head carries the status and the edges; a second
+             copy of either id here would bind $('#bandstatus') to whichever
+             came first in the document and leave the other never written. -->
+        <h2>Treatment <small>marked, never inferred from the quotes</small></h2>
+        <div id="banderr"></div>
+        <div id="bandbody"></div>
+      </section>
+
+      <section class="card" id="pegcard">
+        <h2>Swap points <span class="grow"></span>
+          <span class="meta" id="pegstatus"></span>
+          <span class="meta" id="pegverdict"></span></h2>
+        <div id="pegerr"></div>
+        <div id="pegbody"></div>
+      </section>
+ </div>
+ </div>
+</div>
+
 <div class="modal hide" id="pctrmodal">
  <div class="sheet">
   <div class="sheethead">
@@ -3586,6 +3637,20 @@ async function pctrOpen(){
     return}
   pctrPaint();
 }
+async function bandOpen(){
+  $('#bandmodal').classList.remove('hide');
+  /* Re-read on open rather than trust what was painted when the pair was
+     chosen: the feed is re-read all morning (§15) and a band is placed against
+     whatever it says now, so a window opened an hour later would otherwise be
+     showing probabilities calibrated against a forward that has moved. */
+  await loadBand();
+}
+function bandClose(){$('#bandmodal').classList.add('hide')}
+function bandIsOpen(){return !$('#bandmodal').classList.contains('hide')}
+$('#bandopen').onclick=bandOpen;
+$('#bandclose').onclick=bandClose;
+$('#bandmodal').addEventListener('click',e=>{if(e.target===$('#bandmodal'))bandClose()});
+
 function pctrClose(){$('#pctrmodal').classList.add('hide');PCTR=null}
 function pctrIsOpen(){return !$('#pctrmodal').classList.contains('hide')}
 $('#mctropen').onclick=pctrOpen;
@@ -3634,7 +3699,7 @@ function paintRatios(){
   host.innerHTML=`<thead><tr><th>Tenor</th>`+
     names.map(n=>`<th title="${esc(n.toUpperCase())} 10d = ${esc(n.toUpperCase())} 25d times this">`+
       esc(ratioLabel(n))+`<span class="x" data-clearwing="${esc(n)}"
-        title="give every tenor's ${esc(n.toUpperCase())} multiple back to the workbook's tab">&times;</span></th>`).join('')+`</tr></thead><tbody>`+
+        title="empty this column: every tenor's ${esc(n.toUpperCase())} wing comes off its ratio and is quoted in its own right, which is what emptying each box below does. Clear ratio changes, under the table, is the other one — it gives the column back to the workbook's tab">&times;</span></th>`).join('')+`</tr></thead><tbody>`+
     (rows.length?rows.map(r=>`<tr><td>${esc(r.tenor)}`+
       (r.marked?' <span class="owdot" title="changed">&bull;</span>':'')+'</td>'+
       names.map(n=>`<td><input data-m="ratio" data-wing="${esc(n)}" data-tenor="${esc(r.tenor)}"
@@ -4001,7 +4066,12 @@ $('#mowfitapply').onclick=()=>owfitRun(true);
 $$('#mowfitrow input[data-owdof]').forEach(i=>i.onchange=saveMarking);
 $('#mclearratio').onclick=async()=>{await post('/api/overwrite',{pair:mq().pair,kind:'clear_ratio'});
   await loadMarks();await redraw();schedulePrice()};
-/* The ✕ in a ratio column's heading.  Delegated, because the table is
+/* The ✕ in a ratio column's heading: the column emptied -- every wing in it
+   off its ratio and quoted in its own right, which is what emptying each box
+   down the column does.  Deliberately not the same post as the button below,
+   which gives the column back to the workbook's tab: on a book whose ratios
+   all come off that tab there is no overwrite to drop, so that post moved
+   nothing and the heading looked dead.  Delegated, because the table is
    repainted on every read and a handler bound to a cell would be bound to a
    heading that is no longer in the page. */
 $('#mratio').onclick=async e=>{
@@ -4010,8 +4080,9 @@ $('#mratio').onclick=async e=>{
   setQPaste('');
   try{
     const r=await post('/api/overwrite',
-      {pair:mq().pair,kind:'clear_ratio',wing:t.dataset.clearwing});
+      {pair:mq().pair,kind:'empty_ratio_column',wing:t.dataset.clearwing});
     QPROB=(r&&r.problems)||[];
+    setQPaste(ratioLabel(t.dataset.clearwing)+' emptied — those wings are quoted in their own right now');
   }catch(err){alert(err.message);return}
   await loadMarks();await redraw();schedulePrice();
 };
@@ -4198,18 +4269,29 @@ async function blockPaste(el,text){
            ' is not a number'];
     paintMarks();return;
   }
+  /* A wing a ratio derives has no box to write into, so the paste passes over
+     it.  That belongs with the refusals and not in the note that fades: on a
+     book whose WING_RATIOS tab covers every tenor it is *every* 10-delta cell
+     of the paste, and a desk that pasted four columns and had two of them
+     silently dropped has a table it believes it typed.  It stands until the
+     next edit answers it, and it says the way round. */
+  const derivedWarn=plan.derived.length
+    ?[plan.derived.length+' wing(s) a ratio derives were NOT written — '+
+      plan.derived.slice(0,3).join(', ')+
+      (plan.derived.length>3?' and '+(plan.derived.length-3)+' more':'')+
+      ': empty that ratio column with the × in its heading to quote them here']
+    :[];
   if(!plan.cells.length){
-    QPROB=[];
+    QPROB=derivedWarn;
     setQPaste('nothing in that paste landed on a '+what+' box');
     paintMarks();return;
   }
   const note=[plan.cells.length+' '+what+'(s) pasted'];
   if(plan.blank)note.push(plan.blank+' blank cell(s) left as they were');
-  if(plan.derived.length)note.push(plan.derived.length+' derived wing(s) skipped');
   if(plan.unknown.length)note.push('no tenor '+plan.unknown.slice(0,3).join(', '));
   if(plan.past)note.push(plan.past+' value(s) past the'+
     (kind==='atm'?' overwrite column':' table')+' ignored');
-  QPROB=[];
+  QPROB=derivedWarn;
   /* The overwrite column has no field to send: one column is one number a
      tenor, and the server writes them against a snapshot the same way.  A
      ratio's column is a wing rather than a quote field, and it is sent under
@@ -4229,7 +4311,7 @@ async function blockPaste(el,text){
       :kind==='ratio'
       ?await post('/api/overwrite',{pair:mq().pair,kind:'ratios',cells:cells})
       :await post('/api/overwrite',{pair:mq().pair,kind:'quotes',cells:cells});
-    QPROB=(r&&r.problems)||[];
+    QPROB=derivedWarn.concat((r&&r.problems)||[]);
     setQPaste(note.join(' · '));
   }catch(e){QPROB=[e.message]}
   await loadMarks(); await redraw(); schedulePrice();
@@ -5604,11 +5686,20 @@ function rvWeightBoxes(){
   const host=$('#rvweights'); const sigs=rvSignals();
   if(!sigs.length){host.innerHTML='';return}
   const keep={}; sigs.forEach(s=>{const el=$('#rvw-'+s.key); if(el)keep[s.key]=el.value});
-  host.innerHTML=sigs.map(s=>'<label title="'+esc(s.label)+'" style="margin:0;width:auto;'+
+  /* A derived weight gets a *disabled* reading and a different id, never an
+     editable box. `band` is not a dial: it stands in for level and shape on a
+     pegged pair and carries their combined weight, so a box for it would post
+     a signal `resolve_weights` refuses by name. The id is what keeps it out of
+     the payload -- rvWeights() reads `#rvw-` and finds nothing. */
+  host.innerHTML=sigs.map(s=>'<label title="'+esc(s.label)+
+    (s.derived?' — derived: this signal stands in for level and shape on a pegged pair and '+
+                'carries their combined weight, so it is not set here':'')+
+    '" style="margin:0;width:auto;'+
     'display:flex;flex-direction:column;gap:2px;font-size:10px;color:var(--muted)">'+esc(s.key)+
-    '<input class="w" id="rvw-'+s.key+'" value="'+
-    esc(keep[s.key]!=null?keep[s.key]:String(s.weight))+'"></label>').join('');
-  sigs.forEach(s=>{$('#rvw-'+s.key).oninput=scheduleRelValue});
+    '<input class="w" id="'+(s.derived?'rvd-':'rvw-')+s.key+'" value="'+
+    esc(keep[s.key]!=null&&!s.derived?keep[s.key]:String(s.weight))+'"'+
+    (s.derived?' disabled':'')+'></label>').join('');
+  sigs.forEach(s=>{const el=$('#rvw-'+s.key); if(el)el.oninput=scheduleRelValue});
 }
 function rvResetWeights(){
   rvSignals().forEach(s=>{const el=$('#rvw-'+s.key); if(el)el.value=String(s.weight)});
@@ -6026,9 +6117,13 @@ function bandPayload(){
   return out;
 }
 async function loadBand(){
-  const card=$('#bandcard');
-  card.classList.toggle('hide',!bandPaired());
-  if(!bandPaired()){BAND=null;return}
+  $('#bandtrigger').classList.toggle('hide',!bandPaired());
+  if(!bandPaired()){
+    /* The window is over the marking screen and the marking screen has just
+       moved to a pair that has no band, so what it is showing is no longer
+       about anything. Shut it rather than leave the last pair's numbers up. */
+    if(bandIsOpen())bandClose();
+    BAND=null;await loadPegCarry();return}
   $('#banderr').innerHTML='';
   try{
     BAND=await api('/api/band?'+qs({pair:$('#mpair').value,cut:$('#mcut').value}));
@@ -6036,6 +6131,7 @@ async function loadBand(){
   }catch(e){
     $('#bandbody').innerHTML='<div class="out err"><div class="v">'+esc(e.message)+'</div></div>';
   }
+  await loadPegCarry();
 }
 async function applyBand(){
   /* The payload is read out of the card *before* anything is written to it.
@@ -6061,6 +6157,10 @@ async function applyBand(){
      nothing, so the chart it would repaint has not changed.  Any other
      method never reads the treatment, so nothing to redraw. */
   if(applied&&$('#mmethod').value==='BAND')await redraw();
+  /* The ceiling is a function of the jump specification, so a swap-points
+     card kept across a re-mark would be a bound on the hazard that was
+     replaced.  Re-read it rather than leave a stale number beside a new one. */
+  if(applied)await loadPegCarry();
 }
 function renderBand(){
   const d=BAND; if(!d)return;
@@ -6092,6 +6192,9 @@ function renderBand(){
       '<button id="bandapply">Apply</button>'+
       '<button id="bandfit" class="ghost" title="Every tenor at once, both wings at both deltas; '+
         'fills the boxes above and marks nothing until Apply">Fit from the wings</button>'+
+      '<button id="banddyn" class="ghost" title="Measure the band\'s own process from the spot '+
+        'history and show the at-the-money it predicts beside the one marked. Measures nothing '+
+        'from the option market and marks nothing">Estimate from history</button>'+
       '<div style="display:flex;flex-wrap:wrap;gap:4px 10px;align-items:center">'+
         BANDFREE_PARAMS.map(x=>'<label style="display:flex;align-items:center;gap:4px;margin:0;'+
           'width:auto;color:var(--muted);font-size:11px;white-space:nowrap"><input type="checkbox" '+
@@ -6099,7 +6202,7 @@ function renderBand(){
           ' style="width:auto"> '+esc(x[1])+'</label>').join('')+
       '</div>'+
     '</div>'+
-    '<div id="bandfitout"></div>'+
+    '<div id="bandfitout"></div><div id="banddynout"></div>'+
     '<div class="meta" style="margin-top:8px">'+esc(d.describe||'')+'</div>';
   if(!d.has_feed)
     f+='<div class="etowarn">! no spot / forward feed for '+esc(d.pair)+'. A band is an '+
@@ -6126,8 +6229,70 @@ function renderBand(){
     'interpolation prices this mixture instead of the lognormal smile; a band weight between '+
     '0 and 100 blends the two, which is a marking convenience and not a model.</details>';
   $('#bandbody').innerHTML=f;
+  $('#bandtrigedges').textContent=$('#bandedges').textContent;
+  $('#bandmarked').textContent=d.describe||'';
+  const said=(d.warnings||[]).length+(d.has_feed?0:1);
+  $('#bandtrigwarn').innerHTML=said
+    ? '<div class="etowarn">'+said+(said===1?' thing this band wants said':
+        ' things this band wants said')+' &mdash; open the card</div>' : '';
   $('#bandapply').onclick=applyBand;
   $('#bandfit').onclick=fitBand;
+  $('#banddyn').onclick=bandDynamics;
+}
+
+/* The third source of evidence about one marked thing. *Fit from the wings*
+   asks the option market what the break regime is; the swap-points card below
+   asks the forward market the same question; this asks the spot series what
+   the band's own process is. It is the only one of the three that is a
+   measurement rather than an inversion of somebody's quote, and it is the only
+   one that has nothing at all to say about break risk -- the process it fits
+   is the peg-intact regime, which is exactly the part the Beta body describes.
+   Marks nothing, and fills no boxes: the concentration is not a field on this
+   card, it is solved from the at-the-money, so there is nothing to write back
+   and the comparison *is* the output. */
+async function bandDynamics(){
+  $('#banderr').innerHTML='';
+  $('#bandstatus').innerHTML='<span class="spin"></span> measuring the band\u2019s process\u2026';
+  try{
+    const d=await api('/api/band/dynamics?'+qs({pair:$('#mpair').value,cut:$('#mcut').value}));
+    if(d.message){$('#banddynout').innerHTML='<div class="meta" style="margin-top:8px">'+
+      esc(d.message)+'</div>'; $('#bandstatus').innerHTML=''; return}
+    const n=d.note||{};
+    let h='<div class="meta" style="margin-top:8px">'+esc(d.describe||'')+'</div>'+
+      '<div class="meta">from '+n.observations+' spot observations, '+esc(n.from||'')+
+      ' to '+esc(n.to||'')+' ('+num(n.days,2)+' years)</div>';
+    const rows=(d.rows||[]).map(r=>{
+      if(r.message)return '<tr><td>'+esc(r.tenor)+'</td><td colspan="5" style="text-align:left;'+
+        'color:var(--muted);white-space:normal">'+esc(r.message)+'</td></tr>';
+      return '<tr><td>'+esc(r.tenor)+'</td><td>'+num(r.position,3)+'</td><td>'+
+        num(r.marked_concentration,3)+'</td><td>'+num(r.dynamics_concentration,3)+'</td><td>'+
+        anPct(r.marked_atm)+' / '+anPct(r.dynamics_atm)+'</td><td'+cls(r.difference)+'>'+
+        anSgn(r.difference)+'</td></tr>';});
+    h+='<div class="anwide" style="margin-top:9px">'+tblHtml(
+      '<th>Tenor</th><th title="where spot sits in the band, 0 at the strong edge">Position</th>'+
+      '<th title="solved from the at-the-money">Concentration marked</th>'+
+      '<th title="measured from the spot series">Concentration measured</th>'+
+      '<th>ATM marked / predicted</th><th>Difference</th>',rows)+'</div>';
+    h+=(d.warnings||[]).map(w=>'<div class="etowarn">! '+esc(w)+'</div>').join('');
+    h+='<details class="hint"><summary>What is being measured, and what is not</summary>'+
+      'The Beta body\'s <b>concentration</b> is normally solved from the at-the-money &mdash; one '+
+      'free parameter per expiry, carrying no memory of where spot sits in the band or how fast '+
+      'it has moved across it. Here it is measured instead, from the band position\'s own '+
+      'process (a Jacobi target zone, whose volatility dies at each defended edge and whose '+
+      'stationary law is exactly this Beta family), and the at-the-money becomes a '+
+      '<i>prediction</i>.<br><br>'+
+      '<b>Only the spread is taken from the measurement.</b> The mean stays the forward\'s, '+
+      'through the same risk-neutral re-centring the mixture always applies, so a disagreement '+
+      'here is about the <i>shape</i> of the band and never about its level.<br><br>'+
+      'The pull toward the centre is the hardest parameter in this family to measure and a '+
+      'decade of daily data still leaves it loose, which is why the concentration comes with a '+
+      'range and why this panel says so out loud when the pull cannot be told from zero. '+
+      '<b>Nothing here is marked</b>, and break risk is not touched: this process describes the '+
+      'peg holding, not the peg failing.</details>';
+    $('#banddynout').innerHTML=h;
+  }catch(e){ $('#banderr').innerHTML='<div class="out err"><div class="v">'+
+    esc(e.message)+'</div></div>'; }
+  $('#bandstatus').innerHTML='';
 }
 let BANDFREE='hazard,weak_share';
 async function fitBand(){
@@ -6177,6 +6342,125 @@ async function fitBand(){
     $('#bandfitout').innerHTML=h;
   }catch(e){ $('#banderr').innerHTML='<div class="out err"><div class="v">'+esc(e.message)+'</div></div>'; }
   $('#bandstatus').innerHTML='';
+}
+
+/* ============================ SWAP POINTS ==============================
+   The same peg, read off the forward market instead of the option market.
+   Nothing here is marked and nothing is posted: the panel is a GET, because
+   its only inputs are the pair, the cut and whichever treatment the band card
+   above last applied.  That is also why it is re-read after an Apply -- the
+   ceiling depends on the jump specification, so a card kept across a re-mark
+   would be a bound on the old one. */
+let PEG=null;
+async function loadPegCarry(){
+  const card=$('#pegcard');
+  card.classList.toggle('hide',!bandPaired());
+  if(!bandPaired()){PEG=null;return}
+  $('#pegerr').innerHTML='';
+  $('#pegstatus').innerHTML='<span class="spin"></span> reading the forwards…';
+  try{
+    PEG=await api('/api/peg-carry?'+qs({pair:$('#mpair').value,cut:$('#mcut').value}));
+    renderPegCarry();
+  }catch(e){
+    /* Beside the table, never over it: the band card's fields are the thing
+       a desk corrects after a refusal, and this panel must not be what takes
+       them off the screen. */
+    PEG=null;
+    $('#pegerr').innerHTML='<div class="out err"><div class="v">'+esc(e.message)+'</div></div>';
+  }
+  $('#pegstatus').innerHTML='';
+}
+function renderPegCarry(){
+  const d=PEG; if(!d)return;
+  const s=d.summary||{};
+  $('#pegverdict').textContent='';
+  if(!d.has_band){
+    $('#pegbody').innerHTML='<div class="bandnone">'+esc(d.message||'')+'</div>';return}
+  const dl=(s.consistent===false)?'diff-bad':'';
+  $('#pegverdict').textContent=s.binding_tenor?
+    (s.binding_tenor+' binds at '+anPct(s.binding_hazard,2)+'%/yr'):'';
+  let f='';
+  if(!d.has_feed)
+    f+='<div class="etowarn">! no spot / forward feed for '+esc(d.pair)+'. This whole '+
+       'read-out is about where the traded forward sits inside the band, so it refuses '+
+       'rather than assuming a level.</div>';
+  const rows=(d.rows||[]).map(function(r){
+    if(r.forward==null)return '<tr><td>'+esc(r.tenor)+'</td>'+
+      '<td colspan="11" style="text-align:left;color:var(--muted);white-space:normal">'+
+      esc(r.message||'')+'</td></tr>';
+    const near=(r.pips_to_lower==null)?null:Math.min(r.pips_to_lower,r.pips_to_upper);
+    return '<tr><td>'+esc(r.tenor)+'</td><td>'+num(r.forward,5)+'</td><td>'+num(r.points,1)+
+      '</td><td'+cls(r.differential)+'>'+anPct(r.differential,2)+
+      '</td><td>'+num(r.position,3)+'</td><td>'+num(near,0)+
+      '</td><td>'+anRaw(r.carry_z,2)+'</td><td>'+anPct(r.ceiling_hazard,2)+
+      '</td><td>'+anPct(r.ceiling_probability,2)+'</td><td>'+anPct(r.marked_hazard,2)+
+      '</td><td'+cls(r.headroom)+'>'+anSgn(r.headroom,2)+
+      '</td><td'+(r.carry_dominated?' class="neg"':'')+'>'+
+      anPct(r.break_share_of_gap,0)+'</td></tr>';});
+  f+='<div class="anwide">'+tblHtml(
+    '<th>Tenor</th><th>Forward</th><th>Points</th><th>r'+esc(d.quote||'')+'&minus;r'+
+    esc(d.base||'')+' %</th><th>Position</th><th>To edge</th><th>z</th>'+
+    '<th>Ceiling %/yr</th><th>P(break) &le; %</th><th>Marked %/yr</th><th>Headroom</th>'+
+    '<th title="how much of the forward gap the marked break regime explains">Break/gap %</th>',
+    rows)+'</div>';
+  const legs=(d.rows||[]).filter(r=>r.quote_rate_implied!=null);
+  f+='<div class="meta" style="margin-top:10px">'+esc(d.rates||'')+'</div>';
+  if(legs.length)
+    f+='<div class="anwide" style="margin-top:6px">'+tblHtml(
+      '<th>Tenor</th><th>r'+esc(d.base||'')+' %</th><th>r'+esc(d.quote||'')+' %</th>'+
+      '<th title="covered parity off the base curve and the traded forward">Implied %</th>'+
+      '<th title="the stated curve less the implied one: on a defended peg, the funding '+
+      'premium">Basis %</th>',
+      legs.map(r=>'<tr><td>'+esc(r.tenor)+'</td><td>'+anPct(r.base_rate,3)+'</td><td>'+
+        anPct(r.quote_rate,3)+'</td><td>'+anPct(r.quote_rate_implied,3)+
+        '</td><td'+cls(r.cip_basis)+'>'+anSgn(r.cip_basis,3)+'</td></tr>'))+'</div>';
+  const bal=d.aggregate_balance||{};
+  if(bal.found){
+    const mv=(bal.change==null)?'':(', '+anRaw(bal.change,0)+' over '+bal.change_days+' days'+
+      (bal.change<0?' (draining)':' (building)'));
+    /* The date is the last one that *has* a number; where the sheet runs on
+       past it the gap goes on the line rather than being left to be noticed. */
+    const when=(bal.date?' at '+esc(bal.date):'')+
+      (bal.stale_days?' <span'+(bal.stale?' class="neg"':'')+'>(sheet runs to '+
+        esc(bal.as_of)+', '+bal.stale_days+' days later)</span>':'');
+    f+='<div class="meta" style="margin-top:9px"><b>'+esc(bal.header)+'</b> off '+
+       esc(bal.sheet)+when+': '+num(bal.latest,0)+' &mdash; '+
+       (bal.percentile==null?'':(bal.percentile*100).toFixed(0)+'% of its own range, ')+
+       bal.observations+' observations, low '+num(bal.low,0)+' high '+num(bal.high,0)+
+       esc(mv)+'</div>';
+  } else {
+    f+='<div class="meta" style="margin-top:9px">'+esc(bal.message||'')+'</div>';
+  }
+  f+='<div class="out'+(dl?' err':'')+'" style="margin-top:9px"><div class="v" '+
+     'style="white-space:normal">'+esc(s.verdict||'')+'</div></div>';
+  f+=(d.warnings||[]).map(w=>'<div class="etowarn">! '+esc(w)+'</div>').join('');
+  f+='<div class="meta" style="margin-top:8px">net '+esc(d.direction||'')+
+     '; E[S | break] = '+num(d.multiple,4)+' &times; forward</div>';
+  f+='<details class="hint"><summary>What the forward is being asked, and what it is not</summary>'+
+    'Under the regime mixture the forward <i>is</i> the risk-neutral mean, so the break '+
+    'probability that puts the peg-intact mean on a band edge is the <b>largest hazard the '+
+    'forward can support</b> &mdash; closed form, and with no volatility quote in it at all. '+
+    'Above it the peg-intact body would have to sit outside the band to pay for the jump, '+
+    'which is the same refusal the band card makes. Where this ceiling and the wings disagree '+
+    'the tighter one is the binding market.<br><br>'+
+    'A <b>negative</b> spot-anchored reading is not an error and is the useful case: it says '+
+    'the forward gap runs opposite to the marked break direction, so the gap is the rate '+
+    'differential and not break premium. The mixture still has to match that forward, and it '+
+    'pays for it by shifting the peg-intact body &mdash; <b>that shift is carry, not a view on '+
+    'where the peg sits.</b></details>'+
+    '<details class="hint"><summary>What the two rate legs and the balance add</summary>'+
+    'The differential on the table above is the <i>net</i>, read off the traded outright. '+
+    'That is right for pricing and wrong for attribution: a forward walking toward an edge '+
+    'because the quote currency\'s rates fell is peg stress, and one walking there because '+
+    'the base currency\'s rose is the Fed. The legs are read from what the feed <b>states</b> '+
+    '&mdash; the anchor\'s own OIS curve and the quote currency\'s, which is kept for exactly '+
+    'this and never used to discount.<br><br>'+
+    'The <b>aggregate balance</b> is the state variable the defence runs on: the Convertibility '+
+    'Undertaking triggers, the HKMA buys the local currency, the balance drains, and the local '+
+    'rate has to rise. It leads the chain, so a differential that has started to compress means '+
+    'one thing with the balance draining and another with it flat. The level is not the signal; '+
+    'where it sits in its own range is.</details>';
+  $('#pegbody').innerHTML=f;
 }
 
 /* ========================== CURVE COMPARISON ==========================
@@ -6944,7 +7228,8 @@ $('#cfgmodal').onclick=e=>{if(e.target===$('#cfgmodal'))cfgClose()};
 document.addEventListener('keydown',e=>{if(e.key!=='Escape')return;
   /* The contour panel opens over the marking screen and the configuration
      window opens over anything, so Escape shuts whichever is showing. */
-  if(pctrIsOpen())pctrClose(); else if(cfgIsOpen())cfgClose()});
+  if(pctrIsOpen())pctrClose(); else if(bandIsOpen())bandClose();
+  else if(cfgIsOpen())cfgClose()});
 $('#cfgaddpair').onclick=()=>{
   const pair=($('#cfgnewpair').value||'').trim().toUpperCase(), atm=$('#cfgnewatm').value.trim();
   if(pair.length!==6||!/^[A-Z]{6}$/.test(pair)){cfgShow('a pair is six letters, like USDSGD',true);return}

@@ -449,10 +449,26 @@ move the screen.
   is not a number refuses the whole block, so half a pasted table is never
   written.
 
-  The **✕** in a column heading gives that multiplier back to the tab at every
-  tenor; **Clear ratio changes** below does the whole table. Clearing one
-  column used to mean emptying its box at every tenor by hand, one request and
-  one refit each.
+  The two ways out of a column are **not the same thing**:
+
+  * The **✕** in a column heading **empties** it. Every tenor's wing comes off
+    its ratio and is quoted in its own right — exactly what emptying each box
+    down the column does, in one write and one refit — and the 10-delta boxes
+    above become typeable.
+  * **Clear ratio changes** goes the other way: it drops what this session
+    changed and gives the table back to the workbook's `WING_RATIOS` tab. On a
+    book whose multiples all come off that tab it has nothing to undo.
+
+  That distinction is the bug the ✕ was written after: it used to post the
+  revert, so on a desk workbook — where every multiple comes off the tab and
+  there is no session edit to drop — nothing moved and the heading looked dead.
+
+  **A wing a ratio derives is not written by a quote paste.** Its box above is
+  read-only, so a block paste of all four quote columns passes over the
+  10-delta cells and says so in a warning that stays up until your next edit —
+  on a book whose tab covers every tenor that is *every* 10-delta cell of the
+  paste. Empty the ratio column with its ✕ first, and the same paste lands
+  whole.
 
   They used to be Excel formulas in the pair sheets, which is why this exists:
   `ST 10D` was `=ST 25D * 3.25` and `RR 10D` was `=RR 25D * 1.85`, a different

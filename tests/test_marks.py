@@ -814,6 +814,65 @@ class TestWingRatioBlockAndColumn(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.svc.overwrite({"pair": "USDJPY", "kind": "clear_ratio", "wing": "wings"})
 
+    # -- the column heading, against multiples the workbook supplied ---------
+    #
+    # The fixture workbook has no WING_RATIOS tab, so every test above works on
+    # multiples typed in the session -- and the column heading was reported
+    # dead on a desk book, where every multiple comes off the tab and there is
+    # no overwrite to drop. These put the tab's own numbers on the surface, the
+    # way `load_wing_ratios` does, and pin both directions out.
+
+    def tab_ratios(self, *tenors):
+        from volkit.surface import WingRatio
+        s = self.svc.book["USDJPY"]
+        for tenor in tenors:
+            s.wing_ratios[tenor.upper()] = WingRatio(st=3.2, rr=1.8)
+        return s
+
+    def test_the_column_heading_empties_a_multiple_the_workbook_supplied(self):
+        """The bug this was written after: the heading posted `clear_ratio`,
+        which gives a column back to the tab, and on a book whose ratios all
+        come off that tab nothing moved."""
+        s = self.tab_ratios("1M", "3M")
+        out = self.svc.overwrite({"pair": "USDJPY", "kind": "empty_ratio_column",
+                                  "wing": "st"})
+        self.assertEqual(out["problems"], [])
+        for tenor in ("1M", "3M"):
+            # Off its ratio, so the 10-delta is quoted in its own right...
+            self.assertIsNone(s.effective_ratio(tenor).st)
+            # ...and the column beside it is untouched. One wing, one decision.
+            self.assertAlmostEqual(s.effective_ratio(tenor).rr, 1.8)
+            # Stored as a null and not as an absence: "no multiple here" and
+            # "no opinion" are different answers, and only the first survives a
+            # session save.
+            self.assertIsNone(s.ratio_overwrites[tenor]["st"])
+        rows = {r["tenor"].upper(): r for r in self.svc.marks({"pair": "USDJPY"})["ratios"]}
+        self.assertIsNone(rows["1M"]["st"])
+        self.assertAlmostEqual(rows["1M"]["st_sheet"], 3.2)
+
+    def test_emptying_a_column_leaves_a_tenor_with_no_multiple_alone(self):
+        """Nulls at tenors that never had a ratio are session state nobody
+        asked for, and they would be written back on a save."""
+        s = self.tab_ratios("1M")
+        self.svc.overwrite({"pair": "USDJPY", "kind": "empty_ratio_column", "wing": "st"})
+        self.assertEqual(list(s.ratio_overwrites), ["1M"])
+
+    def test_the_heading_and_the_button_are_different_answers(self):
+        """The heading empties the column; the button gives it back to the
+        tab. A book with a tab has both, and they must not be one control."""
+        s = self.tab_ratios("1M")
+        self.svc.overwrite({"pair": "USDJPY", "kind": "ratio", "tenor": "1M",
+                            "wing": "st", "value": 4.0})
+        self.svc.overwrite({"pair": "USDJPY", "kind": "clear_ratio", "wing": "st"})
+        self.assertAlmostEqual(s.effective_ratio("1M").st, 3.2)
+        self.svc.overwrite({"pair": "USDJPY", "kind": "empty_ratio_column", "wing": "st"})
+        self.assertIsNone(s.effective_ratio("1M").st)
+
+    def test_emptying_a_wing_nothing_is_called_is_refused(self):
+        with self.assertRaises(ValueError):
+            self.svc.overwrite({"pair": "USDJPY", "kind": "empty_ratio_column",
+                                "wing": "wings"})
+
 
 class TestCrossQuotesFromLegs(unittest.TestCase):
     """A thin cross's RR and ST filled from its two dollar legs."""

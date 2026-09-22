@@ -45,6 +45,8 @@ jobs:
           - test_calendar
           - test_marketdata
           - test_pricing
+          - test_pegcarry
+          - test_targetzone
           - test_marks
           - test_workbook
           - test_marketmaker

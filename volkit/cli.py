@@ -710,7 +710,57 @@ def cmd_band(args) -> int:
           "proposes the regime\n  from both wings at every tenor at once, and marks nothing.")
     if getattr(args, "fit", None):
         failed += _print_band_fit(args, surface, tenors)
+    if getattr(args, "dynamics", False):
+        failed += _print_band_dynamics(args, book, tenors)
     return 1 if failed else 0
+
+
+def _print_band_dynamics(args, book, tenors) -> int:
+    """``volkit band --dynamics``: the band as a process, against the marks.
+
+    The concentration of the Beta body is solved from the at-the-money, one
+    per expiry.  This estimates it from the **spot series** instead and turns
+    the at-the-money into a prediction, so the two can disagree.  It marks
+    nothing.
+    """
+    from .history import load_history
+    from .targetzone import dynamics_panel
+
+    hist = None
+    if getattr(args, "history", None):
+        try:
+            hist = load_history(args.history, book.pairs)
+        except Exception as exc:  # noqa: BLE001
+            print(f"\n  dynamics  history: {type(exc).__name__}: {exc}")
+            return 1
+    out = dynamics_panel(book, args.pair, hist[args.pair] if hist and args.pair in hist else None,
+                         tenors, cut=args.cut, days=getattr(args, "dynamics_days", None))
+    if out["message"]:
+        print(f"\n  dynamics  {out['message']}")
+        return 1
+    note = out["note"]
+    print(f"\n  dynamics  {out['describe']}")
+    print(f"            from {note['observations']} spot observations, {note['from']} to "
+          f"{note['to']} ({note['days']:.2f} years)")
+    print(f"\n  {'tenor':<7}{'position':>10}{'conc mkd':>10}{'conc dyn':>10}"
+          f"{'ATM mkd':>10}{'ATM dyn':>10}{'diff':>9}")
+    bad = 0
+    for r in out["rows"]:
+        if r["message"]:
+            bad += 1
+            print(f"  {r['tenor']:<7}  {r['message']}")
+            continue
+        print(f"  {r['tenor']:<7}{r['position']:>10.3f}{r['marked_concentration']:>10.3f}"
+              f"{r['dynamics_concentration']:>10.3f}{r['marked_atm'] * 100:>9.4f}%"
+              f"{r['dynamics_atm'] * 100:>9.4f}%{r['difference'] * 100:>+9.4f}")
+    for w in out["warnings"]:
+        print(f"  ! {w}")
+    print("\n  The concentration is the Beta body's spread. Marked, it is solved from the "
+          "at-the-money;\n  measured, it comes from the spot series and the at-the-money is a "
+          "prediction. Only the\n  spread is taken from the measurement -- the mean stays the "
+          "forward's, so a disagreement\n  here is about the shape of the band and never about "
+          "the level. Nothing was marked.")
+    return bad
 
 
 def _print_band_fit(args, surface, tenors) -> int:
@@ -759,6 +809,144 @@ def _print_band_fit(args, surface, tenors) -> int:
                       f"{m * 100:>9.4f}{(m - q) * 100:>+9.4f}  {where}")
     print("\n  Apply the proposal with --hazard, --weak-share and the rest; nothing was marked.")
     return 1 if bad else 0
+
+
+def cmd_peg_carry(args) -> int:
+    """What the swap points say about break risk, beside what the wings say.
+
+    The same function the band card's carry read-out calls.  It is a separate
+    command from ``band`` because it answers a separate question off a
+    separate market: ``band`` calibrates the mixture to the option quotes,
+    this bounds it from the traded forward and takes no volatility input at
+    all beyond a descriptive z.
+    """
+    from .pegcarry import peg_carry_panel
+
+    book = _book(args, [args.pair])
+    _apply_band(args, book)
+    tenors = [args.tenor] if args.tenor else None
+    hist = None
+    if getattr(args, "history", None):
+        from .history import load_history
+        try:
+            hist = load_history(args.history, book.pairs)
+        except Exception as exc:  # noqa: BLE001 - the rest of the read-out stands
+            print(f"  ! history: {type(exc).__name__}: {exc}", file=sys.stderr)
+    panel = peg_carry_panel(book, args.pair, tenors, cut=args.cut, history=hist)
+
+    print(f"{args.pair}   valuation {book.clock.now:%Y-%m-%d %H:%M}Z   cut {args.cut}")
+    if not panel["has_band"]:
+        print(f"  {panel['message']}")
+        return 2
+    b = panel["band"]
+    edges = f"[{b['effective_lower']:g}, {b['effective_upper']:g}]"
+    print(f"  band    {edges}"
+          + (f"  (policy [{b['lower']:g}, {b['upper']:g}], overridden here)"
+             if b["overridden"] else "")
+          + (f"\n          {b['note']}" if b["note"] else ""))
+    print(f"  marked  {panel['marked']}")
+    print(f"  break   net {panel['direction']}; E[S | break] = {panel['multiple']:.4f} "
+          f"x forward")
+
+    diff = f"r{panel['quote']}-r{panel['base']}"
+    print(f"\n  {'tenor':<7}{'forward':>10}{'points':>9}{diff:>12}{'pos':>7}"
+          f"{'to edge':>9}{'z':>7}{'ceiling':>10}{'P(brk)':>9}{'marked':>9}{'headroom':>10}"
+          f"{'brk/gap':>9}")
+    failed = 0
+    for r in panel["rows"]:
+        if r["forward"] is None:
+            failed += 1
+            print(f"  {r['tenor']:<7}  {r['message']}")
+            continue
+
+        def num(v, spec, width, scale=1.0):
+            """A number in ``spec``, or a dash right-aligned to the same width.
+
+            ``spec`` carries its own alignment and sign because a format
+            specifier orders them sign-then-width; composing it from parts is
+            how this printed ">11+.2f" and raised on the first row.
+            """
+            return f"{'—':>{width}}" if v is None else format(v * scale, spec)
+
+        near = (min(r["pips_to_lower"], r["pips_to_upper"])
+                if r["pips_to_lower"] is not None else None)
+        print(f"  {r['tenor']:<7}{r['forward']:>10.5f}"
+              f"{num(r['points'], '>9.1f', 9)}{num(r['differential'], '>+10.2f', 11, 100)}%"
+              f"{num(r['position'], '>7.3f', 7)}{num(near, '>9.0f', 9)}"
+              f"{num(r['carry_z'], '>+7.2f', 7)}"
+              f"{num(r['ceiling_hazard'], '>9.2f', 10, 100)}%"
+              f"{num(r['ceiling_probability'], '>8.2f', 9, 100)}%"
+              f"{num(r['marked_hazard'], '>8.2f', 9, 100)}%"
+              f"{num(r['headroom'], '>+9.2f', 10, 100)}%"
+              f"{num(r['break_share_of_gap'], '>8.0f', 9, 100)}%")
+        if r["message"]:
+            print(f"  {'':<7}  {r['message']}")
+
+    _print_peg_rates(panel)
+    _print_peg_balance(panel)
+
+    s = panel["summary"]
+    print(f"\n  verdict  {s['verdict']}")
+    for w in panel["warnings"]:
+        print(f"  ! {w}")
+    print("\n  The ceiling is the largest hazard the forward alone supports: above it the "
+          "peg-intact\n  body would have to sit outside the band to pay for the jump. It uses "
+          "no volatility\n  quote, so where it and the wings disagree the tighter one is the "
+          "binding market.\n  brk/gap is how much of the forward's gap from spot the marked "
+          "break regime explains;\n  the rest is the rate differential, whichever way the "
+          "marked break points.")
+    return 1 if failed else 0
+
+
+def _print_peg_rates(panel) -> None:
+    """The two money-market legs, in their own block rather than more columns.
+
+    The net differential is already on the main table; what this adds is which
+    leg moved it, which is the whole reason the OIS rows are read at all.  It
+    is a block and not four more columns because the main table is already as
+    wide as a terminal takes, and a table nobody can read is a table nobody
+    checks.
+    """
+    rows = [r for r in panel["rows"] if r.get("quote_rate_implied") is not None]
+    print(f"\n  rates   {panel['rates']}")
+    if not rows:
+        return
+    base, quote = panel["base"], panel["quote"]
+    print(f"  {'tenor':<7}{'r' + base:>9}{'r' + quote:>9}{'implied':>10}{'basis':>9}")
+    for r in rows:
+        def pc(v, w=8, sign=""):
+            return f"{'—':>{w}}" if v is None else format(v * 100, f">{sign}{w}.3f")
+        print(f"  {r['tenor']:<7}{pc(r['base_rate'])}%{pc(r['quote_rate'])}%"
+              f"{pc(r['quote_rate_implied'], 9)}%{pc(r['cip_basis'], 8, '+')}%")
+    print(f"  implied is what covered parity off r{base} and the traded forward says r{quote} is; "
+          f"basis is\n  the stated curve less it, and on a defended peg that is the funding "
+          f"premium.")
+
+
+def _print_peg_balance(panel) -> None:
+    """The aggregate balance: the state variable the whole defence runs on."""
+    b = panel.get("aggregate_balance") or {}
+    if not b.get("found"):
+        print(f"\n  balance {b.get('message', 'not read')}")
+        return
+    pct = "" if b["percentile"] is None else f"{b['percentile']:.0%} of its own range"
+    move = ("" if b["change"] is None else
+            f", {b['change']:+,.0f} over {b['change_days']} days"
+            + (" (draining)" if b["change"] < 0 else " (building)"))
+    # The date is the last one that *has* a number, which is not always the
+    # sheet's own last date; where they differ the gap is on the line, not
+    # left for a reader to notice.
+    stamp = f" at {b['date']}" if b["date"] else ""
+    if b.get("stale_days"):
+        stamp += f" (sheet runs to {b['as_of']}, {b['stale_days']} days later)"
+    print(f"\n  balance {b['header']} off {b['sheet']}{stamp}: {b['latest']:,.0f}")
+    print(f"          {pct}, {b['observations']} observations, "
+          f"low {b['low']:,.0f} high {b['high']:,.0f}{move}")
+    if b.get("message"):
+        print(f"          ! {b['message']}")
+    print("          The balance leads the rate: the Convertibility Undertaking triggers, the "
+          "HKMA\n          buys the local currency, the balance drains, and the local rate has "
+          "to rise.")
 
 
 def cmd_analysis(args) -> int:
@@ -3670,7 +3858,28 @@ def build_parser() -> argparse.ArgumentParser:
                         "tenor at once, holding the parameters not named: a comma list of "
                         "hazard, weak_share, weak_jump, strong_jump, weak_vol, strong_vol "
                         "(default hazard,weak_share). Proposes; marks nothing")
+    s.add_argument("--dynamics", action="store_true",
+                   help="estimate the band's own process from the spot history and show the "
+                        "at-the-money it predicts beside the one marked. Measures; marks nothing")
+    s.add_argument("--history", default=_default_history(),
+                   help="historical workbook the band dynamics are estimated from")
+    s.add_argument("--dynamics-days", type=float, metavar="DAYS",
+                   help="estimate the process over this many calendar days only "
+                        "(default: the whole sheet)")
     s.set_defaults(func=cmd_band)
+
+    s = add_command("peg-carry", parents=[common, band_opts],
+                       help="what the swap points say about peg-break risk")
+    s.add_argument("pair")
+    s.add_argument("--tenor", help="one tenor (default: every quoted tenor)")
+    s.add_argument("--feed", default=_default_feed(),
+                   help="spot / forward feed CSV; this whole read-out is about where the "
+                        "traded forward sits inside the band, so it refuses without one")
+    s.add_argument("--cut", default="NY")
+    s.add_argument("--history", default=_default_history(),
+                   help="historical workbook; read for the aggregate balance column, "
+                        "which is the state variable a defended peg runs on")
+    s.set_defaults(func=cmd_peg_carry)
 
     s = add_command("vol", parents=[common, band_opts],
                        help="volatility for a strike and expiry")

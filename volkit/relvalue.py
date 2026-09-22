@@ -172,6 +172,7 @@ WEIGHTS: dict[str, float] = {
 SIGNALS: tuple[tuple[str, str], ...] = (
     ("level", "implied less realized, at the money"),
     ("shape", "marked smile less the smile the measured dynamics imply"),
+    ("band", "marked smile less the band model's, at this strike"),
     ("carry", "minus the roll and the forward carry, as volatility"),
     ("history", "where this volatility sits in its own recent history"),
     ("triangle", "the cross's mark against what its legs imply"),
@@ -181,6 +182,43 @@ SIGNALS: tuple[tuple[str, str], ...] = (
 #: to the fair-value answer.  The other two answer different questions and are
 #: deliberately not summed with them.
 ADDITIVE: tuple[str, ...] = ("level", "shape", "carry")
+
+#: On a pegged pair the ``band`` signal stands in for these two, and the
+#: richness is ``band + carry``.  Both of the replaced signals read a
+#: volatility as the width of a lognormal distribution -- ``level`` against a
+#: realized volatility that is suppressed diffusion, ``shape`` against a SABR
+#: smile fitted to measured dynamics -- and neither is a comparison worth
+#: making where the terminal distribution is a bounded regime mixture (§6).
+BAND_REPLACES: tuple[str, ...] = ("level", "shape")
+BAND_ADDITIVE: tuple[str, ...] = ("band", "carry")
+
+
+def cell_weights(weights: dict[str, float]) -> dict[str, float]:
+    """The weights a cell scores with: the declared ones, plus the derived band.
+
+    ``band`` is deliberately **not** in :data:`WEIGHTS` and is not a dial of
+    its own.  It occupies the same slot as the two signals it replaces and
+    carries their combined weight, which keeps two things true that would
+    otherwise break.
+
+    The declared total stays 1.00 whichever set a pair turns out to have, so
+    ``Cell.confidence`` means the same thing on a pegged pair as on any other.
+    Making it a sixth dial would put 0.50 of permanently unavailable weight on
+    every cell of every pair -- band on the ordinary ones, level and shape on
+    the pegged ones -- and a constant deduction is not information.  That is a
+    different case from the triangle, which the docstring on ``confidence``
+    has in mind: a pair either is a cross or is not, but *no* pair can have
+    both the lognormal signals and the band one, because they are two readings
+    of the same question and only one of them is ever the right reading.
+
+    And a desk that has re-weighted level and shape has re-weighted this by
+    the same act, which is the behaviour to want: the judgement being
+    expressed is how much of the score should rest on the smile comparison,
+    and that judgement does not change with the pair.
+    """
+    out = dict(weights)
+    out["band"] = sum(weights[n] for n in BAND_REPLACES)
+    return out
 
 #: Signals that are a property of the **tenor** and not of the strike, so
 #: every cell of a row carries the identical number.  ``level`` is one by
@@ -539,6 +577,44 @@ def _regime(spot, forward, t: float, atm: float, realized) -> dict:
     return out
 
 
+def _band_context(surface, expiry, cut: str) -> dict:
+    """Whether this tenor's smile can be read against the band model, and why not.
+
+    The band model is the only comparison on a pegged pair that is a
+    comparison at all: the lognormal signals read a volatility as the width of
+    a distribution the pair does not have (§6).  So where it can price, it
+    replaces them -- and where it cannot, the reason travels with the cell
+    rather than leaving a blank column.
+
+    It is run whatever the treatment **mode** is, for the same reason
+    ``banded.band_panel`` is: how much of this smile is peg-break premium is
+    the question a marker asks *before* deciding whether to price off the
+    band.  The one exception is ``off``, which is a deliberate marking that
+    the range is not defended -- there the lognormal comparisons are the right
+    ones and are left alone.
+    """
+    out = {"active": False, "why": "", "slice": None, "label": ""}
+    band = getattr(surface, "band", None)
+    if band is None:
+        out["why"] = (f"{surface.pair} has no managed band, so there is no model to read the "
+                      f"smile against; bands are policy and live on the PEG_BANDS tab")
+        return out
+    effective = surface.band_treatment.effective_band(band)
+    out["label"] = f"[{effective.lower:g}, {effective.upper:g}]"
+    if surface.band_treatment.mode == "off":
+        out["why"] = (f"{surface.pair}'s band is marked off, which is a deliberate statement "
+                      f"that {out['label']} is not defended, so the lognormal comparisons stand")
+        return out
+    try:
+        out["slice"] = surface.slice_at(expiry, "BAND", cut)
+    except Exception as exc:  # noqa: BLE001 - the reason is the useful half
+        out["why"] = (f"the band model cannot price {surface.pair} at this expiry, so the "
+                      f"lognormal comparisons are left in place: {exc}")
+        return out
+    out["active"] = True
+    return out
+
+
 def suppressed_diffusion(rows) -> dict:
     """Does this pair's own history have the managed-float shape?
 
@@ -808,6 +884,11 @@ def relative_value(book, pair: str, hist=None, *, horizon_days: float = 30.0,
     surface = book[pair]
     clock = book.clock
     w = resolve_weights(weights)
+    # What a cell scores with adds the derived band weight; what the grid
+    # *declares* does not, so the denominator behind every confidence is the
+    # same 1.00 it has always been.  See ``cell_weights``.
+    w_cell = cell_weights(w)
+    declared = sum(w.values())
     h = float(horizon_days) / 365.2425
     if h <= 0:
         raise RelativeValueError(f"the horizon must be positive, got {horizon_days!r} days")
@@ -921,6 +1002,7 @@ def relative_value(book, pair: str, hist=None, *, horizon_days: float = 30.0,
             "which is small next to the standard deviation it is being measured with")
 
     rows: list[TenorRow] = []
+    banded_tenors: list[str] = []
     for tenor in names:
         dates = book.fx_dates(pair, tenor)
         t = surface.tenor_years(tenor)
@@ -1008,9 +1090,14 @@ def relative_value(book, pair: str, hist=None, *, horizon_days: float = 30.0,
                 f"carry trade in an option's clothes and the carry signal is carrying most "
                 f"of what this row says; the weight is still yours to set")
 
+        bandctx = _band_context(surface, expiry, cut)
+        if bandctx["active"]:
+            banded_tenors.append(tenor)
+        elif bandctx["label"]:
+            warn.append(bandctx["why"])
         cells = [_cell(surface, hist, tri.get(tenor), tri_note, carry, col, tenor, t, expiry,
-                       atm, rv, rho, nu, window, history_days, h, method, cut, w, forward,
-                       regime)
+                       atm, rv, rho, nu, window, history_days, h, method, cut, w_cell, forward,
+                       regime, bandctx, declared)
                  for col in COLUMNS]
         rows.append(TenorRow(
             tenor=tenor, t=t, expiry=expiry.isoformat(), forward=forward, atm=atm,
@@ -1023,16 +1110,33 @@ def relative_value(book, pair: str, hist=None, *, horizon_days: float = 30.0,
     # Managed-float evidence is a statement about the pair, so it is read off
     # the whole grid and said once rather than repeated on nine rows.
     managed = suppressed_diffusion(rows)
+    if banded_tenors:
+        # The grid is band-native here: ``level`` and ``shape`` have stood
+        # down and the band signal is scored in their place.  This is a
+        # statement about what was scored, not a warning that it could not be.
+        left = sum(w[n] for n in LOGNORMAL_SIGNALS if n not in BAND_REPLACES)
+        warnings.append(
+            f"{pair} is a pegged pair, so at {', '.join(banded_tenors)} the level and shape "
+            f"signals have stood down and the band signal is scored in their place: the "
+            f"marked smile against the regime mixture at the hazard and jumps marked on the "
+            f"BANDS tab, which is the only comparison here that is not reading a volatility as "
+            f"the width of a lognormal. The at-the-money is the model's own input, so it is "
+            f"shown at zero and not scored, and the richness is band plus carry. The history "
+            f"signal still reads a volatility against a lognormal and is {left / declared * 100:.0f}% "
+            f"of the declared weight. What the forward market says about the same hazard is "
+            f"the swap-points read-out (volkit peg-carry), which this grid does not duplicate")
     if managed["managed"]:
-        share = sum(w[n] for n in LOGNORMAL_SIGNALS) / sum(w.values())
+        lognormal = [n for n in LOGNORMAL_SIGNALS if not (banded_tenors and n in BAND_REPLACES)]
+        share = sum(w[n] for n in lognormal) / declared
         warnings.append(
             f"{pair} realized {managed['realized'] * 100:.2f}% against a carry worth "
             f"{managed['carry_to_vol']:.2f} of it, which is the shape of a managed float: "
             f"the carry is compensating jump and devaluation risk rather than diffusion. "
-            f"The level, shape and history signals all read a volatility as the width of a "
-            f"lognormal distribution and are {share * 100:.0f}% of the declared weight here. "
-            f"This is a heuristic on the numbers; a hard defended band is a policy fact and "
-            f"is marked on the PEG_BANDS tab")
+            f"The {', '.join(lognormal)} signal{'' if len(lognormal) == 1 else 's'} read a "
+            f"volatility as the width of a lognormal distribution and "
+            f"{'is' if len(lognormal) == 1 else 'are'} {share * 100:.0f}% of the declared "
+            f"weight here. This is a heuristic on the numbers; a hard defended band is a "
+            f"policy fact and is marked on the PEG_BANDS tab")
 
     return RelativeValue(
         pair=pair, is_cross=is_cross, legs=tuple(info.legs), has_feed=has_feed,
@@ -1041,7 +1145,10 @@ def relative_value(book, pair: str, hist=None, *, horizon_days: float = 30.0,
         history_days=history_days, weights=w,
         columns=tuple({"name": c.name, "label": c.label, "delta": c.delta,
                        "is_call": c.is_call, "target": c.target} for c in COLUMNS),
-        signals=tuple({"name": n, "label": l, "weight": w[n], "shared": n in SHARED}
+        # ``w_cell`` rather than ``w``: the page lists every signal it may be
+        # shown, and band is derived rather than declared.
+        signals=tuple({"name": n, "label": l, "weight": w_cell[n], "shared": n in SHARED,
+                       "derived": n not in WEIGHTS}
                       for n, l in SIGNALS),
         rows=tuple(rows), summary=summarise(rows), unavailable=unavailable,
         managed=managed, warnings=tuple(dict.fromkeys(warnings)),
@@ -1056,7 +1163,8 @@ def relative_value(book, pair: str, hist=None, *, horizon_days: float = 30.0,
 
 def _cell(surface, hist, tri_row, tri_note, carry, col: GridColumn, tenor: str, t: float, expiry,
           atm: float, rv, rho, nu, window: float, history_days: float, h: float,
-          method, cut: str, weights: dict[str, float], forward, regime=None) -> Cell:
+          method, cut: str, weights: dict[str, float], forward, regime=None,
+          band=None, declared: float | None = None) -> Cell:
     """One cell: its strike, its five signals, and what they come to."""
     # -- where on the smile this cell is -------------------------------------
     try:
@@ -1079,8 +1187,37 @@ def _cell(surface, hist, tri_row, tri_note, carry, col: GridColumn, tenor: str, 
                               weight=weights[name], message=message,
                               shared=name in SHARED, scorable=scorable))
 
+    # -- the band model, where the pair has one ------------------------------
+    banded = bool((band or {}).get("active"))
+    if not banded:
+        add("band", message=(band or {}).get("why") or "no managed band for this pair")
+    elif col.name == "atm":
+        # The mixture's Beta concentration is solved so that the model
+        # reprices this very option (``banded._BodyFit.fit``), so the
+        # at-the-money is the model's *input*.  Zero by construction, shown
+        # and not scored -- the same statement the shape signal makes here,
+        # and for the same reason.
+        add("band", 0.0, "the band model is calibrated to the at-the-money, so this cell is "
+                         "an input to it rather than a comparison, and none is scored here",
+            scorable=False)
+    else:
+        try:
+            add("band", implied - float(band["slice"].vol(k)))
+        except (ValueError, ArithmeticError, ConvergenceError) as exc:
+            add("band", message=f"the band model has no volatility at this strike: {exc}")
+
     # -- implied against realized: the level, and then the shape -------------
-    if rv is None:
+    if banded:
+        # Both of these read a volatility as the width of a lognormal, and the
+        # band signal above is the comparison that replaces them.  They stand
+        # down with a reason rather than being scored on a distribution this
+        # pair does not have.
+        why = (f"{surface.pair} is pegged inside {band['label']}, so this reads a volatility as "
+               f"the width of a lognormal distribution the pair does not have; the band signal "
+               f"is the comparison that replaces it")
+        add("level", message=why)
+        add("shape", message=why)
+    elif rv is None:
         add("level", message="no realized volatility over this window")
         add("shape", message="no realized volatility to build a comparison smile on")
     else:
@@ -1183,7 +1320,10 @@ def _cell(surface, hist, tri_row, tri_note, carry, col: GridColumn, tenor: str, 
 
     # -- the score ------------------------------------------------------------
     by_name = {s.name: s for s in signals}
-    additive = [by_name[n].value for n in ADDITIVE]
+    # On a pegged pair the richness is ``band + carry``: the two signals it
+    # replaces are not measured, so summing the declared three would give
+    # ``None`` on every cell of a pair that has a perfectly good answer.
+    additive = [by_name[n].value for n in (BAND_ADDITIVE if banded else ADDITIVE)]
     richness = None if any(v is None for v in additive) else float(sum(additive))
 
     def _counts(s: Signal) -> bool:
@@ -1214,7 +1354,10 @@ def _cell(surface, hist, tri_row, tri_note, carry, col: GridColumn, tenor: str, 
               for s in signals]
     used = [s for s in scored if s.used]
     total = sum(s.weight for s in used)
-    declared = sum(weights.values())
+    # The *declared* total, which does not include the derived band weight --
+    # band occupies level and shape's slot rather than adding to it, so this
+    # is the same denominator on a pegged pair as on any other.
+    declared = sum(weights.values()) if declared is None else float(declared)
     score = (sum(s.weight * s.value for s in used) / total) if total > 0 else None
 
     return Cell(

@@ -530,6 +530,44 @@ class Book:
             surface.forward_lookup = lambda t, p=name: self.forward_at(
                 p, t, expiry=self.clock.datetime_from_years(t).date())
 
+    def attach_target_zones(self, history, *, days: float | None = None) -> dict:
+        """Estimate each banded pair's target-zone process off its own history.
+
+        Called explicitly, after a history workbook is loaded, rather than in
+        the constructor: the Book does not own the history and a surface that
+        silently acquired a measured process on reload would be a price that
+        moved for a reason nobody asked for.
+
+        Returns what happened per pair -- the estimate, or the reason there is
+        none -- because "no zone" is the ordinary case (a pair with no band, a
+        sheet with no spot column, a window too short to measure a pull) and a
+        caller showing a lognormal touch price needs to be able to say why.
+        """
+        from .targetzone import from_history
+
+        out: dict[str, dict] = {}
+        for name in self.banded_pairs():
+            surface = self[name]
+            band = surface.band_treatment.effective_band(surface.band)
+            entry = {"pair": name, "attached": False, "describe": "", "message": ""}
+            hist = None
+            if history is not None and name in history:
+                hist = history[name]
+            if hist is None:
+                entry["message"] = (f"the history workbook has no sheet for {name}, so its band "
+                                    f"dynamics cannot be measured")
+            else:
+                try:
+                    zone, note = from_history(hist, band, days=days)
+                    surface.target_zone = zone
+                    entry.update(attached=True, describe=zone.describe(),
+                                 observations=note["observations"])
+                except ValueError as exc:
+                    surface.target_zone = None
+                    entry["message"] = str(exc)
+            out[name] = entry
+        return out
+
     # -- construction -----------------------------------------------------
     def build_order(self) -> list[str]:
         """Pairs ordered so every cross comes after both of its legs."""

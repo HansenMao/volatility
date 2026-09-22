@@ -380,6 +380,37 @@ is built out of them.
     would drag every score toward the middle. Each cell reports `used` and a
     `confidence` -- the share of the declared weight the score rests on -- so
     a cell scored on one signal and a cell scored on four are not read alike.
+  - **On a pegged pair the grid is band-native.** `level` and `shape` both
+    read a volatility as the width of a lognormal -- `level` against a
+    realized volatility that is suppressed diffusion, `shape` against a SABR
+    smile fitted to measured dynamics -- and neither is a comparison worth
+    making where the terminal distribution is a bounded regime mixture (§6).
+    Where the band model can price the expiry, both **stand down with a
+    reason** and the `band` signal is scored in their place: the marked smile
+    less the mixture's, at the same strike. The richness is then `band +
+    carry` (`relvalue.BAND_ADDITIVE`). Before this the grid only *diagnosed*
+    the problem -- it emitted a warning saying those signals were most of the
+    declared weight -- which is a screen telling a desk it cannot answer.
+    - The **at-the-money is the model's own input**: `banded._BodyFit` solves
+      the Beta concentration so the mixture reprices that very option, so the
+      cell is zero by construction, shown and not scored. The same statement
+      `shape` makes there, for the same reason.
+    - A band marked `off` is a deliberate statement that the range is not
+      defended, so the lognormal comparisons are left alone. So is a pair with
+      no band, and so is an expiry the mixture cannot price -- each with its
+      reason in the cell rather than a blank column.
+    - **`band` is not a sixth dial.** It is absent from `relvalue.WEIGHTS` and
+      takes the combined weight of the two it replaces (`relvalue.cell_weights`,
+      which the page reads too, so the arithmetic has one home). Declaring it
+      separately would put 0.50 of permanently unavailable weight on every cell
+      of every pair -- band on the ordinary ones, level and shape on the pegged
+      ones -- and a constant deduction is not information. That is a different
+      case from the triangle in `Cell.confidence`'s docstring: a pair either is
+      a cross or is not, but *no* pair can have both readings, because they are
+      two answers to one question.
+    - What the **forward** market says about the same hazard is the swap-points
+      read-out (`pegcarry.py`, `volkit peg-carry`), and the grid does not
+      duplicate it -- it names it in the warning instead.
   - **A triangle difference inside its own noise floor is shown and not
     scored**, which is that section's own rule; the wing mapping is
     `atm + fly + rr/2`, the same arithmetic the marked wing is read with.
