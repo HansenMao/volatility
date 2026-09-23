@@ -12,6 +12,7 @@ import argparse
 import dataclasses
 import json
 import math
+import os
 import sys
 from datetime import date, datetime
 from pathlib import Path
@@ -2306,7 +2307,12 @@ def cmd_serve(args) -> int:
           kace_insecure=bool(getattr(args, "kace_insecure", False)),
           kace_log_path=getattr(args, "kace_log", None),
           kace_tier=getattr(args, "kace_tier", None),
-          export_dir=getattr(args, "export_dir", None))
+          export_dir=getattr(args, "export_dir", None),
+          excel_port=getattr(args, "excel_port", 0) or 0,
+          excel_host=getattr(args, "excel_host", None) or "127.0.0.1",
+          excel_token=(getattr(args, "excel_token", None)
+                       or os.environ.get("VOLKIT_EXCEL_TOKEN") or None),
+          excel_busy=getattr(args, "excel_busy", None) or 5.0)
     return 0
 
 
@@ -3360,6 +3366,19 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--host", default="127.0.0.1")
     s.add_argument("--port", type=int, default=8765)
     s.add_argument("--no-browser", action="store_true")
+    s.add_argument("--excel-port", type=int, nargs="?", const=8766, default=0,
+                   help="open the read-only Excel listener on this port (8766 when given "
+                        "bare): a spreadsheet asks for a price with WEBSERVICE() and gets "
+                        "text back. Off by default")
+    s.add_argument("--excel-host", default="127.0.0.1",
+                   help="where the Excel listener binds (default: this machine only). "
+                        "Anything else needs --excel-token")
+    s.add_argument("--excel-token",
+                   help="the token every Excel request must carry, as token=... in the URL "
+                        "(default: VOLKIT_EXCEL_TOKEN in the environment)")
+    s.add_argument("--excel-busy", type=float, default=5.0,
+                   help="seconds an Excel request waits for the book before answering "
+                        "'#ERR: busy' (default 5)")
     s.add_argument("--feed", default=_default_feed(),
                    help="spot / forward feed CSV (pair,tenor,value)")
     s.add_argument("--history", default=_default_history(),

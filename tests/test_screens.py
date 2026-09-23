@@ -6,6 +6,10 @@ paths and helpers are in ``tests/_support.py``.
 
 from __future__ import annotations
 
+import json
+import threading
+import time
+
 from ._support import *  # noqa: F401,F403
 
 
@@ -2279,6 +2283,131 @@ class TestTextFilesAreUtf8(unittest.TestCase):
         page = paths.read_text(self.ROOT / "volkit" / "web" / "index.html")
         self.assertIn("\u2014", page)          # an em dash, which is what broke
         self.assertTrue(page.rstrip().endswith("</html>"))
+
+
+class TestExcelListener(unittest.TestCase):
+    """The read-only port a spreadsheet prices through (``volkit/excel.py``).
+
+    Over real HTTP, because what is being pinned is what ``WEBSERVICE()`` sees:
+    a 200 and a piece of text, every time.  Any other status is a bare
+    ``#VALUE!`` in the cell with the reason thrown away.
+    """
+
+    PAIRS = ("USDJPY", "EURUSD")
+
+    @classmethod
+    def setUpClass(cls):
+        from volkit.webapp import BookService
+        from volkit import excel
+        cls.excel = excel
+        cls.service = BookService(str(book_for(*cls.PAIRS)), ASOF, feed_path=str(FEED))
+        cls.httpd = excel.start(cls.service, "127.0.0.1", 0)
+        cls.base = "http://127.0.0.1:%d" % cls.httpd.server_address[1]
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
+
+    def get(self, path, base=None):
+        import urllib.request
+        with urllib.request.urlopen((base or self.base) + path, timeout=30) as r:
+            self.assertEqual(r.status, 200)
+            self.assertTrue(r.headers["Content-Type"].startswith("text/plain"))
+            return r.read().decode("utf-8")
+
+    def post(self, path, body):
+        import urllib.request
+        req = urllib.request.Request(self.base + path, json.dumps(body).encode(),
+                                     {"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            self.assertEqual(r.status, 200)
+            return r.read().decode("utf-8")
+
+    def test_a_cell_is_the_pricing_screen_s_number_in_full_precision(self):
+        """Same call as the screen, so the same number -- not a rounded copy of it."""
+        leg = {"pair": "USDJPY", "expiry": "3m", "strike": "25DP"}
+        want = self.service.price({"legs": [dict(leg)]})["legs"][0]
+        got = self.get("/xl/price?pair=USDJPY&expiry=3m&strike=25DP")
+        self.assertEqual(got, repr(float(want["vol"])))
+        line = self.get("/xl/price?pair=USDJPY&expiry=3m&strike=25DP&fields=strike,vol,delta_pct")
+        self.assertEqual(line.split("\t"),
+                         [repr(float(want[f])) for f in ("strike", "vol", "delta_pct")])
+
+    def test_a_failure_is_a_200_carrying_the_real_message(self):
+        """``#VALUE!`` is the legacy silent zero with a different face."""
+        got = self.get("/xl/price?pair=USDJPY&expiry=banana")
+        self.assertTrue(got.startswith("#ERR: "), got)
+        self.assertIn("banana", got)
+        self.assertIn("nope", self.get("/xl/price?pair=USDJPY&expiry=1m&field=nope"))
+
+    def test_a_word_the_model_does_not_read_is_refused_by_name(self):
+        """A misspelt ``stirke`` priced the ATM before anybody noticed."""
+        got = self.get("/xl/price?pair=USDJPY&expiry=3m&stirke=25DP")
+        self.assertTrue(got.startswith("#ERR: not read here: stirke"), got)
+
+    def test_a_range_is_one_call_and_a_bad_leg_keeps_its_line(self):
+        got = self.post("/xl/price", {"legs": [
+            {"pair": "EURUSD", "expiry": "1m", "strike": "ATM"},
+            {"pair": "EURUSD", "expiry": "banana"},
+            {"pair": "USDJPY", "expiry": "6m", "strike": "10DC", "notional": 1e7}],
+            "fields": ["vol", "premium_amount"]}).split("\n")
+        self.assertEqual(len(got), 3)
+        self.assertEqual(len(got[0].split("\t")), 2)
+        self.assertTrue(got[1].startswith("#ERR: "))
+        self.assertGreater(float(got[2].split("\t")[1]), 0.0)
+
+    def test_a_quote_is_the_one_engine_s_two_way(self):
+        """And with no width to stand on it is no price, as on the Quote button."""
+        want = self.service.mm_quote({"request_text": "EURUSD 1m ATM",
+                                      "fallback_tier": "default"})["sheet"]["rows"][0]
+        got = self.get("/xl/quote?q=EURUSD%201m%20ATM&tier=default&fields=our_bid,our_ask")
+        self.assertEqual(got, "%r\t%r" % (float(want["our_bid"]), float(want["our_ask"])))
+        bare = self.get("/xl/quote?q=EURUSD%201m%20ATM&field=our_bid")
+        self.assertTrue(bare.startswith("#ERR: "), bare)
+
+    def test_nothing_that_moves_a_mark_is_reachable(self):
+        for path in ("/api/overwrite", "/api/reload", "/api/price", "/"):
+            self.assertTrue(self.get(path).startswith("#ERR: unknown address"), path)
+        self.assertIn("only /xl/price", self.post("/api/overwrite", {"legs": [{}]}))
+
+    def test_a_held_book_answers_busy_rather_than_freezing_the_sheet(self):
+        excel = self.excel.ExcelService(self.service, busy_after=0.05)
+        done = threading.Event()
+
+        def hold():
+            with self.service._lock:
+                done.wait(5)
+        t = threading.Thread(target=hold)
+        t.start()
+        try:
+            time.sleep(0.05)
+            with self.assertRaises(self.excel.Refused) as ctx:
+                excel.get("/xl/ping", {}, None)
+            self.assertIn("busy", str(ctx.exception))
+        finally:
+            done.set()
+            t.join()
+
+    def test_the_token_is_checked_and_off_loopback_it_is_required(self):
+        with self.assertRaises(ValueError):
+            self.excel.start(self.service, "0.0.0.0", 0)
+        httpd = self.excel.start(self.service, "127.0.0.1", 0, token="s3cret")
+        try:
+            base = "http://127.0.0.1:%d" % httpd.server_address[1]
+            self.assertIn("token", self.get("/xl/ping", base))
+            self.assertTrue(self.get("/xl/ping?token=s3cret", base).startswith("volkit\t"))
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_the_serve_command_takes_the_listener_s_options(self):
+        from volkit import cli
+        args = cli.build_parser().parse_args(
+            ["serve", "--excel-port", "--excel-token", "t", "--no-browser"])
+        self.assertEqual((args.excel_port, args.excel_host, args.excel_token),
+                         (8766, "127.0.0.1", "t"))
+        self.assertEqual(cli.build_parser().parse_args(["serve"]).excel_port, 0)
 
 
 if __name__ == "__main__":

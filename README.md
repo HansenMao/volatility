@@ -1503,6 +1503,7 @@ python3 -m volkit events USDJPY --all          # ... including the rows that wei
 
 ```bash
 python3 -m volkit -w files/vol_marks.xlsx serve       # web interface
+python3 -m volkit -w files/vol_marks.xlsx serve --excel-port   # ... and prices for Excel's WEBSERVICE() on :8766
 python3 -m volkit -w files/vol_marks.xlsx check       # validate the workbook
 python3 -m volkit validate USDJPY                    # hunt for competing smile fits
 python3 -m volkit events   USDJPY --horizon 1        # scheduled economic events
@@ -1735,6 +1736,7 @@ the same clock always gives the same numbers.
 | `knowledge` | the per-pair knowledge bank: widths, floors, mid shifts and advisory notes |
 | `marketmaker` | fit the curve to a target, fine tune the wings to a market, and quote it |
 | `webapp`, `web/` | the local web interface |
+| `excel` | the read-only Excel listener: `/xl/price`, `/xl/quote` as text (`files/volkit_excel.bas` for ranges; USER_MANUAL "Prices in Excel") |
 | `screens` | which screens a build has, shown or hidden; the one reader of the build's manifest |
 | `config` | the startup settings file a double-clicked executable reads |
 | `cli` | command line |

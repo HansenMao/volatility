@@ -2554,6 +2554,106 @@ morning.
 
 ---
 
+### Prices in Excel
+
+A spreadsheet can ask volkit for a price and get it back in a cell. Start the
+tool with the **Excel listener** open -- a second, read-only port beside the
+browser's:
+
+```
+volkit serve --excel-port            opens it on 8766, on this machine only
+```
+
+or, for the double-clicked exe, `excel-port = 8766` in `volkit.cfg`. The
+console says `Excel listener (read-only): http://127.0.0.1:8766/xl/price`.
+
+**One cell, no macro.** Excel for Windows has `WEBSERVICE()`, and that is all a
+cell needs:
+
+```
+=NUMBERVALUE(WEBSERVICE("http://127.0.0.1:8766/xl/price?pair=USDJPY&expiry=3m&strike=25DP&field=vol"), ".")
+=NUMBERVALUE(WEBSERVICE("http://127.0.0.1:8766/xl/price?pair="&A2&"&expiry="&B2&"&strike="&C2&"&field=premium_pct_base"), ".")
+=WEBSERVICE("http://127.0.0.1:8766/xl/quote?q="&ENCODEURL("EURUSD 1m 25d RR")&"&tier=default&field=our_bid")
+=WEBSERVICE("http://127.0.0.1:8766/xl/ping")          volkit and the valuation time: is it up?
+```
+
+- **`/xl/price`** is the Pricing tab. A leg is written with the tab's own
+  boxes: `pair`, `expiry` (a tenor or a date), `strike` (`ATM`, `25DP`,
+  `1.12`, ...), and optionally `side`, `notional`, `type`, `cut`, `method`,
+  `spot`, `forward`, `points`, `settle`, `csa`, `product`, `barrier`, ... A
+  word it does not read is refused by name, so a misspelt `stirke` is an
+  error, not an ATM. It prices off whatever the tool's book holds right now,
+  including every mark moved on the screen.
+- **`/xl/quote`** is the Quote button, written the way the Quote box takes it
+  (`q=EURUSD 1m 25d RR`, several lines allowed). It needs a spreading tier
+  (`tier=default`, a column of the `SPREADS` tab) unless the knowledge bank
+  holds a width for it; without one the answer is no price and says why, just
+  as on the screen. A quote asked from Excel names **no client** and is
+  **recorded nowhere** -- the client's lean and the record are the Quote
+  button's.
+- **What comes back** is the field you name: `field=vol` (the default), or
+  `fields=strike,vol,delta_pct` for a tab-separated line (`=TEXTSPLIT(...,
+  CHAR(9))` spreads it across cells in Excel 365). Name a field that does not
+  exist and the answer lists the ones that do: `vol`, `atm_vol`, `strike`,
+  `forward`, `premium_pct_base`, `premium_dom`, `premium_amount`,
+  `pv_amount`, `delta_pct`, `vega_amount`, ... for a price; `our_bid`,
+  `our_mid`, `our_ask`, `width`, `width_source`, ... for a quote.
+- **Numbers are written with a `.`** and in full precision, whatever your
+  locale. Use `NUMBERVALUE(..., ".")`, not `VALUE`: on a desk set to a comma
+  decimal separator `VALUE("6.61")` is an error.
+- **A date typed in a cell** goes in as `TEXT(B2,"yyyy-mm-dd")`. A bare `B2`
+  sends Excel's serial number.
+- **An error is text, never `#VALUE!`.** Anything that could not be priced
+  comes back as a line starting `#ERR:` with the real reason -- the same
+  message the screen would show. `NUMBERVALUE` of it is `#VALUE!`, so keep the
+  raw `WEBSERVICE` cell beside the number while you build a sheet, or wrap it:
+  `=IFERROR(NUMBERVALUE(X, "."), X)`.
+- **`#ERR: busy`** means the book was held for more than five seconds (a
+  reload, a long fit) and the cell gave up rather than freeze Excel. Ask again;
+  `--excel-busy` changes the wait.
+- **When cells update.** `WEBSERVICE` recalculates when a cell it reads
+  changes, not when a mark moves in the tool. `Ctrl+Alt+F9` asks everything
+  again; or make every formula read one refresh cell (`&"&r="&$Z$1`) and change
+  that cell after re-marking. Each call is answered in milliseconds, but Excel
+  asks them one at a time and waits -- a few dozen cells are instant, a few
+  hundred take seconds. Price a range in one call with the macro below.
+- `WEBSERVICE` exists only in **Excel for Windows**, not on a Mac and not in
+  Excel on the web. Python in Excel (`=PY`) runs in Microsoft's cloud and can
+  never reach this port.
+
+**A whole range at once.** `files/volkit_excel.bas` is a small VBA module
+(`Alt+F11`, File > Import, save as `.xlsm`) with three functions:
+
+```
+=VolkitPrice("USDJPY", "3m", "25DP")                       the vol
+=VolkitPrice(A2, B2, C2, "vol,premium_pct_base")           a row of cells
+=VolkitPrices(A1:E40, "vol,premium_amount,delta_pct")      one POST: a row per leg
+=VolkitQuote("EURUSD 1m 25d RR", "our_bid,our_ask", "default")
+```
+
+`VolkitPrices` reads the columns pair, expiry, strike, [side], [notional]; a
+first row saying `pair` is a header. It sends date cells as ISO dates, reads
+numbers back locale-proof, and leaves every `#ERR:` in its own row. The URL
+and the token are the two constants at the top of the module.
+
+**Pricing from another machine.** The listener binds to this machine alone.
+To let a colleague's spreadsheet reach it, give it an address *and a token* --
+it refuses to start on anything but loopback without one:
+
+```
+volkit serve --excel-port 8766 --excel-host 0.0.0.0 --excel-token <something long>
+```
+
+Their URL is then `http://<your machine>:8766/xl/price?...&token=<something long>`
+(or `VOLKIT_TOKEN` in the macro). Only the three `/xl/` addresses are on that
+port: nothing on it can move a mark, reload the workbook, post to kACE or
+write a file, and the browser's own port stays on this machine. The token
+travels in the URL over plain HTTP -- it keeps out a stray browser on the
+network, not somebody reading it. A build without the Market maker tab
+answers `/xl/quote` with the same refusal the tab's own address gives.
+
+---
+
 ## 3. Events
 
 A bump is quoted in **vol points over the 24 hours following the release** —
@@ -2812,6 +2912,7 @@ subcommand.
 volkit check                              validate the workbook, list every problem
 volkit serve --feed market_feed.csv       run the interface
 volkit serve --auto-reload 30             ... and re-read the market feed when it changes
+volkit serve --excel-port                 ... and let a spreadsheet ask for prices ("Prices in Excel")
 volkit tenors USDJPY --cut TK             ATM term structure
 volkit smile  USDJPY 2026-11-23           the smile at one expiry
 volkit vol    USDJPY 2026-11-23 --strike 152 --forward 149.9

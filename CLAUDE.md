@@ -207,6 +207,12 @@ ask        the third agent: a question in English about what the tool holds --
            the bank -- answered from the record with every fact sourced. Reads
            everything, writes nothing
 webapp     JSON API + stdlib server;  web/index.html is the whole front end
+excel      the read-only Excel listener (`serve --excel-port`): /xl/price is
+           `BookService.price`, /xl/quote is `BookService.mm_quote`, answered
+           as text for WEBSERVICE(). Always a 200; a failure is a line starting
+           `#ERR:` with the real message. Own port, loopback unless a token is
+           set, nothing on it moves a mark, and a book held past `--excel-busy`
+           answers busy rather than freezing the sheet
 cli        every screen has a command-line equivalent
 screens    which screens a build has, shown or hidden; the one reader of the
            build's manifest, and of --enable-tab

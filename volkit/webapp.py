@@ -38,6 +38,7 @@ from .feed import FeedError, load_for
 from .listed import (GREEK_FIELDS, UNDERLYINGS, WEIGHTINGS, panel_from_request,
                      positions_from_request)
 from . import dtcc
+from . import excel as excel_mod
 from .archive import Archive, ArchiveError
 from . import rules as rules_mod
 from .knowledge import KnowledgeBank, KnowledgeError, RULE_INSTRUMENTS, RULE_KINDS, SIZE_BASES
@@ -4097,8 +4098,15 @@ def serve(path: str, host: str = "127.0.0.1", port: int = 8765,
           kace_scenario: str = kace_mod.DEFAULT_SCENARIO, kace_url: str | None = None,
           kace_ca: str | None = None, kace_insecure: bool = False,
           kace_log_path: str | None = None, kace_tier: str | None = None,
-          export_dir: str | None = None) -> None:
-    """Start the local server (blocking)."""
+          export_dir: str | None = None, excel_port: int = 0,
+          excel_host: str = "127.0.0.1", excel_token: str | None = None,
+          excel_busy: float = excel_mod.DEFAULT_BUSY_AFTER) -> None:
+    """Start the local server (blocking).
+
+    ``excel_port`` opens the Excel listener (``excel.py``) beside it, on the
+    same book: read-only, text answers, its own host and token.  0 leaves it
+    shut.
+    """
     Handler.service = BookService(path, clock, feed_path, history_path, bank_path,
                                   session_path, auto_reload, archive_path,
                                   agent_chats, agent_sdr, ingest_state_path, dtcc_proxy,
@@ -4148,6 +4156,15 @@ def serve(path: str, host: str = "127.0.0.1", port: int = 8765,
         watched = ", ".join(w["path"] for w in Handler.service.auto_state()["watching"])
         print(f"  auto-load the feed every {Handler.service.auto_interval:g}s: "
               f"{watched or '(no feed file)'}")
+    excel_httpd = None
+    if excel_port:
+        # Refused before anything listens when the host is not loopback and
+        # there is no token -- the whole server stops, rather than coming up
+        # without the port somebody asked for.
+        excel_httpd = excel_mod.start(Handler.service, excel_host, excel_port,
+                                      excel_token, excel_busy)
+        print(f"  Excel listener (read-only): http://{excel_host}:{excel_port}/xl/price"
+              + ("  (token required)" if excel_token else ""))
     if open_browser:
         threading.Timer(0.6, lambda: webbrowser.open(url)).start()
     try:
@@ -4156,4 +4173,7 @@ def serve(path: str, host: str = "127.0.0.1", port: int = 8765,
         print("\nstopped")
     finally:
         Handler.service.stop_watching()
+        if excel_httpd is not None:
+            excel_httpd.shutdown()
+            excel_httpd.server_close()
         httpd.server_close()

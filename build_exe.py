@@ -106,6 +106,9 @@ USER_DATA = [
     # The startup settings file.  Staged, never bundled: the whole point of it
     # is to be edited beside the exe, and paths.find_data_file() looks there.
     "files/volkit.cfg",
+    # The VBA module for pricing a range from Excel (USER_MANUAL, "Prices in
+    # Excel"): imported into a desk spreadsheet, so it has to be beside the exe.
+    "files/volkit_excel.bas",
     "USER_MANUAL.md",
 ]
 
