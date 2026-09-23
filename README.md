@@ -1224,8 +1224,10 @@ The panel has two halves. **Input**, on the left:
   `SHADES` (the ATM mid shift by channel — 0.2 under the mark on Bloomberg
   for the G7 and G7 Cross pairs, nothing for the EM/PM four), `COS_WIDTHS`
   (how far under the mid the COS bid sits, per pair and tenor, one-sided),
-  and `EXPORT_PAIRS` (which pairs each channel publishes, in the file's
-  order, with the file's label, the curve it is fed from and where it stops),
+  and `EXPORT_PAIRS` (which pairs each channel publishes by default, in the
+  file's order, with the file's label, the curve it is fed from and where it
+  stops; the picker offers the book's and the overlay's pairs beside them,
+  unticked, for a run that wants one this table does not carry),
   plus `CROSS_CORR` (a cross's correlation per tenor, **COS only**: a cross it
   names goes into the COS file with its ATM off its two dollar legs at that
   correlation; the book and the other channels never read it).

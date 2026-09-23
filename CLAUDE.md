@@ -516,7 +516,12 @@ to safely amend.
   neither source supplies is refused by name** (§22). The book or the
   overlay is a *source chosen per pair* (`sources`), never a global switch;
   widths, shades, labels, formatting and the log are the same either way and
-  the coverage names which pair came from where. A channel's pair list, its
+  the coverage names which pair came from where. **`EXPORT_PAIRS` is a
+  channel's default pair list, not its ceiling**: `universe_for` offers the
+  book's and the overlay's pairs beside it, unticked, and an unlisted pair
+  goes out only when it is named -- fed from itself, spelled the file's own
+  way, capped where the channel's own rows agree they stop, and still refused
+  by name by any table that has no row for it. A channel's pair list, its
   widths and its shades are tables in the workbook (`EXPORT_PAIRS`,
   `MARKET_WIDTHS` + `ADD_UPS`, `WING_WIDTHS`, `SPREADS`, `SHADES`),
   hand-typed, edited on the Vol bulk processing screen and read everywhere,

@@ -503,6 +503,15 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
 .queued{color:var(--warn)}
 .etoheld{font-style:normal;margin-left:4px;padding:1px 5px;border-radius:20px;font-size:9.5px;
   font-weight:650;background:color-mix(in srgb,var(--warn) 18%,transparent);color:var(--warn)}
+/* Type-to-filter on currency selects (ccyPick below). */
+.ccypick{position:fixed;z-index:1000;background:var(--panel);border:1px solid var(--line);border-radius:8px;
+  box-shadow:0 6px 24px rgba(0,0,0,.18);padding:6px;min-width:150px;display:flex;flex-direction:column;gap:5px}
+.ccypick input{padding:5px 7px;font-size:12px;text-transform:uppercase}
+.ccypick ul{list-style:none;margin:0;padding:0;max-height:260px;overflow:auto}
+.ccypick li{padding:4px 8px;border-radius:5px;cursor:pointer;font-size:12px;font-variant-numeric:tabular-nums;white-space:nowrap}
+.ccypick li.on{background:var(--accent);color:#fff}
+.ccypick li.cur{font-weight:650}
+.ccypick .none{color:var(--muted);font-size:11.5px;padding:4px 8px}
 </style>
 </head>
 <body>
@@ -939,7 +948,17 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
         <!-- The curve the overwrites describe.  The marking agent's own fit
              (marking.propose) aimed at the overwrite column, with the free
              knobs ticked here by name rather than planned.  Shown with the
-             overwrite column and only then: the column is its target curve. -->
+             overwrite column, and kept up while a fit is held.
+
+             What the fit produced is a picture and not a receipt: the
+             targets it was aimed at stay on the graph after the column they
+             were read from has been cleared, and the book curve drawn
+             against them is the book's own ATM curve *as it stands*,
+             repainted on every mark.  So the way to finish a mark by hand --
+             fit, clear the column, then nudge the curve card -- has the
+             targets it is aiming at still on the screen and the miss under
+             them moving as the curve moves.  Dropped by the button, or by
+             leaving the pair. -->
         <div class="hide" id="mowfitrow" style="margin-top:11px">
           <div class="row" style="flex-wrap:wrap;gap:10px;align-items:center">
             <b style="font-size:12px;width:auto">Fit the curve to the overwrites</b>
@@ -958,10 +977,21 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
               style="width:auto;padding:5px 12px;font-size:12px">Propose</button>
             <button id="mowfitapply"
               style="width:auto;padding:5px 12px;font-size:12px">Apply to curve</button>
-            <label style="margin:0;display:flex;align-items:center;gap:5px;width:auto;font-size:11px"
+            <!-- `flex:none`: a tick box whose words are the control does not
+                 shrink.  Left to shrink it was squeezed to one word a line
+                 the moment a third button joined this row, and a wrapping row
+                 has a next line for it. -->
+            <label style="margin:0;display:flex;align-items:center;gap:5px;width:auto;flex:none;font-size:11px"
               title="once the fitted parameters are on the curve, take off the overwrites it was fitted to; a tenor beyond the fit cutoff keeps its overwrite, because nothing else marks it">
               <input type="checkbox" id="mowfitclear" style="width:auto"> and clear the overwrites it fits</label>
-            <span class="grow"></span><span class="meta" id="mowfitstale"></span>
+            <button class="ghost hide" id="mowfitdrop"
+              style="width:auto;padding:5px 12px;font-size:12px"
+              title="take the held targets, the fitted curve and this table off the graph; the curve itself is not touched, and the overwrite column is not touched either">Drop the targets</button>
+            <span class="grow"></span>
+            <!-- A sentence, not a chip.  Left in the flex row it was squeezed
+                 into a column one word wide the moment a second button joined
+                 it, so it takes the whole of the next line instead. -->
+            <span class="meta" id="mowfitstale" style="flex:0 0 100%;margin-top:2px"></span>
           </div>
           <details class="hint" style="margin-top:6px"><summary>What is fitted, and what
             Apply writes</summary>The targets are the <b>overwrites</b> in the column above,
@@ -977,6 +1007,20 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
             <b>Propose</b> reads, <b>Apply</b> writes: it re-runs the fit on the overwrites as
             they are then and puts the fitted parameters on the curve, exactly as typing them
             into the curve card would. The overwrites stay unless the box beside it is ticked.
+            <br><br>What is drawn afterwards is <b>held</b>. The <b>targets</b> the fit was aimed
+            at and the <b>fitted curve</b> stay on the graph once it has run &mdash; through an
+            apply, through <b>Clear ATM overwrites</b>, through the overwrite column being emptied
+            one box at a time &mdash; because a target is what the mark is aiming at and
+            clearing the column is part of marking, not the end of it. <b>Book now</b> is the
+            other line: the pair&rsquo;s own ATM curve <i>as the book holds it</i>, read again on
+            every mark, so typing into the <b>curve card</b> moves it under the targets and
+            <b>RMSE now</b> and the <b>Miss</b> column move with it. Right after an apply the two
+            curves are the same line; they part as soon as the curve is marked again, and
+            <b>at the fit</b> then appears beside the RMSE with what the fit itself left.
+            The graph is a picture of the curve, not of the overwrites: an overwrite laid over a
+            tenor is a mark on top of the curve and is not in either line. <b>Drop the targets</b>
+            takes the held picture down, and so does changing the pair; neither touches the curve
+            or the column.
           </details>
           <div id="mowfitout" style="margin-top:8px"></div>
         </div>
@@ -1679,7 +1723,7 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
       <section class="card"><h2>Output <small>where the marks go, and which source each pair is read from</small></h2>
         <div class="row" style="flex-wrap:wrap;gap:8px;align-items:flex-end">
           <div class="f"><label>Destination</label><select id="xchan" style="width:150px"></select></div>
-          <div class="f" title="which of the channel's pairs go, and from where: the channel's own list is the EXPORT_PAIRS table below; a pair the overlay carries can be read from it or from the book">
+          <div class="f" title="which pairs go, and from where: the channel's own list (the EXPORT_PAIRS table below) opens ticked, and under it every other pair the book builds or the overlay carries — tick one and it goes out too, fed from itself and spelled the file's own way. A pair the overlay carries can be read from it or from the book">
             <label>Pairs and sources</label>
             <details class="mmpick" id="xpick"><summary id="xpicksum">every pair</summary>
               <div class="mmpicklist" id="xpairs" style="min-width:300px"></div></details></div>
@@ -1699,7 +1743,7 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
           <div class="f" id="xdatef" title="the date the file name carries; blank is the book's valuation date"><label>File date</label><input id="xdate" placeholder="book's" style="width:104px"></div>
         </div>
         <div class="mmknob" style="margin-top:8px">
-          <label id="xkeyl" title="post each pillar's ATM two-way and wings alone, and no calendar-day ATM nodes"><input type="checkbox" id="xkey"> key tenors only</label>
+          <label id="xkeyl" title="post each pillar's ATM two-way and wings alone, with its tenor (1M, O/N) as the Maturity rather than a date, and no calendar-day ATM nodes"><input type="checkbox" id="xkey"> key tenors only</label>
           <label id="xinterpl" title="a day between two pillars takes a width read across between them"><input type="checkbox" id="xinterp"> interpolate widths</label>
           <label id="xconfl" title="write the file even though its date and this machine's disagree (a book loaded as of yesterday, a file built after midnight)"><input type="checkbox" id="xconfirmdate"> date as the book</label>
           <label title="build and show, send nothing, log nothing"><input type="checkbox" id="xdry"> dry run</label>
@@ -3280,10 +3324,19 @@ function loadMarking(){
     i=>{i.checked=v.corrfit_dof.indexOf(i.dataset.corrdof)>=0});
   markingVisible();
 }
+/* The last fit to the overwrites, held: `{pair, sig, r, applied}`, with `r`
+   the server's answer.  Declared up here rather than beside the fit's own
+   code because `markingVisible` below reads it -- the row stays up while a
+   fit is held, and a `let` further down the file would be in its dead zone
+   when `loadMarking` first calls that. */
+let OWFIT=null;
 function markingVisible(){
   $('#matmowrow').classList.toggle('hide',!$('#matmowshow').checked);
-  /* The fit's target curve is the overwrite column, so it is shown with it. */
-  $('#mowfitrow').classList.toggle('hide',!$('#matmowshow').checked);
+  /* The fit's target curve is the overwrite column, so it is shown with it --
+     and stays up while a fit is held, because the targets outlive the column
+     they were read from: clearing the overwrites is a step in marking the
+     curve by hand, not a reason to take away what it is aimed at. */
+  $('#mowfitrow').classList.toggle('hide',!($('#matmowshow').checked||owfitHeld()));
   $('#msmilebody').classList.toggle('hide',!$('#msmileshow').checked);
   /* Nothing is hidden by shutting the bump: what it makes are per-tenor ATM
      overwrites, which the overwrite count in this card's heading already
@@ -3328,6 +3381,11 @@ function paintMarks(){
   const ow=$('#matmowshow').checked;
   const nown=MARKS.atm.filter(r=>r.overwrite!=null).length;
   $('#matmowcount').textContent=(!ow&&nown)?`· ${nown} marked`:'';
+  /* The held fit is drawn against the book curve *as it stands*, so it is
+     repainted with the rest of this card and not only when its own buttons
+     are pressed: every route that marks something ends in `loadMarks`, and
+     this is where the line under the targets follows it. */
+  owfitPaint();
   owfitStale();
   corrfitStale();
   const qn=$('#mquotenote');
@@ -4004,46 +4062,112 @@ function revSpan(r,what){
     esc(what)+' held in <b>'+num(r.reversion_range[0],2)+'</b>–<b>'+num(r.reversion_range[1],2)+'</b>'+
     (r.reversion_house?' (house)':' (agent card)')+'</span>';
 }
-let OWFIT=null;
 function owSignature(){
   return MARKS?JSON.stringify([MARKS.atm.filter(r=>r.overwrite!=null).map(r=>[r.tenor,r.overwrite]),revSig()]):'';
 }
+/* How many overwrites the column holds now -- which is not how many targets
+   the graph is holding.  A held fit keeps the ones it was aimed at. */
+function owColumnCount(){return MARKS?MARKS.atm.filter(r=>r.overwrite!=null).length:0}
+function owfitHeld(){return !!(OWFIT&&OWFIT.r&&OWFIT.r.fitted&&OWFIT.r.rows.length)}
 function owfitStale(){
-  const stale=!!(OWFIT&&(OWFIT.pair!==mq().pair||OWFIT.sig!==owSignature()));
-  $('#mowfitstale').textContent=stale?'the overwrites or the mean-reversion range have changed since this proposal — propose again':'';
-  $('#mowfitstale').className=stale?'msg bad':'meta';
+  const el=$('#mowfitstale'), drop=$('#mowfitdrop');
+  if(!OWFIT){el.textContent='';el.className='meta';drop.classList.add('hide');return}
+  /* An apply reloads the marks underneath this, and the column it leaves --
+     cleared or not -- is the column this answer now belongs to.  Adopted on
+     the first paint after the write instead of compared against the column
+     the fit was read from, which would call every apply stale. */
+  if(OWFIT.sig==null)OWFIT.sig=owSignature();
+  drop.classList.toggle('hide',!owfitHeld());
+  const moved=OWFIT.pair!==mq().pair||OWFIT.sig!==owSignature();
+  if(moved&&owfitHeld()&&owColumnCount()===0){
+    /* The column emptied under a held fit is what this card is for, not a
+       reason to run it again: the targets stay on the graph and the curve is
+       marked towards them by hand. */
+    const n=OWFIT.r.rows.length;
+    el.textContent=n+' target'+(n===1?'':'s')+' held · the book curve follows every mark';
+    el.title='the overwrite column is empty and these targets are the ones this fit was aimed '+
+      'at, kept on the graph so the curve can be marked towards them by hand. Drop the targets '+
+      'takes them off';
+    el.className='meta';
+  }else{
+    el.textContent=moved?'the overwrites or the mean-reversion range have changed since this proposal — propose again':'';
+    el.title='';
+    el.className=moved?'msg bad':'meta';
+  }
 }
 function owfitDof(){return $$('#mowfitrow input[data-owdof]').filter(i=>i.checked).map(i=>i.dataset.owdof)}
-async function owfitRun(apply){
-  const out=$('#mowfitout');
-  out.innerHTML='<span class="spin"></span> '+(apply?'fitting and applying':'fitting')+'…';
-  let r;
-  try{
-    r=await post('/api/atm/fit',Object.assign({pair:mq().pair,dof:owfitDof(),apply:!!apply,
-                                 clear_overwrites:$('#mowfitclear').checked},revRange()));
-  }catch(e){OWFIT=null;owfitStale();out.innerHTML='<div class="msg bad">'+esc(e.message)+'</div>';return}
+/* The book's own ATM curve at the fit's tenors, as the book holds it now.
+   Read off the marking table rather than off the fit, so the line on the
+   graph is the curve after every mark since -- which is the point of holding
+   the picture up once the fit has been applied.  `curve` and not `marked`:
+   the fit aimed at the curve, an overwrite is a mark laid on top of one, and
+   a line that jumped to the overwrites would be comparing a target with
+   itself. */
+function owfitBookNow(rows){
+  const by={};((MARKS&&MARKS.atm)||[]).forEach(r=>{by[String(r.tenor).toUpperCase()]=r.curve});
+  return rows.map(x=>{const v=by[String(x.tenor).toUpperCase()];
+    return (v==null||!isFinite(v))?null:v});
+}
+/* What a held fit looks like on the screen: the targets it was aimed at, the
+   curve it produced, and -- read again every time -- the curve the book
+   actually holds.  Repainted from `paintMarks`, so every mark on this screen
+   moves the book line and the miss under it; nothing here is re-fitted, and
+   nothing here writes.  Split out of `owfitRun` for exactly that reason: a
+   picture that only a button can redraw is a picture that goes stale the
+   moment the curve card is touched, which is where a mark is finished by
+   hand. */
+function owfitPaint(){
+  if(!OWFIT||!OWFIT.r)return;
+  /* Hidden, so `clientWidth` is 0 and the chart would be drawn at a fallback
+     width and then stretched when the row opens.  Opening it repaints. */
+  if($('#mowfitrow').classList.contains('hide'))return;
+  const out=$('#mowfitout'), r=OWFIT.r, applied=OWFIT.applied;
   const pts=k=>['initial_vol','long_term_vol','short_addon'].indexOf(k)>=0;
   const names=r.rows.map(x=>x.tenor);
+  const now=owfitBookNow(r.rows);
+  /* The miss as it stands rather than as the fit left it: measured off the
+     book curve, so a hand mark on the curve card moves it. */
+  const miss=r.rows.map((x,i)=>now[i]==null?null:now[i]-x.target);
+  const have=miss.filter(v=>v!=null);
+  const rmse=have.length?Math.sqrt(have.reduce((a,v)=>a+v*v,0)/have.length):null;
+  let wi=-1;miss.forEach((v,i)=>{if(v!=null&&(wi<0||Math.abs(v)>Math.abs(miss[wi])))wi=i});
+  /* Straight after an apply the book *is* the fitted curve and there is only
+     one number to report.  Once it has been marked again there are two, and
+     the fit's own is the one that needs saying it is history. */
+  const drift=r.rows.some((x,i)=>now[i]!=null&&Math.abs(now[i]-x.after)>5e-5);
   const head=!r.fitted
     ?'<div class="msg bad">the curve was not fitted</div>'
-    :'<div class="msg '+(apply?'ok':'')+'">'+(apply
+    :'<div class="msg '+(applied?'ok':'')+'">'+(applied
         ?'fitted parameters applied to the '+esc(r.pair)+' curve'+
-          (r.cleared.length?'; overwrites cleared at '+esc(r.cleared.join(', ')):'; the overwrites are still on')
+          (r.cleared.length?'; overwrites cleared at '+esc(r.cleared.join(', '))
+                           :'; the overwrites it fitted were left on')
         :'proposal: '+esc(r.evidence))+'</div>'+
-      '<div class="mmstat" style="margin-top:4px"><span>RMSE <b>'+vnum(r.rmse)+'</b> vol pts</span>'+
-      '<span>worst <b>'+vsgn(r.max_error)+'</b> at '+esc(r.max_error_tenor)+'</span>'+
+      '<div class="mmstat" style="margin-top:4px">'+
+      '<span title="the book curve against the held targets, as both stand now">RMSE now <b>'+
+      vnum(rmse)+'</b> vol pts</span>'+
+      '<span>worst <b>'+(wi>=0?vsgn(miss[wi]):'&mdash;')+'</b> at '+
+      esc(wi>=0?r.rows[wi].tenor:'—')+'</span>'+
+      (drift?'<span title="what the fit itself left, before anything was marked over it">at the fit <b>'+
+        vnum(r.rmse)+'</b></span>':'')+
       (r.dof.indexOf('decay')>=0?revSpan(r,r.is_cross?'decay':'mean reversion'):'')+
       '<span>'+esc(r.message)+'</span></div>';
   out.innerHTML=head+
     (r.fitted?'<div class="owfitchart" style="margin-top:6px"></div>'+
-      '<div class="legend"><span><i style="background:'+C2+'"></i>overwrite</span>'+
-      '<span><i style="background:'+C1+'"></i>fitted curve</span>'+
-      '<span><i style="background:'+C3+'"></i>curve now</span></div>'+
+      '<div class="legend"><span><i style="background:'+C2+'"></i>target</span>'+
+      '<span><i style="background:'+C1+'"></i>book curve now</span>'+
+      '<span><i style="background:'+C3+'"></i>fitted curve</span>'+
+      '<span><i style="background:'+C4+'"></i>curve before the fit</span></div>'+
       '<div class="scroll" style="margin-top:6px"><table class="mark"><thead><tr><th>Tenor</th>'+
-      '<th>Overwrite %</th><th>Curve was %</th><th>Fitted %</th><th>Miss</th><th>Moved</th></tr></thead><tbody>'+
-      r.rows.map(x=>'<tr><td>'+esc(x.tenor)+'</td><td>'+vnum(x.target)+'</td><td>'+vnum(x.before)+
-        '</td><td>'+vnum(x.after)+'</td><td'+cls(x.diff)+'>'+vsgn(x.diff)+'</td><td'+cls(x.moved)+'>'+
-        vsgn(x.moved)+'</td></tr>').join('')+'</tbody></table></div>'+
+      '<th title="the overwrite this fit was aimed at, held after the column is cleared">Target %</th>'+
+      '<th>Curve before %</th><th>Fitted %</th>'+
+      '<th title="the pair&rsquo;s ATM curve as the book holds it now, overwrites aside">Book now %</th>'+
+      '<th title="book now less the target">Miss</th>'+
+      '<th title="book now less the curve before the fit">Moved</th></tr></thead><tbody>'+
+      r.rows.map((x,i)=>'<tr><td>'+esc(x.tenor)+'</td><td>'+vnum(x.target)+'</td><td>'+vnum(x.before)+
+        '</td><td title="what the fit left here; the miss it left was '+vsgn(x.diff)+'">'+vnum(x.after)+
+        '</td><td>'+vnum(now[i])+'</td><td'+cls(miss[i])+'>'+vsgn(miss[i])+'</td><td'+
+        cls(now[i]==null?null:now[i]-x.before)+'>'+vsgn(now[i]==null?null:now[i]-x.before)+
+        '</td></tr>').join('')+'</tbody></table></div>'+
       '<div class="scroll" style="margin-top:8px"><table class="mark"><thead><tr><th>Parameter</th>'+
       '<th>Was</th><th>Fitted</th></tr></thead><tbody>'+
       PORDER.filter(k=>k in r.params).map(k=>'<tr><td>'+esc(PLABEL[k]||k)+
@@ -4053,14 +4177,37 @@ async function owfitRun(apply){
     (r.warnings||[]).map(w=>'<div class="etowarn">! '+esc(w)+'</div>').join('')+
     (r.notes||[]).map(n=>'<div class="meta" style="font-size:11px;margin-top:2px">'+esc(n)+'</div>').join('');
   if(r.fitted)chart(out.querySelector('.owfitchart'),[
-    {color:C3,dash:true,pts:r.rows.map((x,i)=>[i,x.before])},
-    {color:C1,pts:r.rows.map((x,i)=>[i,x.after])},
+    {color:C4,dash:true,pts:r.rows.map((x,i)=>[i,x.before])},
+    {color:C3,dash:true,pts:r.rows.map((x,i)=>[i,x.after])},
+    /* Drawn last of the three lines and a shade heavier: it is the one that
+       moves, and it has to be readable where it sits on top of the fit. */
+    {color:C1,w:2.4,pts:r.rows.map((x,i)=>[i,now[i]]).filter(p=>p[1]!=null)},
     {type:'dot',color:C2,pts:r.rows.map((x,i)=>[i,x.target])},
   ],{xfmt:anTenorFmt(names),ldp:2,r:16,height:190});
-  if(apply){OWFIT=null;await loadCurve();await loadMarks();await redraw();schedulePrice()}
-  else OWFIT={pair:r.pair,sig:owSignature()};
   owfitStale();
 }
+async function owfitRun(apply){
+  const out=$('#mowfitout');
+  out.innerHTML='<span class="spin"></span> '+(apply?'fitting and applying':'fitting')+'…';
+  let r;
+  try{
+    r=await post('/api/atm/fit',Object.assign({pair:mq().pair,dof:owfitDof(),apply:!!apply,
+                                 clear_overwrites:$('#mowfitclear').checked},revRange()));
+  }catch(e){OWFIT=null;owfitStale();out.innerHTML='<div class="msg bad">'+esc(e.message)+'</div>';return}
+  /* `sig` null means "adopt the column as it is after this has landed":
+     `owfitStale` takes it on the first paint, so an apply that clears the
+     overwrites it fitted does not then call itself stale. */
+  OWFIT={pair:r.pair,sig:apply?null:owSignature(),r:r,applied:!!apply};
+  if(apply){await loadCurve();await loadMarks();await redraw();schedulePrice()}
+  owfitPaint();
+  owfitStale();
+}
+/* Let the held picture go.  Nothing is written: the curve keeps the
+   parameters it has and the overwrite column keeps whatever is in it -- this
+   is the graph being taken down, and it is the one way besides changing the
+   pair. */
+$('#mowfitdrop').onclick=()=>{OWFIT=null;$('#mowfitout').innerHTML='';
+  markingVisible();owfitStale()};
 $('#mowfitgo').onclick=()=>owfitRun(false);
 $('#mowfitapply').onclick=()=>owfitRun(true);
 $$('#mowfitrow input[data-owdof]').forEach(i=>i.onchange=saveMarking);
@@ -4487,6 +4634,16 @@ function kaceInterp(){
   if(KACE_INTERP===null){try{KACE_INTERP=localStorage.getItem('volkit.kace.interp')==='1'}catch(e){KACE_INTERP=false}}
   return !!KACE_INTERP}
 function setKaceInterp(v){KACE_INTERP=!!v;try{localStorage.setItem('volkit.kace.interp',v?'1':'0')}catch(e){}}
+/* Key tenors only: the pillars' ATM two-way and wings alone, with no
+   calendar-day ATM nodes -- the Vol bulk processing kACE channel's box of the
+   same name, for one pair.  Off is the full feed and stays the default.  With
+   no days posted there is nothing between pillars to interpolate, so the
+   interpolate box is greyed while it is on. */
+let KACE_KEY=null;
+function kaceKey(){
+  if(KACE_KEY===null){try{KACE_KEY=localStorage.getItem('volkit.kace.keyonly')==='1'}catch(e){KACE_KEY=false}}
+  return !!KACE_KEY}
+function setKaceKey(v){KACE_KEY=!!v;try{localStorage.setItem('volkit.kace.keyonly',v?'1':'0')}catch(e){}}
 /* One phrase for what the widths are, used by the header, the confirmation
    and the post history alike.  A tier name on its own stopped being the whole
    answer the moment it could be multiplied: 'default spreads' and 'default
@@ -4495,7 +4652,8 @@ function kaceWidths(r){
   const m=Number(r&&r.multiplier);
   return esc(r&&r.tier?r.tier:'—')+' spreads'+
     ((isFinite(m)&&m&&m!==1)?' &times;'+esc(String(+m.toFixed(6))):'')+
-    ((r&&r.interpolate)?', interpolated':'');
+    ((r&&r.interpolate&&!r.pillars_only)?', interpolated':'')+
+    ((r&&r.pillars_only)?', key tenors only':'');
 }
 /* Which numbers this single-pair post goes out on, when the Vol exporting
    bulk screen holds an overlay.  Export only: the marks, not the overlay --
@@ -4511,14 +4669,14 @@ function kaceOverlayNote(){
 async function drawKace(){
   const p=$('#panes');p.innerHTML='<div class="meta"><span class="spin"></span> building the feed…</div>';
   const o=mq(),K=STATE.kace||{},scn=kaceScenario(),tier=kaceTier(),
-        mult=kaceMult(),interp=kaceInterp();
+        mult=kaceMult(),interp=kaceInterp(),keyonly=kaceKey();
   if(K.error){p.innerHTML=`<div class="out err"><div class="v">${esc(K.error)}</div></div>`;return}
   const q={pair:o.pair,cut:o.cut,method:o.method,source:KACE_SRC,scenario:scn,tier:tier,
-           multiplier:mult,interpolate:interp?'1':''};
+           multiplier:mult,interpolate:interp?'1':'',pillars_only:keyonly?'1':''};
   const d=await api('/api/kace?'+qs(q));
   const dl=(q,label)=>`<a href="/api/export/kace?${qs(q)}" style="color:var(--accent);font-weight:600;text-decoration:none">${label}</a>`;
   p.innerHTML=`<div style="display:flex;gap:10px;align-items:center;margin-bottom:8px;flex-wrap:wrap">
-      <b>${esc(d.pair)}</b><span class="meta">horDate ${esc(d.hor_date)} · ${d.days} days ${esc(d.first_day)} to ${esc(d.last_day)} · ${d.nodes} nodes · ${esc(d.cut)} cut · ${kaceWidths(d)}</span>
+      <b>${esc(d.pair)}</b><span class="meta">horDate ${esc(d.hor_date)} · ${d.pillars_only?`${d.pillars.length} pillars, no calendar days`:`${d.days} days ${esc(d.first_day)} to ${esc(d.last_day)}`} · ${d.nodes} nodes · ${esc(d.cut)} cut · ${kaceWidths(d)}</span>
       <div class="grow"></div>
       <label style="margin:0;display:flex;align-items:center;gap:5px;width:auto;font-size:11px" title="the kACE scenario the vols are posted into; goes into the message and the file name">scenario
         <input id="kacescn" value="${esc(scn)}" style="width:7em;padding:3px 6px"></label>
@@ -4527,7 +4685,9 @@ async function drawKace(){
       <label style="margin:0;display:flex;align-items:center;gap:5px;width:auto;font-size:11px" title="every one of the tier's ATM widths multiplied by this before it is posted. 1 is the tab's own ladder. The mid of every two-way is unchanged -- only the width moves">&times;
         <input id="kacemult" value="${esc(mult)}" style="width:4.5em;padding:3px 6px"></label>
       <label style="margin:0;display:flex;align-items:center;gap:5px;width:auto;font-size:11px" title="a day between two pillars takes a width read straight across between them, by date, instead of the last pillar's. Pillars themselves are unchanged either way; off is the rule the spreadsheet posted">
-        <input type="checkbox" id="kaceinterp" style="width:auto"${interp?' checked':''}> interpolate</label>
+        <input type="checkbox" id="kaceinterp" style="width:auto"${interp?' checked':''}${keyonly?' disabled':''}> interpolate</label>
+      <label style="margin:0;display:flex;align-items:center;gap:5px;width:auto;font-size:11px" title="post each pillar's ATM two-way and wings alone, with its tenor (1M, O/N) as the Maturity rather than a date, and no calendar-day ATM nodes -- the Vol bulk processing kACE channel's key tenors only, for this pair">
+        <input type="checkbox" id="kacekey" style="width:auto"${keyonly?' checked':''}> key tenors only</label>
       <label style="margin:0;display:flex;align-items:center;gap:5px;width:auto;font-size:11px" title="the quoted marks are what the sheet posted; fitted is what the surface returns at each pillar">wings
         <select id="kacesrc" style="width:auto;padding:3px 6px">${(K.sources||['marks','fitted']).map(x=>`<option value="${x}"${x===KACE_SRC?' selected':''}>${x}</option>`).join('')}</select></label>
       ${d.xml?`<button id="kacecopy" style="width:auto;padding:5px 12px;font-size:12px">Copy XML</button>`:''}
@@ -4543,7 +4703,7 @@ async function drawKace(){
         <td>${vnum(r.rr25)}</td><td>${vnum(r.rr10)}</td><td>${vnum(r.fly25)}</td><td>${vnum(r.fly10)}</td><td class="meta">${esc(r.wings)}</td></tr>`).join('')}</tbody></table></div>
     ${d.notes.length?`<div class="meta" style="margin-top:8px">${d.notes.map(n=>'· '+esc(n)).join('<br>')}</div>`:''}
     ${kaceOverlayNote()}
-    <details class="hint" style="margin-top:8px"><summary>Where the widths come from, and where a post goes</summary>Spread table: ${esc(K.spreads||'')}, tier <b>${esc(d.tier)}</b> of ${(K.tiers||[]).map(esc).join(', ')} &mdash; a tier is a column of that tab and is added, edited or removed in the <b>Config</b> window; the pillars are its rows and are the same whichever tier is posted. The <b>&times;</b> box multiplies every one of that tier's widths on the way out &mdash; the mid of each two-way does not move &mdash; and <b>interpolate</b> reads a day between two pillars straight across between their widths instead of taking the last pillar's, which is what the spreadsheet did and is still the default. Both are the morning's, like the tier, and both are recorded with the post. RR is the base-currency call vol minus the put vol; S is the butterfly.
+    <details class="hint" style="margin-top:8px"><summary>Where the widths come from, and where a post goes</summary>Spread table: ${esc(K.spreads||'')}, tier <b>${esc(d.tier)}</b> of ${(K.tiers||[]).map(esc).join(', ')} &mdash; a tier is a column of that tab and is added, edited or removed in the <b>Config</b> window; the pillars are its rows and are the same whichever tier is posted. The <b>&times;</b> box multiplies every one of that tier's widths on the way out &mdash; the mid of each two-way does not move &mdash; and <b>interpolate</b> reads a day between two pillars straight across between their widths instead of taking the last pillar's, which is what the spreadsheet did and is still the default. <b>key tenors only</b> posts the pillars alone &mdash; each one's ATM two-way and wings, and no calendar-day ATM nodes &mdash; as the Vol bulk processing kACE channel's box of that name does. All three are the morning's, like the tier, and all are recorded with the post. RR is the base-currency call vol minus the put vol; S is the butterfly.
       ${K.url?`Posts go to <b>${esc(K.url)}</b>${K.insecure?' (certificate not checked)':''}, the way the XML poster page sends them, and are recorded in ${esc(K.log||'')}.`:'No post address is set (kace-url in volkit.cfg, or --kace-url): copy or download the message and paste it into the kACE XML poster.'}</details>
     ${(K.posts||[]).length?`<div class="scroll" style="margin-top:8px"><table style="width:100%"><thead><tr><th>Posted</th><th>Pair</th><th>Scenario</th><th>Widths</th><th>What</th><th>Nodes</th><th>Outcome</th></tr></thead>
       <tbody>${K.posts.slice().reverse().map(r=>`<tr><td>${esc(String(r.at||'').replace('T',' ').slice(0,16))}</td><td>${esc(r.pair)}</td><td>${esc(r.scenario)}</td><td>${r.clear?'—':kaceWidths(r)}</td><td>${r.clear?'clear':'feed'}</td><td>${r.nodes??'—'}</td>
@@ -4573,6 +4733,7 @@ async function drawKace(){
   $('#kacesrc').onchange=e=>{KACE_SRC=e.target.value;redraw()};
   const tb=$('#kacetier');if(tb)tb.onchange=e=>{setKaceTier(e.target.value);redraw()};
   const ib=$('#kaceinterp');if(ib)ib.onchange=e=>{setKaceInterp(e.target.checked);redraw()};
+  const kb=$('#kacekey');if(kb)kb.onchange=e=>{setKaceKey(e.target.checked);redraw()};
   /* The multiplier is typed, so it is checked here before it is sent: a box
      left empty is 1 rather than a refusal from the server, and anything that
      is not a positive number is put back and said, not posted. */
@@ -9160,11 +9321,22 @@ function xKeep(patch){const v=Object.assign(xSaved(),patch);
   try{localStorage.setItem('volkit.export',JSON.stringify(v))}catch(e){}}
 function xChan(){return (XS&&XS.channels||[]).find(c=>c.key===$('#xchan').value)||null}
 function xOverlay(){return ((XS||{}).overlay)||{}}
+/* The pairs this channel publishes when nobody has touched the picker: its
+   own EXPORT_PAIRS list.  The picker offers more than that -- every pair the
+   book builds and the overlay carries -- but an unlisted pair goes out only
+   when it is ticked. */
+function xDefaults(ch){
+  const all=ch.pairs.map(p=>p.pair);
+  /* Empty only when the channel has no list at all -- EXPORT_PAIRS missing,
+     or no row for it -- and then nothing is ticked and the error says why,
+     rather than a file quietly carrying every pair in the book. */
+  return (ch.default_pairs||[]).filter(p=>all.indexOf(p)>=0);
+}
 function xChosen(){
   const ch=xChan(); if(!ch)return [];
   const all=ch.pairs.map(p=>p.pair);
   const on=XSEL[ch.key];
-  if(!on||!on.length)return all.slice();
+  if(!on||!on.length)return xDefaults(ch);
   return on.filter(p=>all.indexOf(p)>=0);
 }
 /* Which source a pair is read from.  Default: the overlay wherever the loaded
@@ -9184,10 +9356,19 @@ function xSetSource(pair,src){XSRC[pair]=src;xRenderPick();$('#xsend').disabled=
 function xSrcTag(src){return '<span class="mmtag '+(src==='overlay'?'out':'in')+'">'+src+'</span>'}
 function xRenderPick(){
   const ch=xChan(); if(!ch){$('#xpairs').innerHTML='';$('#xpicksum').textContent='—';$('#xsrcline').innerHTML='';return}
-  const all=ch.pairs, on=xChosen(), src=xSources();
-  $('#xpairs').innerHTML='<label class="mmpickall"><input type="checkbox" id="xall"'+
+  const all=ch.pairs, on=xChosen(), src=xSources(), defs=xDefaults(ch);
+  const same=(a,b)=>a.length===b.length&&a.every(x=>b.indexOf(x)>=0);
+  $('#xpairs').innerHTML='<div class="mmpickall" style="display:flex;align-items:center;gap:8px">'+
+    '<label style="flex:1"><input type="checkbox" id="xall"'+
     (on.length===all.length?' checked':'')+'> every pair ('+all.length+')</label>'+
-    all.map(p=>'<div style="display:flex;align-items:center;gap:6px;padding:2px 0"><label style="flex:1" title="'+
+    '<button class="ghost" id="xdefpairs" style="width:auto;padding:2px 8px;font-size:11px" '+
+    'title="back to the pairs '+esc(ch.label)+' publishes by default -- its EXPORT_PAIRS rows, in the file\'s own order">the '+
+    esc(ch.label)+' list ('+defs.length+')</button></div>'+
+    all.map((p,i)=>((!p.listed&&(i===0||all[i-1].listed))?
+      '<div class="meta" style="margin:5px 0 2px;padding-top:5px;border-top:1px solid var(--line)" '+
+      'title="not on this channel\'s EXPORT_PAIRS list; ticked, it is fed from itself and goes out spelled the file\'s own way">'+
+      'not on the '+esc(ch.label)+' list — from the book or the overlay</div>':'')+
+      '<div style="display:flex;align-items:center;gap:6px;padding:2px 0"><label style="flex:1" title="'+
       esc(p.feed_from?('fed from '+p.feed_from):'')+(p.in_book?'':' (not in the book)')+'"><input type="checkbox" data-x="'+esc(p.pair)+'"'+
       (on.indexOf(p.pair)>=0?' checked':'')+'> '+esc(p.pair)+
       (p.label&&p.label!==p.pair?' <span class="meta">'+esc(p.label)+'</span>':'')+
@@ -9197,9 +9378,11 @@ function xRenderPick(){
         '<option value="book"'+(src[p.pair]==='book'?' selected':'')+'>book</option></select>'
        :'<span class="mmtag in" style="opacity:.6" title="the overlay has no rows for this pair">book</span>')+
       '</div>').join('');
+  $('#xdefpairs').onclick=()=>{delete XSEL[ch.key];xKeep({sel:XSEL});xRenderPick();$('#xsend').disabled=true};
   $('#xpicksum').textContent=!all.length?'no pairs listed':
     (on.length===all.length?'every pair ('+all.length+')':
-     (on.length<=3&&on.length?on.join(', '):on.length+' of '+all.length));
+     (on.length&&same(on,defs)?'the '+ch.label+' list ('+defs.length+')':
+     (on.length<=3&&on.length?on.join(', '):on.length+' of '+all.length)));
   const ov=on.filter(p=>src[p]==='overlay'), bk=on.filter(p=>src[p]!=='overlay');
   $('#xsrcline').innerHTML=ov.length?
     ('<span class="mmtag out">overlay</span> '+esc(ov.join(', '))+' &nbsp; <span class="mmtag in">book</span> '+
@@ -9410,7 +9593,7 @@ function xPaintBuild(b){
       (x.notes||[]).map(n=>' · '+esc(n)).join('')+'</td></tr>'}).join('')+'</tbody></table></div></details>');
   if(b.feeds)out.push('<details open><summary style="cursor:pointer">kACE messages — one per pair</summary><div class="mmwide"><table class="mmxr"><thead><tr><th>Pair</th><th>Days</th><th>Pillars</th><th>Nodes</th><th>Widths</th><th>Notes</th></tr></thead><tbody>'+
     Object.keys(b.feeds).map(p=>{const f=b.feeds[p], m=(b.messages||{})[p]||{};return '<tr><td><b>'+esc(p)+'</b></td><td class="mmv">'+(f.pillars_only?'—':f.days)+'</td><td class="mmv">'+(f.pillars||[]).length+
-      '</td><td class="mmv">'+(m.error?'<span class="etoerr">'+esc(m.error)+'</span>':m.nodes)+'</td><td>'+kaceWidths(f)+(f.pillars_only?', key tenors only':'')+'</td><td class="meta" style="text-align:left">'+(f.notes||[]).map(esc).join('<br>')+'</td></tr>'}).join('')+
+      '</td><td class="mmv">'+(m.error?'<span class="etoerr">'+esc(m.error)+'</span>':m.nodes)+'</td><td>'+kaceWidths(f)+'</td><td class="meta" style="text-align:left">'+(f.notes||[]).map(esc).join('<br>')+'</td></tr>'}).join('')+
     '</tbody></table></div></details>');
   if(b.notes&&b.notes.length)out.push('<div class="meta" style="margin-top:6px">'+b.notes.map(n=>'· '+esc(n)).join('<br>')+'</div>');
   $('#xpre').innerHTML=out.join('');
@@ -9519,11 +9702,15 @@ function xInit(){
     const ch=xChan(); if(!ch)return;
     if(e.target.dataset.src){xSetSource(e.target.dataset.src,e.target.value);return}
     const all=ch.pairs.map(p=>p.pair);
-    if(e.target.id==='xall'){XSEL[ch.key]=e.target.checked?[]:['(none)'];}
+    /* The list is kept as it is ticked, pair by pair: the picker now offers
+       more than the channel publishes by default, so "all of them" is no
+       longer the same thing as "the file's own list" and cannot be stored as
+       the empty list any more.  Absent is the default; ['(none)'] is none. */
+    if(e.target.id==='xall'){XSEL[ch.key]=e.target.checked?all.slice():['(none)'];}
     else{const p=e.target.dataset.x; if(!p)return;
       const on=xChosen();
-      const next=e.target.checked?on.concat([p]):on.filter(q=>q!==p);
-      XSEL[ch.key]=(next.length===all.length)?[]:(next.length?next:['(none)']);}
+      const next=e.target.checked?all.filter(q=>on.indexOf(q)>=0||q===p):on.filter(q=>q!==p);
+      XSEL[ch.key]=next.length?next:['(none)'];}
     xKeep({sel:XSEL}); xRenderPick(); $('#xsend').disabled=true;};
   $('#xallov').onclick=()=>{(XS.channels||[]).forEach(c=>c.pairs.forEach(p=>{if(p.in_overlay)XSRC[p.pair]='overlay'}));xRenderPick();$('#xsend').disabled=true};
   $('#xallbook').onclick=()=>{(XS.channels||[]).forEach(c=>c.pairs.forEach(p=>{if(p.in_overlay)XSRC[p.pair]='book'}));xRenderPick();$('#xsend').disabled=true};
@@ -9583,7 +9770,10 @@ $('#mpair').onchange=async()=>{setMethodSel('#mmethod',$('#mpair').value);
      reload or solve, and the two curve fits were about the pair they ran on.
      A fit still says it is stale when its own inputs move on this pair. */
   [$('#cmsg'),$('#emsg')].forEach(m=>{m.className='msg';m.textContent=''});
-  $('#mowfitout').innerHTML='';OWFIT=null;
+  /* A held fit belongs to the pair it was run on, and the row it lives in may
+     be open only because it is held -- so the row is asked again once it is
+     not. */
+  $('#mowfitout').innerHTML='';OWFIT=null;markingVisible();
   $('#mcorrfitout').innerHTML='';CORRFIT=null;
   $('#mcorrout').innerHTML='';
   await loadCurve();await loadMarks();await loadBand();redraw();bumpWeights()};
@@ -9736,6 +9926,104 @@ async function boot(){
   if(has('pricing'))await priceAll();
   if(has('listed')&&PANELS.length)await fitAll();
 }
+/* Type-to-filter on every currency dropdown.  Any <select> whose options are
+   currencies or pairs (EUR, EURUSD, EUR/USD) opens, on a click or on a letter
+   typed while it has focus, a small picker with a text box: typing narrows the
+   list to the options containing what was typed ("JPY" leaves every yen pair,
+   the ones starting with it first), arrows move, Enter or a click chooses,
+   Escape leaves it as it was.  The <select> stays the one thing the screens
+   read -- choosing sets its value and fires the same `change` a mouse pick
+   does -- so every existing listener, and every select built later by
+   innerHTML, works unchanged.  Delegated from the document for that reason.
+   A select opts out with data-nofilter. */
+(function(){
+  const CCY=/^[A-Z]{3}(\/?[A-Z]{3})?$/;
+  const norm=x=>String(x||'').toUpperCase().replace(/[^A-Z0-9]/g,'');
+  function isCcySel(el){
+    if(!el||el.tagName!=='SELECT'||el.disabled||el.multiple||el.hasAttribute('data-nofilter'))return false;
+    const v=[...el.options].map(o=>o.value).filter(x=>x!=='');
+    if(v.length<2)return false;
+    return v.filter(x=>CCY.test(x)).length>=0.6*v.length;
+  }
+  let box=null;
+  function close(refocus){
+    if(!box)return; const s=box.sel; box.el.remove(); box=null;
+    document.removeEventListener('mousedown',outside,true);
+    window.removeEventListener('resize',onScroll); window.removeEventListener('scroll',onScroll,true);
+    if(refocus&&s&&document.contains(s))s.focus();
+  }
+  function outside(e){if(box&&!box.el.contains(e.target))close(false)}
+  function onScroll(e){if(box&&!(e&&e.target&&box.el.contains(e.target)))close(false)}
+  function choose(o){
+    const s=box.sel; close(true);
+    if(o&&s.value!==o.value){
+      s.value=o.value;
+      s.dispatchEvent(new Event('input',{bubbles:true}));
+      s.dispatchEvent(new Event('change',{bubbles:true}));
+    }
+  }
+  function render(){
+    const q=norm(box.inp.value);
+    const all=[...box.sel.options].filter(o=>!o.disabled);
+    let hit=all;
+    if(q){
+      const key=o=>norm(o.value)+' '+norm(o.textContent);
+      const pre=all.filter(o=>norm(o.value).startsWith(q)||norm(o.textContent).startsWith(q));
+      hit=pre.concat(all.filter(o=>pre.indexOf(o)<0&&key(o).includes(q)));
+    }
+    box.hit=hit;
+    if(box.at>=hit.length)box.at=hit.length-1;
+    if(box.at<0&&hit.length)box.at=0;
+    box.ul.innerHTML=hit.length?hit.map((o,i)=>
+      '<li data-n="'+i+'" class="'+(i===box.at?'on ':'')+(o.value===box.sel.value?'cur':'')+'">'+esc(o.textContent||o.value)+'</li>').join('')
+      :'<div class="none">no match</div>';
+    const on=box.ul.querySelector('li.on'); if(on)on.scrollIntoView({block:'nearest'});
+  }
+  function open(sel,seed){
+    close(false);
+    const el=document.createElement('div'); el.className='ccypick';
+    el.innerHTML='<input type="text" spellcheck="false" autocomplete="off" placeholder="type to filter"><ul></ul>';
+    document.body.appendChild(el);
+    const r=sel.getBoundingClientRect();
+    el.style.minWidth=Math.max(150,r.width)+'px';
+    const h=el.offsetHeight||300, below=window.innerHeight-r.bottom;
+    el.style.left=Math.max(4,Math.min(r.left,window.innerWidth-el.offsetWidth-4))+'px';
+    el.style.top=(below>=Math.min(h,300)+4||below>r.top?r.bottom+2:Math.max(4,r.top-h-2))+'px';
+    box={el,sel,inp:el.querySelector('input'),ul:el.querySelector('ul'),at:-1,hit:[]};
+    box.at=[...sel.options].filter(o=>!o.disabled).findIndex(o=>o.value===sel.value);
+    box.inp.value=seed||'';
+    if(seed)box.at=0;
+    render();
+    box.inp.focus();
+    box.inp.addEventListener('input',()=>{box.at=0;render()});
+    box.inp.addEventListener('keydown',e=>{
+      if(e.key==='ArrowDown'||e.key==='ArrowUp'){
+        e.preventDefault(); if(!box.hit.length)return;
+        box.at=(box.at+(e.key==='ArrowDown'?1:-1)+box.hit.length)%box.hit.length; render();
+      }else if(e.key==='Enter'){e.preventDefault(); choose(box.hit[box.at]||null);}
+      else if(e.key==='Escape'){e.preventDefault(); e.stopPropagation(); close(true);}
+      else if(e.key==='Tab'){close(false);}
+    });
+    box.ul.addEventListener('mousedown',e=>{
+      const li=e.target.closest('li'); if(!li)return;
+      e.preventDefault(); choose(box.hit[+li.dataset.n]);
+    });
+    document.addEventListener('mousedown',outside,true);
+    window.addEventListener('resize',onScroll); window.addEventListener('scroll',onScroll,true);
+  }
+  document.addEventListener('mousedown',e=>{
+    const s=e.target.closest&&e.target.closest('select');
+    if(e.button!==0||!isCcySel(s))return;
+    e.preventDefault(); if(box&&box.sel===s){close(true);return;}
+    s.focus(); open(s,'');
+  },true);
+  document.addEventListener('keydown',e=>{
+    const s=e.target;
+    if(box||e.ctrlKey||e.metaKey||e.altKey||!isCcySel(s))return;
+    if(/^[a-zA-Z0-9\/]$/.test(e.key)){e.preventDefault(); open(s,e.key.toUpperCase());}
+    else if(e.key==='Enter'||e.key===' '){e.preventDefault(); open(s,'');}
+  },true);
+})();
 boot();
 </script>
 </body>

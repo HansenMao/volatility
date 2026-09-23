@@ -110,7 +110,9 @@ line, every post in `publish_log.jsonl` as any other is.
   `volkit kace --pillars-only`) writes the pillars' five nodes each and none of
   the calendar-day ATM nodes: 45 nodes rather than 400-odd. The daily series is
   still built -- a pillar's ATM is read off it -- and simply not written, so the
-  pillars posted are identical either way. It is a field of the post log, because
+  pillars posted are identical either way. Each pillar node's `Maturity` is then the
+  tenor as the spread table writes it (`1M`, `O/N`) rather than the date it
+  expires on; the full feed keeps the dates. It is a field of the post log, because
   "what did we send kACE this morning" is not answered by a pair and a tier when
   one morning sent the whole curve and the next sent nine points.
 - **The route belongs to the market-maker screen** (`screens.py`), because the

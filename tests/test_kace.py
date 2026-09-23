@@ -906,6 +906,23 @@ class TestBulkExport(unittest.TestCase):
         self.assertEqual(keys.summary()["days"], 0)
         self.assertTrue(any("key tenors only" in n for n in keys.notes))
 
+    def test_key_tenors_only_writes_the_tenor_as_the_maturity(self):
+        """Key tenors only names each pillar by its tenor, as the spread table
+        writes it, not by the date it expires on; the full feed keeps the
+        dates on its pillar nodes as well as its days."""
+        import re
+        book = Book.from_excel(BOOK, ASOF).load_all(["USDCNH"])
+        table = kace.SpreadTable.load(BOOK)
+        keys = kace.build(book, "USDCNH", table, pillars_only=True)
+        whole = kace.build(book, "USDCNH", table)
+        got = re.findall(r'<field name="Maturity" value="([^"]*)"/>', keys.xml("feeuser", "pw"))
+        want = [p.tenor.strip() for p in sorted(keys.pillars, key=lambda p: p.expiry)
+                for _ in range(5)]
+        self.assertEqual(got, want)
+        self.assertIn("O/N", got)
+        dated = re.findall(r'<field name="Maturity" value="([^"]*)"/>', whole.xml("feeuser", "pw"))
+        self.assertTrue(all(re.fullmatch(r"\d\d [A-Z][a-z]{2} \d{4}", v) for v in dated))
+
     def test_the_bulk_export_left_the_market_maker_tab_for_its_own_screen(self):
         """The bar came off the Market maker screen and is not replaced there:
         bulk publishing is the Vol exporting bulk screen's, with its own

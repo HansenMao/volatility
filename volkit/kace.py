@@ -451,7 +451,9 @@ class Feed:
     #: Post the pillars alone -- the key tenors' ATM two-way and wings -- and
     #: none of the calendar-day ATM nodes.  The daily series is still built
     #: (a pillar's ATM is read off it) and still summarised; it is just not
-    #: written into the message.  The bulk export's *key tenors only*.
+    #: written into the message.  The bulk export's *key tenors only*.  Each
+    #: pillar's ``Maturity`` is then its tenor as the spread table names it
+    #: (``1M``, ``O/N``) rather than the expiry date that tenor falls on.
     pillars_only: bool = False
     notes: list[str] = field(default_factory=list)
 
@@ -500,13 +502,16 @@ class Feed:
                 ("VolType", "ATM"), ("Volity", _bid_offer(vol - half, vol + half, day))])
         s = 0
         for p in pillars:
+            # Key tenors only goes out as the tenors themselves; the full feed
+            # keeps the sheet's dates, which is what it has always posted.
+            at = p.tenor.strip() if self.pillars_only else p.expiry
             s += 1
-            lines += _node(f"S{s}", self.ccy, self.ctr, p.expiry, [
+            lines += _node(f"S{s}", self.ccy, self.ctr, at, [
                 ("VolType", "ATM"), ("Volity", _bid_offer(p.bid, p.offer, p.expiry))])
             for pct, kind, value in (("0.25", "RR", p.rr25), ("0.10", "RR", p.rr10),
                                      ("0.25", "S", p.fly25), ("0.10", "S", p.fly10)):
                 s += 1
-                lines += _node(f"S{s}", self.ccy, self.ctr, p.expiry, [
+                lines += _node(f"S{s}", self.ccy, self.ctr, at, [
                     ("PctDelta", pct), ("VolType", kind), ("Volity", _decimal(value / 100.0))])
         lines += ['    </data>', '  </body>', '</gfi_message>']
         return "\n".join(lines) + "\n"
@@ -638,8 +643,9 @@ def build(book, pair: str, spreads: SpreadTable, *, tier: str | None = None,
         notes.append("a day between two pillars takes a width read across between them "
                      "rather than the nearer pillar's")
     if pillars_only:
-        notes.append("key tenors only: the pillars' ATM two-way and wings are posted, and "
-                     "no calendar-day ATM nodes")
+        notes.append("key tenors only: the pillars' ATM two-way and wings are posted, each "
+                     "with its tenor as the Maturity rather than a date, and no calendar-day "
+                     "ATM nodes")
 
     # The pillars are the spread table's tenors, in expiry order.
     read = read_pillars(book, pair, sorted(widths, key=pillar_years), cut=cut,
@@ -833,12 +839,15 @@ def _action(scenario: str, hor_date: date, *, clear: bool) -> list[str]:
     return lines
 
 
-def _node(name: str, ccy: str, ctr: str, maturity: date, fields: list[tuple[str, str]]) -> list[str]:
+def _node(name: str, ccy: str, ctr: str, maturity: date | str,
+          fields: list[tuple[str, str]]) -> list[str]:
+    """One node.  ``maturity`` is a date (written ``DD MMM YYYY``) or a tenor, written as given."""
+    when = _attr(maturity) if isinstance(maturity, str) else _date(maturity)
     out = [f'      <node name="{name}">',
            '        <field name="RateType" value="Volatility"/>',
            f'        <field name="Currency" value="{ccy}"/>',
            f'        <field name="CtrCcy" value="{ctr}"/>',
-           f'        <field name="Maturity" value="{_date(maturity)}"/>']
+           f'        <field name="Maturity" value="{when}"/>']
     out += [f'        <field name="{_attr(k)}" value="{_attr(v)}"/>' for k, v in fields]
     out.append('      </node>')
     return out

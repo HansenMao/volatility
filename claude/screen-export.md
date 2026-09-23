@@ -40,6 +40,22 @@ and says *why*; this file says what is there and what must not be broken.
   Vol marking screen is the single-pair workbench and is unchanged.  The
   market-maker bar's bulk export is gone and not replaced there;
   `/api/kace/bulk` is removed, no back-compat.
+- **`EXPORT_PAIRS` is the default pair list, not the ceiling.**
+  `ExportTables.pairs_for` is what a channel publishes when nobody says
+  otherwise -- the typed rows, in the file's own order -- and it is what the
+  picker opens with ticked.  `ExportTables.universe_for` is what the channel
+  may be *asked* for: that list first, then every other pair the book builds
+  and the overlay carries, alphabetically, each flagged `listed: false`.  An
+  unlisted pair goes out only when it is named (the picker, `--pairs`); it is
+  fed from itself, spelled the channel's own way (`Channel.default_label` --
+  `AUD/USD` for Murex and COS, `AUDUSD` elsewhere), and stops where the
+  channel's own rows agree they stop, so a Murex extra beside rows that all
+  end at 1Y is not refused for the 2Y and 3Y the book never marks.  Every
+  table the channel reads still refuses it by name where it has no row for it
+  (`MARKET_WIDTHS` above all), and a pair in none of the three -- list, book,
+  overlay -- is refused by name as before.  The picker's summary says *the
+  <channel> list* while the ticks are exactly that, and a button puts them
+  back.
 - **The source is chosen per pair** (`publish.build(sources={pair: "book" |
   "overlay"})`, `source` the default for the rest).  A run is not all from
   one or all from the other; the preflight's coverage carries each pair's
@@ -53,7 +69,9 @@ and says *why*; this file says what is there and what must not be broken.
   (rows, tenors, whether the book holds them, a tick), **Overwrite book for
   ticked**, Revert, Clear; then **Compare** -- the book's mids against the overlay's, the ATM
   and the wings, no channel.  Right,
-  the Output half: destination, the pair picker with a book/overlay select
+  the Output half: destination, the pair picker -- the channel's own list
+  ticked, then, under a divider, every other pair the book builds or the
+  overlay carries -- with a book/overlay select
   beside every pair the overlay carries (and *from overlay* / *from book*
   for all of them at once), tier, multiplier, wings, scenario, tolerance,
   file date, key tenors, dry run; Build, Send, download; the Preflight; the
@@ -71,7 +89,8 @@ and says *why*; this file says what is there and what must not be broken.
   destination reads -- `publish.Channel.tables`, worked out from the
   channel's width source, wings and `correlated_crosses`, and sent in each
   channel's summary, so the page keeps no list of its own.
-- **Command line:** `volkit export CHANNEL [--pairs ...] [--overlay FILE]
+- **Command line:** `volkit export CHANNEL [--pairs ...]` (the channel's list,
+  or any pair the book or the overlay has) `[--overlay FILE]
   [--book-pairs ...] [--compare] [--tier] [--multiplier] [--wings]
   [--tolerance] [--file-date] [--confirm-date] [--out-dir] [--dry-run]`, and
   `volkit export --init-tables` to seed the tables a workbook lacks.
@@ -88,7 +107,7 @@ and says *why*; this file says what is there and what must not be broken.
 | `WING_WIDTHS` | `pair` (`default`, `crosses`, or a pair), `tenor`, `rr25`, `rr10`, `bf25`, `bf10` -- most specific row wins | Bloomberg: each wing goes out two-way about its mark |
 | `SHADES` | `channel`, `pair` (blank = the channel's default), `shade` | every channel: the ATM mid shift, both sides, before the width |
 | `COS_WIDTHS` | `pair` (`default`, `crosses`, or a pair), `tenor`, `width` -- most specific row wins | COS: how far under the mid the bid sits, **one-sided** |
-| `EXPORT_PAIRS` | `channel`, `pair`, `label`, `feed_from`, `last_tenor`, `note`, in the file's order | every channel: which pairs it publishes and from which curve; kACE with no rows publishes the book's pairs |
+| `EXPORT_PAIRS` | `channel`, `pair`, `label`, `feed_from`, `last_tenor`, `note`, in the file's order | every channel: which pairs it publishes *by default* and from which curve; kACE with no rows publishes the book's pairs. The picker offers the book's and the overlay's pairs beside them, unticked |
 | `CROSS_CORR` | `pair`, `tenor`, `correlation`, `note` -- a cross's correlation rung by rung | **COS only**: a cross it names goes out with its ATM off its two dollar legs at the typed correlation (`_correlated_atm`); the book and every other channel never read it. A pillar a leg cannot supply is refused by name, not filled from the book's cross |
 
 - **A shade is not a width, and the wings are never shaded.** The ATM mid
@@ -102,7 +121,9 @@ and says *why*; this file says what is there and what must not be broken.
   order with the slash labels, the 25 COS pairs with the CNY labels fed CNH.
   `feed_from` names the book's curve where it differs; a pair marked the
   other way up is inverted -- the risk reversals change sign, the ATM and
-  flies do not -- and says so.  `last_tenor` caps a pair.
+  flies do not -- and says so.  `last_tenor` caps a pair.  Typing a row is
+  still how a pair joins a file *permanently*, with its own label, curve and
+  cap; picking an unlisted pair is for the run in front of you.
 - **The seeds reproduce the desk's sheet**: `MARKET_WIDTHS` is the sheet's
   total ATM width less the add-up the `ADD_UPS` rule assigns (0 overnight,
   0.2 otherwise; 0 for crosses; the seven HKD legs the G7 tab carried get

@@ -528,7 +528,7 @@ move the screen.
   other than the house one) on the command above prints the proposal and writes
   nothing.
 * **Fit the curve to the overwrites** — shown with the **overwrites** column,
-  and only then. Tick the degrees of freedom the fit may move — **initial**,
+  and kept up afterwards while a fit is held. Tick the degrees of freedom the fit may move — **initial**,
   **final**, **decay**, **add-on** (on a plain pair the backbone's initial vol,
   long-term vol and mean reversion; on a cross the correlation's initial, final
   and decay; add-on is the short add-on on either) — and press **Propose**. The
@@ -548,6 +548,31 @@ move the screen.
   fits** is ticked, which clears only the tenors the fit used — one beyond the
   fit cutoff keeps its overwrite, because nothing else marks it. A proposal
   made before the overwrites or the mean-reversion range changed says so.
+
+  **What is drawn afterwards is held, and the book curve on it keeps moving.**
+  The **targets** the fit was aimed at and the **fitted curve** stay on the
+  graph once it has run — through an apply, through *Clear ATM overwrites*,
+  through the column being emptied one box at a time — because a target is
+  what the mark is aiming at and clearing the column is part of marking, not
+  the end of it. When the column is empty the line under the buttons says so:
+  *N targets held · the book curve follows every mark*.
+
+  **Book now** is the fourth line and the fifth column: the pair's own ATM
+  curve *as the book holds it*, read again every time anything on this screen
+  is marked — so typing into the **curve card** moves it under the targets,
+  and **Miss** (book now less the target), **Moved** (book now less the curve
+  before the fit) and **RMSE now** move with it. Straight after an apply the
+  fitted curve and the book curve are one line; they part as soon as the curve
+  is marked again, and **at the fit** then appears beside the RMSE with what
+  the fit itself left. So the way a mark is finished by hand — fit, clear the
+  column, then nudge the curve card until the miss reads right — has the
+  targets still on the screen and the miss moving as you go.
+
+  The graph is a picture of the *curve*: an overwrite laid over a tenor is a
+  mark on top of the curve and is in neither line. **Drop the targets** takes
+  the held picture down, and so does changing the pair; neither writes
+  anything — the curve keeps its parameters and the overwrite column keeps
+  whatever is in it.
 * **Bump** — tick **bump** in the heading for the row that moves the whole
   curve at once. Choose an **anchor** tenor, type a **move** in vol points, and
   every tenor moves `move × w(tenor) / w(anchor)` where the weights come from
@@ -2250,11 +2275,19 @@ tenors the book quotes that the overlay does not, and each pair's largest
 move in the ATM, the risk reversals and the flies.
 
 **Output — where the marks go, and which source each pair is read from.** The
-destination, and the pair picker: every pair the channel publishes, with a
-tick to include it and — beside every pair the overlay carries — a
-**book / overlay** select. The default is the overlay wherever it has rows for
-the pair and the book everywhere else; *from overlay* / *from book* set all of
-them at once. So a run is not all from one source or all from the other, and
+destination, and the pair picker: the pairs the channel publishes, ticked,
+and under a divider every *other* pair the book builds or the overlay
+carries, unticked. Tick one of those and it goes out with the rest, fed from
+itself and spelled the way that file spells a pair (`AUD/USD` for Murex and
+COS) — it is for the run in front of you; a pair that belongs in the file
+every day belongs in `EXPORT_PAIRS` below, with its own label, curve and last
+tenor. The button beside **every pair** puts the ticks back to the channel's
+own list. A pair a table the channel reads has no row for is still refused by
+name — the Bloomberg widths above all — and so is a pair that is in neither
+the list, the book nor the overlay. Beside every pair the overlay carries
+there is a **book / overlay** select. The default is the overlay wherever it
+has rows for the pair and the book everywhere else; *from overlay* /
+*from book* set all of them at once. So a run is not all from one source or all from the other, and
 the line under the picker says which pairs are read from where. Then the
 **tier** and **width ×** where the channel uses a tier (kACE, COS), the
 **wings** (the quoted marks, or the fitted smile's), the **scenario** for
@@ -2318,7 +2351,7 @@ folds them all again.
 | `SHADES` | the ATM **mid shift** in vol points by channel, with a row per pair that differs. `bloomberg` is 0.2 under the mark on both sides for the G7 and G7 Cross pairs, and **zero for USDCNH, USDHKD, HKDCNH and XAUUSD** — the EM/PM block is a separate sheet on the desk's side and shades nothing. A shade is not a width — it moves the mid, and the width goes around it |
 | `COS_WIDTHS` | how far under the mid the **COS bid** sits, in vol points, per pair and tenor, with `default` and `crosses` rows; the most specific wins. **One-sided**: the COS file carries a bid and no ask, so this is the whole distance under the mid — the number on the desk's own `Guideline` sheet. Pair-dependent, which is why it is not a tier of `SPREADS`: the desk runs 0.8/0.6/0.5/0.5/0.5 for most pairs, 1.0/0.8 at the front for USDJPY, 0.9/0.7 for the yen crosses, a flat 0.5 for USDCNH and AUDNZD |
 | `CROSS_CORR` | **COS only.** A cross's correlation typed per tenor — `pair`, `tenor`, `correlation`, optional `note` — e.g. the CNH crosses' ladder O/N to 3Y. Where it names a cross the COS file carries, that row's ATM is built from the two dollar legs' ATMs at the typed correlation (linear in time between rungs, flat outside), the way the desk's CNH cross workbook does it; the Preflight's *From* column shows the correlation and both leg vols. **Nothing else reads it**: the marking and pricing screens, kACE, Bloomberg and Murex all keep the cross as the book builds it. A tenor a leg cannot supply is refused by name. `CNHHKD` and `HKDCNH` are the same cross |
-| `EXPORT_PAIRS` | which pairs each channel publishes, **in the file's order**: `channel`, `pair`, `label` (as the file writes it — `AUD/USD`, `USD/CNY`), `feed_from` (the curve it is read from when that is another pair — COS's CNY rows are fed the CNH curves; a pair marked the other way up is inverted and says so), `last_tenor` (XAUUSD stops at 1Y on Bloomberg). kACE with no rows of its own publishes every pair the book builds |
+| `EXPORT_PAIRS` | which pairs each channel publishes **by default**, **in the file's order** (the picker offers the book's and the overlay's pairs beside them, unticked): `channel`, `pair`, `label` (as the file writes it — `AUD/USD`, `USD/CNY`), `feed_from` (the curve it is read from when that is another pair — COS's CNY rows are fed the CNH curves; a pair marked the other way up is inverted and says so), `last_tenor` (XAUUSD stops at 1Y on Bloomberg). kACE with no rows of its own publishes every pair the book builds |
 
 **Seed the missing tables** (or `volkit export --init-tables`) writes what the
 desk's own files say — the 33 Bloomberg pairs in block order, the 32 Murex
@@ -2796,7 +2829,7 @@ volkit kace   USDCNH --clear --out clear.xml the clearRate message for the pair
 volkit kace   USDCNH --source fitted         wings off the fitted surface instead of the marks
 volkit kace   USDCNH --post --kace-url https://pfcshkwapp01:8500/xmlposter   send it the way the poster page does
 volkit kace   USDCNH --post --dry-run        what would be sent, and where, sending nothing
-volkit kace   USDCNH --pillars-only          key tenors only: the pillars and no calendar-day nodes
+volkit kace   USDCNH --pillars-only          key tenors only: the pillars, Maturity as the tenor, no calendar-day nodes
 volkit events USDJPY                      the EVENTS sheet, through one pair's legs
 volkit events USDJPY --weights            ... and every event's weight on every currency
 volkit events USDJPY --set FOMC:JPY=0.3   mark a weight for this run (the Weights card)

@@ -249,6 +249,75 @@ class TestTables(_Fixture):
         with self.assertRaises(publish.PublishError):
             publish.channel("murex_wings")
 
+    def test_the_universe_is_the_channels_list_then_the_book_and_the_overlay(self):
+        """`EXPORT_PAIRS` is the default, not the ceiling.
+
+        What a channel publishes when nobody says otherwise is its typed
+        rows, in the file's own order (`pairs_for`).  What it may be *asked*
+        for is those, then every other pair the book builds and the overlay
+        carries (`universe_for`) -- so a pair nobody has typed into the table
+        can still go out today, by name.  An extra is fed from itself,
+        spelled the file's own way, and stops where the channel's own rows
+        agree they stop.
+        """
+        listed = [e.pair for e in self.tables.pairs_for("murex", self.book)]
+        self.assertEqual(listed, ["AUDUSD", "USDJPY"])
+        universe = self.tables.universe_for("murex", self.book, self.overlay)
+        self.assertEqual([e.pair for e in universe[:2]], listed)
+        self.assertTrue(all(e.listed for e in universe[:2]))
+        extra = [e for e in universe if not e.listed]
+        # The book's other pairs and the overlay's, alphabetically, once each.
+        self.assertEqual([e.pair for e in extra],
+                         sorted((set(self.book.pairs) | set(self.overlay.pairs))
+                                - set(listed)))
+        gbp = next(e for e in extra if e.pair == "GBPUSD")
+        self.assertEqual((gbp.label, gbp.feed_from), ("GBP/USD", "GBPUSD"))
+        # Both Murex rows stop at 1Y, so an extra beside them does too --
+        # otherwise it would be refused for 2Y and 3Y the book never marks.
+        self.assertEqual(gbp.last_tenor, "1Y")
+        # A pair the overlay carries and the book does not is offered as well.
+        self.assertIn("AUDHKD", [e.pair for e in extra])
+        self.assertNotIn("AUDHKD", [str(p) for p in self.book.pairs])
+        # With no overlay loaded it is the channel's list and the book alone.
+        self.assertEqual([e.pair for e in self.tables.universe_for("murex", self.book)],
+                         listed + sorted(set(self.book.pairs) - set(listed)))
+        # kACE has no file to match: its list is the book's pairs already, so
+        # the overlay is all the universe adds.
+        bare = publish.ExportTables.load(self.wb)
+        bare.export_pairs.pop("kace")
+        self.assertEqual([e.pair for e in bare.universe_for("kace", self.book, self.overlay)],
+                         list(self.book.pairs)
+                         + sorted(set(self.overlay.pairs) - set(self.book.pairs)))
+
+    def test_an_unlisted_pair_goes_out_only_when_it_is_named(self):
+        """The universe is what may be asked for; naming nothing is the list."""
+        default = publish.build("murex", self.book, self.tables)
+        self.assertEqual([c["pair"] for c in default.preflight["coverage"]],
+                         ["AUDUSD", "USDJPY"])
+        named = publish.build("murex", self.book, self.tables, pairs=["GBPUSD", "USDJPY"])
+        # The channel's own order first, then the extras: a file's row order
+        # is the file's, and a pair nobody typed cannot claim a place in it.
+        self.assertEqual([c["pair"] for c in named.preflight["coverage"]],
+                         ["USDJPY", "GBPUSD"])
+        self.assertEqual(named.refused, [])
+        rows = named.file("DRV_MktData_FX_Vol_20240228.xls")
+        self.assertIn(b"GBP/USD", rows.body)
+        # And a pair in none of the three is refused by name.
+        with self.assertRaises(publish.PublishError) as ctx:
+            publish.build("murex", self.book, self.tables, pairs=["USDTRY"])
+        self.assertIn("USDTRY", str(ctx.exception))
+
+    def test_an_overlay_only_pair_can_be_picked_for_a_file_channel(self):
+        """AUDHKD is on no channel's list and in no book sheet; the overlay
+        carries it whole, so the file can be asked for it."""
+        b = publish.build("murex", self.book, self.tables, pairs=["AUDHKD"],
+                          source="overlay", overlay=self.overlay)
+        self.assertEqual(b.refused, [])
+        self.assertEqual([c["pair"] for c in b.preflight["coverage"]], ["AUDHKD"])
+        self.assertEqual(b.preflight["sources"]["overlay"], ["AUDHKD"])
+        self.assertTrue(all(q.source == "overlay" for q in b.quotes))
+        self.assertIn(b"AUD/HKD", b.file("DRV_MktData_FX_Vol_20240228.xls").body)
+
     def test_a_workbook_typed_before_the_murex_merge_still_reads(self):
         """`murex_vol` and `murex_broker` were two channels writing one file
         each; they are one `murex` destination writing both.  A workbook
@@ -1189,9 +1258,25 @@ class TestExportScreen(unittest.TestCase):
         st = svc.export_state()
         self.assertEqual([c["key"] for c in st["channels"]], list(publish.CHANNELS))
         cos = next(c for c in st["channels"] if c["key"] == "cos")
-        self.assertEqual([p["pair"] for p in cos["pairs"]], ["USDCNH", "EURCNH", "HKDCNH"])
+        # What COS publishes when nobody says otherwise is its EXPORT_PAIRS
+        # rows, in the file's own order; they come first and are ticked.
+        self.assertEqual(cos["default_pairs"], ["USDCNH", "EURCNH", "HKDCNH"])
+        self.assertEqual([p["pair"] for p in cos["pairs"][:3]],
+                         ["USDCNH", "EURCNH", "HKDCNH"])
+        self.assertTrue(all(p["listed"] for p in cos["pairs"][:3]))
         self.assertEqual(cos["pairs"][2]["feed_from"], "CNHHKD")
         self.assertTrue(cos["pairs"][2]["in_book"])
+        # What it may be asked for is wider: every other pair the book builds,
+        # alphabetically, unlisted and spelled the file's own way.
+        extra = [p for p in cos["pairs"] if not p["listed"]]
+        self.assertEqual([p["pair"] for p in extra],
+                         sorted(set(svc.book.pairs) - set(cos["default_pairs"])))
+        self.assertEqual(next(p["label"] for p in extra if p["pair"] == "USDJPY"), "USD/JPY")
+        self.assertTrue(all(p["in_book"] for p in extra))
+        # kACE spells a pair as the message does, not with a slash.
+        kace_extra = [p for p in next(c for c in st["channels"] if c["key"] == "kace")["pairs"]
+                      if not p["listed"]]
+        self.assertEqual(next(p["label"] for p in kace_extra if p["pair"] == "USDJPY"), "USDJPY")
         kace_ch = next(c for c in st["channels"] if c["key"] == "kace")
         self.assertFalse(kace_ch["pairs"][1]["in_book"])          # AUDHKD
         self.assertFalse(kace_ch["pairs"][1]["in_overlay"])
@@ -1254,10 +1339,17 @@ class TestExportScreen(unittest.TestCase):
         # A one-file destination needs no name.
         name, _, kind = svc.export_download({"channel": "cos", "pairs": "USDCNH"})
         self.assertEqual((name, kind), ("COS_86830_Bid.csv", "text/csv"))
-        # A pair not on the channel's list is refused by name.
+        # A pair the book builds is offered although EXPORT_PAIRS does not
+        # list it for this channel: picked by name, it goes out, fed from
+        # itself and spelled the file's own way.
+        extra = svc.export_build({"channel": "murex", "pairs": ["GBPUSD"]})
+        self.assertTrue(extra["ok"], extra["refused"])
+        self.assertEqual([c["pair"] for c in extra["preflight"]["coverage"]], ["GBPUSD"])
+        self.assertEqual(extra["preflight"]["coverage"][0]["label"], "GBP/USD")
+        # A pair in neither the list, the book nor the overlay is refused by name.
         with self.assertRaises(publish.PublishError) as ctx:
-            svc.export_build({"channel": "murex", "pairs": ["GBPUSD"]})
-        self.assertIn("GBPUSD", str(ctx.exception))
+            svc.export_build({"channel": "murex", "pairs": ["USDTRY"]})
+        self.assertIn("USDTRY", str(ctx.exception))
 
     def test_a_kace_run_posts_one_message_per_pair_and_records_the_source(self):
         posted = []

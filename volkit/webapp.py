@@ -3245,22 +3245,33 @@ class BookService:
             channels = []
             for ch in publish.CHANNELS.values():
                 entry = ch.summary()
+                ov_pairs = set(self.overlay.pairs) if self.overlay is not None else set()
                 try:
-                    ov_pairs = set(self.overlay.pairs) if self.overlay is not None else set()
-                    entry["pairs"] = [{"pair": e.pair, "label": e.label,
-                                       "feed_from": e.feed_from if e.feed_from != e.pair else "",
-                                       "last_tenor": e.last_tenor,
-                                       "in_book": (self.book is not None
-                                                   and e.feed_from in self.book),
-                                       # Whether the loaded overlay carries the
-                                       # pair: the screen's per-pair source
-                                       # toggle is offered only where it does.
-                                       "in_overlay": e.pair in ov_pairs}
-                                      for e in tables.pairs_for(ch.key, self.book)]
+                    # What the channel publishes when nobody says otherwise:
+                    # the picker opens with these ticked.
+                    entry["default_pairs"] = [e.pair for e in
+                                              tables.pairs_for(ch.key, self.book)]
                     entry["error"] = ""
                 except publish.PublishError as exc:
-                    entry["pairs"] = []
+                    entry["default_pairs"] = []
                     entry["error"] = str(exc)
+                # What it may be asked for: that list, then every other pair
+                # the book builds and the overlay carries.
+                entry["pairs"] = [{"pair": e.pair, "label": e.label,
+                                   "feed_from": e.feed_from if e.feed_from != e.pair else "",
+                                   "last_tenor": e.last_tenor,
+                                   # On the channel's own EXPORT_PAIRS list,
+                                   # rather than offered off the book or the
+                                   # overlay.
+                                   "listed": e.listed,
+                                   "in_book": (self.book is not None
+                                               and e.feed_from in self.book),
+                                   # Whether the loaded overlay carries the
+                                   # pair: the screen's per-pair source
+                                   # toggle is offered only where it does.
+                                   "in_overlay": e.pair in ov_pairs}
+                                  for e in tables.universe_for(ch.key, self.book,
+                                                               self.overlay)]
                 if ch.key == "kace":
                     try:
                         entry["tenors"] = ch.tenor_list(tables)
@@ -3482,7 +3493,7 @@ class BookService:
         applied = set((self.overlay_applied or {}).get("pairs") or [])
         notes: list[str] = []
         if applied and self.overlay is not None:
-            pairs = self.export_tables.pairs_for(key, self.book)
+            pairs = self.export_tables.universe_for(key, self.book, self.overlay)
             turned = []
             for e in pairs:
                 want = sources.get(e.pair, default)

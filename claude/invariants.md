@@ -484,6 +484,14 @@ for the reasoning behind it. Read this file when working in the area above.
   something *was* marked, so a shut control counts the overwrites in its own
   heading and a shut overwrite column puts a dot on the tenor it belongs to.
   A mark nobody can see is the silent zero of §2 wearing a tidier screen.
+  The **fit to the overwrites** reads the same way from the other end: it
+  opens with that column, but once it has run it stays open and keeps its
+  targets whether the column still holds them or not -- through an apply,
+  through *Clear ATM overwrites*, through the disclosure being shut again.
+  A target is what a mark is aiming at, and clearing the column is a step in
+  marking the curve by hand rather than the end of it, so the graph holds the
+  targets and draws the book's own ATM curve against them, repainted from
+  `paintMarks` on every mark. Taking it down is its own button.
   An **input** row is not a disclosure at all. The pricing grid's `CSA` and
   per-leg `Premium` rows shipped behind a `hidden | shown` toggle, on the
   argument that a desk on one house CSA should not have to look past a row it

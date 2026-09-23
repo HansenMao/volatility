@@ -562,13 +562,16 @@ class TestWebAssets(unittest.TestCase):
         owner = {r: sc.name for sc in screens.SCREENS for r in sc.routes}
         self.assertEqual(owner.get("/api/marks/correlation/fit"), "marking")
 
-    def test_the_fit_to_the_overwrites_is_shown_only_with_the_overwrite_column(self):
-        """Its target curve is the overwrite column, so it opens and shuts with
-        it; and like the bump, Propose and Apply are one route with a flag."""
+    def test_the_fit_to_the_overwrites_is_shown_with_the_column_or_while_it_is_held(self):
+        """Its target curve is the overwrite column, so it opens with it -- and
+        stays open while a fit is held, because the targets outlive the column
+        they were read from.  Like the bump, Propose and Apply are one route
+        with a flag."""
         page = _source("volkit", "web", "index.html")
         js = page.split("<script>")[1].split("</script>")[0]
         self.assertIn('<div class="hide" id="mowfitrow"', page)
-        self.assertIn("$('#mowfitrow').classList.toggle('hide',!$('#matmowshow').checked)", js)
+        self.assertIn("$('#mowfitrow').classList.toggle("
+                      "'hide',!($('#matmowshow').checked||owfitHeld()))", js)
         for dof in ("initial", "final", "decay", "add_on"):
             self.assertIn(f'data-owdof="{dof}"', page)
         body = js.split("async function owfitRun(apply){")[1].split("\n}")[0].replace(" ", "")
@@ -580,6 +583,42 @@ class TestWebAssets(unittest.TestCase):
         self.assertIn("awaitloadCurve()", body)
         self.assertIn("$('#mowfitgo').onclick=()=>owfitRun(false)", js.replace(" ", ""))
         self.assertIn("$('#mowfitapply').onclick=()=>owfitRun(true)", js.replace(" ", ""))
+
+    def test_the_fitted_picture_is_held_and_drawn_against_the_curve_as_it_stands(self):
+        """A fit is a picture, not a receipt.  The targets stay on the graph
+        after the column they were read from has been cleared -- which is a
+        step in marking the curve by hand, not the end of it -- and the line
+        drawn against them is the book's own ATM curve *as it stands*, read
+        off the marking table on every repaint rather than off the fit.  So
+        the fit is painted from `paintMarks`, where every route that marks
+        something ends, and not only from its own two buttons."""
+        page = _source("volkit", "web", "index.html")
+        js = page.split("<script>")[1].split("</script>")[0]
+        flat = js.replace(" ", "").replace("\n", "")
+        # Held between runs, and let go by a button of its own rather than by
+        # the overwrites going away.
+        self.assertIn('id="mowfitdrop"', page)
+        self.assertIn("OWFIT={pair:r.pair,sig:apply?null:owSignature(),r:r,applied:!!apply}", flat)
+        self.assertIn("$('#mowfitdrop').onclick=()=>{OWFIT=null;", flat)
+        # An apply clears the overwrites it fitted when it is asked to, and
+        # that must not then read as a proposal gone stale.
+        self.assertIn("if(OWFIT.sig==null)OWFIT.sig=owSignature();", flat)
+        # The book line is the curve, read off the marking table: `curve` and
+        # not `marked`, which would be the overwrites the fit aimed at.
+        body = js.split("function owfitBookNow(rows){")[1].split("\n}")[0]
+        self.assertIn("MARKS.atm", body)
+        self.assertIn("r.curve", body)
+        self.assertNotIn("r.marked", body)
+        # Repainted with the rest of the card.
+        paint = js.split("function paintMarks(){")[1].split("\nfunction ")[0]
+        self.assertIn("owfitPaint();", paint)
+        # The miss on the table is measured against the book as it stands, so
+        # a mark on the curve card moves it.
+        pic = js.split("function owfitPaint(){")[1].split("\nasync function owfitRun")[0]
+        self.assertIn("now[i]-x.target", pic.replace(" ", ""))
+        self.assertIn("Book now %", pic)
+        for label in ("target", "book curve now", "fitted curve", "curve before the fit"):
+            self.assertIn(label, pic)
 
     def test_the_key_tenor_is_matched_however_the_workbook_spells_it(self):
         """`fillSel` matches by string.  A default of '1M' offered to a

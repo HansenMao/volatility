@@ -62,7 +62,14 @@ A channel names its width source: kACE a tier, Bloomberg the market table,
 COS its own pair ladder, Murex neither (bid equals ask, and always has).  The pair list each
 channel publishes, in the file's own order, is the ``EXPORT_PAIRS`` tab --
 typed by hand like the rest, because which pairs a file carries is a fact
-about the file and the file is somebody else's.
+about the file and the file is somebody else's.  That table is the
+**default**, not the ceiling: ``ExportTables.universe_for`` offers the same
+list plus every other pair the book builds and the overlay carries, so a run
+can be asked for a pair nobody has typed into the table yet.  An unlisted
+pair goes out only when it is named (the screen's picker, ``--pairs``), it is
+fed from itself and spelled the channel's own way, and every table the
+channel reads -- ``MARKET_WIDTHS`` above all -- still refuses it by name if
+it has no row for it.
 
 **What COS starts from.**  The desk's COS sheet takes its base from a broker
 paste -- the market's delta-neutral *bid*, rounded down to a tenth -- and
@@ -404,13 +411,17 @@ class ExportTables:
         return None
 
     def pairs_for(self, channel: str, book=None) -> list["PairEntry"]:
-        """The pairs a channel publishes, in order.
+        """The pairs a channel publishes by default, in order.
 
         From ``EXPORT_PAIRS``; a file channel with no rows is refused, because
         which pairs a file carries is a fact about the file.  kACE is the
         exception: a message is per pair and there is no file to match, so
         with no rows of its own it publishes every pair the book builds --
         the pair list the market-maker bar's bulk export used to offer.
+
+        This is the list a run carries when nobody says otherwise, and the
+        list the screen's picker opens with ticked.  What a run *may* carry
+        is wider: see :meth:`universe_for`.
         """
         key = channel_key(channel)
         entries = (self.export_pairs or {}).get(key) or []
@@ -426,6 +437,52 @@ class ExportTables:
         raise PublishError(f"EXPORT_PAIRS lists no pairs for {channel}; add a row per "
                            f"pair the file carries, in the file's order")
 
+    def universe_for(self, name: str, book=None,
+                     overlay: overlay_mod.Overlay | None = None) -> list["PairEntry"]:
+        """Every pair a channel may be *asked* for: its own list, then the rest.
+
+        ``EXPORT_PAIRS`` is what a file carries by default and it stays that
+        -- typed by hand, in the file's own order, and what ``pairs_for``
+        returns.  But the desk's pairs are not only the ones somebody has
+        typed into that table for that channel: a pair the book marks, or a
+        pair an overlay carries, is a pair this channel can publish today if
+        it is asked to.  So the picker offers all three -- the channel's list
+        first, in its order, then every other pair the book builds and the
+        overlay carries, alphabetically -- and ``listed`` says which is
+        which.  Nothing here changes what goes out: an unlisted pair is
+        published only when it is picked by name.
+
+        An extra is fed from itself and spelled the channel's own way
+        (:meth:`Channel.default_label`), because it has no ``EXPORT_PAIRS``
+        row to say otherwise, and it stops where the channel's own rows stop
+        when they all agree on a ``last_tenor`` -- a file whose every typed
+        pair ends at 1Y is a file the book cannot fill past 1Y, and an extra
+        beside them that asked for 3Y would be refused for a reason that is
+        about the table rather than about the pair.
+
+        A channel with no list at all -- the table is missing, or has no row
+        for it -- still offers the book and the overlay here rather than
+        raising: the refusal belongs to a run that names no pairs, which is
+        ``pairs_for``'s, not to the question of what could be named.
+        """
+        ch = channel(name)
+        try:
+            entries = list(self.pairs_for(ch.key, book))
+        except PublishError:
+            entries = []
+        seen = {e.pair for e in entries}
+        extra = set()
+        if book is not None:
+            extra |= {str(p).upper() for p in book.pairs}
+        if overlay is not None:
+            extra |= {str(p).upper() for p in overlay.pairs}
+        last = {e.last_tenor for e in entries}
+        cap = last.pop() if len(last) == 1 else ""
+        entries.extend(PairEntry(pair=p, label=ch.default_label(p), feed_from=p,
+                                 last_tenor=cap, listed=False)
+                       for p in sorted(extra - seen))
+        return entries
+
 
 @dataclass(frozen=True)
 class PairEntry:
@@ -436,6 +493,10 @@ class PairEntry:
     feed_from: str             # the book's curve; the pair itself when blank
     last_tenor: str            # the last tenor published, blank for the channel's whole list
     note: str = ""
+    #: On the channel's own ``EXPORT_PAIRS`` list, and so published unless
+    #: it is unticked.  False is an extra the book or the overlay offers
+    #: (``ExportTables.universe_for``): available to pick, never a default.
+    listed: bool = True
 
     @property
     def inverted(self) -> bool:
@@ -651,6 +712,16 @@ class Channel:
     #: dollar legs at that correlation, for this channel alone (COS).  Every
     #: other channel, and the book, keep the cross the book builds.
     correlated_crosses: bool = False
+    #: How this channel's file spells a pair: ``AUD/USD`` rather than
+    #: ``AUDUSD``.  An ``EXPORT_PAIRS`` row carries the spelling of the pairs
+    #: somebody typed; this is for a pair picked off the book or an overlay,
+    #: which has no row (``default_label``).
+    slash_labels: bool = False
+
+    def default_label(self, pair: str) -> str:
+        """How the file spells a pair with no ``EXPORT_PAIRS`` row of its own."""
+        p = str(pair).upper()
+        return f"{p[:3]}/{p[3:6]}" if self.slash_labels else p
 
     def tenor_list(self, tables: ExportTables) -> list[str]:
         if self.tenors:
@@ -705,14 +776,14 @@ CHANNELS: dict[str, Channel] = {
              "go out two-way about their marks by WING_WIDTHS"),
     "murex": Channel(
         key="murex", label="Murex", kind="file", tenors=ELEVEN, width="none",
-        default_tier="", precision=2,
+        default_tier="", precision=2, slash_labels=True,
         what="two .xls files written together: DRV_MktData_FX_Vol_<date>.xls, the ATM as "
              "ccy pair, Maturity, bid, ask; and DRV_MktData_FX_Broker_<date>.xls, the 10 "
              "and 25 delta butterfly and risk reversal. Bid equals ask in both"),
     "cos": Channel(
         key="cos", label="COS", kind="file", tenors=COS_TENORS, width="cos",
         default_tier="", precision=2, needs=("atm",), one_sided=True,
-        correlated_crosses=True,
+        correlated_crosses=True, slash_labels=True,
         what="COS_86830_Bid.csv: the ATM bid alone, five tenors, CNY-labelled rows fed "
              "from the CNH curves; the bid sits COS_WIDTHS under the mid, one-sided, "
              "per pair and tenor; a cross CROSS_CORR names takes its ATM off its two "
@@ -1040,7 +1111,11 @@ def build(channel_name: str, book, tables: ExportTables, *, source: str = "book"
     methods = {str(k).upper(): str(v) for k, v in (methods or {}).items() if str(v or "").strip()}
     today = book.clock.now.date()
     tenors = ch.tenor_list(tables)
-    entries = tables.pairs_for(ch.key, book)
+    # Named pairs are looked up in the whole universe -- the channel's own
+    # list, the book and the overlay -- so a run can carry a pair nobody has
+    # typed into EXPORT_PAIRS yet.  Naming none is the channel's own list.
+    entries = (tables.universe_for(ch.key, book, overlay) if pairs
+               else tables.pairs_for(ch.key, book))
     chosen_tier = ""
     if ch.width == "tier":
         if tables.spreads is None:
@@ -1052,9 +1127,11 @@ def build(channel_name: str, book, tables: ExportTables, *, source: str = "book"
         wanted = {str(p).strip().upper() for p in pairs if str(p or "").strip()}
         unknown = sorted(wanted - {e.pair for e in entries})
         if unknown:
-            raise PublishError(f"{', '.join(unknown)} {'is' if len(unknown) == 1 else 'are'} "
-                               f"not on the {ch.label} pair list (EXPORT_PAIRS); it publishes "
-                               f"{', '.join(e.pair for e in entries)}")
+            raise PublishError(
+                f"{', '.join(unknown)} {'is' if len(unknown) == 1 else 'are'} not on the "
+                f"{ch.label} pair list (EXPORT_PAIRS), in the book"
+                + (" or in the overlay" if overlay is not None else "")
+                + f"; it can publish {', '.join(e.pair for e in entries)}")
         entries = [e for e in entries if e.pair in wanted]
     chosen = pair_sources(entries, source, overlay, sources)
     # The overlay stays in scope for the bookkeeping -- its rows for a pair

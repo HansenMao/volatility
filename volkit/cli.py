@@ -3810,7 +3810,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("channel", nargs="?", default="kace",
                    help="kace, bloomberg, murex (both Murex files) or cos; the old "
                         "murex_vol and murex_broker still name it")
-    s.add_argument("--pairs", nargs="*", help="a subset of the channel's EXPORT_PAIRS list")
+    s.add_argument("--pairs", nargs="*",
+                   help="the pairs to publish: a subset of the channel's EXPORT_PAIRS list, "
+                        "or any pair the book builds or the overlay carries -- an unlisted "
+                        "one is fed from itself and spelled the file's own way. Naming none "
+                        "publishes the channel's own list")
     s.add_argument("--overlay", metavar="FILE",
                    help="an outside file of pair, tenor, atm, rr25, rr10, bf25, bf10 laid "
                         "over the book for this export; not confined to the book's pairs "
