@@ -72,7 +72,7 @@ from .monitor import panel_from_request as monitor_panel_from_request
 from .history import ANNUALISATIONS, VOL_UNITS, HistoryError, load_history
 from .pricing import (PRODUCTS, OptionLeg, expiry_datetime, price_strip,
                       quick_vol, resolve_legs)
-from . import remarks, screens, session
+from . import paths, remarks, screens, session
 from .marking import MIN_INSTANCES as MARK_MIN_INSTANCES
 from .marking import SCREEN_VERDICTS as MARK_VERDICTS
 from .smile import INTERPOLATORS
@@ -3914,6 +3914,11 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self.service.relative_value(q))
             elif url.path == "/api/history":
                 self._json(self.service.history_state())
+            elif url.path == "/api/files":
+                # The file navigator behind every path box.  Belongs to no
+                # screen, like /api/auto: the boxes it fills are on several.
+                self._json(paths.list_dir(q.get("dir", ""), q.get("ext", ""),
+                                          start=Path(self.service.path).resolve().parent))
             elif url.path == "/api/session":
                 self._json(self.service.session_state(q))
             elif url.path == "/api/band":

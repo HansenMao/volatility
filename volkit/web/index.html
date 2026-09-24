@@ -157,6 +157,21 @@ table.mark th .x:hover{color:var(--bad);background:var(--bg)}
 .modal .sheethead h2{font-size:12px;text-transform:uppercase;letter-spacing:.9px;
   color:var(--muted);margin:0;font-weight:650}
 .modal .sheetbody{padding:14px;display:flex;flex-direction:column;gap:14px}
+/* The file navigator: over everything, the configuration window included,
+   because two of the boxes it fills are in that window. */
+#fpmodal{z-index:70}
+#fpmodal .sheet{width:min(720px,100%)}
+.fpbar{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.fpbar button,.fpbar select{width:auto;padding:4px 10px;font-size:12px}
+.fplist{border:1px solid var(--line);border-radius:8px;background:var(--panel);
+  height:min(52vh,460px);overflow:auto;font-size:12.5px}
+.fprow{display:flex;gap:10px;align-items:center;padding:4px 10px;cursor:pointer;
+  border-bottom:1px solid var(--line);user-select:none}
+.fprow:hover{background:color-mix(in srgb,var(--accent) 8%,transparent)}
+.fprow.on{background:color-mix(in srgb,var(--accent) 18%,transparent)}
+.fprow.off{opacity:.5}
+.fprow .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fprow .meta{flex:0 0 auto}
 .toolbar{display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap}
 .toolbar button{width:auto;padding:6px 13px}
 .totals{display:flex;gap:10px;flex-wrap:wrap;margin-top:12px}
@@ -704,7 +719,10 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
           <span class="pill warn hide" id="sesscfg"></span>
           <span class="meta" id="sesswhen"></span></h2>
         <label>Session file</label>
-        <input id="sesspath" placeholder="vol_session.json beside the workbook">
+        <div class="row">
+          <input id="sesspath" placeholder="vol_session.json beside the workbook">
+          <button class="ghost" data-fp="sesspath" data-fptitle="the session file" data-fpext=".json" style="width:auto;padding:6px 13px;font-size:12px" title="find the file in a folder navigator instead of typing its path">Browse…</button>
+        </div>
         <div class="row" style="margin-top:9px">
           <button id="sesssave">Save marks</button>
           <button class="ghost" id="sessload">Load marks</button>
@@ -1698,6 +1716,7 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
       <section class="card"><h2>Input <small>an outside file, read into an overlay</small></h2>
         <div class="row" style="flex-wrap:wrap;gap:6px">
           <input id="xovpath" placeholder="path to a CSV or xlsx of pair, tenor, atm, rr25, rr10, bf25, bf10" style="flex:1;min-width:200px">
+          <button class="ghost" data-fp="xovpath" data-fptitle="the overlay file" data-fpext=".csv,.txt,.xlsx,.xlsm" data-fpthen="xovload" style="width:auto;padding:5px 12px;font-size:12px" title="find the file in a folder navigator instead of typing its path">Browse…</button>
           <button class="ghost" id="xovload" style="width:auto;padding:5px 12px;font-size:12px">Load</button>
         </div>
         <details class="hint" style="margin-top:6px"><summary>or paste the rows</summary>
@@ -2282,6 +2301,40 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
  </div>
 </div>
 
+<!-- The file navigator behind every Browse… button.  Every path box names a
+     file the server opens, so the listing comes from the server
+     (/api/files); a browser's own file input only ever hands over the bytes
+     and a bare name.  Choosing fills the box -- and, where the box has one
+     action, runs it; the session file is saved to as well as read from, so
+     that box is only filled. -->
+<div class="modal hide" id="fpmodal">
+ <div class="sheet">
+  <div class="sheethead">
+    <h2 id="fptitle">Choose a file</h2>
+    <span class="meta" id="fpexts" style="white-space:nowrap"></span>
+    <div class="grow"></div>
+    <button class="ghost" id="fpclose" style="width:auto;padding:5px 12px;font-size:12px">Close</button>
+  </div>
+  <div class="sheetbody" style="gap:9px">
+    <div class="fpbar">
+      <button class="ghost" id="fpup" title="the folder above">↑ Up</button>
+      <button class="ghost" id="fpstart" title="the loaded workbook's folder">Workbook folder</button>
+      <button class="ghost" id="fphome" title="your home folder">Home</button>
+      <select id="fproots" class="hide" title="drive"></select>
+      <label class="meta" style="margin-left:auto;display:flex;align-items:center;gap:5px" title="list files of every type, not only the ones this box reads">
+        <input type="checkbox" id="fpall" style="width:auto"> every file</label>
+    </div>
+    <input id="fpdir" spellcheck="false" autocomplete="off" title="the folder shown; type or paste one and press Enter">
+    <div class="fplist" id="fplist"></div>
+    <div class="row" style="align-items:center;gap:8px">
+      <span class="meta" id="fpmsg" style="flex:1"></span>
+      <button class="ghost" id="fpcancel" style="width:auto;padding:6px 13px">Cancel</button>
+      <button id="fpok" style="width:auto;padding:6px 16px" disabled>Choose</button>
+    </div>
+  </div>
+ </div>
+</div>
+
 <!-- ========================= CONFIGURATION =========================
      One window, over whichever screen is showing, for the three things that
      belong to no screen: where the market feed is read from, where the
@@ -2314,12 +2367,14 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
       <label>Market feed</label>
       <div class="row">
         <input id="feedpath" placeholder="spot / forward feed CSV">
+        <button class="ghost" data-fp="feedpath" data-fptitle="the market feed" data-fpext=".csv,.txt" data-fpthen="feedload" style="width:auto;padding:6px 13px;font-size:12px" title="find the file in a folder navigator instead of typing its path">Browse…</button>
         <button class="ghost" id="feedload" style="width:auto;padding:6px 13px">Load feed</button>
       </div>
       <div class="meta" id="cfgfeed" style="margin-top:6px"></div>
       <label style="margin-top:12px">Historical workbook</label>
       <div class="row">
         <input id="histpath" placeholder="vol_history.xlsx — or files/history_sample.xlsx">
+        <button class="ghost" data-fp="histpath" data-fptitle="the historical workbook" data-fpext=".xlsx,.xlsm" data-fpthen="histload" style="width:auto;padding:6px 13px;font-size:12px" title="find the file in a folder navigator instead of typing its path">Browse…</button>
         <button class="ghost" id="histload" style="width:auto;padding:6px 13px">Load history</button>
       </div>
       <div class="meta" id="histstatus" style="margin-top:6px"></div>
@@ -7393,10 +7448,90 @@ $('#mohistcfg').onclick=cfgOpen;
 /* The backdrop closes it, the sheet does not: a click that lands on a table
    inside the window must not put the window away underneath the cursor. */
 $('#cfgmodal').onclick=e=>{if(e.target===$('#cfgmodal'))cfgClose()};
+/* ---- The file navigator (Browse…) ----
+   One window for every path box: a button carrying data-fp (the box it
+   fills), data-fpext (the extensions the box reads; a file of any other
+   type is hidden until "every file" is ticked, and dimmed then) and, where
+   the box has only one thing to do with a path, data-fpthen (the button to press
+   once it is filled).  The folder a box was last browsed in is remembered in
+   this browser only, as a convenience: a box with a path in it opens there. */
+let FP=null;
+function fpKeep(box,dir){try{const v=JSON.parse(localStorage.getItem('volkit.fpdirs')||'{}')||{};
+  v[box]=dir;localStorage.setItem('volkit.fpdirs',JSON.stringify(v))}catch(e){}}
+function fpKept(box){try{return (JSON.parse(localStorage.getItem('volkit.fpdirs')||'{}')||{})[box]||''}catch(e){return ''}}
+function fpIsOpen(){return !$('#fpmodal').classList.contains('hide')}
+function fpClose(){$('#fpmodal').classList.add('hide');FP=null}
+function fpSize(n){return n==null?'':n<1024?n+' B':n<1048576?(n/1024).toFixed(0)+' KB':(n/1048576).toFixed(1)+' MB'}
+function fpJoin(dir,name){const sep=(FP&&FP.data&&FP.data.sep)||'/';return dir.endsWith(sep)?dir+name:dir+sep+name}
+async function fpGo(dir){
+  if(!FP)return;
+  $('#fpmsg').textContent='reading…';
+  let d;
+  try{d=await api('/api/files?'+qs({dir:dir||'',ext:FP.ext}))}
+  catch(e){$('#fpmsg').textContent=e.message;return}
+  if(!FP)return;
+  FP.data=d; FP.pick=d.selected||'';
+  $('#fpdir').value=d.dir;
+  $('#fpup').disabled=!d.parent;
+  const R=$('#fproots');
+  R.classList.toggle('hide',(d.roots||[]).length<2);
+  R.innerHTML=(d.roots||[]).map(r=>'<option'+(d.dir.toUpperCase().startsWith(r.toUpperCase())?' selected':'')+'>'+esc(r)+'</option>').join('');
+  fpPaint();
+}
+function fpPaint(){
+  const d=FP.data, all=$('#fpall').checked, want=(d.exts||[]).length>0;
+  const rows=(d.entries||[]).filter(e=>e.dir||all||e.match||!want);
+  const hidden=(d.entries||[]).filter(e=>!e.dir).length-rows.filter(e=>!e.dir).length;
+  $('#fplist').innerHTML=rows.map(e=>'<div class="fprow'+(e.name===FP.pick&&!e.dir?' on':'')+
+    (!e.dir&&want&&!e.match?' off':'')+'" data-fpn="'+esc(e.name)+'" data-fpd="'+(e.dir?1:0)+'">'+
+    '<span>'+(e.dir?'📁':'📄')+'</span><span class="nm">'+esc(e.name)+'</span>'+
+    '<span class="meta">'+esc(fpSize(e.size))+'</span><span class="meta" style="width:118px;text-align:right">'+
+    esc(String(e.modified||'').replace('T',' '))+'</span></div>').join('')||
+    '<div class="meta" style="padding:10px">'+(d.error?'':'nothing here')+'</div>';
+  $('#fpmsg').textContent=d.error?d.error:
+    ((d.truncated?'the first '+d.entries.length+' entries only · ':'')+
+     (hidden?hidden+' other file(s) hidden — tick every file to see them':''));
+  $('#fpmsg').style.color=d.error?'var(--bad)':'';
+  $('#fpok').disabled=!FP.pick;
+  const on=$('#fplist .fprow.on'); if(on)on.scrollIntoView({block:'nearest'});
+}
+function fpChoose(name){
+  if(!FP)return;
+  const f=FP, path=fpJoin(f.data.dir,name||f.pick);
+  if(!(name||f.pick))return;
+  const box=$('#'+f.box); box.value=path;
+  box.dispatchEvent(new Event('input',{bubbles:true}));box.dispatchEvent(new Event('change',{bubbles:true}));
+  fpKeep(f.box,f.data.dir); fpClose();
+  if(f.then){const b=$('#'+f.then); if(b&&!b.disabled)b.click();}
+}
+function fpOpen(btn){
+  const box=btn.dataset.fp;
+  FP={box, ext:btn.dataset.fpext||'', then:btn.dataset.fpthen||'', data:null, pick:''};
+  $('#fptitle').textContent='Choose '+(btn.dataset.fptitle||'a file');
+  $('#fpexts').textContent=FP.ext?FP.ext.split(',').join(' '):'';
+  $('#fpall').checked=false;
+  $('#fpmodal').classList.remove('hide');
+  fpGo(($('#'+box).value||'').trim()||fpKept(box));
+}
+document.addEventListener('click',e=>{const b=e.target.closest&&e.target.closest('[data-fp]');if(b){e.preventDefault();fpOpen(b)}});
+$('#fplist').onclick=e=>{const r=e.target.closest('.fprow');if(!r||!FP)return;
+  if(r.dataset.fpd==='1'){fpGo(fpJoin(FP.data.dir,r.dataset.fpn));return}
+  FP.pick=r.dataset.fpn; fpPaint();};
+$('#fplist').ondblclick=e=>{const r=e.target.closest('.fprow');if(r&&r.dataset.fpd!=='1')fpChoose(r.dataset.fpn)};
+$('#fpup').onclick=()=>{if(FP&&FP.data&&FP.data.parent)fpGo(FP.data.parent)};
+$('#fphome').onclick=()=>{if(FP&&FP.data)fpGo(FP.data.home)};
+$('#fpstart').onclick=()=>{if(FP&&FP.data)fpGo(FP.data.start)};
+$('#fproots').onchange=()=>fpGo($('#fproots').value);
+$('#fpall').onchange=()=>{if(FP&&FP.data)fpPaint()};
+$('#fpdir').onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();fpGo($('#fpdir').value.trim())}};
+$('#fpok').onclick=()=>fpChoose();
+$('#fpcancel').onclick=fpClose;
+$('#fpclose').onclick=fpClose;
+$('#fpmodal').onclick=e=>{if(e.target===$('#fpmodal'))fpClose()};
 document.addEventListener('keydown',e=>{if(e.key!=='Escape')return;
   /* The contour panel opens over the marking screen and the configuration
      window opens over anything, so Escape shuts whichever is showing. */
-  if(pctrIsOpen())pctrClose(); else if(bandIsOpen())bandClose();
+  if(fpIsOpen())fpClose(); else if(pctrIsOpen())pctrClose(); else if(bandIsOpen())bandClose();
   else if(cfgIsOpen())cfgClose()});
 $('#cfgaddpair').onclick=()=>{
   const pair=($('#cfgnewpair').value||'').trim().toUpperCase(), atm=$('#cfgnewatm').value.trim();
@@ -9339,6 +9474,15 @@ function xDefaults(ch){
      rather than a file quietly carrying every pair in the book. */
   return (ch.default_pairs||[]).filter(p=>all.indexOf(p)>=0);
 }
+/* The sets the picker ticks in one go, beside "every pair": the channel's
+   own list, every pair the book holds, every pair the loaded overlay
+   carries -- the last two in the picker's order.  A set replaces the ticks;
+   it does not add to them, and it leaves each pair's source alone. */
+function xSets(ch){
+  return {list:xDefaults(ch),
+          book:ch.pairs.filter(p=>p.in_book).map(p=>p.pair),
+          overlay:xOverlay().loaded?ch.pairs.filter(p=>p.in_overlay).map(p=>p.pair):[]};
+}
 function xChosen(){
   const ch=xChan(); if(!ch)return [];
   const all=ch.pairs.map(p=>p.pair);
@@ -9363,14 +9507,19 @@ function xSetSource(pair,src){XSRC[pair]=src;xRenderPick();$('#xsend').disabled=
 function xSrcTag(src){return '<span class="mmtag '+(src==='overlay'?'out':'in')+'">'+src+'</span>'}
 function xRenderPick(){
   const ch=xChan(); if(!ch){$('#xpairs').innerHTML='';$('#xpicksum').textContent='—';$('#xsrcline').innerHTML='';return}
-  const all=ch.pairs, on=xChosen(), src=xSources(), defs=xDefaults(ch);
+  const all=ch.pairs, on=xChosen(), src=xSources(), defs=xDefaults(ch), sets=xSets(ch);
   const same=(a,b)=>a.length===b.length&&a.every(x=>b.indexOf(x)>=0);
+  const now=on.length?['list','book','overlay'].find(k=>sets[k].length&&same(on,sets[k]))||'':'';
   $('#xpairs').innerHTML='<div class="mmpickall" style="display:flex;align-items:center;gap:8px">'+
     '<label style="flex:1"><input type="checkbox" id="xall"'+
     (on.length===all.length?' checked':'')+'> every pair ('+all.length+')</label>'+
-    '<button class="ghost" id="xdefpairs" style="width:auto;padding:2px 8px;font-size:11px" '+
-    'title="back to the pairs '+esc(ch.label)+' publishes by default -- its EXPORT_PAIRS rows, in the file\'s own order">the '+
-    esc(ch.label)+' list ('+defs.length+')</button></div>'+
+    '<select id="xpreset" style="width:auto;padding:2px 6px;font-size:11px" '+
+    'title="tick a whole set at once, in place of the ticks there are: the pairs '+esc(ch.label)+' publishes by default (its EXPORT_PAIRS rows, in the file\'s own order), every pair the book holds, or every pair the loaded overlay carries">'+
+    '<option value=""'+(now?'':' selected')+' disabled>tick a set…</option>'+
+    '<option value="list"'+(now==='list'?' selected':'')+'>the '+esc(ch.label)+' list ('+defs.length+')</option>'+
+    '<option value="book"'+(now==='book'?' selected':'')+'>book pairs ('+sets.book.length+')</option>'+
+    (xOverlay().loaded?'<option value="overlay"'+(now==='overlay'?' selected':'')+'>overlay pairs ('+sets.overlay.length+')</option>':'')+
+    '</select></div>'+
     all.map((p,i)=>((!p.listed&&(i===0||all[i-1].listed))?
       '<div class="meta" data-xsep="1" style="margin:5px 0 2px;padding-top:5px;border-top:1px solid var(--line)" '+
       'title="not on this channel\'s EXPORT_PAIRS list; ticked, it is fed from itself and goes out spelled the file\'s own way">'+
@@ -9385,11 +9534,16 @@ function xRenderPick(){
         '<option value="book"'+(src[p.pair]==='book'?' selected':'')+'>book</option></select>'
        :'<span class="mmtag in" style="opacity:.6" title="the overlay has no rows for this pair">book</span>')+
       '</div>').join('');
-  $('#xdefpairs').onclick=()=>{delete XSEL[ch.key];xKeep({sel:XSEL});xRenderPick();$('#xsend').disabled=true};
+  $('#xpreset').onchange=e=>{const k=e.target.value;
+    if(k==='list')delete XSEL[ch.key];
+    else if(sets[k])XSEL[ch.key]=sets[k].length?sets[k].slice():['(none)'];
+    xKeep({sel:XSEL});xRenderPick();$('#xsend').disabled=true};
   xFilterPick();
   $('#xpicksum').textContent=!all.length?'no pairs listed':
     (on.length===all.length?'every pair ('+all.length+')':
-     (on.length&&same(on,defs)?'the '+ch.label+' list ('+defs.length+')':
+     (now==='list'?'the '+ch.label+' list ('+defs.length+')':
+     now==='book'?'book pairs ('+sets.book.length+')':
+     now==='overlay'?'overlay pairs ('+sets.overlay.length+')':
      (on.length<=3&&on.length?on.join(', '):on.length+' of '+all.length)));
   const ov=on.filter(p=>src[p]==='overlay'), bk=on.filter(p=>src[p]!=='overlay');
   $('#xsrcline').innerHTML=ov.length?

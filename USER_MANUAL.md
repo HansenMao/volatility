@@ -137,6 +137,17 @@ Run `volkit.exe --help` to see which, if any, are hidden.
 
 ### The Config window
 
+Every box that takes a file's path — the market feed, the historical
+workbook, the session file and the bulk screen's overlay — has a **Browse…**
+button beside it. It opens a folder navigator over the page, starting at the
+file already in the box (or where that box was last browsed, or the
+workbook's folder): folders first, then the files the box reads — tick
+**every file** for the rest. Click a folder to open it, a file to pick it,
+and **Choose** (or double-click the file). The path goes into the box, and
+where the box has one action — **Load feed**, **Load history**, **Load** — it
+is run; the session file is only filled, since it is saved to as well as
+loaded from. You can still type or paste a path.
+
 Beside them, in the header, is **Config**. It is not a tab: it opens over
 whichever screen you are on and closes back onto it, and it holds the three
 things that belong to no screen.
@@ -2238,7 +2249,7 @@ The tab is two halves: **Input** on the left, **Output** on the right.
 
 **Input — an outside file, read into an overlay.** Some mornings the numbers a
 file has to carry are not the book's: a client run, a pair nobody has marked,
-a 3Y row nobody has a market for. Type the path of a CSV or xlsx with a header
+a 3Y row nobody has a market for. Type the path (or **Browse…** to it) of a CSV or xlsx with a header
 of `pair, tenor, atm, rr25, rr10, bf25, bf10` (the workbook's `RR 25D`, `ST
 25D`, `RR 10D`, `ST 10D` headings work as well; the strangle *is* the
 butterfly the files carry), in vol points, or paste the rows into the box, and
@@ -2283,8 +2294,10 @@ carries, unticked. Tick one of those and it goes out with the rest, fed from
 itself and spelled the way that file spells a pair (`AUD/USD` for Murex and
 COS) — it is for the run in front of you; a pair that belongs in the file
 every day belongs in `EXPORT_PAIRS` below, with its own label, curve and last
-tenor. The button beside **every pair** puts the ticks back to the channel's
-own list. A pair a table the channel reads has no row for is still refused by
+tenor. The **tick a set…** menu beside **every pair** replaces the ticks with a
+whole set at once: the channel's own list, **book pairs** (every pair the book
+holds) or, with an overlay loaded, **overlay pairs** (every pair it carries).
+It leaves each pair's book / overlay source as it was. A pair a table the channel reads has no row for is still refused by
 name — the Bloomberg widths above all — and so is a pair that is in neither
 the list, the book nor the overlay. Beside every pair the overlay carries
 there is a **book / overlay** select. The default is the overlay wherever it

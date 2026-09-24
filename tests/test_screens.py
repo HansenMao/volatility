@@ -1302,6 +1302,50 @@ class TestWebAssets(unittest.TestCase):
         self.assertEqual(refs - ids - {"c1"}, set())
 
 
+class TestFileNavigator(unittest.TestCase):
+    """Browse… beside every path box, listed by the server (`paths.list_dir`).
+
+    The boxes name files the *server* opens, so the listing has to come from
+    it: a browser's own file input never tells the page where a file lives.
+    """
+
+    def setUp(self):
+        import tempfile
+        from pathlib import Path
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(__import__("shutil").rmtree, self.tmp, True)
+        (self.tmp / "sub").mkdir()
+        (self.tmp / "b.csv").write_text("x", encoding="utf-8")
+        (self.tmp / "A.xlsx").write_bytes(b"")
+        (self.tmp / "notes.pdf").write_bytes(b"")
+        (self.tmp / ".hidden.csv").write_text("x", encoding="utf-8")
+        (self.tmp / "~$A.xlsx").write_bytes(b"")
+
+    def test_folders_first_then_files_and_the_readable_ones_marked(self):
+        from volkit import paths
+        r = paths.list_dir(self.tmp, ".csv,xlsx")
+        self.assertEqual([e["name"] for e in r["entries"]], ["sub", "A.xlsx", "b.csv", "notes.pdf"])
+        self.assertEqual({e["name"]: e["match"] for e in r["entries"]},
+                         {"sub": False, "A.xlsx": True, "b.csv": True, "notes.pdf": False})
+        self.assertEqual(r["exts"], [".csv", ".xlsx"])
+        self.assertEqual(r["error"], "")
+
+    def test_a_file_opens_its_folder_with_it_chosen_and_a_missing_path_its_nearest_folder(self):
+        from volkit import paths
+        from pathlib import Path
+        home = lambda r: Path(r["dir"]).resolve()
+        r = paths.list_dir(self.tmp / "b.csv")
+        self.assertEqual((home(r), r["selected"]), (self.tmp.resolve(), "b.csv"))
+        self.assertEqual(home(paths.list_dir(self.tmp / "nope" / "deeper.csv")), self.tmp.resolve())
+        self.assertEqual(home(paths.list_dir("", start=self.tmp / "sub")), (self.tmp / "sub").resolve())
+
+    def test_every_path_box_has_a_browse_button(self):
+        html = _source("volkit", "web", "index.html")
+        for box in ("sesspath", "xovpath", "feedpath", "histpath"):
+            self.assertIn(f'data-fp="{box}"', html)
+        self.assertIn("/api/files?", html)
+
+
 class TestScreens(unittest.TestCase):
     """Building without a screen.
 
@@ -1350,6 +1394,9 @@ class TestScreens(unittest.TestCase):
         "/api/session/export",
         "/api/workbook/restore", "/api/workbook/versions",
         "/api/marks/cross",
+        # The file navigator behind every Browse… button; its boxes are on
+        # the marking screen, the export screen and the Config window.
+        "/api/files",
     }
 
     def test_every_dispatched_route_is_owned_by_a_screen_or_is_shared(self):

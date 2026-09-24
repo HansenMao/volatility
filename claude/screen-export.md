@@ -54,8 +54,11 @@ and says *why*; this file says what is there and what must not be broken.
   table the channel reads still refuses it by name where it has no row for it
   (`MARKET_WIDTHS` above all), and a pair in none of the three -- list, book,
   overlay -- is refused by name as before.  The picker's summary says *the
-  <channel> list* while the ticks are exactly that, and a button puts them
-  back.
+  <channel> list* while the ticks are exactly that.  One select beside
+  *every pair* (`xpreset`, `xSets`) ticks a whole set in place of the ticks
+  there are: the channel's list, **book pairs** (`in_book`) or, with an
+  overlay loaded, **overlay pairs** (`in_overlay`); it never touches a pair's
+  source, and the summary names the set while the ticks match it.
 - **The source is chosen per pair** (`publish.build(sources={pair: "book" |
   "overlay"})`, `source` the default for the rest).  A run is not all from
   one or all from the other; the preflight's coverage carries each pair's

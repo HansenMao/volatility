@@ -13,6 +13,7 @@ import codecs
 import io
 import locale
 import sys
+from datetime import datetime
 from pathlib import Path
 
 
@@ -223,3 +224,77 @@ def use_utf8_streams() -> None:
                 stream.reconfigure(errors=errors)
             except (AttributeError, ValueError, OSError):
                 pass
+
+
+# --------------------------------------------------------------------------
+# Browsing for a file
+# --------------------------------------------------------------------------
+# Every file box on the page takes a path the *server* opens, so a browser's
+# own file input is no use: it hands the page the file's bytes and its bare
+# name, never where it lives.  The navigator on the page is drawn from this
+# instead -- one directory at a time, read and forgotten, nothing opened.
+
+BROWSE_LIMIT = 3000
+
+
+def _drives() -> list[str]:
+    if sys.platform != "win32":
+        return ["/"]
+    import os
+    import string
+    return [f"{c}:\\" for c in string.ascii_uppercase if os.path.exists(f"{c}:\\")]
+
+
+def list_dir(where: str | Path = "", exts: str | list[str] = "",
+             start: str | Path | None = None) -> dict:
+    """One directory's folders and files, for the page's file navigator.
+
+    ``where`` may be a directory, a file (its folder is listed and the file
+    named as ``selected``) or a path that does not exist yet (the nearest
+    folder above it that does).  Empty means ``start`` -- the workbook's
+    folder -- and then the app directory.  ``exts`` (``".csv,.xlsx"``) marks
+    the files a box can read as ``match``; the rest are listed too, so a file
+    saved under an unexpected extension can still be found.  Hidden files and
+    Office's ``~$`` lock files are left out.
+    """
+    import os
+    if isinstance(exts, str):
+        exts = [e for e in exts.split(",") if e.strip()]
+    want = {("." + e.strip().lstrip(".")).lower() for e in exts}
+    raw = str(where or "").strip().strip('"')
+    p = Path(os.path.expanduser(raw)) if raw else Path(start or app_dir())
+    if not p.is_absolute():
+        p = Path.cwd() / p
+    p = Path(os.path.abspath(p))
+    selected = ""
+    if p.is_file():
+        selected, p = p.name, p.parent
+    while not p.is_dir() and p.parent != p:
+        p = p.parent
+    out = {"dir": str(p), "parent": str(p.parent) if p.parent != p else None,
+           "home": str(Path.home()), "start": str(start or app_dir()),
+           "roots": _drives(), "sep": os.sep, "selected": selected,
+           "exts": sorted(want), "entries": [], "truncated": False, "error": ""}
+    try:
+        items = list(os.scandir(p))
+    except OSError as exc:
+        out["error"] = f"{type(exc).__name__}: {exc}"
+        return out
+    rows = []
+    for e in items:
+        if e.name.startswith((".", "~$")):
+            continue
+        try:
+            is_dir = e.is_dir()
+            st = e.stat()
+        except OSError:
+            continue
+        ext = os.path.splitext(e.name)[1].lower()
+        rows.append({"name": e.name, "dir": is_dir,
+                     "size": None if is_dir else st.st_size,
+                     "modified": datetime.fromtimestamp(st.st_mtime).isoformat(timespec="minutes"),
+                     "match": (not is_dir) and (not want or ext in want)})
+    rows.sort(key=lambda r: (not r["dir"], r["name"].lower()))
+    out["truncated"] = len(rows) > BROWSE_LIMIT
+    out["entries"] = rows[:BROWSE_LIMIT]
+    return out

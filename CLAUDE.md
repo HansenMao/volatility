@@ -236,7 +236,8 @@ overlay    an outside file of pillar quotes laid over the book for the bulk
 session    the marks a session made, saved beside the workbook and put back
 config     the startup settings file a double-clicked exe reads
 paths      resource vs user-data paths (source and frozen), and the one
-           text encoding every file is read and written in
+           text encoding every file is read and written in; `list_dir` is the
+           server side of every Browse… button (/api/files, shared by all screens)
 preflight  startup checks (tzdata above all)
 ```
 
