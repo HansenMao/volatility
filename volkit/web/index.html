@@ -414,6 +414,10 @@ tr.sep td{border-top:1px solid var(--line);color:var(--muted);font-size:10.5px;
 .mmpicklist label{display:flex;align-items:center;gap:6px;margin:0;width:auto;font-size:12px;
   padding:2px 0;cursor:pointer}
 .mmpicklist label input{width:auto}
+/* The filter box stays at the top of the list while it scrolls. */
+.mmpicklist .mmpickq{position:sticky;top:-6px;z-index:1;width:100%;box-sizing:border-box;
+  margin:-6px 0 5px;padding:5px 7px;font-size:12px;border-radius:0;border-width:0 0 1px 0;
+  background:var(--panel,var(--bg))}
 .mmpicklist .mmpickall{border-bottom:1px solid var(--line);margin-bottom:4px;padding-bottom:4px;
   color:var(--muted)}
 .mmchk{display:flex;align-items:center;gap:6px;margin:0;width:auto;font-size:12px;
@@ -1726,7 +1730,10 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
           <div class="f" title="which pairs go, and from where: the channel's own list (the EXPORT_PAIRS table below) opens ticked, and under it every other pair the book builds or the overlay carries — tick one and it goes out too, fed from itself and spelled the file's own way. A pair the overlay carries can be read from it or from the book">
             <label>Pairs and sources</label>
             <details class="mmpick" id="xpick"><summary id="xpicksum">every pair</summary>
-              <div class="mmpicklist" id="xpairs" style="min-width:300px"></div></details></div>
+              <div class="mmpicklist" style="min-width:300px">
+                <input id="xpairq" class="mmpickq" type="text" spellcheck="false" autocomplete="off"
+                  placeholder="type to filter" title="narrow the list to the pairs containing what is typed (JPY leaves every yen pair); Enter ticks or unticks the first one left, Escape clears">
+                <div id="xpairs"></div></div></details></div>
           <div class="f" id="xsrcall" title="set every pair the overlay carries to be read from it, or every pair to the book">
             <label>Overlay pairs</label>
             <div class="row" style="gap:4px"><button class="ghost" id="xallov" style="width:auto;padding:4px 9px;font-size:11px">from overlay</button>
@@ -1743,7 +1750,7 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
           <div class="f" id="xdatef" title="the date the file name carries; blank is the book's valuation date"><label>File date</label><input id="xdate" placeholder="book's" style="width:104px"></div>
         </div>
         <div class="mmknob" style="margin-top:8px">
-          <label id="xkeyl" title="post each pillar's ATM two-way and wings alone, with its tenor (1M, O/N) as the Maturity rather than a date, and no calendar-day ATM nodes"><input type="checkbox" id="xkey"> key tenors only</label>
+          <label id="xkeyl" title="post each pillar's ATM two-way and wings alone, with its tenor (1M; O/N goes as 1D) as the Maturity rather than a date, and no calendar-day ATM nodes"><input type="checkbox" id="xkey"> key tenors only</label>
           <label id="xinterpl" title="a day between two pillars takes a width read across between them"><input type="checkbox" id="xinterp"> interpolate widths</label>
           <label id="xconfl" title="write the file even though its date and this machine's disagree (a book loaded as of yesterday, a file built after midnight)"><input type="checkbox" id="xconfirmdate"> date as the book</label>
           <label title="build and show, send nothing, log nothing"><input type="checkbox" id="xdry"> dry run</label>
@@ -4686,7 +4693,7 @@ async function drawKace(){
         <input id="kacemult" value="${esc(mult)}" style="width:4.5em;padding:3px 6px"></label>
       <label style="margin:0;display:flex;align-items:center;gap:5px;width:auto;font-size:11px" title="a day between two pillars takes a width read straight across between them, by date, instead of the last pillar's. Pillars themselves are unchanged either way; off is the rule the spreadsheet posted">
         <input type="checkbox" id="kaceinterp" style="width:auto"${interp?' checked':''}${keyonly?' disabled':''}> interpolate</label>
-      <label style="margin:0;display:flex;align-items:center;gap:5px;width:auto;font-size:11px" title="post each pillar's ATM two-way and wings alone, with its tenor (1M, O/N) as the Maturity rather than a date, and no calendar-day ATM nodes -- the Vol bulk processing kACE channel's key tenors only, for this pair">
+      <label style="margin:0;display:flex;align-items:center;gap:5px;width:auto;font-size:11px" title="post each pillar's ATM two-way and wings alone, with its tenor (1M; O/N goes as 1D) as the Maturity rather than a date, and no calendar-day ATM nodes -- the Vol bulk processing kACE channel's key tenors only, for this pair">
         <input type="checkbox" id="kacekey" style="width:auto"${keyonly?' checked':''}> key tenors only</label>
       <label style="margin:0;display:flex;align-items:center;gap:5px;width:auto;font-size:11px" title="the quoted marks are what the sheet posted; fitted is what the surface returns at each pillar">wings
         <select id="kacesrc" style="width:auto;padding:3px 6px">${(K.sources||['marks','fitted']).map(x=>`<option value="${x}"${x===KACE_SRC?' selected':''}>${x}</option>`).join('')}</select></label>
@@ -9365,10 +9372,10 @@ function xRenderPick(){
     'title="back to the pairs '+esc(ch.label)+' publishes by default -- its EXPORT_PAIRS rows, in the file\'s own order">the '+
     esc(ch.label)+' list ('+defs.length+')</button></div>'+
     all.map((p,i)=>((!p.listed&&(i===0||all[i-1].listed))?
-      '<div class="meta" style="margin:5px 0 2px;padding-top:5px;border-top:1px solid var(--line)" '+
+      '<div class="meta" data-xsep="1" style="margin:5px 0 2px;padding-top:5px;border-top:1px solid var(--line)" '+
       'title="not on this channel\'s EXPORT_PAIRS list; ticked, it is fed from itself and goes out spelled the file\'s own way">'+
       'not on the '+esc(ch.label)+' list — from the book or the overlay</div>':'')+
-      '<div style="display:flex;align-items:center;gap:6px;padding:2px 0"><label style="flex:1" title="'+
+      '<div data-xrow="'+esc(p.pair+' '+(p.label||''))+'" style="display:flex;align-items:center;gap:6px;padding:2px 0"><label style="flex:1" title="'+
       esc(p.feed_from?('fed from '+p.feed_from):'')+(p.in_book?'':' (not in the book)')+'"><input type="checkbox" data-x="'+esc(p.pair)+'"'+
       (on.indexOf(p.pair)>=0?' checked':'')+'> '+esc(p.pair)+
       (p.label&&p.label!==p.pair?' <span class="meta">'+esc(p.label)+'</span>':'')+
@@ -9379,6 +9386,7 @@ function xRenderPick(){
        :'<span class="mmtag in" style="opacity:.6" title="the overlay has no rows for this pair">book</span>')+
       '</div>').join('');
   $('#xdefpairs').onclick=()=>{delete XSEL[ch.key];xKeep({sel:XSEL});xRenderPick();$('#xsend').disabled=true};
+  xFilterPick();
   $('#xpicksum').textContent=!all.length?'no pairs listed':
     (on.length===all.length?'every pair ('+all.length+')':
      (on.length&&same(on,defs)?'the '+ch.label+' list ('+defs.length+')':
@@ -9389,6 +9397,24 @@ function xRenderPick(){
      (bk.length?esc(bk.length<=8?bk.join(', '):bk.length+' pairs'):'none')):
     (xOverlay().loaded?'<span class="mmtag in">book</span> every pair — the overlay is loaded but no chosen pair reads it':'');
   $('#xsrcall').classList.toggle('hide',!xOverlay().loaded);
+}
+/* Type to filter the pair list, as every currency dropdown does.  The list is
+   checkboxes, not a <select>, so the page-wide picker never reaches it; this
+   is the same matching -- letters and digits only, "jpy" and "USD/JPY" both
+   count -- applied by hiding rows.  Hidden rows keep their ticks: the filter
+   narrows what is shown, never what is sent. */
+function xPickNorm(x){return String(x||'').toUpperCase().replace(/[^A-Z0-9]/g,'')}
+function xFilterPick(){
+  const q=xPickNorm(($('#xpairq')||{}).value);
+  let shown=0;
+  $$('#xpairs [data-xrow]').forEach(r=>{
+    const hit=!q||r.dataset.xrow.split(' ').some(w=>xPickNorm(w).indexOf(q)>=0);
+    r.style.display=hit?'flex':'none'; if(hit)shown++;});
+  $$('#xpairs [data-xsep]').forEach(r=>{r.style.display=q?'none':''});
+  let none=$('#xpairs .xpicknone');
+  if(q&&!shown){if(!none){none=document.createElement('div');none.className='meta xpicknone';$('#xpairs').appendChild(none)}
+    none.textContent='no pair matches '+($('#xpairq').value||'');}
+  else if(none)none.remove();
 }
 function xApplyChannel(){
   const ch=xChan(); const K=(XS||{}).kace||{};
@@ -9712,6 +9738,15 @@ function xInit(){
       const next=e.target.checked?all.filter(q=>on.indexOf(q)>=0||q===p):on.filter(q=>q!==p);
       XSEL[ch.key]=next.length?next:['(none)'];}
     xKeep({sel:XSEL}); xRenderPick(); $('#xsend').disabled=true;};
+  $('#xpairq').oninput=xFilterPick;
+  $('#xpairq').onkeydown=e=>{
+    if(e.key==='Escape'){e.preventDefault();e.stopPropagation();$('#xpairq').value='';xFilterPick();}
+    else if(e.key==='Enter'){e.preventDefault();
+      const r=$$('#xpairs [data-xrow]').filter(x=>x.style.display!=='none')[0];
+      const box=r&&r.querySelector('input[data-x]');
+      if(box){box.checked=!box.checked;box.dispatchEvent(new Event('change',{bubbles:true}));}}
+  };
+  $('#xpick').addEventListener('toggle',()=>{if($('#xpick').open)$('#xpairq').focus()});
   $('#xallov').onclick=()=>{(XS.channels||[]).forEach(c=>c.pairs.forEach(p=>{if(p.in_overlay)XSRC[p.pair]='overlay'}));xRenderPick();$('#xsend').disabled=true};
   $('#xallbook').onclick=()=>{(XS.channels||[]).forEach(c=>c.pairs.forEach(p=>{if(p.in_overlay)XSRC[p.pair]='book'}));xRenderPick();$('#xsend').disabled=true};
   $('#xovload').onclick=()=>xLoadOverlay(false);

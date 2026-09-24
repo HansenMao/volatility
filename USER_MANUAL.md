@@ -2214,8 +2214,10 @@ tab, described after *Saving your marks* below.
 **Key tenors only** posts each pillar's ATM two-way and its four wing nodes and
 leaves out the calendar-day nodes — 45 nodes instead of four hundred-odd. The
 pillars posted are identical either way; what is left out is the day-by-day ATM
-curve between them. Unticked, the whole daily series goes, which is what the
-feed tab posts. `volkit kace PAIR --pillars-only` does the same from the shell,
+curve between them. Each pillar's Maturity is then its tenor rather than a
+date -- `1M`, `3M` -- and the overnight pillar goes as **`1D`**, which is how
+kACE reads it; the screens and the post log still call it O/N. Unticked, the
+whole daily series goes, which is what the feed tab posts. `volkit kace PAIR --pillars-only` does the same from the shell,
 and the post log says which kind of message went.
 
 ### Vol bulk processing

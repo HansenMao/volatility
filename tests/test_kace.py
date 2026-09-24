@@ -916,10 +916,16 @@ class TestBulkExport(unittest.TestCase):
         keys = kace.build(book, "USDCNH", table, pillars_only=True)
         whole = kace.build(book, "USDCNH", table)
         got = re.findall(r'<field name="Maturity" value="([^"]*)"/>', keys.xml("feeuser", "pw"))
-        want = [p.tenor.strip() for p in sorted(keys.pillars, key=lambda p: p.expiry)
-                for _ in range(5)]
+        want = [kace.maturity_tenor(p.tenor)
+                for p in sorted(keys.pillars, key=lambda p: p.expiry) for _ in range(5)]
         self.assertEqual(got, want)
-        self.assertIn("O/N", got)
+        # kACE reads the overnight pillar as 1D; the desk's O/N stays on the
+        # pillar itself, and so on the screen and in the log.
+        self.assertIn("1D", got)
+        self.assertNotIn("O/N", got)
+        self.assertIn("O/N", [p.tenor for p in keys.pillars])
+        self.assertEqual([kace.maturity_tenor(t) for t in ("O/N", "o/n", "ON", "1d", "1m")],
+                         ["1D", "1D", "1D", "1D", "1M"])
         dated = re.findall(r'<field name="Maturity" value="([^"]*)"/>', whole.xml("feeuser", "pw"))
         self.assertTrue(all(re.fullmatch(r"\d\d [A-Z][a-z]{2} \d{4}", v) for v in dated))
 

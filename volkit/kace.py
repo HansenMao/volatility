@@ -178,6 +178,18 @@ def canonical_tenor(tenor: str) -> str:
     return t
 
 
+#: A key tenor as kACE takes it for a ``Maturity``, where it differs from the
+#: desk's own spelling.  The spread table, the screens and the log keep
+#: ``O/N``; only the message says ``1D``, which is what kACE reads.
+MATURITY_TENOR = {OVERNIGHT: "1D"}
+
+
+def maturity_tenor(tenor: str) -> str:
+    """A pillar's tenor as the ``Maturity`` of a key-tenors-only message."""
+    t = canonical_tenor(tenor)
+    return MATURITY_TENOR.get(t, t)
+
+
 def calendar_tenor(tenor: str) -> str:
     """The tenor the calendar resolves.
 
@@ -452,8 +464,9 @@ class Feed:
     #: none of the calendar-day ATM nodes.  The daily series is still built
     #: (a pillar's ATM is read off it) and still summarised; it is just not
     #: written into the message.  The bulk export's *key tenors only*.  Each
-    #: pillar's ``Maturity`` is then its tenor as the spread table names it
-    #: (``1M``, ``O/N``) rather than the expiry date that tenor falls on.
+    #: pillar's ``Maturity`` is then its tenor (``1M``, and ``1D`` for the
+    #: overnight pillar -- ``maturity_tenor``) rather than the expiry date
+    #: that tenor falls on.
     pillars_only: bool = False
     notes: list[str] = field(default_factory=list)
 
@@ -502,9 +515,10 @@ class Feed:
                 ("VolType", "ATM"), ("Volity", _bid_offer(vol - half, vol + half, day))])
         s = 0
         for p in pillars:
-            # Key tenors only goes out as the tenors themselves; the full feed
-            # keeps the sheet's dates, which is what it has always posted.
-            at = p.tenor.strip() if self.pillars_only else p.expiry
+            # Key tenors only goes out as the tenors themselves, in kACE's
+            # spelling (O/N is 1D); the full feed keeps the sheet's dates,
+            # which is what it has always posted.
+            at = maturity_tenor(p.tenor) if self.pillars_only else p.expiry
             s += 1
             lines += _node(f"S{s}", self.ccy, self.ctr, at, [
                 ("VolType", "ATM"), ("Volity", _bid_offer(p.bid, p.offer, p.expiry))])
