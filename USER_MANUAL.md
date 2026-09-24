@@ -66,7 +66,7 @@ settings that go with them:
 |---|---|
 | `PEG_BANDS` | managed/pegged trading bands: `pair, lower, upper, note` |
 | `SPREADS` | the pillars posted and the ATM width each spreading **tier** posts at them (kACE, and the `cos` ladder for the COS file); was `SPREADS`, and the old name is still read |
-| `MARKET_WIDTHS`, `ADD_UPS`, `SHADES`, `EXPORT_PAIRS` | the bulk export's policy: the Bloomberg widths, the mid shades, and which pairs each channel publishes — edited on the **Vol bulk processing** tab, not here |
+| `TIER_GROUPS`, `MARKET_WIDTHS`, `ADD_UPS`, `SHADES`, `EXPORT_PAIRS` | the bulk export's policy: which tier each group of pairs posts, the Bloomberg widths, the mid shades, and which pairs each channel publishes — edited on the **Vol bulk processing** tab, not here |
 | `HOLIDAYS` | holiday dates no rule derives: `country, date, remove` |
 | `CONVENTIONS` | a pair's quoting conventions where they differ from the market's: `pair, premium, atmf beyond, delta, fit cutoff` |
 | `CROSS_DEPENDENCE` | how a cross's legs depend on each other beyond the correlation, for the smile its legs imply: `pair, tenor, vol vol corr, corr vol, corr spot corr, note`. See *Cross triangle* under Analysis |
@@ -2304,7 +2304,9 @@ there is a **book / overlay** select. The default is the overlay wherever it
 has rows for the pair and the book everywhere else; *from overlay* /
 *from book* set all of them at once. So a run is not all from one source or all from the other, and
 the line under the picker says which pairs are read from where. Then the
-**tier** and **width ×** where the channel uses a tier (kACE, COS), the
+**global tier** and **width ×** where the channel uses a tier (kACE) — the
+global tier is what every pair the `TIER_GROUPS` table does not place posts;
+a pair in a group posts its group's tier, and the multiplier scales both — the
 **wings** (the quoted marks, or the fitted smile's), the **scenario** for
 kACE, a **tolerance** — the largest move in vol points an overlay pair may
 make against a book value before the run is refused rather than just shown —
@@ -2344,7 +2346,7 @@ grid for grid.
 * **Widths and shades, resolved**: every pillar's source, bid, mid and ask, its
   wings (bid / ask where the channel publishes them two-way), and in words
   where each number came from — `marks`, `fitted`, `overlay`, `overlay (bf10
-  from the book)`, `default tier ×1.5`, `market 0.5 + default other add-up
+  from the book)`, `default tier ×1.5`, `yen group: wide tier ×1.5`, `market 0.5 + default other add-up
   0.2`, `bloomberg default shade`, `WING_WIDTHS AUDUSD 1M`, `COS_WIDTHS USDJPY 1W`.
 
 **Configuration** — the export-policy tables. They are tabs of the workbook
@@ -2360,6 +2362,7 @@ folds them all again.
 | Table | What it holds |
 |---|---|
 | `SPREADS` | tenor rows, a column per tier: `default`, `wide`, `thin`. Was `KACE_SPREADS`; the old name is read and renamed on the next write |
+| `TIER_GROUPS` | `group, tier, pairs, note`: a row per group of pairs and the `SPREADS` tier they post. `pairs` is a comma list of pairs (either way up: `USDCNH` and `CNHUSD` are one) and currencies (`TRY` is every pair with TRY in it). A pair named beats a currency named; a pair two currency groups both claim is refused until a group names it. A blank `tier` is the run's global tier. A pair in no group posts the global tier, so an empty table is the old one-tier run. Belongs to no channel: every channel whose width is a tier reads it. A pair or currency in two groups, or a group on a tier `SPREADS` has no column for, is refused by name |
 | `MARKET_WIDTHS` | tenor rows, a column per pair: the **observed market** ATM two-way, in vol points. What the Bloomberg feed goes out at, plus the add-up. Typed by hand — nothing refreshes it — and a pair not here is refused |
 | `ADD_UPS` | the policy on top of `MARKET_WIDTHS`: a `default` row (`overnight`, `other`), a `crosses` row, and a row per pair that differs; the most specific wins. Today: 0 overnight, 0.2 otherwise, crosses 0, the HKD legs 0.2 |
 | `WING_WIDTHS` | the **two-way width of each wing** on the Bloomberg feed — `rr25`, `rr10`, `bf25`, `bf10` per pair and tenor, with `default` and `crosses` rows; the most specific wins. A wing goes out at its mark less and plus half of this; it is never shaded |

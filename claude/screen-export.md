@@ -76,7 +76,7 @@ and says *why*; this file says what is there and what must not be broken.
   ticked, then, under a divider, every other pair the book builds or the
   overlay carries -- with a book/overlay select
   beside every pair the overlay carries (and *from overlay* / *from book*
-  for all of them at once), tier, multiplier, wings, scenario, tolerance,
+  for all of them at once), global tier, multiplier, wings, scenario, tolerance,
   file date, key tenors, dry run; Build, Send, download; the Preflight; the
   Configuration tables; the Log.
 - **Routes** (`screens.BY_NAME["export"]`): `/api/export/state`, `/build`,
@@ -105,6 +105,7 @@ and says *why*; this file says what is there and what must not be broken.
 | tab | shape | who reads it |
 |---|---|---|
 | `SPREADS` (was `KACE_SPREADS`) | tenor rows, a column per tier: `default`, `wide`, ... | kACE (pillars and widths), the market-maker fallback tier |
+| `TIER_GROUPS` | `group`, `tier` (a `SPREADS` column; blank = the run's), `pairs` (pairs either way up, and three-letter currencies, comma separated), `note` | every channel whose width is a tier (today kACE): a pair posts its group's tier, a pair in no group the run's **global** tier. Channel-independent by design |
 | `MARKET_WIDTHS` | tenor rows, a column per pair: the observed market ATM two-way | Bloomberg |
 | `ADD_UPS` | `pair` (`default`, `crosses`, or a pair), `overnight`, `other` -- most specific row wins | Bloomberg, on top of `MARKET_WIDTHS` |
 | `WING_WIDTHS` | `pair` (`default`, `crosses`, or a pair), `tenor`, `rr25`, `rr10`, `bf25`, `bf10` -- most specific row wins | Bloomberg: each wing goes out two-way about its mark |
@@ -118,6 +119,20 @@ and says *why*; this file says what is there and what must not be broken.
   with its own width around it (`PillarQuote.side`).  That is what the desk's
   sheet does: `(C-J/200)-0.002` for the ATM, `D-K/200` for a wing.
 - **Murex is bid = ask**, always; no tier, no arithmetic.
+- **A tier channel's width is per pair; the run's tier is the global one.**
+  `ExportTables.tier_for(pair, fallback)` is the one lookup: a pair a
+  `TIER_GROUPS` row names (either way up), else the one group its currencies
+  point at, else the run's tier (`--tier`, the screen's *Global tier*).
+  Two currency groups claiming one pair, a group on a tier `SPREADS` lacks,
+  and an unreadable tab are each **refused by name** -- never posted at the
+  global widths.  The multiplier scales every tier alike.  The build carries
+  `pair_tiers` (the exceptions) beside `tier`, the preflight
+  `widths.by_pair` and a `tier`/`group` per coverage row, each kACE feed and
+  its log entry the pair's own tier, and `width_from` names the group
+  (`yen group: wide tier x2`).  The table is channel-independent on purpose:
+  a new tier channel reads the same groups (`Channel.tables` adds it with
+  `SPREADS`).  The market-maker fallback tier and the single-pair kACE feed
+  tab still take one named tier and do not read it.
 - **`EXPORT_PAIRS` is typed, not guessed.** Seeded once from the desk's own
   files (`files/reference/`, captured 2026-09-10, `exportseed.py`): the 33
   Bloomberg blocks in block order (XAUUSD to 1Y), the 32 Murex pairs in row

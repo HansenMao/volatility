@@ -1761,7 +1761,7 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
         <div class="meta" id="xchanwhat" style="margin-top:6px"></div>
         <div id="xsrcline" class="meta" style="margin-top:6px"></div>
         <div class="row" style="flex-wrap:wrap;gap:8px;align-items:flex-end;margin-top:8px">
-          <div class="f" id="xtierf" title="which spreading tier's widths go out -- a column of the SPREADS table below"><label>Tier</label><select id="xtier" style="width:100px"></select></div>
+          <div class="f" id="xtierf" title="the global spreading tier: a column of the SPREADS table below, posted by every pair the TIER_GROUPS table does not place in a group. A pair in a group posts its group's tier"><label>Global tier</label><select id="xtier" style="width:100px"></select></div>
           <div class="f" id="xmultf" title="multiply the widths by this; the mid does not move"><label>Width &times;</label><input id="xmult" value="1" style="width:56px"></div>
           <div class="f" title="the quoted marks, or what the fitted surface returns at each pillar"><label>Wings</label><select id="xwings" style="width:84px"></select></div>
           <div class="f" id="xscnf" title="the kACE scenario the vols are posted into"><label>Scenario</label><input id="xscn" style="width:80px"></div>
@@ -9570,6 +9570,13 @@ function xFilterPick(){
     none.textContent='no pair matches '+($('#xpairq').value||'');}
   else if(none)none.remove();
 }
+/* The groups TIER_GROUPS put pairs in on this run, one clause each: the
+   pairs no group claims post the global tier, and the preflight says which
+   did not. */
+function xTierGroups(byPair){
+  const g={};Object.keys(byPair||{}).forEach(p=>{const t=byPair[p];if(t.group)(g[t.group+'\u0000'+t.tier]=g[t.group+'\u0000'+t.tier]||[]).push(p)});
+  return Object.keys(g).map(k=>{const [n,t]=k.split('\u0000');return '; '+esc(n)+' group '+esc(t)+': '+g[k].map(esc).join(' ')}).join('');
+}
 function xApplyChannel(){
   const ch=xChan(); const K=(XS||{}).kace||{};
   $('#xchanwhat').innerHTML=ch?(esc(ch.what)+(ch.error?' <span class="etoerr">'+esc(ch.error)+'</span>':'')+
@@ -9733,7 +9740,7 @@ function xPaintBuild(b){
     '<span>'+xSrcTag('book')+' <b>'+(S.book||[]).length+'</b> pair(s) · '+(pf.from_book||0)+' rows</span>'+
     '<span>'+xSrcTag('overlay')+' <b>'+(S.overlay||[]).length+'</b> pair(s) · '+(pf.from_overlay||0)+' rows'+(pf.fell_through?', '+pf.fell_through+' fell through to the book':'')+'</span>'+
     (b.files||[]).map(f=>'<span>file <b>'+esc(f.name)+'</b> · '+f.bytes+' bytes · '+esc(String(f.sha256||'').slice(0,12))+(f.what?' · '+esc(f.what):'')+'</span>').join('')+
-    ((pf.widths||{}).source==='tier'?'<span>widths: '+esc(pf.widths.tier)+' tier'+(pf.widths.multiplier&&pf.widths.multiplier!==1?' ×'+pf.widths.multiplier:'')+'</span>':'')+
+    ((pf.widths||{}).source==='tier'?'<span>widths: '+esc(pf.widths.tier)+' tier (global)'+xTierGroups(pf.widths.by_pair)+(pf.widths.multiplier&&pf.widths.multiplier!==1?' ×'+pf.widths.multiplier:'')+'</span>':'')+
     ((pf.widths||{}).source==='market'?'<span>widths: MARKET_WIDTHS + ADD_UPS, wings by WING_WIDTHS</span>':'')+
     ((pf.widths||{}).source==='cos'?'<span>widths: COS_WIDTHS, one-sided under the mid</span>':'')+
     ((pf.widths||{}).source==='none'?'<span>bid equals ask</span>':'')+'</div>');
@@ -9743,6 +9750,7 @@ function xPaintBuild(b){
   out.push('<details open><summary style="cursor:pointer">Coverage and sources — '+(pf.coverage||[]).filter(c=>c.missing&&c.missing.length).length+' pair(s) short</summary>'+
     '<div class="mmwide"><table class="mmxr"><thead><tr><th>Pair</th><th>Source</th>'+tenors.map(t=>'<th>'+esc(t)+'</th>').join('')+'</tr></thead><tbody>'+
     (pf.coverage||[]).map(c=>'<tr><td><b>'+esc(c.pair)+'</b>'+(c.feed_from?' <span class="meta">← '+esc(c.feed_from)+'</span>':'')+
+      (c.group?' <span class="meta" title="TIER_GROUPS: the '+esc(c.group)+' group posts the '+esc(c.tier)+' tier">'+esc(c.tier)+'</span>':'')+
       (c.in_book?'':' <span class="meta" title="not in the book">∅</span>')+'</td>'+
       '<td>'+xSrcTag(c.source)+((c.from||[]).length>1?' <span class="meta" title="some tenors fell through to the book">mixed</span>':'')+'</td>'+
       tenors.map(t=>{const v=c.tenors[t];return '<td>'+(v==null?'':'<span class="mmtag '+(cls[v]||'none')+'" title="'+esc(v)+'">'+

@@ -39,7 +39,12 @@ kill -- and every log entry records which source built it.
 exporting bulk screen and in the workbook (it is the database):
 
 * ``SPREADS`` -- tenor rows, a column per tier (``default``, ``wide``,
-  ``cos``, ...).  Pair-independent: a width is a quoting *policy*.
+  ``thin``, ...).  Pair-independent: a width is a quoting *policy*.
+* ``TIER_GROUPS`` -- which of those policies each group of pairs posts:
+  ``group, tier, pairs``, the pairs either way up and currencies standing
+  for every pair they are in.  A pair in no group posts the run's tier, the
+  global one.  Channel-independent: every channel whose width is a tier
+  reads the same groups.
 * ``MARKET_WIDTHS`` + ``ADD_UPS`` -- an observed market two-way per pair and
   tenor, plus a policy add-up (overnight, other tenors, with per-pair and
   crosses overrides).  Pair-dependent: this is what the market is *showing*.
@@ -244,6 +249,10 @@ class ExportTables:
     #: The COS file builds a cross it names off the two dollar legs at these;
     #: the book never reads them (``_correlated_atm``).
     cross_corr: dict[str, dict[str, float]] | None = None
+    #: ``TIER_GROUPS``: which spreading tier each group of pairs posts.  Any
+    #: channel whose width is a tier reads it; a pair in no group takes the
+    #: run's tier (:meth:`tier_for`).
+    tier_groups: list["TierGroup"] | None = None
     errors: dict[str, str] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
 
@@ -261,6 +270,7 @@ class ExportTables:
                               ("WING_WIDTHS", _read_wing_widths),
                               ("COS_WIDTHS", _read_cos_widths),
                               ("CROSS_CORR", _read_cross_corr),
+                              ("TIER_GROUPS", _read_tier_groups),
                               ("EXPORT_PAIRS", _read_export_pairs)):
             try:
                 value = reader(p, overlay)
@@ -279,11 +289,55 @@ class ExportTables:
                             "WING_WIDTHS": self.wing_widths is not None,
                             "COS_WIDTHS": self.cos_widths is not None,
                             "CROSS_CORR": self.cross_corr is not None,
+                            "TIER_GROUPS": self.tier_groups is not None,
                             "EXPORT_PAIRS": self.export_pairs is not None},
                 "tiers": self.spreads.names if self.spreads is not None else [],
+                "tier_groups": [g.summary() for g in self.tier_groups or ()],
                 "errors": dict(self.errors)}
 
     # -- widths ----------------------------------------------------------
+    def tier_for(self, pair: str, fallback: str | None = None) -> tuple[str, str]:
+        """The spreading tier one pair posts, and the ``TIER_GROUPS`` group it came from.
+
+        A pair a group names (either way up) takes that group's tier; else a
+        currency a group names, when the pair's currencies point at one group
+        only; else ``fallback``, the run's own tier -- the global one.  The
+        group is ``""`` for a pair no group claims.  A pair whose two
+        currencies sit in different groups is refused by name: which of two
+        tiers it should post is the desk's decision, and a pair row on the
+        tab is how it is made.  So is a group naming a tier ``SPREADS`` does
+        not have -- the pair is not quietly posted at the global tier's
+        widths.  The tier is returned resolved.
+        """
+        if self.spreads is None:
+            raise PublishError(self.errors.get("SPREADS") or configsheets.missing(
+                kace.SPREADS_SHEET, self.path))
+        if "TIER_GROUPS" in self.errors:
+            raise PublishError(self.errors["TIER_GROUPS"])
+        pair = str(pair).upper()
+        key = _member_key(pair)
+        group = next((g for g in self.tier_groups or ()
+                      if any(len(m) == 6 and _member_key(m) == key for m in g.members)), None)
+        if group is None:
+            by_ccy = [g for g in self.tier_groups or ()
+                      if any(m in (pair[:3], pair[3:6]) for m in g.members)]
+            if len(by_ccy) > 1:
+                raise PublishError(
+                    f"{pair} is claimed by TIER_GROUPS {by_ccy[0].group} (through "
+                    f"{pair[:3] if pair[:3] in by_ccy[0].members else pair[3:6]}) and "
+                    f"{by_ccy[1].group} (through "
+                    f"{pair[:3] if pair[:3] in by_ccy[1].members else pair[3:6]}); name "
+                    f"the pair in the group whose tier it should post")
+            group = by_ccy[0] if by_ccy else None
+        if group is None:
+            return self.spreads.resolve_tier(fallback), ""
+        try:
+            return self.spreads.resolve_tier(group.tier or fallback), group.group
+        except KaceError as exc:
+            raise PublishError(f"{pair} is in the TIER_GROUPS {group.group} group, whose "
+                               f"tier {group.tier!r} is not a column of "
+                               f"{kace.SPREADS_SHEET}: {exc}") from None
+
     def tier_width(self, tier: str, tenor: str, *, multiplier=None) -> tuple[float, str]:
         if self.spreads is None:
             raise PublishError(self.errors.get("SPREADS") or configsheets.missing(
@@ -686,6 +740,86 @@ def _read_export_pairs(p: Path, overlay) -> dict[str, list[PairEntry]] | None:
     return out
 
 
+@dataclass(frozen=True)
+class TierGroup:
+    """One row of ``TIER_GROUPS``: a set of pairs and the spreading tier they post.
+
+    ``members`` are pairs (six letters, either way up) and currencies (three
+    letters: every pair with that currency in it that no group names as a
+    pair).  ``tier`` blank is the run's own tier -- a group kept on the tab
+    and parked on the global one.
+    """
+
+    group: str
+    tier: str
+    members: tuple[str, ...]
+    note: str = ""
+    row: int = 0
+
+    def summary(self) -> dict:
+        return {"group": self.group, "tier": self.tier, "members": list(self.members),
+                "note": self.note}
+
+
+def _members(text: str) -> list[str]:
+    """``AUDUSD, USD/JPY; TRY`` -> ``["AUDUSD", "USDJPY", "TRY"]``."""
+    out = []
+    for token in text.replace(";", ",").replace("\n", ",").split(","):
+        for word in token.split():
+            name = "".join(c for c in word.upper() if c.isalpha())
+            if name:
+                out.append(name)
+    return out
+
+
+def _member_key(member: str) -> str:
+    """A pair is one pair either way up; a currency is itself."""
+    return member if len(member) == 3 else min(member, member[3:] + member[:3])
+
+
+def _read_tier_groups(p: Path, overlay) -> list[TierGroup] | None:
+    rows = configsheets.read_rows(p, "TIER_GROUPS", required=("group", "pairs"),
+                                  overlay=overlay)
+    if rows is None:
+        return None
+    out: list[TierGroup] = []
+    bad: list[str] = []
+    owner: dict[str, tuple[str, int]] = {}      # member key -> (group, row)
+    for row in rows:
+        name = row.text("group").strip()
+        members = _members(row.text("pairs"))
+        if not name and not members:
+            continue
+        where = f"TIER_GROUPS row {row.number}"
+        if not name:
+            bad.append(f"{where}: {', '.join(members)} {'has' if len(members) == 1 else 'have'} "
+                       f"no group name")
+            continue
+        if any(g.group.lower() == name.lower() for g in out):
+            bad.append(f"{where}: the group {name!r} is named twice; one row per group")
+            continue
+        kept: list[str] = []
+        for m in members:
+            if len(m) not in (3, 6):
+                bad.append(f"{where}: {m!r} is neither a pair (six letters) nor a "
+                           f"currency (three)")
+                continue
+            key = _member_key(m)
+            if key in owner:
+                other, at = owner[key]
+                if other != name:
+                    bad.append(f"{where}: {m} is already in the {other} group (row {at}); a "
+                               f"pair or a currency belongs to one group")
+                continue
+            owner[key] = (name, row.number)
+            kept.append(m)
+        out.append(TierGroup(group=name, tier=kace.tier_name(row.text("tier")),
+                             members=tuple(kept), note=row.text("note"), row=row.number))
+    if bad:
+        raise PublishError("TIER_GROUPS could not be read:\n  " + "\n  ".join(bad))
+    return out
+
+
 # ---------------------------------------------------------------------------
 # the channels
 # ---------------------------------------------------------------------------
@@ -742,7 +876,7 @@ class Channel:
         """
         used = {"SHADES", "EXPORT_PAIRS"}
         if self.width == "tier":
-            used.add("SPREADS")
+            used |= {"SPREADS", "TIER_GROUPS"}
         if self.width == "market":
             used |= {"MARKET_WIDTHS", "ADD_UPS"}
         if self.wings_two_way:
@@ -902,6 +1036,12 @@ class Build:
     file_date: date | None = None
     tier: str = ""
     multiplier: float = 1.0
+    #: Each pair's own tier where ``TIER_GROUPS`` gives it one other than
+    #: ``tier``, which is the run's -- the global one every other pair posts.
+    pair_tiers: dict[str, str] = field(default_factory=dict)
+
+    def tier_of(self, pair: str) -> str:
+        return self.pair_tiers.get(pair, self.tier)
 
     @property
     def ok(self) -> bool:
@@ -949,6 +1089,7 @@ class Build:
                "files": [f.summary() for f in self.files],
                "bytes": sum(len(f.body) for f in self.files), "notes": list(self.notes),
                "tier": self.tier, "multiplier": self.multiplier,
+               "pair_tiers": dict(self.pair_tiers),
                "file_date": self.file_date.isoformat() if self.file_date else None,
                "overlay": self.overlay.record() if self.overlay else None}
         if self.feeds:
@@ -1121,6 +1262,11 @@ def build(channel_name: str, book, tables: ExportTables, *, source: str = "book"
         if tables.spreads is None:
             raise PublishError(tables.errors.get("SPREADS") or configsheets.missing(
                 kace.SPREADS_SHEET, tables.path))
+        # The run's tier is the global one: every pair TIER_GROUPS does not
+        # place posts it.  A tab that is there and unreadable stops the run
+        # rather than posting every pair at the global widths.
+        if "TIER_GROUPS" in tables.errors:
+            raise PublishError(tables.errors["TIER_GROUPS"])
         chosen_tier = tables.spreads.resolve_tier(tier or ch.default_tier)
     factor = kace.spread_multiplier(multiplier)
     if pairs:
@@ -1148,9 +1294,29 @@ def build(channel_name: str, book, tables: ExportTables, *, source: str = "book"
     used_keys: set[tuple[str, str]] = set()
     feeds: dict[str, kace.Feed] = {}
     where = f"the {ch.label} tenor list"
+    pair_tiers: dict[str, str] = {}
+    tier_by_pair: dict[str, dict] = {}
 
     for entry in entries:
         want = _tenors_for(entry, tenors)
+        pair_tier, pair_group = chosen_tier, ""
+        if ch.width == "tier":
+            try:
+                pair_tier, pair_group = tables.tier_for(entry.pair, chosen_tier)
+            except PublishError as exc:
+                refused.append(f"{entry.pair}: {exc}")
+                coverage.append({"pair": entry.pair, "label": entry.label,
+                                 "feed_from": entry.feed_from if entry.feed_from != entry.pair
+                                 else "", "source": chosen[entry.pair], "from": [],
+                                 "tenors": {t: "no width" for t in want}, "missing": [],
+                                 "in_book": entry.feed_from in book,
+                                 "in_overlay": (overlay is not None and any(
+                                     k[0] == entry.pair for k in overlay.rows)),
+                                 "tier": "", "group": ""})
+                continue
+            if pair_tier != chosen_tier:
+                pair_tiers[entry.pair] = pair_tier
+            tier_by_pair[entry.pair] = {"tier": pair_tier, "group": pair_group}
         read: kace.PillarRead | None = None
         cannot: list[str] = list(want)
         try:
@@ -1261,7 +1427,9 @@ def build(channel_name: str, book, tables: ExportTables, *, source: str = "book"
             if q.given_bid is not None:
                 q.width_from = "the overlay's own two-way"
             elif ch.width == "tier":
-                q.width, q.width_from = tables.tier_width(chosen_tier, t, multiplier=factor)
+                q.width, q.width_from = tables.tier_width(pair_tier, t, multiplier=factor)
+                if pair_group:
+                    q.width_from = f"{pair_group} group: {q.width_from}"
             elif ch.width in ("market", "cos"):
                 read_width = (tables.market_width if ch.width == "market" else tables.cos_width)
                 try:
@@ -1310,7 +1478,8 @@ def build(channel_name: str, book, tables: ExportTables, *, source: str = "book"
                          "missing": pair_missing,
                          "in_book": entry.feed_from in book,
                          "in_overlay": (overlay is not None
-                                        and any(k[0] == entry.pair for k in overlay.rows))})
+                                        and any(k[0] == entry.pair for k in overlay.rows)),
+                         "tier": pair_tier, "group": pair_group})
 
     # Rows the overlay carries that this channel does not publish, and rows
     # for a pair the run reads from the book instead.
@@ -1370,9 +1539,9 @@ def build(channel_name: str, book, tables: ExportTables, *, source: str = "book"
                          "diffs": diffs[:200], "tolerance": tol,
                          "outside": outside, "date": date_note,
                          "widths": {"source": ch.width, "tier": chosen_tier,
-                                    "multiplier": factor}},
+                                    "multiplier": factor, "by_pair": tier_by_pair}},
               notes=notes, overlay=overlay, file_date=stamp, tier=chosen_tier,
-              multiplier=factor)
+              multiplier=factor, pair_tiers=pair_tiers)
     b.overlay = overlay if any_overlay else None
     if refused:
         return b
@@ -1417,7 +1586,8 @@ def _kace_feeds(b: Build, book, tables: ExportTables, *, cut: str, wings: str, m
             q.feed_from for q in qs)
         shade = qs[0].shade
         if whole:
-            feed = kace.build(book, pair, tables.spreads, tier=b.tier, cut=cut, source=wings,
+            feed = kace.build(book, pair, tables.spreads, tier=b.tier_of(pair), cut=cut,
+                              source=wings,
                               method=methods.get(pair, book[pair].method),
                               multiplier=b.multiplier, interpolate=interpolate,
                               pillars_only=pillars_only)
@@ -1440,7 +1610,8 @@ def _kace_feeds(b: Build, book, tables: ExportTables, *, cut: str, wings: str, m
                                            atm=q.mid, rr25=q.rr25, rr10=q.rr10,
                                            fly25=q.bf25, fly10=q.bf10, wings=q.origin))
             feed = kace.Feed(pair=pair, hor_date=today, cut=cut.upper(), source=wings,
-                             daily={}, pillars=pillars, tier=b.tier, multiplier=b.multiplier,
+                             daily={}, pillars=pillars, tier=b.tier_of(pair),
+                             multiplier=b.multiplier,
                              interpolate=False, pillars_only=True,
                              notes=[f"{pair}: built from the overlay, so the pillars alone "
                                     f"are posted -- an overlay row is a pillar quote, not a "
@@ -1769,6 +1940,7 @@ def write_file(b: Build, directory: str | Path | None, *, log: kace.PostLog | No
               "sources": b.preflight.get("sources"),
               "file_date": b.file_date.isoformat() if b.file_date else None,
               "tier": b.tier, "multiplier": b.multiplier,
+              **({"pair_tiers": dict(b.pair_tiers)} if b.pair_tiers else {}),
               "shades": sorted({f"{q.pair} {q.shade:+g}" for q in b.quotes if q.shade}),
               "dry_run": bool(dry_run)}
     entries = []
@@ -1881,6 +2053,10 @@ def seed_tables(present: dict[str, bool]) -> dict[str, list[dict]]:
                                  "note": ("the cross workbook's own ladder" if t == "O/N"
                                           else "")})
         out["CROSS_CORR"] = rows
+    if not present.get("TIER_GROUPS"):
+        # Empty: no desk file groups the pairs, and an empty tab is every pair
+        # on the run's tier -- what the kACE channel posted before there was one.
+        out["TIER_GROUPS"] = []
     if not present.get("EXPORT_PAIRS"):
         rows = []
         for p in exportseed.BLOOMBERG_PAIRS:

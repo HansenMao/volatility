@@ -93,6 +93,11 @@ SHEETS: dict[str, str] = {
     "COS_WIDTHS": "how far under the mid the COS bid sits, in vol points, per pair and "
                   "tenor: pair (default, crosses, or a pair), tenor, width, note -- the most "
                   "specific row wins. One-sided: the file carries the bid alone",
+    "TIER_GROUPS": "which spreading tier each group of pairs posts, for every channel whose "
+                   "width is a tier: group, tier (a SPREADS column; blank is the run's own), "
+                   "pairs (pairs, either way up, and currencies -- USDJPY, EURUSD, TRY -- "
+                   "comma separated; a pair named beats a currency named), note. A pair in "
+                   "no group posts the run's tier, the global one",
     "EXPORT_PAIRS": "which pairs each channel publishes, in the file's own order: channel, "
                     "pair, label (as the file writes it), feed_from (the curve it is fed "
                     "from when that is another pair), last_tenor (where the pair stops, "
@@ -103,8 +108,8 @@ SHEETS: dict[str, str] = {
 #: window.  Read and written exactly like the rest -- ``EDITABLE`` below --
 #: and only the editor differs: the Config window skips them and the export
 #: screen shows nothing else.
-EXPORT_TABS: tuple[str, ...] = ("SPREADS", "MARKET_WIDTHS", "ADD_UPS", "SHADES", "WING_WIDTHS",
-                                "COS_WIDTHS", "CROSS_CORR", "EXPORT_PAIRS")
+EXPORT_TABS: tuple[str, ...] = ("SPREADS", "TIER_GROUPS", "MARKET_WIDTHS", "ADD_UPS", "SHADES",
+                                "WING_WIDTHS", "COS_WIDTHS", "CROSS_CORR", "EXPORT_PAIRS")
 
 #: The old names of tabs that were renamed, so a workbook that still carries
 #: the old name is read and, on the next write, written under the new one in
@@ -136,6 +141,7 @@ EDITABLE: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "SHADES": (("channel", "pair", "shade", "note"), ("channel", "shade")),
     "WING_WIDTHS": (("pair", "tenor", "rr25", "rr10", "bf25", "bf10", "note"), ("pair", "tenor")),
     "COS_WIDTHS": (("pair", "tenor", "width", "note"), ("pair", "tenor")),
+    "TIER_GROUPS": (("group", "tier", "pairs", "note"), ("group", "pairs")),
     "EXPORT_PAIRS": (("channel", "pair", "label", "feed_from", "last_tenor", "note"),
                      ("channel", "pair")),
 }

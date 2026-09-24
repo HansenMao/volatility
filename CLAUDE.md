@@ -117,9 +117,8 @@ pricing    multi-leg strips, strike/expiry specs, per-leg error isolation, and
 configsheets the workbook's settings tabs -- PEG_BANDS, SPREADS (was
            KACE_SPREADS; the old name is read and renamed on write), HOLIDAYS,
            WING_RATIOS, Vega Weights, CROSS_DEPENDENCE, and the export-policy tables
-           MARKET_WIDTHS, ADD_UPS, SHADES, WING_WIDTHS, EXPORT_PAIRS -- read one way,
-           with
-           '#' comment rows and a header found rather than assumed, and off
+           TIER_GROUPS, MARKET_WIDTHS, ADD_UPS, SHADES, WING_WIDTHS, EXPORT_PAIRS --
+           read one way, with '#' comment rows and a header found rather than assumed, and off
            the session's own rows where it holds the tab (`overlay`). A new
            setting is a tab here, not a new file
 marketdata validated Excel reader; CONFIG is two columns and a cross
@@ -530,7 +529,8 @@ to safely amend.
   way, capped where the channel's own rows agree they stop, and still refused
   by name by any table that has no row for it. A channel's pair list, its
   widths and its shades are tables in the workbook (`EXPORT_PAIRS`,
-  `MARKET_WIDTHS` + `ADD_UPS`, `WING_WIDTHS`, `SPREADS`, `SHADES`),
+  `MARKET_WIDTHS` + `ADD_UPS`, `WING_WIDTHS`, `SPREADS` + `TIER_GROUPS`,
+  `SHADES`),
   hand-typed, edited on the Vol bulk processing screen and read everywhere,
   seeded once from the desk's own files (`exportseed.py`, `files/reference/`);
   a shade moves the ATM mid and a width goes around it, never folded

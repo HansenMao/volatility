@@ -2395,6 +2395,14 @@ def cmd_export(args) -> int:
     print(f"{b.channel.label}: {pf['wanted']['pairs']} pair(s) x {len(pf['wanted']['tenors'])} "
           f"tenor(s) wanted; {pf['from_book']} from the book, {pf['from_overlay']} from the "
           f"overlay, {pf['fell_through']} fell through", file=sys.stderr)
+    if pf["widths"]["source"] == "tier":
+        grouped = {}
+        for pair, t in pf["widths"]["by_pair"].items():
+            if t["group"]:
+                grouped.setdefault((t["group"], t["tier"]), []).append(pair)
+        print(f"  widths: the {pf['widths']['tier']} tier (global)"
+              + "".join(f"; {g} group {t}: {', '.join(ps)}" for (g, t), ps in grouped.items()),
+              file=sys.stderr)
     for c in pf["coverage"]:
         if c["missing"]:
             print(f"  ! {c['pair']}: no {', '.join(c['missing'])}", file=sys.stderr)
@@ -3844,7 +3852,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--compare", action="store_true",
                    help="with --overlay: print the book's mids against the overlay's -- "
                         "ATM and wings, no channel -- and stop")
-    s.add_argument("--tier", help="the spreading tier (kACE, COS)")
+    s.add_argument("--tier", help="the global spreading tier (kACE): what every pair the "
+                                  "TIER_GROUPS tab does not place posts")
     s.add_argument("--multiplier", metavar="X", help="multiply the widths; the mid stays")
     s.add_argument("--wings", default="marks", choices=list(kace.SOURCES),
                    help="the quoted marks, or the fitted smile's wings")

@@ -349,7 +349,10 @@ class TestTables(_Fixture):
         from volkit import exportseed
         rows = publish.seed_tables({"SHADES": True, "ADD_UPS": True})
         self.assertEqual(sorted(rows), ["COS_WIDTHS", "CROSS_CORR", "EXPORT_PAIRS",
-                                        "MARKET_WIDTHS", "WING_WIDTHS"])
+                                        "MARKET_WIDTHS", "TIER_GROUPS", "WING_WIDTHS"])
+        # No desk file groups the pairs: the tab is seeded empty, every pair
+        # on the run's tier, which is what a kACE run did before it existed.
+        self.assertEqual(rows["TIER_GROUPS"], [])
         self.assertEqual(publish.seed_tables(self.tables.summary()["present"]), {})
         every = publish.seed_tables({})
         bbg = [r["pair"] for r in every["EXPORT_PAIRS"] if r["channel"] == "bloomberg"]
@@ -1300,7 +1303,7 @@ class TestExportScreen(unittest.TestCase):
         # And which of them each destination reads, for the card to show only
         # those: every table belongs to at least one, none to a stranger.
         by = {c["key"]: c["tables"] for c in st["channels"]}
-        self.assertEqual(by["kace"], ["SPREADS", "SHADES", "EXPORT_PAIRS"])
+        self.assertEqual(by["kace"], ["SPREADS", "TIER_GROUPS", "SHADES", "EXPORT_PAIRS"])
         self.assertEqual(by["bloomberg"], ["MARKET_WIDTHS", "ADD_UPS", "SHADES",
                                            "WING_WIDTHS", "EXPORT_PAIRS"])
         self.assertEqual(by["murex"], ["SHADES", "EXPORT_PAIRS"])
@@ -1413,7 +1416,7 @@ class TestExportScreen(unittest.TestCase):
             out = svc.export_seed_tables({})
             self.assertEqual(out["wrote"]["tabs"], ["ADD_UPS", "COS_WIDTHS", "CROSS_CORR",
                                                     "EXPORT_PAIRS", "MARKET_WIDTHS",
-                                                    "SHADES", "WING_WIDTHS"])
+                                                    "SHADES", "TIER_GROUPS", "WING_WIDTHS"])
             self.assertTrue(svc.export_tables.summary()["present"]["SHADES"])
             self.assertEqual(svc.export_tables.shade("bloomberg", "CHFJPY")[0], -0.2)
             self.assertEqual(svc.export_tables.shade("bloomberg", "USDCNH"),
@@ -1581,6 +1584,111 @@ class TestMarkedCorrelation(unittest.TestCase):
             self.assertFalse(b.ok)
             self.assertTrue(any("HKDCNH" in r and "USDHKD" in r and "CROSS_CORR" in r
                                 for r in b.refused), b.refused)
+
+
+class TestTierGroups(_Fixture):
+    """Each pair posts its own group's tier; the run's tier is the global one.
+
+    Before ``TIER_GROUPS`` a kACE run posted every pair at the one tier the
+    screen named, so a desk that quoted the yen wider than the dollar block
+    had to run the channel twice with two pair lists.  The groups are a
+    table of the workbook, not of a channel: any channel whose width is a
+    tier reads the same one.
+    """
+
+    PAIRS = ["USDJPY", "AUDJPY", "HKDJPY", "USDCNH", "CNHHKD"]
+
+    def tables_with(self, rows):
+        return publish.ExportTables.load(self.wb, overlay={"TIER_GROUPS": rows})
+
+    def by_pair_1m(self, b):
+        return {q.pair: q for q in b.quotes if q.tenor == "1M"}
+
+    def test_a_pair_posts_its_groups_tier_and_the_rest_the_global_one(self):
+        t = self.tables_with([
+            {"group": "yen", "tier": "wide", "pairs": "USDJPY, AUD/JPY"},
+            {"group": "hk", "tier": "thin", "pairs": "HKD"}])
+        self.assertEqual(t.errors, {})
+        b = publish.build("kace", self.book, t, tier="default", pairs=self.PAIRS,
+                          multiplier=2)
+        self.assertEqual(b.refused, [])
+        q = self.by_pair_1m(b)
+        ladder = t.spreads.tiers
+        # The multiplier is the morning's and scales every tier alike.
+        self.assertAlmostEqual(q["USDJPY"].width, ladder["wide"]["1M"] * 2)
+        self.assertAlmostEqual(q["AUDJPY"].width, ladder["wide"]["1M"] * 2)
+        self.assertAlmostEqual(q["HKDJPY"].width, ladder["thin"]["1M"] * 2)
+        self.assertAlmostEqual(q["CNHHKD"].width, ladder["thin"]["1M"] * 2)
+        self.assertAlmostEqual(q["USDCNH"].width, ladder["default"]["1M"] * 2)
+        self.assertEqual(q["USDJPY"].width_from, "yen group: wide tier x2")
+        self.assertEqual(q["USDCNH"].width_from, "default tier x2")
+        # The run's tier stays the global one; the exceptions are per pair,
+        # and the feed each pair posts carries its own.
+        self.assertEqual(b.tier, "default")
+        self.assertEqual(b.pair_tiers, {"USDJPY": "wide", "AUDJPY": "wide",
+                                        "HKDJPY": "thin", "CNHHKD": "thin"})
+        self.assertEqual({p: f.tier for p, f in b.feeds.items()},
+                         {"USDJPY": "wide", "AUDJPY": "wide", "HKDJPY": "thin",
+                          "CNHHKD": "thin", "USDCNH": "default"})
+        by_pair = b.preflight["widths"]["by_pair"]
+        self.assertEqual(by_pair["USDCNH"], {"tier": "default", "group": ""})
+        self.assertEqual(by_pair["HKDJPY"], {"tier": "thin", "group": "hk"})
+        cov = {c["pair"]: c for c in b.preflight["coverage"]}
+        self.assertEqual((cov["AUDJPY"]["group"], cov["AUDJPY"]["tier"]), ("yen", "wide"))
+
+    def test_no_tab_and_an_empty_tab_are_every_pair_on_the_global_tier(self):
+        for t in (self.tables, self.tables_with([])):
+            b = publish.build("kace", self.book, t, tier="wide", pairs=self.PAIRS)
+            self.assertEqual(b.pair_tiers, {})
+            self.assertTrue(all(q.width_from.startswith("wide tier") for q in b.quotes))
+
+    def test_a_pair_named_beats_a_currency_and_either_way_up_is_one_pair(self):
+        t = self.tables_with([
+            {"group": "yen", "tier": "wide", "pairs": "JPY"},
+            {"group": "hk", "tier": "thin", "pairs": "JPYHKD"}])
+        self.assertEqual(t.tier_for("HKDJPY", "default"), ("thin", "hk"))
+        self.assertEqual(t.tier_for("USDJPY", "default"), ("wide", "yen"))
+        self.assertEqual(t.tier_for("EURUSD", "default"), ("default", ""))
+
+    def test_a_blank_tier_parks_the_group_on_the_global_one(self):
+        t = self.tables_with([{"group": "yen", "tier": "", "pairs": "USDJPY"}])
+        self.assertEqual(t.tier_for("USDJPY", "thin"), ("thin", "yen"))
+
+    def test_a_pair_two_currency_groups_claim_is_refused_until_it_is_named(self):
+        rows = [{"group": "yen", "tier": "wide", "pairs": "JPY"},
+                {"group": "hk", "tier": "thin", "pairs": "HKD"}]
+        b = publish.build("kace", self.book, self.tables_with(rows), pairs=self.PAIRS)
+        self.assertFalse(b.ok)
+        self.assertTrue(any(r.startswith("HKDJPY:") and "yen" in r and "hk" in r
+                            for r in b.refused), b.refused)
+        self.assertEqual(b.feeds, {})
+        rows[1]["pairs"] = "HKD, HKDJPY"
+        self.assertEqual(self.tables_with(rows).tier_for("HKDJPY"), ("thin", "hk"))
+
+    def test_a_group_on_a_tier_spreads_lacks_refuses_its_pairs_by_name(self):
+        t = self.tables_with([{"group": "yen", "tier": "wider", "pairs": "USDJPY"}])
+        b = publish.build("kace", self.book, t, pairs=self.PAIRS)
+        self.assertFalse(b.ok)
+        self.assertTrue(any(r.startswith("USDJPY:") and "'wider'" in r for r in b.refused),
+                        b.refused)
+
+    def test_a_bad_tab_stops_the_run_rather_than_posting_the_global_widths(self):
+        t = self.tables_with([{"group": "yen", "tier": "wide", "pairs": "USDJPY"},
+                              {"group": "dollar", "tier": "thin", "pairs": "JPYUSD, EUR"},
+                              {"group": "odd", "tier": "thin", "pairs": "EURO"}])
+        err = t.errors["TIER_GROUPS"]
+        self.assertIn("already in the yen group", err)
+        self.assertIn("'EURO' is neither a pair", err)
+        with self.assertRaises(publish.PublishError) as ctx:
+            publish.build("kace", self.book, t, pairs=self.PAIRS)
+        self.assertIn("TIER_GROUPS", str(ctx.exception))
+        # A channel whose width is not a tier does not read the tab at all.
+        self.assertTrue(publish.build("murex", self.book, t).ok)
+
+    def test_the_tab_belongs_to_every_tier_channel_and_to_no_other(self):
+        self.assertIn("TIER_GROUPS", configsheets.EXPORT_TABS)
+        for ch in publish.CHANNELS.values():
+            self.assertEqual("TIER_GROUPS" in ch.tables, ch.width == "tier", ch.key)
 
 
 if __name__ == "__main__":
