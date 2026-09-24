@@ -251,6 +251,9 @@ class Request:
     fallback_tier: str = ""
     fallback_multiplier: float = 1.0
     fallback_interpolate: bool = False
+    #: Where the width comes from (``marketmaker.WIDTH_POLICIES``): the bid-offer study
+    #: first by default, as on the screen.
+    width_policy: str = "study"
     marks: dict | None = None
     narrate: bool = True
 
@@ -269,6 +272,7 @@ class Request:
             "fallback_tier": self.fallback_tier,
             "fallback_multiplier": self.fallback_multiplier,
             "fallback_interpolate": self.fallback_interpolate,
+            "width_policy": self.width_policy,
             "archive_half_life": self.half_life,
             "archive_min_effective": self.min_effective,
             "archive_lookback_days": self.lookback_days,
@@ -335,7 +339,8 @@ class AgentRun:
 
 # --------------------------------------------------------------------------
 def run(request: Request, *, book, archive: arch.Archive,
-        bank: KnowledgeBank | None = None, hist=None, model=None, spreads=None) -> AgentRun:
+        bank: KnowledgeBank | None = None, hist=None, model=None, spreads=None,
+        widths=None) -> AgentRun:
     """Make a price on everything asked for, through the one engine, and say how.
 
     Everything numeric is :meth:`marketmaker.QuotePanel.run`; what is added
@@ -353,7 +358,8 @@ def run(request: Request, *, book, archive: arch.Archive,
                          "'1M ATM in 100mm vega'")
     try:
         panel = request.panel()
-        sheet = panel.run(book, bank=bank, hist=hist, archive=archive, spreads=spreads)
+        sheet = panel.run(book, bank=bank, hist=hist, archive=archive, spreads=spreads,
+                          widths=widths)
     except ValueError as exc:
         raise AgentError(str(exc)) from None
 
@@ -859,3 +865,53 @@ def file_paste(archive: arch.Archive, payload: dict, *, clock,
         "notes": notes,
         "skipped": skipped,
     }
+
+
+# --------------------------------------------------------------------------
+#: The instruments a width suggestion fills, as the export tables name them:
+#: ``MARKET_WIDTHS`` holds the at-the-money, ``WING_WIDTHS`` the four wings.
+SUGGEST_POINTS = (("atm", "atm", {}), ("rr25", "rr", {"wing": 25}), ("rr10", "rr", {"wing": 10}),
+                  ("bf25", "fly", {"wing": 25}), ("bf10", "fly", {"wing": 10}))
+
+
+def suggest_widths(study, pair: str, tenors, *, size_usd_mm: float | None = None) -> dict:
+    """The quoting agent's widths for one pair across tenors, for the export tables' boxes.
+
+    The same widths the quote engine shows under its default policy (``bidoffer.quote_width``):
+    the at-the-money for a ``MARKET_WIDTHS`` column and the 25- and 10-delta risk reversal and
+    butterfly for ``WING_WIDTHS`` rows, each with the rung it stood on.  A suggestion, never a
+    write: the screen puts it into the boxes and the desk applies it or not.  A tenor the study
+    cannot read keeps its place with the reason.
+    """
+    from . import bidoffer
+    from .timeutil import TenorError, tenor_to_years
+
+    pair = str(pair).upper()
+    rows = []
+    for tenor in tenors:
+        label = str(tenor).strip().upper()
+        row = {"tenor": label, "notes": [], "rungs": {}}
+        try:
+            T = tenor_to_years(label)
+        except (TenorError, ValueError):
+            row["notes"].append(f"{label} is not a tenor")
+            rows.append(row)
+            continue
+        T = max(T, 1.0 / 365.0)
+        for name, inst, kw in SUGGEST_POINTS:
+            try:
+                r = bidoffer.quote_width(study, pair, T, inst, size_usd_mm=size_usd_mm, **kw)
+            except (ValueError, ArithmeticError, KeyError) as exc:
+                row[name] = None
+                row["notes"].append(f"{name}: {type(exc).__name__}: {exc}")
+                continue
+            # on the tick grid already; rounded here only so a box shows 0.3 and not 0.30000000000000004
+            row[name] = None if r.width is None else round(r.width, 6)
+            row["rungs"][name] = r.rung
+            for n in r.notes:
+                if n not in row["notes"]:
+                    row["notes"].append(n)
+        rows.append(row)
+    return {"pair": pair, "rows": rows,
+            "size_usd_mm": size_usd_mm or study.meta.get("median_ticket_usd_mm"),
+            "study": {k: study.meta.get(k) for k in ("built", "tape_first", "tape_last")}}

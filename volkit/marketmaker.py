@@ -1969,6 +1969,21 @@ class QuotePanel:
     #: Stepped (``False``, the tab's own rule) or read across between the two
     #: tenors a maturity falls between.
     fallback_interpolate: bool = False
+    #: Where the width comes from (the owner, 2026-09-24: the quoting agent's
+    #: spreading logic is the bid-offer study's).  One of :data:`WIDTH_POLICIES`:
+    #:
+    #: * ``study`` (the default) -- the study's measured width; then a bank
+    #:   rule; then the archive; then the study's rule of thumb (the desk's
+    #:   4-5 bp broker rule, for a pair with no vol history); then a named
+    #:   fallback tier; then no price.
+    #: * ``bank`` -- a bank rule first, then the same ladder from the study
+    #:   down: the desk's written widths stand where it has written one.
+    #: * ``off`` -- the ladder before the study (bank, archive, tier), the
+    #:   study's width shown on every row and applied to none.
+    #:
+    #: A bank **floor** applies under every policy: it is a minimum the desk
+    #: set, not a width.  With no study loaded every policy is ``off``.
+    width_policy: str = "study"
     # The archive's rung on the width ladder: bank, then what the archive has
     # seen this shown at, then the fallback tier, then no price.  Always on
     # the ladder (§17): thin evidence produces no number, so an archive that
@@ -2003,9 +2018,12 @@ class QuotePanel:
     notes: tuple[str, ...] = field(default_factory=tuple)
 
     def run(self, book, *, bank: KnowledgeBank | None = None, hist=None,
-            archive=None, spreads=None) -> dict:
+            archive=None, spreads=None, widths=None) -> dict:
         surface, method, clock = _prepare(book, self.pair, self.method)
         self._book = book
+        # The bid-offer study (bidoffer.Study) the caller loaded.  None is a
+        # quote with no model column, said per row.
+        self._widths = widths
         # The fallback ladder is resolved once, before any row: a tier that is
         # not there is one message on the sheet rather than the same sentence
         # repeated on every row that wanted a width.
@@ -2152,6 +2170,9 @@ class QuotePanel:
             # What the bottom rung was, so the screen can say it once rather
             # than the reader inferring it from the rows that used it.
             "fallback": dict(self._ladder),
+            "width_policy": self.width_policy if self._widths is not None else "off",
+            "study": None if self._widths is None else dict(self._widths.meta.get("study_stamp")
+                                                            or {"built": self._widths.meta.get("built")}),
             "tolerance": self.tolerance,
         }
         out["warnings"].extend(surface.warnings[-6:])
@@ -2374,6 +2395,9 @@ class QuotePanel:
             # was the rung used: a bank rule beside the ladder it beat is the
             # comparison somebody makes before editing the rule.
             "fallback_width": None,
+            # What the bid-offer study says the width should be, and on which rung
+            # (``_model_width``); shown whatever rung the width came off.
+            "model_width": None, "model_route": "", "model_gap": None, "model_note": "",
             "market_bid": None, "market_ask": None, "market_mid": None, "market_width": None,
             "position": None, "edge": None, "crossing": "",
             "richness": None, "axe": None, "flow": None, "verdict": "",
@@ -2500,6 +2524,52 @@ class QuotePanel:
                        else None, source="the archive", applied=False,
                        detail=(level.describe() if level is not None else
                                "nothing in the archive quotes this instrument at this tenor"))
+
+        # -- the bid-offer study, and the width policy that places it -------
+        # Everything the ladder could stand on is known by now: the bank's
+        # rule, the archive's width, the named tier and the study's reading.
+        # The policy picks among them in one place, so a row's rung is one
+        # decision and says which it was.
+        model_read = self._model_width(q, expiries, forwards, row)
+        measured = (model_read is not None and model_read.width is not None
+                    and model_read.rung != "rule of thumb")
+        thumb = (model_read is not None and model_read.width is not None
+                 and model_read.rung == "rule of thumb")
+        policy = self.width_policy if self._widths is not None else "off"
+        take = None
+        if policy == "study" and measured:
+            take = "measured"
+        elif policy == "bank" and measured and row["width_rung"] != "bank":
+            take = "measured"
+        elif policy in ("study", "bank") and thumb and row["width_rung"] in ("fallback", "none"):
+            take = "thumb"
+        if take is not None:
+            beaten = row["width_rung"]
+            if beaten != "none":
+                was = {"bank": f"the bank's {overlay.spread_rule}",
+                       "archive": "the archive's", "fallback": "the fallback tier's"}[beaten]
+                row["notes"].append(f"the bid-offer study's width stands before {was} "
+                                    f"{row['width']:.3f} (width policy '{policy}')")
+            width = model_read.width / 100.0
+            row["width"] = model_read.width
+            row["width_rung"] = "model"
+            row["width_source"] = f"the bid-offer study ({model_read.rung})"
+            if take == "thumb":
+                row["notes"].append("the pair has no vol history, so this is the desk's rule of "
+                                    "thumb (4.5bp of premium on USD 100mm over the vega): the "
+                                    "last measured-free rung above a typed tier")
+            # The bank's "nothing matched, so no bid and no offer" is not true of a row the
+            # study priced; it is dropped wherever it was put, not kept as a note that contradicts
+            # the price beside it.
+            if overlay.reason:
+                for bucket in ("warnings", "notes"):
+                    if overlay.reason in row[bucket]:
+                        row[bucket].remove(overlay.reason)
+        elif model_read is not None and model_read.width is not None and policy == "off":
+            row["notes"].append("width policy 'off': the bid-offer study's width is shown and "
+                                "not applied")
+        # The agent's one opinion, on the width actually shown (whichever rung
+        # it came off) against what the archive has seen it shown at.
         self._agent_verdict(row, overlay, evidence)
 
         if width is None:
@@ -2514,8 +2584,10 @@ class QuotePanel:
             ingredient("width", row["width"],
                        source={"bank": f"the bank: {overlay.spread_rule}",
                                "archive": row["width_source"],
+                               "model": row["width_source"],
                                "fallback": self._fallback_describe()}[row["width_rung"]],
                        detail=(evidence.describe() if row["width_rung"] == "archive" else
+                               model_read.summary() if row["width_rung"] == "model" else
                                f"no bank rule matched and the archive is too thin; the tier "
                                f"reads {fallback:.3f} at {days:.1f} days"
                                if row["width_rung"] == "fallback" and fallback is not None
@@ -2687,6 +2759,89 @@ class QuotePanel:
                 f"our mid is {row['position']} their market")
         return row
 
+    def _model_width(self, q, expiries, forwards, row: dict):
+        """The bid-offer study's width for one row, laid on the row and its trace.
+
+        ``bidoffer.quote_width`` off the study the caller handed over (``bidoffer_study.pkl``
+        beside the workbook): the lay-off cost measured on the tape plus twice the likely move over
+        the hold and the size's impact.  Filled in whichever rung the width came off --
+        ``model_width``, ``model_route`` (the study's rung: history + tape, history, legs, rule of
+        thumb), ``model_gap`` -- with a not-applied step on the trace carrying its parts.  A spread
+        or a structure is not asked: the study reads one instrument at a time.
+        """
+        from . import bidoffer
+        from .cross import is_cross, usd_leg
+
+        row.setdefault("model_width", None)
+        row.setdefault("model_route", "")
+        row.setdefault("model_gap", None)
+        row.setdefault("model_note", "")
+        if self._widths is None:
+            row["model_note"] = ("no bid-offer study is loaded (run `volkit bidoffer study`), so "
+                                 "there is no model width")
+            return None
+        if q.instrument not in ("atm", "rr", "fly", "outright"):
+            row["model_note"] = (f"the bid-offer study reads one instrument at a time, and a "
+                                 f"{q.instrument} is several")
+            return None
+        key = _key(q.expiry)
+        t = expiries[key][1]
+        fwd = forwards.get(key)
+        kw: dict = {}
+        if q.instrument in ("rr", "fly"):
+            kw["wing"] = 10 if (q.delta or 0.25) < 0.175 else 25
+        elif q.instrument == "outright":
+            if q.strike is not None:
+                if not fwd:
+                    row["model_note"] = "a strike needs a forward to place it on the smile"
+                    return None
+                vol = row["model"] / 100.0 if row.get("model") else 0.1
+                sq = vol * math.sqrt(t)
+                from scipy.special import ndtr
+                kw["call_delta"] = float(ndtr((math.log(fwd / q.strike) + 0.5 * sq * sq) / sq))
+            else:
+                d = abs(q.delta or 0.25)
+                kw["call_delta"] = d if q.is_call else 1.0 - d
+        size_usd = None
+        pair = self.pair.upper()
+        if q.size and q.size_basis in ("notional", "unspecified"):
+            if pair[:3] == "USD":
+                size_usd = q.size
+            elif pair[3:6] == "USD" and fwd:
+                size_usd = q.size * fwd
+            elif is_cross(pair):
+                try:
+                    rate = self._book.forward_at(usd_leg(pair[:3]), t)
+                except (ValueError, KeyError):
+                    rate = None
+                if rate:
+                    size_usd = q.size * (rate if usd_leg(pair[:3]).endswith("USD") else 1.0 / rate)
+        try:
+            reading = bidoffer.quote_width(self._widths, pair, t, q.instrument,
+                                           size_usd_mm=size_usd, **kw)
+        except (ValueError, ArithmeticError, KeyError) as exc:
+            row["model_note"] = f"{type(exc).__name__}: {exc}"
+            return None
+        if reading.width is None or not math.isfinite(reading.width):
+            row["model_note"] = "; ".join(reading.notes) or "no width"
+            return None
+        row["model_width"] = reading.width
+        row["model_route"] = reading.rung
+        row["model_note"] = (f"{reading.width:.3f} ({reading.rung}): "
+                             + "; ".join(f"{p['name']} {p['value']:.3f}" for p in reading.parts
+                                         if p.get("value") is not None and p["unit"] == "vol points")
+                             + ("; " + "; ".join(reading.notes) if reading.notes else ""))
+        if size_usd is None and q.size:
+            row["model_note"] += "; the size could not be put in dollars, so the tape's median ticket was used"
+        if row["width"] is not None:
+            row["model_gap"] = row["width"] - reading.width
+        row["trace"].append({
+            "name": "bid-offer study", "value": reading.width, "unit": "vol points",
+            "source": f"the bid-offer study ({reading.rung})", "applied": False,
+            "detail": "; ".join(f"{p['name']} {p['value']:.3f} {p['unit']}" for p in reading.parts
+                                if p.get("value") is not None)})
+        return reading
+
     def _agent_verdict(self, row: dict, overlay, evidence) -> None:
         """The quoting agent's one opinion: is this width the one it trades at.
 
@@ -2713,16 +2868,18 @@ class QuotePanel:
             row["agent_note"] = f"not enough behind a width here: {evidence.why_not}"
             return
         archived = evidence.median
-        if overlay.spread is None:
+        shown = row["width"] if row["width_rung"] in ("bank", "fallback", "model") else None
+        if shown is None:
             row["agent_verdict"] = "no rule"
             row["agent_note"] = (f"no bank rule matches this, and the archive has it "
                                  f"{archived:.3f} wide over {evidence.observations} "
                                  f"observation(s) from {evidence.sources} source(s)")
             return
-        gap = overlay.spread - archived
+        gap = shown - archived
         row["agent_gap"] = gap
         threshold = max(AGENT_MIN_GAP, abs(archived) * max(0.0, self.tolerance))
-        shown_as = "bank" if overlay.spread_rule else "fallback tier"
+        shown_as = {"bank": "bank", "fallback": "fallback tier",
+                    "model": "bid-offer study"}[row["width_rung"]]
         if abs(gap) <= threshold:
             row["agent_verdict"] = "agrees"
             row["agent_note"] = (f"the {shown_as} width and the archive agree to within "
@@ -2732,7 +2889,7 @@ class QuotePanel:
         side = "tighter" if gap < 0 else "wider"
         age = "today" if evidence.newest_days < 1 else f"{evidence.newest_days:.0f} days ago"
         row["agent_note"] = (
-            f"the {shown_as} would show {overlay.spread:.3f}, which is {abs(gap):.3f} {side} "
+            f"the {shown_as} would show {shown:.3f}, which is {abs(gap):.3f} {side} "
             f"than the {archived:.3f} this has been shown over {evidence.observations} "
             f"observation(s) from {evidence.sources} source(s), newest {age}")
 
@@ -3045,6 +3202,18 @@ def check_panel_from_request(payload: dict) -> CheckPanel:
     )
 
 
+#: Where a quote's width comes from; ``QuotePanel.width_policy`` says what each means.
+WIDTH_POLICIES = ("study", "bank", "off")
+
+
+def _width_policy(payload: dict) -> str:
+    """The width policy asked for, refused by name when it is not one."""
+    v = str(payload.get("width_policy") or "study").strip().lower()
+    if v not in WIDTH_POLICIES:
+        raise ValueError(f"width_policy {v!r} is not one of {', '.join(WIDTH_POLICIES)}")
+    return v
+
+
 def quote_panel_from_request(payload: dict) -> QuotePanel:
     """Build the quote panel from a JSON body or a CLI namespace-like mapping."""
     pair, cut, method, fly, vol_unit = _common(payload)
@@ -3078,6 +3247,7 @@ def quote_panel_from_request(payload: dict) -> QuotePanel:
         fallback_tier=str(payload.get("fallback_tier") or "").strip(),
         fallback_multiplier=_opt_float(payload, "fallback_multiplier", 1.0),
         fallback_interpolate=_opt_bool(payload, "fallback_interpolate", False),
+        width_policy=_width_policy(payload),
         archive_half_life=_opt_float(payload, "archive_half_life", 5.0),
         archive_min_effective=_opt_float(payload, "archive_min_effective", 2.0),
         archive_lookback_days=_opt_float(payload, "archive_lookback_days", 90.0),
@@ -3380,7 +3550,7 @@ class QuoteSheet:
                           require_pair=True, **self.settings)
 
     def run(self, book, *, bank: KnowledgeBank | None = None, hists=None,
-            archive=None, spreads=None) -> dict:
+            archive=None, spreads=None, widths=None) -> dict:
         if book is None:
             raise ValueError("the market-maker screen needs a loaded book")
         clock = book.clock
@@ -3393,6 +3563,7 @@ class QuoteSheet:
                             "n_quotes": 0, "priced": 0, "matched": 0, "disagreeing": 0,
                             "leaned_by_client": 0, "widened_by_client": 0,
                             "fly_convention": self.fly_convention, "fallback": {},
+                            "width_policy": str(self.settings.get("width_policy") or "study"),
                             "tolerance": self.settings.get("tolerance", AGENT_TOLERANCE)}
             out["marks"] = _merged_marks({})
             out["client"] = {"name": str(self.settings.get("client") or ""), "known": [],
@@ -3415,7 +3586,8 @@ class QuoteSheet:
                     hist = None
             try:
                 per_pair[pair] = self.panel(pair).run(book, bank=bank, hist=hist,
-                                                      archive=archive, spreads=spreads)
+                                                      archive=archive, spreads=spreads,
+                                                      widths=widths)
             except _PAIR_ERRORS as exc:
                 errors[pair] = f"{type(exc).__name__}: {exc}"
 
@@ -3496,6 +3668,9 @@ class QuoteSheet:
                 # The bottom rung is one tier for the whole sheet: the same
                 # ladder however many pairs are on it.
                 "fallback": dict(first.get("fallback") or {}),
+                "width_policy": first.get("width_policy",
+                                          str(self.settings.get("width_policy") or "study")),
+                "study": first.get("study"),
                 "tolerance": first.get("tolerance", self.settings.get("tolerance",
                                                                         AGENT_TOLERANCE)),
             },

@@ -171,6 +171,18 @@ marketmaker  two panels, neither of which moves a mark: the check (a pasted
            runs per pair and the rows come back in the order they were
            written. The two fitters live here as model code; the only caller
            is `marking`
+tapespread the bid-offer the market traded at, off the DTCC option tape the quant
+           repo keeps: prints merged when they are one trade in pieces, sorted
+           into straddles, two-strike packages and singles, inverted off one
+           spot reference a day, and the spread read as the intercept of
+           print-pair dispersion against the gap. Measures, never quotes
+bidoffer   how wide a two-way should be: the tape's cost of crossing the market
+           on every leg, plus twice the likely move of this option's vol over
+           the time to get out (the ATM / RR / fly history in today's regime,
+           the hold off the tape's flow) and the size's impact. A cross takes
+           the cheaper of its own market and its dollar legs plus the
+           correlation. `volkit bidoffer study` builds bidoffer_study.pkl;
+           a column on every quote row, a rung only when asked
 archive    every observation the desk has kept: quotes shown, trades printed,
            prices we made and what became of them. Append-only, content-addressed
 dtcc       fetching the public dissemination files from DTCC: which URL, whether
@@ -266,6 +278,7 @@ working in its area — not before.
 | `claude/agent-marking.md` (§18) | `remarks.py`, `marking.py`, `consult.py`, `rules.py` — the marking agent and its rules of thumb. |
 | `claude/agent-ask.md` (§19) | `ask.py` — the read-only question agent. |
 | `claude/kace-feed.md` (§20) | `kace.py` — the RATE_FEED message, posting, the spread table. |
+| `claude/bidoffer.md` (also: the export screen's *Suggest from the bid-offer study* on `MARKET_WIDTHS` / `WING_WIDTHS`) | `tapespread.py`, `bidoffer.py`, the quote's `model_width` column and model rung, `volkit bidoffer`. **The typed width tables are not its benchmarks** -- the owner's principle and what was measured are there. |
 | `claude/vega-weights.md` (§21) | `vegaweights.py`, the workbook's `Vega Weights` tab, the ATM card's **bump**, and the realized weighting suggested in the Config window. |
 | `claude/config-tabs.md` | **Before adding a setting**, or anything about `PEG_BANDS`, `SPREADS`, `HOLIDAYS`, `configsheets.py`, or where the discount curves come from (`discount.py`, the feed's `<CCY>OIS` rows). |
 | `claude/screen-export.md` (§22) | `publish.py`, `overlay.py`, `exportseed.py` -- the Vol bulk processing screen (Input / Output), the four channels, the export tables, the overlay and what it may never do to the workbook. |
@@ -505,7 +518,12 @@ to safely amend.
   **spreading tier** off the workbook's `SPREADS` tab -- named on the
   bar, scaled by a multiplier, read at each row's own maturity (stepped or
   interpolated between the tab's tenors, `kace.width_at`) -- then no price,
-  always, and every row names its rung. That bottom rung used to be one typed
+  always, and every row names its rung. The **bid-offer study** (`bidoffer.py`)
+  comes first (owner, 2026-09-24): under `width_policy` `study` (the default)
+  the ladder is study, bank, archive, the study's rule of thumb, tier, none;
+  `bank` puts a bank rule first; `off` is bank, archive, tier with the study
+  shown only. A bank floor holds under all three, and a row names the rung
+  it stood on and what the study stood before. That bottom rung used to be one typed
   width for every tenor on the screen, which is not a width any desk shows;
   it is the same ladder the feed posts from, so a width shown to a client and
   a width posted to the platform cannot quietly differ. Every row

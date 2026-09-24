@@ -1925,6 +1925,7 @@ their record on each instrument is part of the price (below). Then press
 | Skew | their total, capped; a `*` means the cap bound |
 | Our bid / ask | the mid plus the shading, with the width round it |
 | Width | the width; hover for the rule, the archive evidence or the fallback tier that set it, and a small `+` is what the client's record added |
+| Study | what the bid-offer study says the width should be (below); hover for its parts. A small *legs* means a cross was cheaper made off its dollar legs, *rule of thumb* that the pair has no vol history |
 | Archive | the width the archive has seen this instrument shown at, when it holds enough |
 | Agent | the quoting agent's verdict on the width the bank would show — see §5a |
 | Their market | what the market box quoted for this same instrument, if it did |
@@ -1946,6 +1947,55 @@ buttons speak the row's own convention — *lifted* on a `JPY call over` row
 means they bought what that row showed — and the file keeps the book's, so a
 client's record on the risk reversal is one record however each request was
 worded.
+
+### The bid-offer study: how wide a price should be
+
+The bank, the archive and a tier say what width to show. The **bid-offer study** says what it
+*should* be, measured rather than typed. A two-way is protection: half of it has to cover how far
+this option's vol is likely to move before you can get out, and the market's own cost of getting
+out comes on top.
+
+- **Lay-off cost.** What crossing the market costs on each option leg, measured on the DTCC
+  public option tape: about 1.2 bp of notional a leg, from straddles. A risk reversal is two legs
+  and a fly four, which is why they cost more in vol than the at-the-money.
+- **The move over the hold.** How far this option's vol moves, from the history of the ATM, the
+  risk reversal and the fly. A 25-delta call is ATM + fly + half the RR, so its move on each past
+  day is that mix of the three. Past days are rescaled to how fast the market is moving now. The
+  half-width covers 68% of those moves over the time you would hold it.
+- **The hold.** The usual wait for comparable business, plus the size divided by 20% of what that
+  pair and tenor trade per hour on the tape. A big ticket in a thin pair is held for longer.
+- **Size.** Tickets above about USD 150mm trade measurably further from the market on the tape,
+  and carry that too.
+
+- **The tick.** Every width is rounded **up** to whole ticks and is never less than one:
+  0.10 for a vol or an RR out to about a month and 0.05 beyond, and half that for a fly.
+
+**A cross is priced two ways and shows the cheaper**: on its own market, or with its vega hedged
+in the two dollar legs, paying their widths and holding only the correlation's move. The Study
+column shows `legs` when that was cheaper.
+
+A pair with no vol history (USDMXN, USDZAR today) falls back to the desk's rule of thumb, 4.5 bp
+of premium over the option's vega, and is marked as such. It is shown and never used for a price.
+
+On the Market maker bar, **Width from** is *study first* by default: the study's width is the
+price's width, and a bank rule, the archive's width or a fallback tier is used only where the study
+has none. *Bank first* keeps any bank rule the desk has written. *Study shown only* is the old
+ladder, with the study beside it for comparison. A bank **floor** always holds.
+
+On **Vol bulk processing**, `MARKET_WIDTHS` and `WING_WIDTHS` each have **Suggest from the bid-offer
+study**:
+1. Pick a pair and, optionally, a size.
+2. Press **Suggest**. The quoting agent fills a table of widths at the tenors the table carries.
+3. **Suggest into the tab** puts them in the boxes: the pair's column in `MARKET_WIDTHS`, the
+   pair's rows in `WING_WIDTHS`.
+4. Nothing changes until you press **Apply**.
+
+From a shell:
+- `volkit bidoffer study` measures the tape. It reads the quant repo's data and takes about 20
+  seconds; re-run it when the tape has grown.
+- `volkit bidoffer grid EURJPY --explain` prints every width and its parts.
+- `volkit bidoffer coverage EURUSD` checks out of sample how often the buffer covered the next
+  day's move.
 
 ### The printed tape
 

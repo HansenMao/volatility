@@ -1796,6 +1796,7 @@ def cmd_mm(args) -> int:
         "fallback_tier": args.fallback_tier,
         "fallback_multiplier": args.fallback_multiplier,
         "fallback_interpolate": bool(args.interpolate_fallback),
+        "width_policy": args.width_policy,
         "client": args.client, "client_weight": args.client_weight,
         "client_min": args.client_min,
         "flow_weight": args.flow_weight, "flow_scale": args.flow_scale,
@@ -1840,6 +1841,8 @@ def cmd_mm(args) -> int:
             else:
                 print(f"  ! {args.history} has no sheet for {args.pair}", file=sys.stderr)
 
+    widths = _bidoffer_study(args)
+
     warnings = 0
     if do_check:
         checked = (mm.check_panel_from_request(check_payload).run(book) if args.pair
@@ -1849,13 +1852,119 @@ def cmd_mm(args) -> int:
     if do_quote:
         if args.pair:
             out = mm.quote_panel_from_request(quote_payload).run(
-                book, bank=bank, hist=hist, archive=arc, spreads=_fallback_spreads(args))
+                book, bank=bank, hist=hist, archive=arc, spreads=_fallback_spreads(args),
+                widths=widths)
         else:
             out = mm.quote_sheet_from_request(quote_payload).run(
-                book, bank=bank, hists=hists, archive=arc, spreads=_fallback_spreads(args))
+                book, bank=bank, hists=hists, archive=arc, spreads=_fallback_spreads(args),
+                widths=widths)
         _print_quote(out, float(args.skew_cap))
         warnings += len(out["warnings"])
     return 1 if warnings else 0
+
+
+def _bidoffer_study(args, required: bool = False):
+    """The bid-offer study beside the workbook (``bidoffer_study.pkl``), or None, said once."""
+    from . import bidoffer
+    path = Path(getattr(args, "study", None) or
+                Path(args.workbook).parent / bidoffer.STUDY_FILENAME)
+    if not path.exists():
+        msg = (f"no bid-offer study at {path}; `volkit bidoffer study` measures the tape and "
+               f"writes it")
+        if required:
+            raise SystemExit(f"error: {msg}")
+        print(f"  . {msg}, so the quote has no model width", file=sys.stderr)
+        return None
+    return bidoffer.Study.load(path)
+
+
+def cmd_bidoffer(args) -> int:
+    """How wide a two-way should be, measured: ``study`` builds it, ``grid`` and ``coverage`` read it.
+
+    ``study`` runs the tape measurement off the quant repo's data -- the DTCC option tape, the
+    Bloomberg store and, once pulled, the five-minute spot bars -- and writes
+    ``bidoffer_study.pkl`` beside the workbook.  It is the one slow step (a minute or so) and is
+    re-run when the tape has grown.  ``grid PAIR`` prints the width of every tenor and point with
+    its rung, and ``--explain`` every part.  ``coverage PAIR`` is the out-of-sample check: how often
+    the next day's move stayed inside the buffer it was given.
+    """
+    import json as _json
+    from . import bidoffer, tapespread
+    from .timeutil import tenor_to_years
+
+    if args.action == "study":
+        out = Path(args.out or Path(args.workbook).parent / bidoffer.STUDY_FILENAME)
+        study = bidoffer.run_study(tape=args.tape, store=args.store, bars=args.bars,
+                                   since=args.since, boot=args.boot)
+        study.save(out)
+        m = study.meta
+        print(f"study written: {out}")
+        print(f"  tape {m['tape_first']} -> {m['tape_last']}: {m['prints']} prints, "
+              f"{m['observations']} read; {m['pairs_with_history']} pairs with a vol history")
+        ok = study.measured[study.measured.spread.notna()]
+        print(f"  {len(ok)} of {len(study.measured)} buckets measured on the tape")
+        return 0
+    if args.action == "coverage":
+        st = tapespread.Store(args.store)
+        rows = []
+        for pt in [x.strip() for x in args.points.split(",") if x.strip()]:
+            inst, kw = bidoffer.parse_point(pt)
+            cd = kw.get("call_delta")
+            for tenor in [t.strip() for t in args.tenors.split(",") if t.strip()]:
+                r = bidoffer.coverage(st, args.pair.upper(), tenor_to_years(tenor), inst,
+                                      call_delta=cd, p=args.p, start=args.start)
+                rows.append((tenor, pt, r))
+        print(f"{args.pair.upper()}  out of sample since {args.start}: how often the next day's "
+              f"move stayed inside its {args.p:.0%} buffer")
+        for tenor, pt, r in rows:
+            if not r.get("n"):
+                print(f"  {tenor:<5}{pt:<6} no history")
+                continue
+            print(f"  {tenor:<5}{pt:<6} covered {r['covered']:.1%} of {r['n']} days  "
+                  f"(z {r['z']:+.1f})")
+        return 0
+
+    study = _bidoffer_study(args, required=True)
+    pair = args.pair.upper()
+    tenors = [t.strip() for t in args.tenors.split(",") if t.strip()]
+    points = [x.strip() for x in args.points.split(",") if x.strip()]
+    try:
+        for pt in points:
+            bidoffer.parse_point(pt)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    rows = [bidoffer.grid_row(study, pair, tenor_to_years(t), t, pt, size_usd_mm=args.size,
+                              p=args.p, share=args.share) for t in tenors for pt in points]
+    if args.json:
+        print(_json.dumps({"pair": pair, "study": study.meta, "rows": rows}, indent=2,
+                          default=float))
+        return 0
+    size = args.size or study.meta.get("median_ticket_usd_mm")
+    print(f"{pair}  full two-way, vol points; USD {size:.0f}mm, the {args.p:.0%} move over the "
+          f"hold, {args.share:.0%} of the passing flow")
+    print("  " + f"{'tenor':<7}" + "".join(f"{x:>10}" for x in points))
+    for i, t in enumerate(tenors):
+        cells = []
+        for j in range(len(points)):
+            r = rows[i * len(points) + j]
+            mark = {"legs": "L", "history": "h", "rule of thumb": "*"}.get(r["rung"], " ")
+            cells.append(f"{r['width']:>9.3f}{mark}" if r["width"] is not None else f"{'-':>10}")
+        print(f"  {t.upper():<7}" + "".join(cells))
+    print("  L: a cross made off its dollar legs; h: the pair's own history, the flow borrowed; "
+          "*: no history, the desk's rule of thumb")
+    if args.explain:
+        for r in rows:
+            if r["width"] is None:
+                continue
+            print(f"\n  {r['tenor']} {r['point']}: {r['width']:.3f} ({r['rung']})")
+            for part in r["parts"]:
+                v = "" if part["value"] is None else f"{part['value']:.4f} {part['unit']}"
+                print(f"      {part['name']:<28}{v:<22}{part['source']}"
+                      + (f" -- {part['detail']}" if part["detail"] else ""))
+            for n in r["notes"]:
+                print(f"      . {n}")
+    return 0
 
 
 def _heading(r: dict) -> str:
@@ -2057,6 +2166,8 @@ def _print_quote(r: dict, panel_cap: float) -> None:
               f"  {row['verdict']} / {row['agent_verdict']}")
         if row["width_source"]:
             print(f"      . width: {row['width_source']}")
+        if row.get("model_width") is not None:
+            print(f"      . bid-offer study: {row['model_note']}")
         if row.get("agent_note") and row.get("agent_verdict") not in ("agrees", "not read"):
             print(f"      . agent: {row['agent_note']}")
         if row.get("client_record"):
@@ -2800,10 +2911,12 @@ def cmd_agent(args) -> int:
         fallback_tier=args.fallback_tier,
         fallback_multiplier=args.fallback_multiplier,
         fallback_interpolate=bool(args.interpolate_fallback),
+        width_policy=args.width_policy,
         narrate=not args.no_narration)
     try:
         out = agent_mod.run(request, book=book, archive=arc, bank=bank, hist=hist,
-                            model=model, spreads=_fallback_spreads(args))
+                            model=model, spreads=_fallback_spreads(args),
+                            widths=_bidoffer_study(args))
     except agent_mod.AgentError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -3464,6 +3577,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--interpolate-fallback", action="store_true",
                    help="read the tier across between the two tenors a maturity falls "
                         "between, instead of taking the nearer one's width")
+    s.add_argument("--width-policy", default="study", choices=["study", "bank", "off"],
+                   help="where the width comes from: study (default) -- the bid-offer study's "
+                        "measured width, then a bank rule, the archive, the study's rule of "
+                        "thumb, the fallback tier; bank -- a bank rule first, then the same; "
+                        "off -- bank, archive, tier, with the study shown only")
     s.add_argument("--archive", help=f"the observation archive: the width ladder's second "
                                      f"rung and every client's record "
                                      f"(default: {archive.ARCHIVE_FILENAME} beside the workbook)")
@@ -3497,6 +3615,37 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--cut", default="NY")
     s.add_argument("--method", default="SVI")
     s.set_defaults(func=cmd_mm)
+
+    # The bid-offer study: how wide a two-way should be, measured off the tape and the
+    # history.  `study` builds it once; `grid` and `coverage` read it (claude/bidoffer.md).
+    s = add_command("bidoffer", parents=[common],
+                    help="how wide each tenor and strike should be, measured: build the study, "
+                         "print a grid, check its coverage")
+    s.add_argument("action", choices=["study", "grid", "coverage"])
+    s.add_argument("pair", nargs="?", default="EURUSD")
+    s.add_argument("--tenors", default="1W,1M,3M,6M,1Y")
+    s.add_argument("--points", default="10p,25p,atm,25c,10c,rr25,bf25",
+                   help="atm, a delta like 25c or 10p, rr25, rr10, bf25, bf10")
+    s.add_argument("--size", type=float, default=None,
+                   help="USD millions (default: the tape's median ticket)")
+    s.add_argument("--p", type=float, default=0.68,
+                   help="the quantile of the move over the hold the half-width covers")
+    s.add_argument("--share", type=float, default=0.20,
+                   help="the share of the passing flow a position can be laid off into")
+    s.add_argument("--explain", action="store_true", help="every part of every width")
+    s.add_argument("--json", action="store_true")
+    s.add_argument("--study", help="the study file (default: bidoffer_study.pkl beside the workbook)")
+    s.add_argument("--out", help="study: where to write it (default: beside the workbook)")
+    s.add_argument("--tape", default=str(Path("~/quant/data/external/dtcc").expanduser()),
+                   help="study: the DTCC option extract (the quant repo's)")
+    s.add_argument("--store", default=str(Path("~/quant/data/raw/DATA.pkl").expanduser()),
+                   help="study/coverage: the Bloomberg store (the quant repo's)")
+    s.add_argument("--bars", default=str(Path("~/quant/data/external/bbg_intraday").expanduser()),
+                   help="study: the five-minute spot bars (the quant repo's), where pulled")
+    s.add_argument("--since", default="2025-09-01", help="study: the first tape day read")
+    s.add_argument("--boot", type=int, default=100, help="study: bootstrap draws per bucket")
+    s.add_argument("--start", default="2022-01-01", help="coverage: the first day scored")
+    s.set_defaults(func=cmd_bidoffer)
 
     # The quoting agent.  One command with an action on it rather than a family
     # of commands: every action shares the archive, the bank and the model
@@ -3603,6 +3752,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--interpolate-fallback", action="store_true",
                    help="read the tier across between the two tenors a maturity falls "
                         "between, instead of taking the nearer one's width")
+    s.add_argument("--width-policy", default="study", choices=["study", "bank", "off"],
+                   help="where the width comes from: study (default), bank first, or off "
+                        "(the study shown only) -- the Market maker bar's 'Width from'")
+    s.add_argument("--study", help="the bid-offer study (default: bidoffer_study.pkl beside the "
+                                   "workbook)")
     s.add_argument("--knowledge", help="knowledge bank JSON (default: beside the workbook)")
     s.add_argument("--history", default=_default_history(),
                    help="historical workbook, for the fair-value lean")

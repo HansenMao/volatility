@@ -1029,7 +1029,17 @@ volkit mm EURUSD --file run.txt --tolerance 0            # ... and warn only abo
 volkit mm EURUSD --request ask.txt                       # quote off the marks as they are
 volkit mark fit EURUSD --file run.txt --out-marks m.json  # the hand fit, saved
 volkit mm EURUSD --file run.txt --request ask.txt --marks m.json   # check and quote off it
+volkit mm EURUSD --request ask.txt --model-rung          # the bid-offer study prices what the bank and archive do not
+volkit bidoffer study                                    # measure the option tape (quant repo data) into bidoffer_study.pkl
+volkit bidoffer grid EURJPY --explain                    # how wide each tenor and strike should be, part by part
+volkit bidoffer coverage EURUSD                          # out of sample: how often the buffer covered the next day's move
 ```
+
+Every quoted row also carries the **bid-offer study**'s width (`claude/bidoffer.md`): what
+crossing the market costs on each leg, measured on the DTCC option tape, plus twice the likely
+move in the option's vol over the time it takes to lay it off, from the ATM / RR / fly history in
+today's regime, and the size's own impact. A cross is also priced off its dollar legs and their
+correlation, and the cheaper route wins.
 
 ### The knowledge bank
 

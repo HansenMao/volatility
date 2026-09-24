@@ -58,6 +58,7 @@ jobs:
           - test_agent
           - test_marking
           - test_publish
+          - test_bidoffer
         locale: [utf8, cp1252]
     name: ${{ matrix.module }} (${{ matrix.locale }})
     steps:

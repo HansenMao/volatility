@@ -28,3 +28,4 @@ Claude outputs/
 # sample -- an exported desk book must not replace it (see build_exe.check_workbook).
 files/vol_marks_desk_*.xlsx
 files/vol_marks.pre-*.xlsx
+files/bidoffer_study.pkl

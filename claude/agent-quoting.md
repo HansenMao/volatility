@@ -46,7 +46,24 @@ Things decided once on the row, which must not be re-derived anywhere else:
   page shows it under every line as *how this price was made*. A story
   written first and reconciled to the numbers afterwards is a story that stays
   plausible when the numbers are wrong.
-- **The width ladder is bank, then archive, then a spreading tier, then no
+- **The width comes from the bid-offer study first (owner, 2026-09-24).**
+  `QuotePanel.width_policy`, the Market maker bar's *Width from*,
+  `--width-policy`:
+  - `study` (the default): the study's measured width (`bidoffer.py`,
+    `claude/bidoffer.md`); then a bank rule; then the archive; then the
+    study's rule of thumb (a pair with no vol history); then a named
+    fallback tier; then no price.
+  - `bank`: a bank rule first, then the same ladder from the study down.
+  - `off`: the ladder below, with the study shown and applied to nothing.
+
+  A bank **floor** holds under every policy. With no study loaded
+  (`bidoffer_study.pkl` beside the workbook), every policy is `off`, and the
+  row says so. When the study's width stands before a bank rule, the archive
+  or a tier, the row's notes name what it stood before. The agent's verdict
+  compares the width **actually shown**, whichever rung it came off, with the
+  archive's. The paragraphs below describe the ladder under `off`, which is
+  also every ladder when no study is loaded.
+- **The width ladder under `off` is bank, then archive, then a spreading tier, then no
   price**, and it is always that ladder. Every row names the rung it stood on
   (`width_rung`). A row that reaches the bottom shows no bid and no offer --
   §11's rule, unchanged, and the archive is a rung on that ladder rather than

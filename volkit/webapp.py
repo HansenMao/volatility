@@ -2050,6 +2050,11 @@ class BookService:
                                     else "dependence"
                                     if (sheet == CROSS_DEPENDENCE_SHEET
                                         and "marking" in screens.enabled())
+                                    # the quoting agent's widths off the bid-offer study,
+                                    # suggested into the two tables a pair's two-way lives in
+                                    else "widths"
+                                    if (sheet in ("MARKET_WIDTHS", "WING_WIDTHS")
+                                        and "export" in screens.enabled())
                                     else "")
                 out.append(entry)
             return {"workbook": path, "tabs": out,
@@ -2803,12 +2808,82 @@ class BookService:
                 # workbook, read by both, so a width shown to a client and a
                 # width posted to the platform cannot quietly differ.
                 out = sheet.run(self.book, bank=self.bank, hists=self.history,
-                                archive=self.archive, spreads=self.kace_spreads)
+                                archive=self.archive, spreads=self.kace_spreads,
+                                widths=self._bidoffer())
             out["bank"]["error"] = self.bank_error
             out["archive"]["error"] = self.archive_error
             # For the archive card under the sheet: where more can come from.
             out["folders"] = {"chats": list(self.agent_chats), "sdr": list(self.agent_sdr)}
             return out
+
+    def _bidoffer(self):
+        """The bid-offer study beside the workbook (``bidoffer_study.pkl``), or None.
+
+        Read once and kept until the file changes: ``volkit bidoffer study`` writes it, and a
+        study re-run while the server is up is picked up on the next quote.
+        """
+        from . import bidoffer
+        path = Path(self.path).parent / bidoffer.STUDY_FILENAME
+        try:
+            stamp = path.stat().st_mtime
+        except OSError:
+            self._bidoffer_cache = None
+            return None
+        cached = getattr(self, "_bidoffer_cache", None)
+        if cached is None or cached[0] != stamp:
+            self._bidoffer_cache = (stamp, bidoffer.Study.load(path))
+        return self._bidoffer_cache[1]
+
+    def export_suggest_widths(self, payload: dict) -> dict:
+        """The quoting agent's widths for one pair across the tenors a table carries.
+
+        For the Vol bulk processing screen's ``MARKET_WIDTHS`` and ``WING_WIDTHS``: the boxes are
+        filled from this and nothing is applied until the desk presses Apply, as the Config
+        window's dependence suggestion does.  ``agent.suggest_widths`` is the one reading.
+        """
+        from . import agent as agent_mod, bidoffer
+        study = self._bidoffer()
+        if study is None:
+            raise ValueError(f"no {bidoffer.STUDY_FILENAME} beside the workbook; run "
+                             f"`volkit bidoffer study` first")
+        pair = str(payload.get("pair") or "").strip().upper()
+        if len(pair) != 6 or not pair.isalpha():
+            raise ValueError(f"{pair or 'no pair'} is not a six-letter pair")
+        tenors = payload.get("tenors") or ["O/N", "1W", "2W", "1M", "2M", "3M", "6M", "9M",
+                                           "1Y", "2Y"]
+        if isinstance(tenors, str):
+            tenors = [t for t in tenors.replace(";", ",").split(",") if t.strip()]
+        size = payload.get("size")
+        size = float(size) if size not in (None, "") else None
+        with self._lock:
+            return agent_mod.suggest_widths(study, pair, tenors, size_usd_mm=size)
+
+    def mm_bidoffer(self, payload: dict) -> dict:
+        """The bid-offer study's grid for one pair: every tenor and point asked for, with its parts.
+
+        ``volkit bidoffer grid`` is the same call.  Nothing moves: this is a reading.
+        """
+        from . import bidoffer
+        from .timeutil import tenor_to_years
+        with self._lock:
+            study = self._bidoffer()
+            if study is None:
+                raise ValueError(f"no {bidoffer.STUDY_FILENAME} beside the workbook; run "
+                                 f"`volkit bidoffer study` first")
+            pair = str(payload.get("pair") or "").strip().upper()
+            if len(pair) != 6 or not pair.isalpha():
+                raise ValueError(f"{pair or 'no pair'} is not a six-letter pair")
+            tenors = [t.strip() for t in str(payload.get("tenors") or "1W,1M,3M,6M,1Y")
+                      .split(",") if t.strip()]
+            points = [x.strip() for x in str(payload.get("points") or
+                                             "10p,25p,atm,25c,10c,rr25,bf25").split(",")
+                      if x.strip()]
+            size = payload.get("size")
+            size = float(size) if size not in (None, "") else None
+            rows = [bidoffer.grid_row(study, pair, tenor_to_years(t), t, pt, size_usd_mm=size)
+                    for t in tenors for pt in points]
+            return {"pair": pair, "tenors": tenors, "points": points, "study": study.meta,
+                    "rows": rows}
 
     def mm_mark(self, payload: dict) -> dict:
         """The marking-agent card: plan the fit on the screen, run it, judge it.
@@ -4019,6 +4094,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self.service.mm_check(payload))
             elif url.path == "/api/mm/quote":
                 self._json(self.service.mm_quote(payload))
+            elif url.path == "/api/export/widths":
+                self._json(self.service.export_suggest_widths(payload))
+            elif url.path == "/api/mm/bidoffer":
+                self._json(self.service.mm_bidoffer(payload))
             elif url.path == "/api/mm/learn":
                 self._json(self.service.mm_learn(payload))
             elif url.path == "/api/mm/bank":

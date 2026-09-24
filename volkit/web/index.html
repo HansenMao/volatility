@@ -1831,6 +1831,12 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
          title="multiply that tier's widths by this. 1 is the tab's own ladder; the mid does not move, only the width."><label>Tier &times;</label><input id="mmfallbackmult" value="1" style="width:62px"></div>
     <div class="f"
          title="how the tier is read between its tenors. Stepped takes the nearer tenor's width, as the tab's own rule does; interpolated reads straight across between the two the maturity falls between."><label>Between tenors</label><select id="mmfallbackinterp" style="width:110px"><option value="">stepped</option><option value="1">interpolated</option></select></div>
+    <!-- The bid-offer study (bidoffer.py): the lay-off cost measured on the option tape plus
+         twice the likely move over the time to get out, from the vol history. Always read and
+         shown in its own column; a rung only when asked, between the archive and the fallback
+         tier. -->
+    <div class="f"
+         title="the bid-offer study: what crossing the market costs on each leg (measured on the DTCC option tape) plus twice the likely move in this option's vol over the time it takes to lay it off (the ATM, RR and fly history, in today's regime) and the size's own impact. Shown beside every price either way; as a rung it prices what no bank rule and no archive evidence covers, before the fallback tier. Run `volkit bidoffer study` to build it."><label>Width from</label><select id="mmmodelrung" style="width:110px"><option value="study">study first</option><option value="bank">bank first</option><option value="off">study shown only</option></select></div>
     <div class="f"><label>Axe scale</label><input id="mmscale" placeholder="off" style="width:82px"></div>
     <div class="f"><label>Fair wt</label><input id="mmfair" value="0.25" style="width:62px"></div>
     <div class="f"><label>Axe wt</label><input id="mmaxe" value="0.5" style="width:62px"></div>
@@ -7000,7 +7006,8 @@ function cfgTabHtml(t,i,fold){
       'title="'+esc(t.shape||'')+'; blank cells in the column fall back to default">'+
       '<button class="ghost cfgaddcol" data-tab="'+i+
       '" style="width:auto;padding:4px 11px;font-size:11px">Add '+esc(t.open)+'</button>':'')+
-    '</div>'+(t.measure==='vega'?cfgVegaHtml(i):t.measure==='dependence'?cfgDepHtml(i):'')+end;
+    '</div>'+(t.measure==='vega'?cfgVegaHtml(i):t.measure==='dependence'?cfgDepHtml(i):
+              t.measure==='widths'?cfgWidthHtml(i):'')+end;
 }
 /* Which folded tables are open, by sheet: this page's memory only, so a
    reload shuts them all again.  Both editors fold -- the Config window's
@@ -7065,6 +7072,7 @@ function cfgPaintTabs(where){
       R.show(name+' is off '+t.sheet+' in this window; press Apply '+t.sheet+
         ' to take it off the book, and Write to workbook to take it out of the file',false);};});
   if(where==='config'){cfgVegaBind();cfgDepBind()}
+  cfgWidthBind(root);
 }
 /* One added column's name, as the tab's reader will spell it -- or '' when it
    is not one.  The same rule as configsheets.open_column_ok, on the box the
@@ -7339,6 +7347,102 @@ function cfgDepPaint(i){
     cfgPaintTabs('config');
     cfgDepPaint(i);
     cfgShow(n+' tenor(s) of '+r.pair+' suggested into '+t.sheet+'; check them and press Apply '+t.sheet,false);
+  };
+}
+/* ---- a pair's widths, suggested by the quoting agent into the export tables ----
+   The dependence suggestion's arrangement for MARKET_WIDTHS and WING_WIDTHS: the
+   bid-offer study's widths for one pair at the tenors the table already carries,
+   into the boxes for somebody to look at and apply -- never onto the tab on its
+   own.  MARKET_WIDTHS takes the at-the-money into the pair's column; WING_WIDTHS
+   takes the four wings as the pair's rows. */
+let WSUG={};
+let WSUI={pair:'',size:''};
+function cfgWidthHtml(i){
+  return '<details class="hint" style="margin-top:9px"><summary>Suggest from the bid-offer study</summary>'+
+    '<div style="margin:8px 0 0">For one pair, at the tenors this table carries: the width the '+
+    'quoting agent would show under its default policy &mdash; the tape&rsquo;s cost of crossing the '+
+    'market on each leg, plus twice the likely move of the option&rsquo;s vol over the time to lay it off '+
+    '(the ATM, RR and fly history in today&rsquo;s regime) and the size&rsquo;s impact, rounded up to the '+
+    'tick. A cross is made off its legs where that is cheaper. Built by <b>volkit bidoffer study</b>.</div>'+
+    '<div class="row" style="margin-top:8px;flex-wrap:wrap;gap:6px">'+
+    '<select class="cfgwpair" style="width:auto;padding:3px 6px"></select>'+
+    '<span class="meta">size USD mm</span><input class="cfgwsize" style="width:64px" '+
+    'placeholder="median" title="the ticket the width is for; blank is the tape&rsquo;s median ticket">'+
+    '<button class="cfgwgo" data-tab="'+i+'" style="width:auto;padding:4px 11px;font-size:11px;'+
+    'background:transparent;color:var(--ink);border:1px solid var(--line);font-weight:500">Suggest</button></div>'+
+    '<div class="cfgwout" data-tab="'+i+'" style="margin-top:8px"></div></details>';
+}
+function cfgWidthTenors(t){
+  const seen=[];
+  (t.rows||[]).forEach(r=>{const x=String(r.tenor||'').trim().toUpperCase();
+    if(x&&seen.indexOf(x)<0)seen.push(x)});
+  return seen;
+}
+function cfgWidthBind(root){
+  root.querySelectorAll('.cfgwgo').forEach(go=>{
+    const i=+go.dataset.tab, box=go.parentNode.querySelector('.cfgwpair'),
+          size=go.parentNode.querySelector('.cfgwsize');
+    const pairs=STATE.pairs||[];
+    box.innerHTML=pairs.map(p=>'<option value="'+esc(p)+'">'+esc(p)+'</option>').join('');
+    box.value=WSUI.pair&&pairs.indexOf(WSUI.pair)>=0?WSUI.pair:(pairs.indexOf(markingPair())>=0?markingPair():pairs[0]);
+    size.value=WSUI.size;
+    box.onchange=()=>{WSUI.pair=box.value};size.onchange=()=>{WSUI.size=size.value};
+    if(WSUG[i])cfgWidthPaint(root,i);
+    go.onclick=async()=>{
+      WSUI.pair=box.value;WSUI.size=size.value;
+      cfgHarvest(i);
+      const t=CFG.tabs[i], out=root.querySelector('.cfgwout[data-tab="'+i+'"]');
+      out.innerHTML='<span class="spin"></span> asking the quoting agent…';
+      try{WSUG[i]=await post('/api/export/widths',{pair:box.value,tenors:cfgWidthTenors(t),
+                                                   size:size.value.trim()})}
+      catch(e){WSUG[i]=null;out.innerHTML='<div class="msg bad">'+esc(e.message)+'</div>';return}
+      cfgWidthPaint(root,i);
+    };
+  });
+}
+function cfgWidthPaint(root,i){
+  const out=root.querySelector('.cfgwout[data-tab="'+i+'"]'); if(!out)return;
+  const r=WSUG[i]; if(!r){out.innerHTML='';return}
+  const t=CFG.tabs[i], atm=t.sheet==='MARKET_WIDTHS';
+  const cols=atm?['atm']:['rr25','rr10','bf25','bf10'];
+  const cell=v=>(v==null||!isFinite(v))?'—':num(v,3);
+  out.innerHTML='<div class="meta">'+esc(r.pair)+' · USD '+num(r.size_usd_mm||0,0)+'mm · study built '+
+    esc(((r.study||{}).built||'').replace('T',' ').slice(0,16))+' (tape to '+esc((r.study||{}).tape_last||'')+')</div>'+
+    '<div class="scroll" style="margin-top:6px"><table class="mark"><thead><tr><th>Tenor</th>'+
+    cols.map(c=>'<th>'+esc(c)+'</th>').join('')+'<th>rung</th></tr></thead><tbody>'+
+    r.rows.map(x=>{
+      const rung=cols.map(c=>(x.rungs||{})[c]).filter(Boolean)[0]||'';
+      const why=(x.notes||[]).length?' <span class="pill warn" title="'+esc(x.notes.join(' · '))+'">note</span>':'';
+      return '<tr><td>'+esc(x.tenor)+why+'</td>'+cols.map(c=>'<td><b>'+cell(x[c])+'</b></td>').join('')+
+        '<td class="meta">'+esc(rung)+'</td></tr>';}).join('')+
+    '</tbody></table></div>'+
+    '<div class="row" style="margin-top:8px;align-items:center;gap:6px"><button class="cfgwuse" '+
+    'style="width:auto;padding:4px 11px;font-size:11px;background:transparent;'+
+    'color:var(--ink);border:1px solid var(--line);font-weight:500">Suggest into the tab</button>'+
+    '<span class="meta">'+(atm?'fills the '+esc(r.pair)+' column at these tenors':
+      'replaces '+esc(r.pair)+'&rsquo;s rows')+' in the boxes above — nothing is applied until you press Apply'+
+      (atm?'; the Bloomberg feed adds ADD_UPS on top':'')+'</span></div>';
+  out.querySelector('.cfgwuse').onclick=()=>{
+    cfgHarvest(i);
+    const note='bid-offer study '+(((r.study||{}).built)||'').slice(0,10);
+    let n=0;
+    if(atm){
+      if(t.columns.indexOf(r.pair)<0){const at=t.columns.indexOf('note');
+        t.columns.splice(at<0?t.columns.length:at,0,r.pair)}
+      const by={};r.rows.forEach(x=>{by[x.tenor]=x});
+      t.rows.forEach(row=>{const x=by[String(row.tenor||'').trim().toUpperCase()];
+        if(x&&x.atm!=null){row[r.pair]=Math.round(x.atm*1e4)/1e4;n++}});
+    } else {
+      const keep=t.rows.filter(row=>String(row.pair||'').toUpperCase()!==r.pair);
+      r.rows.forEach(x=>{
+        if(cols.every(c=>x[c]==null))return;
+        const row={pair:r.pair,tenor:x.tenor,note:note};
+        cols.forEach(c=>{row[c]=x[c]==null?null:Math.round(x[c]*1e4)/1e4});
+        keep.push(row);n++;});
+      t.rows=keep;
+    }
+    cfgPaintTabs('export');
+    xcfgShow(n+' tenor(s) of '+r.pair+' suggested into '+t.sheet+'; check them and press Apply '+t.sheet,false);
   };
 }
 function cfgConfirm(html,label,run,where){
@@ -7934,7 +8038,7 @@ const MQF=[
  ['fly_convention','#mmfly'],['vol_unit','#mmunit'],['text','#mmtext'],
  ['request_text','#mqtext'],
  ['fallback_tier','#mmfallbacktier'],['fallback_multiplier','#mmfallbackmult'],
- ['fallback_interpolate','#mmfallbackinterp'],
+ ['fallback_interpolate','#mmfallbackinterp'],['width_policy','#mmmodelrung'],
  ['vega_scale','#mmscale'],['fair_weight','#mmfair'],
  ['axe_weight','#mmaxe'],['skew_cap','#mmcap'],['horizon_days','#mmhorizon'],
  ['vega_text','#mmvega'],
@@ -8457,11 +8561,11 @@ function paintQuote(d){
     esc((cl.record||[]).length?cl.record.join('; '):(cl.reason||'no record yet'))+'</div>';
   if(!sh.rows.length){host.innerHTML='<div class="annone">Nothing could be read from the '+
     'request box.</div>';$('#mqrecord').disabled=true;return}
-  const ncol=18;
+  const ncol=19;
   let h='<div class="mmwide"><table><thead><tr>'+
     '<th>Pair</th><th>Instrument</th><th>Size</th><th>Model</th>'+
     '<th>Fair</th><th>Axe</th><th>Flow</th><th>Client</th><th>Bank</th><th>Skew</th>'+
-    '<th>Our bid</th><th>Our ask</th><th>Width</th>'+
+    '<th>Our bid</th><th>Our ask</th><th>Width</th><th>Study</th>'+
     '<th>Archive</th><th>Agent</th>'+
     '<th>Their market</th><th>Verdict</th><th>Outcome</th></tr></thead><tbody>';
   let withwhy=0;
@@ -8491,6 +8595,11 @@ function paintQuote(d){
          (r.premium_ask!=null?'<br><small>'+vnum(r.our_ask)+' vol · '+esc(r.premium_label)+'</small>':'')+'</td>'+
        '<td class="mmv"'+(r.width_source?' title="'+esc(r.width_source)+'"':'')+'>'+vnum(r.width)+
          (r.client_widen?' <small>+'+vnum(r.client_widen)+'</small>':'')+'</td>'+
+       /* What the bid-offer study says it should be, and on which rung: shown
+          whether or not it was the rung the price stood on. */
+       '<td class="mmv"'+(r.model_note?' title="'+esc(r.model_note)+'"':'')+'>'+
+         vnum(r.model_width)+(r.model_route&&r.model_route!=='history + tape'?
+         ' <small>'+esc(r.model_route)+'</small>':'')+'</td>'+
        '<td class="mmv"'+(r.archive_observations?' title="'+r.archive_observations+
          ' observation(s) from '+(r.archive_sources||0)+' broker(s)"':'')+'>'+
          vnum(r.archive_width)+'</td>'+
@@ -8519,6 +8628,11 @@ function paintQuote(d){
   else h+='<div class="etonote">· no fallback tier: a quote no bank rule and no archive '+
     'evidence covers gets no bid and no offer.</div>';
   const fromArchive=sh.rows.filter(r=>r.width_rung==='archive').length;
+  const fromModel=sh.rows.filter(r=>r.width_rung==='model').length;
+  if(sh.width_policy&&sh.width_policy!=='off')h+='<div class="etonote">· widths from the bid-offer study ('+
+    (sh.width_policy==='bank'?'after a bank rule':'first')+'): '+fromModel+' row(s) took their width from it.</div>';
+  else if(sh.width_policy==='off')h+='<div class="etonote">· the bid-offer study is shown and not applied'+
+    (sh.study?'':' (no study loaded: run <code>volkit bidoffer study</code>)')+'.</div>';
   /* The archive is read per pair; what the sheet says is the sum, and the
      card under it says each pair's. */
   const arps=(d.pairs||[]).map(p=>((d.by_pair||{})[p]||{}).archive||{});
@@ -9430,7 +9544,7 @@ document.querySelectorAll('.mmright .mmfoldtog').forEach(el=>{el.onchange=()=>{m
  '#mmflowwt','#mmflowscale','#mmflowtol'].forEach(id=>{
   $(id).oninput=()=>{saveMM();scheduleMQ()}});
 /* Two selects rather than boxes, so they answer to change and not to input. */
-['#mmfallbacktier','#mmfallbackinterp'].forEach(id=>{
+['#mmfallbacktier','#mmfallbackinterp','#mmmodelrung'].forEach(id=>{
   $(id).onchange=()=>{saveMM();scheduleMQ()}});
 /* The tolerance grades the check on the server, so a new one is a new run
    rather than a repaint of the table already on the screen. */

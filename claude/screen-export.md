@@ -252,3 +252,17 @@ and says *why*; this file says what is there and what must not be broken.
 The `cos` tier on `SPREADS`.  Everything else has a seed from the desk's own
 files, and once seeded is the desk's.  The crosses the book does not mark
 come in through the overlay until they are marked.
+
+## Suggesting widths from the bid-offer study (2026-09-24)
+
+`MARKET_WIDTHS` and `WING_WIDTHS` carry a **Suggest from the bid-offer study** section (the
+tab listing's `measure: "widths"`), shaped like the Config window's dependence suggestion:
+- **What it asks:** for one pair and the tenors the table already carries, the quoting agent
+  (`agent.suggest_widths`, through `/api/export/widths`) returns the widths the quote engine
+  shows under its default policy.
+- **Where it goes:** the ATM into the pair's `MARKET_WIDTHS` column, or the 25- and 10-delta RR
+  and fly as the pair's `WING_WIDTHS` rows.
+- **What it writes:** nothing. The boxes are filled and nothing is applied until **Apply**.
+- **The Bloomberg feed** still adds `ADD_UPS` on top of a suggested `MARKET_WIDTHS` width.
+- **With no `bidoffer_study.pkl` beside the workbook** the route refuses by name.
+
