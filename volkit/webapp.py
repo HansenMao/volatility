@@ -161,6 +161,11 @@ def _write_ratio_block(surface, cells) -> None:
         raise ValueError(f"nothing was written: {exc}") from None
 
 
+# Where the page shows an action's message: on its own card, or in one message
+# centre at the top right.  ``serve --messages`` / ``messages =`` in volkit.cfg.
+MESSAGE_MODES = ("card", "center")
+
+
 class BookService:
     """Thread-safe wrapper around a Book, with the request handlers."""
 
@@ -175,8 +180,15 @@ class BookService:
                  kace_scenario: str = kace_mod.DEFAULT_SCENARIO, kace_url: str | None = None,
                  kace_ca: str | None = None, kace_insecure: bool = False,
                  kace_log_path: str | None = None, kace_tier: str | None = None,
-                 export_dir: str | None = None):
+                 export_dir: str | None = None, messages: str = "card"):
         self.path = path
+        # Where the page shows what an action said: on the card that did it
+        # ("card"), or collected in one box at the top right ("center"), shut
+        # unless something failed.  A start-up setting, like the kACE scenario.
+        if messages not in MESSAGE_MODES:
+            raise ValueError(f"messages must be one of {', '.join(MESSAGE_MODES)}, "
+                             f"not {messages!r}")
+        self.messages = messages
         self.clock = clock or Clock.utcnow()
         self.feed_path = feed_path
         # When the feed file was last written, as of the read that is in the
@@ -417,11 +429,13 @@ class BookService:
             if self.book is None:
                 return {"pairs": [], "error": self.load_error, "warnings": [],
                         "notes": [], "auto": self.auto_state(),
-                        "screens": list(screens.enabled())}
+                        "screens": list(screens.enabled()), "messages": self.messages}
             return {
                 # Which tabs this build has.  The page hides the rest, and
                 # their routes are refused below rather than 404-ing blankly.
                 "screens": list(screens.enabled()),
+                # Where the page puts what each action said (``--messages``).
+                "messages": self.messages,
                 "pairs": self.book.pairs,
                 "tenors": list(self.book.data.tenor_points),
                 "methods": list(INTERPOLATORS),
@@ -1490,9 +1504,9 @@ class BookService:
                 # The tenor is checked against the table here, which the
                 # single-tenor route has no need to do: a box is typed into on
                 # a row that exists, but a pasted label is whatever the
-                # spreadsheet called it, and an overwrite at a tenor the curve
-                # has no pillar for is read by nobody -- a mark that silently
-                # does nothing is the thing this project exists to remove.
+                # spreadsheet called it, and an overwrite at a tenor nobody
+                # sees on the table is a mark that moves the curve with no row
+                # to show it or to clear it from.
                 cells = q.get("cells")
                 if not isinstance(cells, list) or not cells:
                     raise ValueError("a block of overwrites needs at least one cell")
@@ -4256,7 +4270,8 @@ def serve(path: str, host: str = "127.0.0.1", port: int = 8765,
           kace_log_path: str | None = None, kace_tier: str | None = None,
           export_dir: str | None = None, excel_port: int = 0,
           excel_host: str = "127.0.0.1", excel_token: str | None = None,
-          excel_busy: float = excel_mod.DEFAULT_BUSY_AFTER) -> None:
+          excel_busy: float = excel_mod.DEFAULT_BUSY_AFTER,
+          messages: str = "card") -> None:
     """Start the local server (blocking).
 
     ``excel_port`` opens the Excel listener (``excel.py``) beside it, on the
@@ -4269,7 +4284,7 @@ def serve(path: str, host: str = "127.0.0.1", port: int = 8765,
                                   journal_path, rules_path, dtcc_direct,
                                   kace_spreads_path, kace_user, kace_password, kace_scenario,
                                   kace_url, kace_ca, kace_insecure, kace_log_path,
-                                  kace_tier, export_dir)
+                                  kace_tier, export_dir, messages)
     httpd = ThreadingHTTPServer((host, port), Handler)
     url = f"http://{host}:{port}/"
     print(f"volkit serving {path}\n  -> {url}\n  (Ctrl-C to stop)")

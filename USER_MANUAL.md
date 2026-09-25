@@ -114,6 +114,24 @@ marks live in memory and a reload throws them away, so it says the workbook
 has changed and waits. Save the session, or press **Reload workbook now** in
 that line to take the new workbook and lose them.
 
+### Where messages appear
+
+Every button that does something says what happened ("applied", "saved", or
+the error). By default that line sits on the card, under the button. Start
+with
+
+```
+volkit.exe serve --messages center
+```
+
+or put `messages = center` in `volkit.cfg`, and every card's message goes into
+one **Messages** box at the top right instead. The box stays shut. The button
+turns **red** when something has failed (hover over it to read the latest
+error), and clicking it opens the log: newest first, each line with its time,
+the screen and the card it came from, and `×2` when the same message came
+again. Opening it clears the red; **Clear** empties it. A message that is
+still working ("writing…", a spinner) stays on its card until it is done.
+
 ---
 
 ## 2. The tabs
@@ -134,6 +152,24 @@ there, but off until you ask for it. Start the tool with
 `volkit.cfg` so a double-click turns it on. If you ask for a screen this build
 does not contain at all, it says so and stops rather than starting without it.
 Run `volkit.exe --help` to see which, if any, are hidden.
+
+**Moving round a table from the keyboard.** Every table you type into — the
+ATM overwrites and quotes, the ratios, the smile grid and its term structure,
+the pricing grid, the events and their weights, the Config tabs, the market
+maker's rules — works like a spreadsheet:
+
+| Key | Moves to |
+|---|---|
+| **↑ / ↓** | the box above / below, in the same column |
+| **Enter / Shift+Enter** | the box below / above (Enter on the last row commits and stays, as before) |
+| **← / →** | the box to the left / right, once the cursor is at that end of the number (or the whole number is selected, which is how you arrive in a box) — otherwise they move the cursor inside the number as usual |
+| **Tab / Shift+Tab** | the next / previous box, unchanged |
+
+A cell with no box — a wing a ratio derives, an option the row does not apply
+to, a dropdown — is stepped over. Leaving a box commits it exactly as clicking
+away does, and the table repainting after the edit does not lose your place:
+the cursor stays in the box you moved to, and anything you had already started
+typing there is kept and committed when you leave it.
 
 ### The Config window
 

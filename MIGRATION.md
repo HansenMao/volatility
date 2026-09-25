@@ -1577,6 +1577,44 @@ change shape: `analytics` decided tenor-versus-date by counting characters
 (four or fewer was a tenor), which called `1week` a date; it now asks
 `parse_tenor`, like everywhere else.
 
+### F18. An ATM overwrite on the last pillar, or off the pillars, moved nothing
+
+`AtmCurve.term_vol` honoured a tenor overwrite only between two `TENORS`
+pillars, and dropped back onto the raw curve everywhere else. Two ways that
+threw a typed mark away:
+
+- **The last pillar.** A pillar sits at its expiry date at midnight UTC, and
+  the option on it expires at the cut, hours later -- past the last pillar,
+  where the raw curve was read. So the cut column, and every price on the 1Y,
+  ignored a 1Y overwrite outright. On the shipped USDJPY, with every pillar
+  overwritten one vol over the curve, the 1Y TK read 6.486 against an
+  overwrite of 7.485; every other pillar read within 0.03 of its own.
+- **A tenor `TENORS` does not list.** A 4M or 18M overwrite was held, shown on
+  the marking screen and saved to the session, and interpolation never used it.
+
+Every overwritten tenor is now an anchor alongside the pillars
+(`AtmCurve._anchors`). Outside the anchors the marked curve is extended rather
+than dropped: before the first anchor, total variance is the curve's own
+scaled to meet the first anchor's level; past the last anchor, it is that
+anchor's total variance plus the curve's forward variance. So the curve is
+continuous at both ends and far-dated expiries converge back to the curve.
+`overwrite_tenor` now refuses a tenor it cannot place, rather than storing a
+mark nothing reads, and a session file carrying one reports it by name.
+
+**What moves.** Only books with an overwrite on them. Options between two
+anchors are unchanged. What does move: expiries past an overwritten last
+anchor (the last pillar's own options most of all), expiries before an
+overwritten first anchor, and expiries near an overwrite at an unlisted tenor.
+There is no switch. To get an old figure back, clear the overwrite at the
+unlisted tenor, which gives the number exactly, or, for an end pillar, clear
+that pillar's overwrite. The old number past an end pillar was the raw curve,
+which is what the overwrite column shows as its placeholder.
+
+The small residual gap between an overwrite and the cut column at its own
+pillar (a few hundredths of a vol at 1W on the TK cut, about 0.3 on the NY cut)
+is not part of this fix. It is the cut convention: the cut sits hours after the
+midnight pillar, and `cut_vol` quotes on whole volatility days.
+
 ## Verified correct
 
 * **Weekly close window** — Friday 22:00Z to Sunday 22:00Z, exactly 48 hours,

@@ -388,6 +388,10 @@ def check_config_tabs(tabs: dict) -> dict:
                                    f"got {type(row).__name__}")
         name = configsheets.match_sheet(configsheets.EDITABLE, sheet)
         configsheets.check_open_columns(name, configsheets.columns_for(name, rows))
+        try:
+            configsheets.check_rows(name, rows)
+        except configsheets.ConfigSheetError as exc:
+            raise SessionError(str(exc)) from None
     return tabs
 
 
@@ -1293,9 +1297,14 @@ def apply_block(surface, block: dict) -> list[str]:
         surface.atm.clear_overwrite()
         for tenor, value in (block.get("atm_overwrites") or {}).items():
             try:
-                surface.atm.overwrite_tenor(str(tenor), float(value) / 100.0)
+                vol = float(value) / 100.0
             except (TypeError, ValueError):
                 problems.append(f"ATM overwrite {tenor}: {value!r} is not a number")
+                continue
+            try:
+                surface.atm.overwrite_tenor(str(tenor), vol)
+            except ValueError as exc:
+                problems.append(f"ATM overwrite {tenor}: {exc}")
 
     if "smile_overwrites" in block:
         surface.clear_param_overwrites()

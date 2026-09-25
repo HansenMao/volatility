@@ -117,7 +117,9 @@ pricing    multi-leg strips, strike/expiry specs, per-leg error isolation, and
 configsheets the workbook's settings tabs -- PEG_BANDS, SPREADS (was
            KACE_SPREADS; the old name is read and renamed on write), HOLIDAYS,
            WING_RATIOS, Vega Weights, CROSS_DEPENDENCE, and the export-policy tables
-           TIER_GROUPS, MARKET_WIDTHS, ADD_UPS, SHADES, WING_WIDTHS, EXPORT_PAIRS --
+           TIER_GROUPS, MARKET_WIDTHS, ADD_UPS, SHADES, WING_WIDTHS, EXPORT_PAIRS,
+           and TENORS, which is CONFIG's TENORS column edited as a tab of its own
+           and written back into that column alone (`COLUMN_TABS`) --
            read one way, with '#' comment rows and a header found rather than assumed, and off
            the session's own rows where it holds the tab (`overlay`). A new
            setting is a tab here, not a new file
@@ -344,7 +346,11 @@ to safely amend.
   **never** fitted, because they came out of the fit. Typing into one
   materialises the row (`VolSurface._materialise`); a tenor `TENORS` does not
   list is refused by `overwrite_quote`. A workbook with no `TENORS` column
-  governs nothing (`MarketData.tenors_stated`). MIGRATION.md 4b-iv.
+  governs nothing (`MarketData.tenors_stated`). MIGRATION.md 4b-iv. The list
+  is edited on the Config window as the `TENORS` tab (`configsheets
+  .COLUMN_TABS`): held in the session like any tab, read by `_load_config`
+  instead of the column, and written into that one column of CONFIG by the
+  export -- never a rewrite of the sheet, whose PAIRS column sits beside it.
 - **The quoting conventions are the pair's, from `DeltaConvention.for_pair`**
   (`black.py`): premium adjusted iff the premium currency -- USD when it is in
   the pair, else the base -- is the base currency, so every cross is adjusted;

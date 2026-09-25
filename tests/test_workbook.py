@@ -637,6 +637,74 @@ class TestConfigTenorsGovern(unittest.TestCase):
         self.assertIsNone(rows["1M"]["quotes_implied"]["rr_25"])
 
 
+class TestTenorsOnTheConfigWindow(unittest.TestCase):
+    """CONFIG's TENORS column, edited on the Config window as a tab of its own.
+
+    Marked like every other tab -- held in the session, the book read again on
+    it, the file untouched until Write to workbook -- and written back into
+    that one column: CONFIG's pairs sit beside it and are never rewritten by a
+    change to the tenors.
+    """
+
+    def _service(self):
+        import tempfile
+        from volkit.webapp import BookService
+        d = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d, True)
+        wb = book_copy(d, pairs=("USDJPY",))
+        return BookService(str(wb), ASOF), wb
+
+    def _tab(self, svc):
+        return {t["sheet"]: t for t in svc.config_tabs()["tabs"]}["TENORS"]
+
+    def test_the_window_shows_the_column_and_applying_it_reads_the_2y(self):
+        from volkit import session
+        svc, wb = self._service()
+        tab = self._tab(svc)
+        self.assertEqual(tab["where"], "config")
+        self.assertEqual([r["tenor"] for r in tab["rows"]],
+                         list(svc.book.data.tenor_points))
+        rows = [dict(r) for r in tab["rows"]] + [{"tenor": "2y"}]
+        stamp = session.workbook_stamp(wb)
+        out = svc.config_save({"sheet": "TENORS", "rows": rows})
+        self.assertTrue(out["wrote"]["pending"])
+        self.assertEqual(session.workbook_stamp(wb), stamp)       # the file is untouched
+        self.assertIn("2y", svc.book.data.tenor_points)
+        self.assertIn("2Y", {m.tenor.upper() for m in svc.book["USDJPY"].quoted_marks()})
+        self.assertTrue(self._tab(svc)["pending"])
+
+    def test_a_bad_or_repeated_tenor_is_refused_before_it_is_held(self):
+        svc, _ = self._service()
+        rows = [dict(r) for r in self._tab(svc)["rows"]]
+        for extra, said in (([{"tenor": "soon"}], "not a tenor"),
+                            ([{"tenor": "1Y"}], "list a tenor once")):
+            with self.assertRaises(ValueError) as cm:
+                svc.config_save({"sheet": "TENORS", "rows": rows + extra})
+            self.assertIn(said, str(cm.exception))
+        self.assertNotIn("TENORS", svc.config_edits)
+
+    def test_the_write_changes_the_tenors_column_and_nothing_else_on_config(self):
+        import openpyxl
+        from volkit import session
+        svc, wb = self._service()
+
+        def grid():
+            ws = openpyxl.load_workbook(wb, read_only=True)["CONFIG"]
+            return [list(r) for r in ws.iter_rows(values_only=True)]
+
+        before = grid()
+        head = [str(c).strip().lower() if c is not None else "" for c in before[0]]
+        col = head.index("tenors")
+        session.write_config_tabs(wb, {"TENORS": [{"tenor": "1m"}, {"tenor": "3y"}]})
+        after = grid()
+        self.assertEqual([r[col] for r in after[1:] if r[col] is not None], ["1m", "3y"])
+        for c in range(len(before[0])):
+            if c != col:
+                self.assertEqual([r[c] if c < len(r) else None for r in before],
+                                 [r[c] if c < len(r) else None for r in after[:len(before)]])
+        self.assertEqual(ExcelSource(wb).load().tenor_points, ("1m", "3y"))
+
+
 class TestWorkbookAsDatabase(unittest.TestCase):
     """The workbook written by the screens rather than opened by a person.
 

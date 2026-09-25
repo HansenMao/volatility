@@ -412,6 +412,26 @@ tr.sep td{border-top:1px solid var(--line);color:var(--muted);font-size:10.5px;
   border-radius:10px}
 .msg.ok{color:var(--good)} .msg.bad{color:var(--bad)} .msg.warn{color:var(--warn)}
 
+/* ---- the message centre (serve --messages center) ----
+   Every card's message box is hidden where it stands and read into one log at
+   the top right.  A box still saying "working…" stays on its card: that is
+   state, not news. */
+body.msgcenter .msg:not([data-busy]),body.msgcenter .amsg:not([data-busy]){display:none}
+#msgbtn{width:auto;display:flex;align-items:center;gap:6px;margin-left:auto}
+#msgbtn .msgn{background:var(--grid);color:var(--muted);border-radius:9px;padding:0 6px;font-size:10.5px}
+#msgbtn.msgerr{background:var(--bad);color:#fff;border-color:var(--bad);font-weight:650}
+#msgbtn.msgerr .msgn{background:rgba(255,255,255,.25);color:#fff}
+#msgbox{position:fixed;right:12px;z-index:40;width:min(440px,calc(100vw - 24px));max-height:62vh;
+  overflow:auto;background:var(--panel);border:1px solid var(--line);border-radius:10px;
+  box-shadow:0 8px 28px rgba(0,0,0,.18);padding:10px 12px}
+#msgbox .mlhead{display:flex;align-items:center;gap:8px;margin-bottom:6px;font-size:11px;
+  text-transform:uppercase;letter-spacing:.9px;color:var(--muted);font-weight:650}
+#msgbox .mlhead button{width:auto;padding:3px 9px;font-size:11px;text-transform:none;letter-spacing:0}
+.mlog{border-left:3px solid var(--line);padding:4px 8px;margin:5px 0;font-size:11.5px}
+.mlog .mlsrc{color:var(--muted);font-size:10.5px;font-variant-numeric:tabular-nums}
+.mlog.ok{border-left-color:var(--good)} .mlog.warn{border-left-color:var(--warn)}
+.mlog.bad{border-left-color:var(--bad);color:var(--bad)}
+
 /* ---- market maker ---- */
 .mmbar{display:flex;gap:9px;align-items:flex-end;flex-wrap:wrap;margin-bottom:12px}
 /* The export screen's pair picker: a dropdown of checkboxes, because a
@@ -550,8 +570,18 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
   <button class="ghost" style="width:auto" id="reload">Reload workbook</button>
   <span class="pill" id="autopill" style="display:none"></span>
   <div class="grow"></div>
+  <!-- The message centre: shown only under `serve --messages center`.  Ahead
+       of the valuation line, so when the header wraps the button keeps the
+       top row and the valuation drops to the next. -->
+  <button class="ghost" id="msgbtn" style="display:none"
+          title="what each action said; red when something failed">Messages <span class="msgn" id="msgn">0</span></button>
   <div class="meta" id="meta"></div>
 </header>
+<div id="msgbox" style="display:none">
+  <div class="mlhead">Messages<span class="grow"></span>
+    <button class="ghost" id="msgclear">Clear</button><button class="ghost" id="msgclose">Close</button></div>
+  <div id="msglist"></div>
+</div>
 
 <!-- What the feed watcher has done.  Hidden unless auto-load is on and
      something has actually happened; a re-read nobody was told about would be
@@ -1328,7 +1358,7 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
       <div id="gout"></div>
     </div>
     <div id="gtables"></div>
-    <div id="gmsg"></div>
+    <div class="amsg" id="gmsg"></div>
     <details class="hint"><summary>How a position line is read, and what adds up</summary>
       One line is one option: <b>contract, expiry, strike, C/P, contracts</b>. Drop the
       leading columns when the screen has only one panel that can answer
@@ -1896,7 +1926,7 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
             <button class="ghost" id="mqrecord" style="width:auto" disabled
                     title="File every priced row as a price shown to the client named on the bar, with the mid the model had now. What became of each one is answered with the buttons that then appear beside it, and that is what the client's record is built from.">Record as shown</button>
           </div>
-          <div class="meta" id="mqrecordmsg"></div>
+          <div class="meta amsg" id="mqrecordmsg"></div>
         </div></div></section>
 
       <section class="card mmfold" data-fold="mark"><h2><label class="mmfoldlab"><input type="checkbox" class="mmfoldtog" checked> Marking agent</label> <small id="markhead"></small></h2>
@@ -2091,7 +2121,7 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
             <button class="ghost" id="mmlearn" title="Propose spread rules from the widths the archive has seen, age-weighted, with the run pasted above counted as if it were filed. Proposed here, saved by you.">Learn widths</button>
             <button id="mmsave">Save bank</button>
             <div class="grow"></div>
-            <div class="meta" id="mmbankmsg"></div>
+            <div class="meta amsg" id="mmbankmsg"></div>
           </div>
           <div id="mmbank"></div></div></section>
     </div>
@@ -4050,6 +4080,14 @@ async function bumpRun(apply){
 }
 $('#mbumpgo').onclick=()=>bumpRun(false);
 $('#mbumpapply').onclick=()=>bumpRun(true);
+/* The bump's table is a receipt for the overwrites it read or wrote, not a
+   mark: once the overwrite column is changed some other way -- cleared by the
+   button, emptied a box at a time, pasted over -- a table still saying "8
+   tenor(s) overwritten" with its bumped levels reads as a bump that is still
+   on the curve.  So it comes down.  The anchor and the move stay as typed:
+   they are the next bump's inputs, and nothing clears or writes them but the
+   bump's own buttons. */
+function bumpStale(){$('#mbumpout').innerHTML=''}
 /* ---- a cross's quotes from its legs ---------------------------------------
    The bump's shape again: `Show` reads and `Fill` writes, and the fill
    recomputes rather than replaying the table -- a leg re-marked in between is
@@ -4266,7 +4304,7 @@ async function owfitRun(apply){
      `owfitStale` takes it on the first paint, so an apply that clears the
      overwrites it fitted does not then call itself stale. */
   OWFIT={pair:r.pair,sig:apply?null:owSignature(),r:r,applied:!!apply};
-  if(apply){await loadCurve();await loadMarks();await redraw();schedulePrice()}
+  if(apply){bumpStale();await loadCurve();await loadMarks();await redraw();schedulePrice()}
   owfitPaint();
   owfitStale();
 }
@@ -4324,6 +4362,7 @@ async function applyMark(el){
     if(el.dataset.m==='atm'){
       if(v==='')await post('/api/overwrite',{pair:o.pair,kind:'clear_atm',tenor:el.dataset.tenor});
       else await post('/api/overwrite',{pair:o.pair,kind:'atm',tenor:el.dataset.tenor,value:parseFloat(v)});
+      bumpStale();
     }else if(el.dataset.m==='quote'){
       /* A quote is an input to the fit, so the server refits the tenor and
          answers with whatever the fit had to say.  Reported rather than
@@ -4527,6 +4566,7 @@ async function blockPaste(el,text){
       ?await post('/api/overwrite',{pair:mq().pair,kind:'ratios',cells:cells})
       :await post('/api/overwrite',{pair:mq().pair,kind:'quotes',cells:cells});
     QPROB=derivedWarn.concat((r&&r.problems)||[]);
+    if(kind==='atm')bumpStale();
     setQPaste(note.join(' · '));
   }catch(e){QPROB=[e.message]}
   await loadMarks(); await redraw(); schedulePrice();
@@ -4545,7 +4585,7 @@ document.addEventListener('paste',e=>{
   blockPaste(el,text);
 });
 $('#mclearatm').onclick=async()=>{await post('/api/overwrite',{pair:mq().pair,kind:'clear_atm'});
-  await loadMarks();await redraw();schedulePrice()};
+  bumpStale();await loadMarks();await redraw();schedulePrice()};
 $('#mclearsmile').onclick=async()=>{await post('/api/overwrite',{pair:mq().pair,kind:'clear_smile'});
   await loadMarks();await redraw();schedulePrice()};
 $('#mclearterm').onclick=async()=>{await post('/api/overwrite',{pair:mq().pair,kind:'clear_smile_term'});
@@ -4776,7 +4816,7 @@ async function drawKace(){
     ${(K.posts||[]).length?`<div class="scroll" style="margin-top:8px"><table style="width:100%"><thead><tr><th>Posted</th><th>Pair</th><th>Scenario</th><th>Widths</th><th>What</th><th>Nodes</th><th>Outcome</th></tr></thead>
       <tbody>${K.posts.slice().reverse().map(r=>`<tr><td>${esc(String(r.at||'').replace('T',' ').slice(0,16))}</td><td>${esc(r.pair)}</td><td>${esc(r.scenario)}</td><td>${r.clear?'—':kaceWidths(r)}</td><td>${r.clear?'clear':'feed'}</td><td>${r.nodes??'—'}</td>
         <td style="color:${r.ok?'inherit':'var(--bad)'}">${esc(r.message||'')}</td></tr>`).join('')}</tbody></table></div>`:''}
-    <div id="kacemsg" class="meta" style="margin-top:6px"></div>`;
+    <div id="kacemsg" class="meta amsg" style="margin-top:6px"></div>`;
   /* Posting: the page sends the *request* -- pair, cut, wings, scenario,
      feed or clear -- never the XML, so what reaches kACE is exactly what the
      table above was built from.  One inline confirmation, no browser
@@ -4963,14 +5003,20 @@ let CURVE=null, EVENTS=[];
 async function loadCurve(){
   CURVE=await api('/api/curve?'+qs({pair:mq().pair}));
   $('#ckind').textContent=CURVE.is_cross?`cross of ${CURVE.legs.join(' / ')} · signs ${CURVE.leg_signs.join(',')}`:'backbone';
-  $('#cparams').innerHTML=PORDER.filter(k=>k in CURVE.params).map(k=>
-    `<div><label>${PLABEL[k]}</label><input data-cp="${k}" value="${(+CURVE.params[k]).toFixed(4)}"></div>`).join('');
+  /* Shown to two decimals; the full value rides on the box, and Apply sends it
+     back for any box left as shown -- otherwise pressing Apply to change one
+     parameter would quietly round every other one on the curve. */
+  $('#cparams').innerHTML=PORDER.filter(k=>k in CURVE.params).map(k=>{
+    const v=+CURVE.params[k], sh=v.toFixed(2);
+    return `<div><label>${PLABEL[k]}</label><input data-cp="${k}" value="${sh}" data-shown="${sh}"
+      data-full="${v}" title="${v}"></div>`}).join('');
   EVLEGS=CURVE.legs_ccy||[mq().pair.slice(0,3),mq().pair.slice(3,6)];
   EVENTS=CURVE.events.map(evRow);
   renderEvents();
 }
 $('#capply').onclick=async()=>{
-  const params={}; $$('#cparams input').forEach(i=>params[i.dataset.cp]=i.value);
+  const params={}; $$('#cparams input').forEach(i=>params[i.dataset.cp]=
+    i.value.trim()===i.dataset.shown?i.dataset.full:i.value);
   const m=$('#cmsg');
   try{
     const r=await post('/api/curve',{pair:mq().pair,params});
@@ -10149,8 +10195,102 @@ window.addEventListener('resize',()=>{clearTimeout(window._rz);window._rz=setTim
   if(PANEL==='mm'&&MCR)paintCheck();
   if(PANEL==='mm'&&MFR)paintFit()},220)});
 
+/* ---------------------- the message centre ----------------------
+   `serve --messages center` (`messages = center` in volkit.cfg): what each
+   action says leaves its card for one log behind a button at the top right.
+   The log stays shut; the button turns red on an error until it is opened.
+   The cards go on writing their messages exactly as before -- the log is fed
+   by watching every .msg / .amsg box, so there is no action whose message the
+   log can miss by not having been wired to it.
+   - A box still saying "working…" (a spinner, or a trailing ellipsis) is
+     marked data-busy and stays visible on its card: progress is state.
+   - A box that is written again says something again, even in the same words
+     (a second "applied" is a second apply), and is counted onto the entry.
+   - A box that is *new* -- a result block redrawn with the heading it had
+     before -- is not news, so the same words from the same card are not
+     logged twice. */
+const MSGSEL='.msg,.amsg';
+let MSGLOG=[], MSGOBS=null, MSGERR=0, MSGNEW=0;
+const MSGSEEN=new WeakMap(), MSGTIMER=new WeakMap();
+function msgBusy(m){
+  const b=!!m.querySelector('.spin')||/(\u2026|\.\.\.)$/.test(m.textContent.trim());
+  if(b&&!m.dataset.busy)m.dataset.busy='1'; else if(!b&&m.dataset.busy)delete m.dataset.busy;
+  return b;
+}
+function msgLevel(m){
+  if(m.classList.contains('bad')||m.querySelector('.bad,.etoerr,[style*="--bad"]'))return 'bad';
+  if(m.classList.contains('warn')||m.querySelector('.etowarn'))return 'warn';
+  return m.classList.contains('ok')?'ok':'';
+}
+/* Where it was said: the screen, and the card's own heading. */
+function msgSource(m){
+  const w=m.closest('.wrap'), b=w&&w.id.indexOf('p-')===0&&$('#nav button[data-p="'+w.id.slice(2)+'"]');
+  const h=(m.closest('.card')||{querySelector:()=>null}).querySelector('h2');
+  const t=h?Array.prototype.filter.call(h.childNodes,n=>n.nodeType===3).map(n=>n.textContent)
+    .join(' ').replace(/\s+/g,' ').trim():'';
+  return [b?b.textContent:'',t].filter(Boolean).join(' \u00b7 ')||m.id||'volkit';
+}
+function msgWatch(recs){
+  const hit=new Set();
+  recs.forEach(r=>{
+    const n=r.target.nodeType===1?r.target:r.target.parentElement;
+    const m=n&&n.closest&&n.closest(MSGSEL); if(m)hit.add(m);
+    if(r.type==='childList')r.addedNodes.forEach(a=>{if(a.nodeType!==1)return;
+      if(a.matches(MSGSEL))hit.add(a); a.querySelectorAll(MSGSEL).forEach(x=>hit.add(x))});
+  });
+  // Busy is decided now, before the page paints, so a finished message never
+  // flashes on its card; what it says is read once the writing has settled.
+  hit.forEach(m=>{msgBusy(m);clearTimeout(MSGTIMER.get(m));MSGTIMER.set(m,setTimeout(()=>msgTake(m),250))});
+}
+function msgTake(m){
+  if(!m.isConnected||msgBusy(m))return;
+  const text=m.textContent.replace(/\s+/g,' ').trim(); if(!text)return;
+  const lvl=msgLevel(m), src=msgSource(m), fresh=!MSGSEEN.has(m); MSGSEEN.set(m,1);
+  if(fresh&&MSGLOG.slice(0,60).some(x=>x.text===text&&x.src===src&&x.lvl===lvl))return;
+  const top=MSGLOG[0], open=$('#msgbox').style.display!=='none';
+  if(top&&top.text===text&&top.src===src&&top.lvl===lvl){top.n++;top.t=new Date()}
+  else{MSGLOG.unshift({lvl:lvl,text:text,src:src,t:new Date(),n:1});if(MSGLOG.length>300)MSGLOG.pop()}
+  if(!open){MSGNEW++;if(lvl==='bad')MSGERR++}
+  msgRender();
+}
+function msgRender(){
+  const btn=$('#msgbtn'), last=MSGLOG.find(x=>x.lvl==='bad');
+  btn.classList.toggle('msgerr',MSGERR>0);
+  btn.firstChild.textContent=MSGERR?(MSGERR>1?MSGERR+' errors ':'error '):'Messages ';
+  $('#msgn').textContent=MSGERR?'':MSGNEW; $('#msgn').style.display=(MSGERR||!MSGNEW)?'none':'';
+  btn.title=MSGERR&&last?last.src+': '+last.text:'what each action said; red when something failed';
+  $('#msglist').innerHTML=MSGLOG.length?MSGLOG.map(x=>'<div class="mlog '+x.lvl+'"><div class="mlsrc">'+
+    x.t.toTimeString().slice(0,8)+' \u00b7 '+esc(x.src)+(x.n>1?' \u00b7 \u00d7'+x.n:'')+'</div>'+esc(x.text)+'</div>').join('')
+    :'<div class="meta">nothing yet</div>';
+}
+function msgShow(on){
+  const box=$('#msgbox');
+  if(on){box.style.top=(document.querySelector('header').getBoundingClientRect().bottom+6)+'px';
+    MSGERR=0;MSGNEW=0;msgRender()}
+  box.style.display=on?'':'none';
+}
+function msgMode(mode){
+  const on=mode==='center';
+  document.body.classList.toggle('msgcenter',on);
+  $('#msgbtn').style.display=on?'':'none';
+  if(on&&!MSGOBS){
+    MSGOBS=new MutationObserver(msgWatch);
+    MSGOBS.observe(document.body,{childList:true,subtree:true,characterData:true,
+      attributes:true,attributeFilter:['class']});
+    $$(MSGSEL).forEach(m=>{msgBusy(m);msgTake(m)});   // whatever the cards already say
+    msgRender();
+  }else if(!on&&MSGOBS){MSGOBS.disconnect();MSGOBS=null;msgShow(false)}
+}
+$('#msgbtn').onclick=e=>{e.stopPropagation();msgShow($('#msgbox').style.display==='none')};
+$('#msgclose').onclick=()=>msgShow(false);
+$('#msgclear').onclick=e=>{e.stopPropagation();MSGLOG=[];MSGERR=0;MSGNEW=0;msgRender()};
+document.addEventListener('click',e=>{const box=$('#msgbox');
+  if(box.style.display!=='none'&&!box.contains(e.target))msgShow(false)});
+document.addEventListener('keydown',e=>{if(e.key==='Escape'&&$('#msgbox').style.display!=='none')msgShow(false)});
+
 async function boot(){
   STATE=await api('/api/state');
+  msgMode(STATE.messages);
   STATE.valuationMs=STATE.valuation?new Date(STATE.valuation).getTime():Date.now();
   applyScreens();
   if(has('marking')){
@@ -10383,6 +10523,123 @@ async function boot(){
     if(/^[a-zA-Z0-9\/]$/.test(e.key)){e.preventDefault(); open(s,e.key.toUpperCase());}
     else if(e.key==='Enter'||e.key===' '){e.preventDefault(); open(s,'');}
   },true);
+})();
+/* Moving round an editable table from the keyboard, the way a spreadsheet
+   does.  Every table whose cells hold a typed box -- the ATM overwrites and
+   quotes, the ratios, the smile and its term structure, the pricing grid, the
+   events and their weights, the Config tabs, the market maker's rules -- takes
+   the same keys: Up and Down go to the box in the same column of the row above
+   or below, Enter and Shift+Enter do the same, and Left and Right go to the
+   next box along once the caret is at that end of the text (or the whole of it
+   is selected, which is how a box is arrived in), so they still move the caret
+   inside a number being typed.  A cell with no box -- a derived wing, a leg the
+   row does not apply to, a section heading -- is stepped over.  Leaving a box
+   commits it exactly as Tab or a click away does: the move is a blur, and the
+   blur fires the table's own `change`, so no screen's listener is touched.
+   Delegated from the document, like the currency picker above, because every
+   one of these tables is built again by innerHTML.
+
+   That rebuild is the other half.  An edit posts, the marks come back and the
+   table is painted again, which throws away the box the cursor had just moved
+   into.  So the box with the cursor is remembered by what it is -- its data-*
+   attributes, which name the row and column on every one of these tables --
+   and when a repaint takes it out of the page the same box in the new table
+   gets the cursor back, with whatever had been typed into it meanwhile: a
+   number typed in the moment between the move and the repaint is carried
+   over, not lost, and committed when that box is left, as if it had never
+   been rebuilt.  Clicking away from a box forgets it, so a repaint never
+   pulls the cursor back from somewhere else. */
+(function(){
+  const TYPED=/^(text|search|number|)$/;
+  function typed(el){
+    return !!el&&el.tagName==='INPUT'&&TYPED.test((el.getAttribute('type')||'').toLowerCase())&&
+      !el.disabled&&!el.readOnly;
+  }
+  function cellOf(el){
+    const td=el&&el.parentElement;
+    return td&&td.tagName==='TD'&&td.closest('table')?td:null;
+  }
+  function boxIn(td){
+    const b=td&&td.querySelector('input');
+    return typed(b)&&b.getClientRects().length?b:null;
+  }
+  function vertical(td,step){
+    const tr=td.parentElement, rows=tr.closest('table').rows, col=td.cellIndex;
+    for(let i=tr.rowIndex+step;i>=0&&i<rows.length;i+=step){
+      const b=boxIn(rows[i].cells[col]); if(b)return b;
+    }
+    return null;
+  }
+  function across(td,step){
+    const cells=td.parentElement.cells;
+    for(let i=td.cellIndex+step;i>=0&&i<cells.length;i+=step){
+      const b=boxIn(cells[i]); if(b)return b;
+    }
+    return null;
+  }
+  function go(to){
+    if(!to)return;
+    to.focus();
+    try{to.select()}catch(_){}
+  }
+  document.addEventListener('keydown',e=>{
+    const el=e.target;
+    if(e.defaultPrevented||e.isComposing||e.altKey||e.ctrlKey||e.metaKey||!typed(el))return;
+    const td=cellOf(el); if(!td)return;
+    let to;
+    if(e.key==='ArrowUp'||e.key==='ArrowDown')to=vertical(td,e.key==='ArrowDown'?1:-1);
+    else if(e.key==='Enter')to=vertical(td,e.shiftKey?-1:1);
+    else if(e.key==='ArrowLeft'||e.key==='ArrowRight'){
+      if(e.shiftKey)return;
+      const s=el.selectionStart, f=el.selectionEnd, n=el.value.length;
+      const all=s===0&&f===n, left=e.key==='ArrowLeft';
+      if(s!=null&&!all&&!(left?(s===0&&f===0):(s===n&&f===n)))return;
+      to=across(td,left?-1:1);
+    }else return;
+    /* At the edge nothing is taken: Enter on the last row commits and stays,
+       as it always has, and an arrow does what it does in any box. */
+    if(!to)return;
+    e.preventDefault();
+    go(to);
+  });
+
+  let HOLD=null;
+  function keyOf(el){
+    const a=[...el.attributes].filter(x=>x.name.slice(0,5)==='data-');
+    return a.length?'input'+a.map(x=>'['+x.name+'="'+CSS.escape(x.value)+'"]').join(''):null;
+  }
+  /* What the box last committed, so a box that has been sent is not taken
+     for one still being typed in. */
+  document.addEventListener('change',e=>{const el=e.target;
+    if(el&&el.tagName==='INPUT'){el._committed=el.value;el._carry=false}},true);
+  document.addEventListener('focusin',e=>{
+    const el=e.target, root=typed(el)&&cellOf(el)&&el.closest('[id]'), sel=root&&keyOf(el);
+    HOLD=sel?{el:el,sel:sel,root:root.id}:null;
+  });
+  document.addEventListener('focusout',e=>{
+    const el=e.target;
+    /* A box carried over a repaint was typed in before it was rebuilt, so
+       the browser does not know it changed: leaving it says so for it. */
+    if(el._carry){el._carry=false;
+      if(el.value!==el.defaultValue)el.dispatchEvent(new Event('change',{bubbles:true}))}
+    if(!HOLD||HOLD.el!==el||e.relatedTarget)return;
+    setTimeout(()=>{if(HOLD&&HOLD.el===el&&el.isConnected)HOLD=null},0);
+  });
+  new MutationObserver(()=>{
+    if(!HOLD||HOLD.el.isConnected)return;
+    const old=HOLD.el, act=document.activeElement;
+    if(act&&act!==document.body&&act!==old){HOLD=null;return}
+    const root=document.getElementById(HOLD.root), to=root&&root.querySelector(HOLD.sel);
+    if(!to||!typed(to)){HOLD=null;return}
+    const was=old._committed!=null?old._committed:old.defaultValue;
+    const s=old.selectionStart, f=old.selectionEnd, all=s===0&&f===old.value.length;
+    if(old.value!==was&&old.value!==to.value){to.value=old.value;to._carry=true}
+    to.focus({preventScroll:true});
+    try{
+      if(all)to.select();
+      else if(s!=null)to.setSelectionRange(Math.min(s,to.value.length),Math.min(f,to.value.length));
+    }catch(_){}
+  }).observe(document.body,{childList:true,subtree:true});
 })();
 boot();
 </script>

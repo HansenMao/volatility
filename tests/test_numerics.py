@@ -539,6 +539,58 @@ class TestAtmCurve(unittest.TestCase):
         self.curve.clear_overwrite("3m")
         self.assertNotAlmostEqual(self.curve.term_vol(t3), 0.09, places=4)
 
+    def test_last_pillar_overwrite_reaches_the_cut(self):
+        """The 1Y option expires at the cut, hours past the 1Y pillar.
+
+        The marked curve used to drop back onto the raw curve past the last
+        pillar, so the cut column -- and every 1Y price -- ignored a 1Y
+        overwrite outright.  Past the last anchor it now carries the anchor's
+        total variance plus the curve's forward variance.
+        """
+        t1y = self.curve.tenor_years("1y")
+        self.curve.overwrite_tenor("1y", 0.09)
+        at_cut = self.curve.cut_vol(self.curve.clock.datetime_from_years(t1y), "TK")
+        self.assertAlmostEqual(at_cut, 0.09, delta=2e-4)
+        t2y = self.curve.tenor_years("2y")
+        expected = (0.09 ** 2 * t1y + self.curve.integrated_variance(t2y)
+                    - self.curve.integrated_variance(t1y)) / t2y
+        self.assertAlmostEqual(self.curve.term_vol(t2y), math.sqrt(expected), places=12)
+        # No jump either side of the pillar.
+        eps = 1e-7
+        self.assertAlmostEqual(self.curve.term_vol(t1y - eps), self.curve.term_vol(t1y + eps),
+                               places=6)
+
+    def test_first_pillar_overwrite_scales_the_short_end(self):
+        t1w = self.curve.tenor_years("1w")
+        self.curve.overwrite_tenor("1w", 0.09)
+        t = t1w / 2
+        expected = 0.09 ** 2 * t1w * (self.curve.integrated_variance(t)
+                                     / self.curve.integrated_variance(t1w)) / t
+        self.assertAlmostEqual(self.curve.term_vol(t), math.sqrt(expected), places=10)
+        self.assertAlmostEqual(self.curve.term_vol(t1w - 1e-7), 0.09, places=6)
+
+    def test_overwrite_off_the_pillars_is_an_anchor(self):
+        """A 4M or an 18M is not on CONFIG's list and used to move nothing."""
+        for tenor in ("4m", "18m"):
+            t = self.curve.tenor_years(tenor)
+            self.curve.overwrite_tenor(tenor, 0.12)
+            self.assertAlmostEqual(self.curve.term_vol(t), 0.12, places=12)
+        self.assertEqual(self.curve._neighbour_tenors(self.curve.tenor_years("5m")), ("4m", "6m"))
+        # The pillars either side are not overwritten and stay on the curve.
+        for tenor in ("3m", "6m"):
+            t = self.curve.tenor_years(tenor)
+            self.assertAlmostEqual(self.curve.term_vol(t), self.curve.curve_vol(t), places=12)
+
+    def test_two_spellings_of_one_expiry_are_one_anchor(self):
+        self.curve.overwrite_tenor("12m", 0.09)
+        t = self.curve.tenor_years("1y")
+        self.assertAlmostEqual(self.curve.term_vol(t), 0.09, places=12)
+
+    def test_an_overwrite_that_cannot_be_placed_is_refused(self):
+        with self.assertRaises(ValueError):
+            self.curve.overwrite_tenor("xyz", 0.09)
+        self.assertEqual(self.curve.tenor_overwrites, {})
+
     def test_weekend_volatility_is_damped(self):
         sat = self.curve.daily_vol(datetime(2024, 3, 2, 12, tzinfo=UTC))
         wed = self.curve.daily_vol(datetime(2024, 3, 6, 12, tzinfo=UTC))

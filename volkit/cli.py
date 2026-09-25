@@ -2422,7 +2422,8 @@ def cmd_serve(args) -> int:
           excel_host=getattr(args, "excel_host", None) or "127.0.0.1",
           excel_token=(getattr(args, "excel_token", None)
                        or os.environ.get("VOLKIT_EXCEL_TOKEN") or None),
-          excel_busy=getattr(args, "excel_busy", None) or 5.0)
+          excel_busy=getattr(args, "excel_busy", None) or 5.0,
+          messages=getattr(args, "messages", None) or "card")
     return 0
 
 
@@ -3504,6 +3505,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--history", default=_default_history(),
                    help="historical workbook for the analysis screen")
     s.add_argument("--knowledge", help="knowledge bank JSON (default: beside the workbook)")
+    s.add_argument("--messages", choices=("card", "center"), default="card",
+                   help="where the page shows what an action said: on the card that did it "
+                        "(card, the default), or collected in one message box at the top "
+                        "right that stays shut and turns red when something failed (center)")
     s.add_argument("--auto-reload", type=float, nargs="?", const=5.0, default=0.0,
                    metavar="SECONDS",
                    help="watch the market feed and re-read it when it is written (default: "

@@ -76,6 +76,10 @@ SHEETS: dict[str, str] = {
                         "Gaussian copula",
     "Vega Weights": "how far each tenor moves when the anchor moves one vol point: "
                     "tenor, default, and a column per pair that needs its own",
+    "TENORS": "the pillar set -- CONFIG's TENORS column: the tenors the marking screen "
+              "shows, the smile is fitted at and a mark can be made on. A tenor a pair "
+              "sheet quotes and this list leaves out is not read; an empty list reads "
+              "every tenor the sheets quote. One tenor per row, in the order shown",
     # The export policy tables (claude/publishing-channels-design.md).  In the
     # workbook like every other table -- it is the database -- but edited on
     # the Vol bulk processing screen rather than in the Config window, because
@@ -144,7 +148,126 @@ EDITABLE: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "TIER_GROUPS": (("group", "tier", "pairs", "note"), ("group", "pairs")),
     "EXPORT_PAIRS": (("channel", "pair", "label", "feed_from", "last_tenor", "note"),
                      ("channel", "pair")),
+    "TENORS": (("tenor",), ("tenor",)),
 }
+
+#: Tabs that are **one column of another sheet** rather than a sheet of their
+#: own: ``{TAB: (SHEET, COLUMN)}``.  CONFIG is two independent lists side by
+#: side -- the pairs to build and the tenors to mark -- with the header on
+#: row 1, which is not a table this module can replace whole: a writer that
+#: rewrote the sheet to change a tenor would be one bug away from dropping the
+#: pairs, and adding or removing a pair is a sheet and a PARAMS column
+#: (``session.add_pair``), not a setting.  So the tenors are edited as a tab
+#: of their own and written back into their column alone; every other cell of
+#: the sheet is left exactly as it was.
+COLUMN_TABS: dict[str, tuple[str, str]] = {"TENORS": ("CONFIG", "TENORS")}
+
+
+def check_rows(sheet: str, rows) -> None:
+    """Refuse rows a tab's own reader would refuse, before they are held.
+
+    Only the tenor list has a rule here: every row a tenor the calendars can
+    place, and no tenor twice.  Stored without this, ``3yr`` would be held in
+    the session, the book rebuilt on it, and every pair sheet's quote at that
+    tenor silently dropped as one CONFIG does not list.
+    """
+    if sheet != "TENORS":
+        return
+    from .timeutil import tenor_key, tenor_to_years
+
+    seen: dict[str, int] = {}
+    for n, row in enumerate(rows_from_records(sheet, rows), start=1):
+        text = row.text("tenor")
+        if not text:
+            continue
+        try:
+            tenor_to_years(text)
+        except ValueError:
+            raise ConfigSheetError(
+                f"TENORS row {row.number}: {text!r} is not a tenor -- write it like "
+                f"1w, 3m, 18m or 3y") from None
+        key = tenor_key(text)
+        if key in seen:
+            raise ConfigSheetError(
+                f"TENORS rows {seen[key]} and {row.number} are both {key}; list a tenor once")
+        seen[key] = row.number
+
+
+def _column_at(ws, heading: str) -> int | None:
+    """The column on row 1 of ``ws`` headed ``heading``, matched as the reader matches."""
+    want = normalise(heading)
+    for c in range(1, (ws.max_column or 0) + 1):
+        v = ws.cell(row=1, column=c).value
+        if v is not None and normalise(v) == want:
+            return c
+    return None
+
+
+def _read_column_tab(path: str | Path, sheet: str) -> list[Row] | None:
+    """A :data:`COLUMN_TABS` tab off its column, as rows of the tab's one field.
+
+    ``None`` when the host sheet or the column is not there -- which for the
+    tenors is a workbook whose CONFIG states no list and so reads every tenor
+    the sheets quote.  The number on each row is the Excel row, like every
+    other tab's.
+    """
+    host, heading = COLUMN_TABS[sheet]
+    field = EDITABLE[sheet][0][0]
+    wb = open_workbook(path)
+    try:
+        found = match_sheet(wb.sheetnames, host)
+        if found is None:
+            return None
+        grid = [list(r) for r in wb[found].iter_rows(values_only=True)]
+    finally:
+        wb.close()
+    if not grid:
+        return None
+    col = next((i for i, v in enumerate(grid[0])
+                if v is not None and normalise(v) == normalise(heading)), None)
+    if col is None:
+        return None
+    out = []
+    for n, raw in enumerate(grid[1:], start=2):
+        v = raw[col] if col < len(raw) else None
+        text = "" if v is None else str(v).strip()
+        if text:
+            out.append(Row(number=n, cells={field: text}, sheet=sheet))
+    return out
+
+
+def _write_column_tab(wb, sheet: str, rows) -> str:
+    """Write a :data:`COLUMN_TABS` tab into its column, and touch nothing else.
+
+    The column is emptied below its heading and refilled from the top, so a
+    list that got shorter leaves no stale tenor underneath it.  A host sheet
+    with no such column gets one, headed as the reader spells it, in the first
+    empty column of row 1.
+    """
+    host, heading = COLUMN_TABS[sheet]
+    field = normalise(EDITABLE[sheet][0][0])
+    found = match_sheet(wb.sheetnames, host)
+    if found is None:
+        raise ConfigSheetError(f"the workbook has no {host} sheet to write {sheet} into")
+    ws = wb[found]
+    col = _column_at(ws, heading)
+    if col is None:
+        col = (ws.max_column or 0) + 1
+        while col > 1 and ws.cell(row=1, column=col - 1).value in (None, ""):
+            col -= 1
+        ws.cell(row=1, column=col, value=heading)
+    for r in range(2, (ws.max_row or 1) + 1):
+        ws.cell(row=r, column=col).value = None
+    values = []
+    for row in rows:
+        cells = {normalise(k): v for k, v in row.items()}
+        v = cells.get(field)
+        text = "" if v is None else str(v).strip()
+        if text:
+            values.append(text)
+    for r, text in enumerate(values, start=2):
+        ws.cell(row=r, column=col, value=text)
+    return f"{found} {heading}: {len(values)} tenor(s)"
 
 #: Tabs that were configuration here and are not any more, and where the
 #: thing they held has gone.  A workbook keeps its old tabs -- deleting a
@@ -400,7 +523,8 @@ def sheet_names(path: str | Path) -> list[str]:
 def present(path: str | Path) -> list[str]:
     """Which of the known configuration tabs this workbook actually has."""
     names = sheet_names(path)
-    return [s for s in SHEETS if match_sheet(names, s) is not None]
+    return [s for s in SHEETS if match_sheet(names, s) is not None
+            or (s in COLUMN_TABS and _read_column_tab(path, s) is not None)]
 
 
 def retired(path: str | Path) -> list[str]:
@@ -518,6 +642,8 @@ def read_rows(path: str | Path, sheet: str, *,
         found = match_sheet(overlay, sheet)
         if found is not None:
             return rows_from_records(sheet, overlay[found])
+    if sheet in COLUMN_TABS:
+        return _read_column_tab(path, sheet)
     wb = open_workbook(path)
     try:
         found = match_sheet(wb.sheetnames, sheet)
@@ -578,6 +704,8 @@ def write_rows(wb, sheet: str, columns, rows, header=None) -> str:
 
     Returns a line for the report.
     """
+    if sheet in COLUMN_TABS:
+        return _write_column_tab(wb, sheet, rows)
     # Which columns identify the old header row.  Not ``columns``: an open
     # tab is written with whatever pair columns it has grown, and a header
     # that does not yet carry one of them is still the header -- looked for by

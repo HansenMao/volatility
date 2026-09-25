@@ -311,6 +311,71 @@ class TestWebAssets(unittest.TestCase):
         self.assertIn("put back on the feed", body)
         self.assertIn("$('#feedrefresh').onclick=()=>refreshFeed()", js)
 
+    def test_the_editable_tables_are_walked_with_the_arrows_and_keep_the_cursor(self):
+        """Marking a curve was a mouse click per box: the overwrite column,
+        the quotes, the ratios and the smile grid took no arrow keys, and an
+        edit repainted the table, so even Tab lost its place.
+
+        So Up / Down / Enter move down a column and Left / Right along a row
+        (at the edge of the text), from one handler delegated off the
+        document -- and the box with the cursor is found again after the
+        repaint by its data-* attributes.  That only works while every typed
+        box in a table carries them, which is what is pinned here: a table
+        added without them would lose the cursor on its first edit.
+        """
+        import re as _re
+        js = _source("volkit", "web", "index.html").split("<script>")[1]
+        nav = js.split("Moving round an editable table")[1].split("boot();")[0]
+        for key in ("'ArrowUp'", "'ArrowDown'", "'ArrowLeft'", "'ArrowRight'", "'Enter'"):
+            self.assertIn(key, nav)
+        # The cursor survives the repaint, and what was typed survives with it.
+        self.assertIn("MutationObserver", nav)
+        self.assertIn("_carry", nav)
+        boxes = _re.findall(r"<td[^>]*><input([^>]*)>", js)
+        self.assertGreater(len(boxes), 10)
+        for attrs in boxes:
+            if 'type="checkbox"' in attrs:
+                continue
+            # The rules table spells its attributes once, into `a`, as the
+            # pricing grid's `ctl` does.
+            self.assertTrue("data-" in attrs or "'+a+'" in attrs,
+                            f"a table box with nothing to find it by: {attrs[:80]}")
+        self.assertIn("consta=`data-i=", js.replace(" ", ""))
+        self.assertIn("consta='data-p=", js.replace(" ", ""))
+
+    def test_the_curve_card_shows_two_decimals_and_applies_the_full_value(self):
+        """The curve-parameter card shows two decimals, but Apply sends back
+        every box it sends.  Rounding what is sent would make changing one
+        parameter quietly round all the others on the curve, so a box left as
+        shown carries its full value back."""
+        js = _source("volkit", "web", "index.html").split("<script>")[1].split("</script>")[0]
+        load = js.split("async function loadCurve(){")[1].split("\n}")[0]
+        self.assertIn("toFixed(2)", load)
+        self.assertNotIn("toFixed(4)", load)
+        self.assertIn('data-full="${v}"', load)
+        apply = js.split("$('#capply').onclick=")[1].split("post('/api/curve'")[0]
+        self.assertIn("i.value.trim()===i.dataset.shown?i.dataset.full:i.value", apply)
+
+    def test_the_message_centre_reads_every_card_s_message_box(self):
+        """`--messages center` hides each card's message box and logs what it
+        says at the top right.  It is fed by watching the boxes rather than by
+        each action calling it, so every message box has to be one it watches:
+        a .msg, or a box named *msg tagged .amsg.  A new one that is neither
+        would stay on its card while all the others moved."""
+        import re as _re
+        html = _source("volkit", "web", "index.html")
+        js = html.split("<script>")[1].split("</script>")[0]
+        self.assertIn("const MSGSEL='.msg,.amsg';", js)
+        self.assertIn("body.msgcenter .msg:not([data-busy]),body.msgcenter .amsg:not([data-busy]){display:none}",
+                      html)
+        self.assertIn("msgMode(STATE.messages);", js.split("async function boot(){")[1][:200])
+        # Every static message box is one the centre watches.  The file
+        # picker's is left alone: it describes the folder listed, not an action.
+        for tag in _re.findall(r'<[a-z]+ [^>]*id="[a-z0-9]*msg"[^>]*>', html):
+            if 'id="fpmsg"' in tag:
+                continue
+            self.assertRegex(tag, r'class="[^"]*\b(msg|amsg)\b', tag)
+
     def test_the_vol_query_asks_in_a_strike_or_a_delta_but_never_both(self):
         """Two boxes for one point on the smile, and only one of them is the
         request.
@@ -476,6 +541,26 @@ class TestWebAssets(unittest.TestCase):
         # The count that makes shutting it safe is the overwrite count.
         paint = js.split("function paintMarks(){")[1].split("\nasync function loadMarks")[0]
         self.assertIn("matmowcount", paint)
+
+    def test_clearing_the_overwrites_is_not_the_bump(self):
+        """Clear ATM overwrites clears and nothing else: it never reads the
+        bump's move or anchor, and what it takes down is the bump's receipt,
+        which would otherwise go on showing bumped levels over a curve the
+        overwrites have come off.  The same for every other way the column
+        changes; the move and anchor boxes are left as typed."""
+        js = _source("volkit", "web", "index.html").split("<script>")[1].split("</script>")[0]
+        stale = js.split("function bumpStale(){")[1].split("}")[0]
+        self.assertEqual(stale, "$('#mbumpout').innerHTML=''")
+        clear = js.split("$('#mclearatm').onclick=")[1].split("};")[0]
+        self.assertNotIn("mbump", clear.replace("bumpStale", ""))
+        self.assertNotIn("bumpRun", clear)
+        self.assertIn("bumpStale()", clear)
+        mark = js.split("async function applyMark(el){")[1].split("}else if(el.dataset.m==='quote')")[0]
+        self.assertIn("bumpStale()", mark)
+        paste = js.split("kind:'atm_block'")[1].split("\n}")[0]
+        self.assertIn("if(kind==='atm')bumpStale()", paste)
+        fit = js.split("async function owfitRun(apply){")[1].split("\n}")[0]
+        self.assertIn("if(apply){bumpStale();", fit)
 
     def test_the_bump_reads_and_writes_through_one_route_and_never_replays(self):
         """`Show` and `Apply` are the same call with a flag.  An apply that
@@ -1526,6 +1611,20 @@ class TestScreens(unittest.TestCase):
         self._select(["pricing", "marking"])
         state = BookService(str(BOOK), ASOF).state()
         self.assertEqual(state["screens"], ["pricing", "marking"])
+
+    def test_the_state_response_says_where_messages_go(self):
+        """`serve --messages` reaches the page through /api/state; anything but
+        card or center is refused at startup rather than ignored."""
+        from volkit import cli
+        from volkit.webapp import BookService
+        self.assertEqual(BookService(str(BOOK), ASOF).state()["messages"], "card")
+        self.assertEqual(BookService(str(BOOK), ASOF, messages="center").state()["messages"],
+                         "center")
+        with self.assertRaises(ValueError):
+            BookService(str(BOOK), ASOF, messages="popup")
+        self.assertEqual(cli.build_parser().parse_args(["serve"]).messages, "card")
+        self.assertEqual(cli.build_parser().parse_args(
+            ["serve", "--messages", "center"]).messages, "center")
 
     def test_an_excluded_screen_loses_its_subcommands(self):
         from volkit.cli import build_parser

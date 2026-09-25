@@ -460,11 +460,22 @@ class ExcelSource:
                 + "; ".join(f"{n} (for {data.pairs[n].implied_by})" for n in implied)
             )
 
-        if "tenors" in cols:
-            tenors = tuple(str(x).strip().lower() for x in cfg[cols["tenors"]].dropna())
-            if tenors:
-                data.tenor_points = tenors
-                data.tenors_stated = True
+        # The tenors a session holds (the Config window's TENORS tab) are read
+        # instead of the column, whole: a list being marked has one value.
+        # Empty there is the column emptied, which states no list.
+        from . import configsheets
+        held = configsheets.match_sheet(self.config, "TENORS") if self.config else None
+        if held is not None:
+            raw = [r.text("tenor") for r in
+                   configsheets.rows_from_records("TENORS", self.config[held])]
+        elif "tenors" in cols:
+            raw = [str(x) for x in cfg[cols["tenors"]].dropna()]
+        else:
+            raw = []
+        tenors = tuple(t for t in (str(x).strip().lower() for x in raw) if t)
+        if tenors:
+            data.tenor_points = tenors
+            data.tenors_stated = True
 
     def _pair_spec(self, name: str, cfg, cols: dict, data: MarketData,
                    implied_by: str = "") -> PairSpec | None:

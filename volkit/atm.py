@@ -226,19 +226,38 @@ class AtmCurve(VolCurve):
         """Years from the valuation instant to this tenor's calendar expiry."""
         return self.calendars.expiry_years(self.pair, tenor, self.clock)
 
+    def _anchors(self) -> tuple[np.ndarray, list[str]]:
+        """Where the marked curve is pinned, in expiry order.
+
+        Every pillar, and every overwritten tenor.  An overwrite used to count
+        only at a pillar: one typed at a tenor CONFIG does not list (a 4M, an
+        18M) was held, shown and saved, and moved nothing.  Two spellings of
+        one expiry (12M and 1Y) are one anchor, and the overwritten one wins.
+        """
+        by_t: dict[float, tuple[float, str]] = {}
+        for name in (*self.tenor_points, *self.tenor_overwrites):
+            t = self.tenor_years(name)
+            if t <= 0:
+                continue
+            key = round(t, 12)
+            held = by_t.get(key)
+            if held is None or (name.lower() in self.tenor_overwrites
+                                and held[1].lower() not in self.tenor_overwrites):
+                by_t[key] = (t, name)
+        rows = [by_t[k] for k in sorted(by_t)]
+        return np.array([t for t, _ in rows], dtype=float), [n for _, n in rows]
+
     def _neighbour_tenors(self, t: float) -> tuple[str | None, str | None]:
-        """Tenor points bracketing ``t``.
+        """Anchors bracketing ``t``.
 
         The legacy ``get_neighbor_tenors`` used ``np.argmax(tenors > t)``, which
         returns 0 when *no* tenor exceeds ``t``.  Past the last tenor it
         therefore returned the pair ``(last, first)``, and below the first it
         indexed ``[-1]`` -- both silently wrong.  Out-of-range now returns
-        ``None`` and the caller falls back to the raw curve.
+        ``None``; ``term_vol`` extends the marked curve from the end anchor.
         """
-        ts = np.array([self.tenor_years(x) for x in self.tenor_points])
-        order = np.argsort(ts)
-        ts, names = ts[order], [self.tenor_points[i] for i in order]
-        if t < ts[0] or t > ts[-1]:
+        ts, names = self._anchors()
+        if not names or t < ts[0] or t > ts[-1]:
             return (None, None)
         idx = int(np.searchsorted(ts, t, side="left"))
         if idx == 0:
@@ -252,27 +271,62 @@ class AtmCurve(VolCurve):
         return self.integrated_vol(t, 0.0)
 
     def term_vol(self, t: float) -> float:
-        """Term volatility including any tenor overwrites."""
+        """Term volatility including any tenor overwrites.
+
+        Between two anchors the overwritten levels are interpolated in total
+        variance, the time split taken off the curve's own variance.  Outside
+        them the marked curve is extended rather than dropped back onto the
+        raw curve: before the first anchor its total variance is the curve's
+        scaled to the anchor, and past the last it is the anchor's plus the
+        curve's forward variance.  Dropping back put a step at each end -- and
+        every option on the last pillar sits past it, because the pillar is
+        its expiry date at midnight and the option expires at the cut, so a
+        1Y overwrite was ignored by the 1Y option it was typed for.
+        """
         if t <= 0:
             return 0.0
         if not self.tenor_overwrites:
             return self.curve_vol(t)
-        left, right = self._neighbour_tenors(t)
-        keys = {k.lower() for k in self.tenor_overwrites}
-        if left is None or not ({left.lower(), right.lower()} & keys):
+        ts, names = self._anchors()
+        if not names:
             return self.curve_vol(t)
-        if left == right:
-            return self.tenor_overwrites.get(left.lower(), self.curve_vol(t))
 
-        t1, t2 = self.tenor_years(left), self.tenor_years(right)
-        v1 = self.tenor_overwrites.get(left.lower(), self.curve_vol(t1))
-        v2 = self.tenor_overwrites.get(right.lower(), self.curve_vol(t2))
+        def level(i: int) -> float | None:
+            return self.tenor_overwrites.get(names[i].lower())
+
+        if t <= ts[0]:
+            v0 = level(0)
+            if v0 is None:
+                return self.curve_vol(t)
+            total = v0 * v0 * ts[0] * self.integrated_variance(t) / self.integrated_variance(ts[0])
+            return safe_sqrt(total / t, what="extended total variance")
+        if t > ts[-1]:
+            vn = level(len(ts) - 1)
+            if vn is None:
+                return self.curve_vol(t)
+            tn = ts[-1]
+            total = vn * vn * tn + self.integrated_variance(t) - self.integrated_variance(tn)
+            return safe_sqrt(total / t, what="extended total variance")
+
+        idx = int(np.searchsorted(ts, t, side="left"))
+        if ts[idx] == t:
+            v = level(idx)
+            return self.curve_vol(t) if v is None else v
+        i1, i2 = idx - 1, idx
+        v1, v2 = level(i1), level(i2)
+        if v1 is None and v2 is None:
+            return self.curve_vol(t)
+        t1, t2 = float(ts[i1]), float(ts[i2])
+        if v1 is None:
+            v1 = self.curve_vol(t1)
+        if v2 is None:
+            v2 = self.curve_vol(t2)
         var1 = self.integrated_variance(t1)
         var2 = self.integrated_variance(t2)
         var_t = self.integrated_variance(t)
         denom = var2 - var1
         if abs(denom) < 1e-18:
-            ratio = 0.0 if t2 == t1 else (t - t1) / (t2 - t1)
+            ratio = (t - t1) / (t2 - t1)
         else:
             ratio = (var_t - var1) / denom
         # Interpolate in total variance so the overwritten curve stays
@@ -281,6 +335,15 @@ class AtmCurve(VolCurve):
         return safe_sqrt(total / t, what="interpolated total variance")
 
     def overwrite_tenor(self, tenor: str, vol: float) -> None:
+        """Pin one tenor's term volatility.
+
+        The tenor is read on the pair's calendar here rather than at the first
+        price: an overwrite is an anchor of the marked curve, and one that
+        cannot be placed would otherwise surface later, on every price.
+        """
+        if self.tenor_years(tenor) <= 0:
+            raise ValueError(f"{self.pair} {tenor} expires at or before the valuation "
+                             f"time, so it cannot be overwritten")
         self.tenor_overwrites[tenor.lower()] = float(vol)
 
     def clear_overwrite(self, tenor: str | None = None) -> None:
