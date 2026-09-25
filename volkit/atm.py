@@ -413,12 +413,27 @@ class AtmCurve(VolCurve):
 
         Replaces ``refreshDailyCumulativeVols``, which mixed a 365-day year in
         its loop bound with a 365.2425-day year in its normalisation.
+
+        The series is the *marked* curve: with tenor overwrites on it the
+        running total variance is ``term_vol`` squared times the time, and a
+        day's volatility is the forward between two of those totals.  It used
+        to sum the raw curve's variance whatever was overwritten, so every
+        pillar the kACE feed and the bulk export read off it posted the curve
+        under a typed ATM -- while `cut_vol`, and so every price, honoured it.
+
+        The marked curve can make the total variance *fall*: past the last
+        overwrite it returns to the raw curve at the next pillar nobody typed,
+        and an overwrite well above the curve then runs down into it.  The
+        cumulative is still the number every price reads, so it stands; the
+        day there has no forward volatility, so its ``daily`` is 0 and
+        ``falling`` says so -- the pillar reader turns that into a note.
         """
         cut = cut.upper()
         if cut not in CUTS:
             raise ValueError(f"unknown cut {cut!r}; expected one of {sorted(CUTS)}")
         end_dt = self.clock.now + timedelta(days=horizon_years * DAYS_IN_YEAR)
         out: dict[str, dict[str, float]] = {}
+        marked = bool(self.tenor_overwrites)
         cum_var = 0.0
         cursor = self.clock.now
         guard = 0
@@ -428,8 +443,16 @@ class AtmCurve(VolCurve):
             if nxt <= cursor:
                 nxt = cut_datetime(cursor + timedelta(days=1), cut, self.dst_aware_cuts)
             t0, t1 = self.clock.years_to(cursor), self.clock.years_to(nxt)
-            day_var = self.integrated_variance(t1, t0)
-            cum_var += day_var
+            if marked:
+                total = self.term_vol(t1) ** 2 * t1
+                day_var = total - cum_var
+                falling = day_var < -1e-10
+                day_var = max(day_var, 0.0)
+                cum_var = total
+            else:
+                day_var = self.integrated_variance(t1, t0)
+                cum_var += day_var
+                falling = False
             label = nxt.strftime("%Y/%m/%d")
             day_vol = safe_sqrt(day_var / (t1 - t0), what="daily variance") if t1 > t0 else 0.0
             close = nxt.replace(hour=DAY_ROLL_HOUR, minute=0, second=0, microsecond=0)
@@ -448,6 +471,8 @@ class AtmCurve(VolCurve):
                 # Zero when the expiry falls on the current quoting day, i.e.
                 # there are no whole volatility days to normalise by.
                 "cumulative_defined": tte > 1e-9,
+                # The marked total variance fell over this day (see above).
+                "falling": falling,
             }
             cursor = nxt
         return out

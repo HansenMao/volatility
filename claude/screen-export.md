@@ -19,7 +19,15 @@ and says *why*; this file says what is there and what must not be broken.
   25d/10d RR and BF, each with its own two-way where the channel publishes
   one -- and differs only in container, pair list, tenor labels, width source
   and shade.  `kace.read_pillars` is the one reader of the book's marks at a
-  pillar list; `kace.build` uses it too.
+  pillar list; `kace.build` uses it too.  Its ATM is the **marked** curve --
+  the per-tenor ATM overwrites on it -- read off `AtmCurve.daily_series` at
+  the pillar's cut, the number `cut_vol` and every price read.  Until
+  2026-09-25 that series summed the raw curve's variance whatever was
+  overwritten, so a book-sourced channel posted the curve under a typed ATM
+  (`test_an_atm_overwrite_is_what_the_channel_posts`).  With no overwrite
+  nothing moved.  Where the overwrites make the marked total variance fall
+  (past the last one the curve returns to the raw curve at the next untyped
+  tenor), the pillars still post as marked and the read carries a note.
 - **A destination is a channel, not a file.**  A channel's `write` returns a
   list of `ExportFile`, and Murex returns two: `DRV_MktData_FX_Vol_<date>.xls`
   with the ATM and `DRV_MktData_FX_Broker_<date>.xls` with the wings, off one

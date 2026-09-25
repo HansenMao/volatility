@@ -743,6 +743,30 @@ class TestMurexAndCos(_Fixture):
                          [f.name for f in b.files])
 
 
+class TestTheBookSourceIsTheMarkedCurve(_Fixture):
+    def test_an_atm_overwrite_is_what_the_channel_posts(self):
+        """Exported from the book, a pillar posted the raw curve under a typed ATM.
+
+        The pillar reader takes its ATM off the daily cumulative series, and
+        that series summed the curve's variance whatever was overwritten.
+        """
+        surface = self.book["USDJPY"]
+        before = {(q.pair, q.tenor): q.atm
+                  for q in publish.build("murex", self.book, self.tables).quotes}
+        self.assertIn(("USDJPY", "1M"), before)
+        target = before[("USDJPY", "1M")] + 1.5
+        try:
+            surface.atm.overwrite_tenor("1M", target / 100.0)
+            after = {(q.pair, q.tenor): q.atm
+                     for q in publish.build("murex", self.book, self.tables).quotes}
+            # The overwrite, give or take the hours between the expiry and the cut.
+            self.assertAlmostEqual(after[("USDJPY", "1M")], target, delta=0.05)
+            self.assertEqual(after[("AUDUSD", "1M")], before[("AUDUSD", "1M")])
+        finally:
+            surface.atm.clear_overwrite()
+            surface.invalidate()
+
+
 class TestReferenceFiles(unittest.TestCase):
     """The desk's own files reproduced grid for grid.
 

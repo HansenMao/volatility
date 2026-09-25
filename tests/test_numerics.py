@@ -591,6 +591,51 @@ class TestAtmCurve(unittest.TestCase):
             self.curve.overwrite_tenor("xyz", 0.09)
         self.assertEqual(self.curve.tenor_overwrites, {})
 
+    def test_the_daily_series_is_the_marked_curve(self):
+        """Every day's cumulative is the cut volatility a price there reads.
+
+        The series summed the raw curve's variance whatever was overwritten,
+        so the kACE feed and the bulk export -- which read their pillar ATMs
+        off it -- posted the curve under a typed ATM while `cut_vol`, and every
+        price, honoured the overwrite.
+        """
+        from volkit.atm import cut_datetime
+        # Close enough to the curve that the marked total variance never falls.
+        self.curve.overwrite_tenor("3m", 0.068)
+        self.curve.overwrite_tenor("6m", 0.07)
+        series = self.curve.daily_series(0.75, "NY")
+        self.assertFalse(any(v["falling"] for v in series.values()))
+        for label, v in series.items():
+            if v["cumulative_defined"]:
+                day = datetime.strptime(label, "%Y/%m/%d").replace(tzinfo=UTC)
+                self.assertAlmostEqual(v["cumulative"], self.curve.cut_vol(day, "NY"), places=10)
+        # The day column is the forward between the marked totals, so it still sums to them.
+        total, cursor = 0.0, self.curve.clock.now
+        for label, v in series.items():
+            nxt = cut_datetime(datetime.strptime(label, "%Y/%m/%d").replace(tzinfo=UTC), "NY",
+                               self.curve.dst_aware_cuts)
+            t0, t1 = self.curve.clock.years_to(cursor), self.curve.clock.years_to(nxt)
+            total += v["daily"] ** 2 * (t1 - t0)
+            cursor = nxt
+        self.assertAlmostEqual(total, self.curve.term_vol(t1) ** 2 * t1, places=12)
+        # At the pillar the posted number is the overwrite, give or take the cut.
+        t3 = self.curve.tenor_years("3m")
+        at = self.curve.clock.datetime_from_years(t3)
+        self.assertAlmostEqual(series[at.strftime("%Y/%m/%d")]["cumulative"], 0.068, delta=3e-4)
+
+    def test_a_falling_marked_variance_is_flagged_not_hidden(self):
+        """Past the last overwrite the marked curve returns to the raw one at
+        the next tenor nobody typed, so a high overwrite runs *down* into it.
+        The cumulative stands -- it is what a price reads -- and the day with
+        no forward volatility says so."""
+        self.curve.overwrite_tenor("6m", 0.095)
+        series = self.curve.daily_series(0.75, "NY")
+        falling = [v for v in series.values() if v["falling"]]
+        self.assertTrue(falling)
+        self.assertTrue(all(v["daily"] == 0.0 for v in falling))
+        self.curve.clear_overwrite()
+        self.assertFalse(any(v["falling"] for v in self.curve.daily_series(0.75, "NY").values()))
+
     def test_weekend_volatility_is_damped(self):
         sat = self.curve.daily_vol(datetime(2024, 3, 2, 12, tzinfo=UTC))
         wed = self.curve.daily_vol(datetime(2024, 3, 6, 12, tzinfo=UTC))

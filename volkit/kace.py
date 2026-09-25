@@ -757,8 +757,11 @@ def read_pillars(book, pair: str, tenors, *, cut: str = "NY", source: str = "mar
     horizon = ((last - today).days + MARGIN_DAYS) / DAYS_IN_YEAR
     series = surface.atm.daily_series(horizon, cut)
     daily: dict[date, float] = {}
+    falling: list[date] = []
     for label, v in series.items():
         day = datetime.strptime(label, "%Y/%m/%d").date()
+        if v.get("falling"):
+            falling.append(day)
         if not v["cumulative_defined"]:
             notes.append(f"{day:%d %b %Y} is the current quoting day, with no whole volatility "
                          f"day to normalise by; it is not posted")
@@ -766,6 +769,15 @@ def read_pillars(book, pair: str, tenors, *, cut: str = "NY", source: str = "mar
         daily[day] = v["cumulative"] * 100.0
     if not daily:
         raise KaceError(f"the daily series for {pair} is empty")
+    if falling:
+        # The pillars are posted as marked -- the ATM a price reads -- but a
+        # marked curve whose total variance falls is a calendar arbitrage.
+        typed = ", ".join(f"{k.upper()} {v * 100:.2f}"
+                          for k, v in surface.atm.tenor_overwrites.items())
+        notes.append(f"{pair}: the ATM overwrites ({typed}) make the total variance fall on "
+                     f"{len(falling)} day(s) from {falling[0]:%d %b %Y} to {falling[-1]:%d %b %Y}, "
+                     f"a calendar arbitrage: past the last overwrite the marked curve returns "
+                     f"to the curve at the next tenor nobody typed. Posted as marked")
     missing = [t for t in tenors if expiries[t] not in daily]
     if missing:
         raise KaceError(f"the daily series does not reach the {', '.join(missing)} expiry "
