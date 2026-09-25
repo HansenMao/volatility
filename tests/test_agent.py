@@ -1054,6 +1054,30 @@ class TestDtccDownload(unittest.TestCase):
         self.down.opener = self.server
         self.down.sleeper = lambda _s: None
 
+    def test_the_screen_may_ask_for_more_than_thirty_days(self):
+        """The market-maker tab's Fetch from DTCC was capped at 30 days back
+        and refused anything longer; the desk asked for the cap to go
+        (2026-09-25).  A long ask costs only the missing days -- aged-out ones
+        are refused before any request, held ones are not asked for -- so the
+        screen passes on what it was asked, and only fewer than one day is
+        refused."""
+        from unittest import mock
+        from volkit.webapp import BookService
+        service = BookService(str(Path(self.folder) / "no_book.xlsx"), agent_sdr=[self.folder],
+                              ingest_state_path=str(Path(self.folder) / "ingest.json"))
+        asked = []
+
+        def fake_fetch(_down, days, folder, **_kw):
+            asked.append(list(days))
+            return self.dtcc.FetchResult(folder=str(folder))
+
+        with mock.patch.object(self.dtcc.Downloader, "fetch", fake_fetch):
+            out = service.mm_agent_fetch({"days": 120})
+        self.assertTrue(out["available"])
+        self.assertEqual(len(asked[0]), 120)
+        with self.assertRaises(ValueError):
+            service.mm_agent_fetch({"days": 0})
+
     def test_a_date_outside_what_dtcc_keeps_is_refused_before_any_request(self):
         # "That is older than DTCC keeps" is a sentence.  As a 404 it is a
         # thing the caller has to interpret, and usually interprets as broken.

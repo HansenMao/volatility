@@ -298,9 +298,11 @@ DTCC keeps **366 days** and publishes nothing before **2023-12-29**.
   the run, and when none answers the error names every URL it tried -- which
   is a thing a person can paste into a browser.
 - **The page chooses when, never where.** The folder and the proxy come from
-  the command line; the browser sends only how many days back, capped at 30. A
-  year's backfill is a command with somebody watching it, not a button that can
-  be leaned on.
+  the command line; the browser sends only how many days back. That was capped at 30 until
+  2026-09-25, when the desk asked for the cap to go: a day older than DTCC's
+  366 is refused before any request, a day already held is not asked for, and
+  the requests stay one at a time with a pause, so a long ask costs only the
+  missing days.
 - One request at a time, a pause between them, a named `User-Agent`, and a
   retry with backoff on a 429 or 5xx -- a 404 is never retried, because asking
   again more slowly does not create a file. A desk that gets itself blocked

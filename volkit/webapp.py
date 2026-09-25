@@ -3123,12 +3123,6 @@ class BookService:
                           for f in result.files],
             }
 
-    #: The most days the page may ask for in one go.  A backfill of a year is
-    #: a command-line job with somebody watching it, not a button that can be
-    #: leaned on: 250 requests to a public service because a click repeated is
-    #: how a desk gets itself blocked.
-    FETCH_MAX_DAYS = 30
-
     def mm_agent_fetch(self, payload: dict) -> dict:
         """Download the dissemination files this desk has not got yet.
 
@@ -3136,6 +3130,11 @@ class BookService:
         only *how many days back*, and that is capped. What arrives is read
         straight away, because a file downloaded and not ingested is a file
         the desk has to remember to come back for.
+
+        There is no upper bound on the days (it was 30, lifted at the desk's
+        request): a day older than DTCC keeps is refused before any request
+        (``dtcc.why_not``), a day already in the folder is not asked for
+        again, and the requests go one at a time with the downloader's pause.
         """
         from . import ingest as ingest_mod
         if not self.agent_sdr:
@@ -3150,10 +3149,8 @@ class BookService:
             days_back = int(raw)
         except (TypeError, ValueError):
             raise ValueError(f"days must be a whole number, not {raw!r}")
-        if days_back < 1 or days_back > self.FETCH_MAX_DAYS:
-            raise ValueError(
-                f"ask for between 1 and {self.FETCH_MAX_DAYS} days from the screen; a longer "
-                f"backfill is 'volkit agent fetch --since ...', where it can be watched")
+        if days_back < 1:
+            raise ValueError(f"ask for at least 1 day back, not {days_back}")
         with self._lock:
             today = (self.book.clock.now if self.book is not None
                      else Clock.utcnow().now).date()

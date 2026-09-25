@@ -3247,9 +3247,13 @@ above it reads the same way, a block a pair.
   is where a client's record starts.
 - **Fetch from DTCC** -- download the last few days of public dissemination
   files straight from DTCC into your SDR folder, and read them. The box beside
-  it is how many days back; the screen is capped at 30, because a long
-  backfill is a command with somebody watching it (`volkit agent fetch --since
-  2025-09-01`). Start the server with `--sdr DIR` to say where they go, and
+  it is how many business days back, with no upper limit. Days already in the
+  folder are not downloaded again, and days older than the 366 DTCC keeps are
+  listed as aged out without being asked for, so a long backfill costs one
+  request per missing day, one at a time with a pause between them. The
+  screen waits until the whole run is done, so a long backfill keeps the
+  spinner going for a while; `volkit agent fetch --since 2025-09-01` does the
+  same from a command line and prints each day as it lands. Start the server with `--sdr DIR` to say where they go, and
   `--proxy` if your desk sits behind one.
 - **Scan folders** -- read whatever is new in the chat and SDR folders this
   server was started with (`volkit serve --chats chats/ --sdr sdr/`). If none
