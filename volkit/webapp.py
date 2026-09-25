@@ -2858,6 +2858,74 @@ class BookService:
         with self._lock:
             return agent_mod.suggest_widths(study, pair, tenors, size_usd_mm=size)
 
+    # -- building the bid-offer study from the screen --------------------------
+    def _study_sources(self) -> dict:
+        """What *Build study* reads: the ``history`` and ``sdr`` this server was started with.
+
+        Named in ``volkit.cfg`` (or on the command line), never by the page -- the same rule as
+        the agent card's folders: a path a browser can post is a path anything reaching it can
+        read.  The loaded historical workbook is used as loaded, so the study sees the sheets the
+        analysis screen does.  Where one is not configured the quant repo's copy is read if this
+        machine has one, and the build is refused by name if it has not.
+        """
+        return {"history": self.history_path or "", "history_loaded": self.history is not None,
+                "sdr": list(self.agent_sdr)}
+
+    def bidoffer_study_state(self, q: dict | None = None) -> dict:
+        """The build's progress, its log and its result, for the page to poll."""
+        from . import bidoffer
+        job = dict(getattr(self, "_study_job", None) or {"state": "idle", "log": []})
+        job["log"] = list(job.get("log", []))
+        path = Path(self.path).parent / bidoffer.STUDY_FILENAME
+        study = self._bidoffer()
+        job["study"] = ({k: study.meta.get(k) for k in ("built", "tape_first", "tape_last",
+                                                         "prints", "sources")}
+                        if study is not None else None)
+        job["path"] = str(path)
+        job["sources"] = self._study_sources()
+        return job
+
+    def bidoffer_build_study(self, payload: dict | None = None) -> dict:
+        """Start ``bidoffer.build_study`` on this server's sources, in the background.
+
+        It reads a year of the tape and ten of history -- a minute or two, and several the first
+        time the zips are read -- so it runs on its own thread and the page polls
+        ``bidoffer_study_state``.  One build at a time.  The study it writes is picked up by the
+        next *Suggest* or quote on its own (``_bidoffer`` watches the file), so nothing is
+        reloaded and no mark moves.
+        """
+        from . import bidoffer
+        job = getattr(self, "_study_job", None)
+        if job and job.get("state") == "running":
+            raise ValueError("a study is already being built; wait for it to finish")
+        src = self._study_sources()
+        with self._lock:
+            history = self.history if self.history is not None else (src["history"] or None)
+        out = Path(self.path).parent / bidoffer.STUDY_FILENAME
+        log: list[str] = []
+        self._study_job = {"state": "running", "log": log, "started": Clock.utcnow().now
+                           .isoformat(timespec="seconds"), "result": None, "error": ""}
+
+        def say(*parts):
+            log.append(" ".join(str(x) for x in parts))
+
+        def run():
+            try:
+                res = bidoffer.build_study(out, history=history, sdr=src["sdr"], log=say)
+                # what the screen says, not the study's internals (per-bucket levels and scales)
+                self._study_job["result"] = {k: v for k, v in res.items()
+                                             if k not in ("tape_atm", "cross_smile")}
+                self._study_job["state"] = "done"
+            except Exception as exc:  # noqa: BLE001 -- reported on the page, never swallowed
+                say(f"{type(exc).__name__}: {exc}")
+                self._study_job["error"] = f"{type(exc).__name__}: {exc}"
+                self._study_job["state"] = "failed"
+            finally:
+                self._study_job["finished"] = Clock.utcnow().now.isoformat(timespec="seconds")
+
+        threading.Thread(target=run, name="bidoffer-study", daemon=True).start()
+        return self.bidoffer_study_state()
+
     def mm_bidoffer(self, payload: dict) -> dict:
         """The bid-offer study's grid for one pair: every tenor and point asked for, with its parts.
 
@@ -4004,6 +4072,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self.service.band_dynamics(q))
             elif url.path == "/api/mm/bank":
                 self._json(self.service.bank_state(q))
+            elif url.path == "/api/bidoffer/study":
+                self._json(self.service.bidoffer_study_state(q))
             elif url.path == "/api/term":
                 self._json(self.service.term(q))
             elif url.path == "/api/daily":
@@ -4098,6 +4168,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self.service.export_suggest_widths(payload))
             elif url.path == "/api/mm/bidoffer":
                 self._json(self.service.mm_bidoffer(payload))
+            elif url.path == "/api/bidoffer/study":
+                self._json(self.service.bidoffer_build_study(payload))
             elif url.path == "/api/mm/learn":
                 self._json(self.service.mm_learn(payload))
             elif url.path == "/api/mm/bank":

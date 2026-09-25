@@ -220,6 +220,75 @@ class Store:
         return out
 
 
+class HistoryStore(Store):
+    """volkit's own historical workbook (``history.load_history``), served as a :class:`Store`.
+
+    The study was written against the quant repo's Bloomberg store, which a desk machine does not
+    have; what it has is the workbook ``volkit.cfg`` names as ``history``.  Each of its sheets is
+    laid out here under the tab names the store uses -- ``EURUSD Curncy`` for spot,
+    ``EURUSDV1M Curncy`` for the ATM, ``EURUSD25R1M``/``25B`` for the 25-delta wings, and the
+    forward points under the non-dollar currency (``EUR1M``) in pips -- so every reading of the
+    store is unchanged and nothing downstream knows which it was given.
+
+    Only the tenors the store itself reads are carried (``ATM_TENORS``, ``FWD_TENORS``); a sheet
+    quoting 2M or 9M vol simply has those columns unused, as the store's tabs would.  A tenor is
+    matched by its length in years, so ``12M`` on a sheet is the store's ``1Y``.
+    """
+
+    ATM_TENORS = ("1W", "1M", "3M", "6M", "1Y")
+    FWD_TENORS = ("1W", "1M", "3M", "9M", "12M")
+
+    def __init__(self, history):
+        from .timeutil import tenor_to_years
+        self.tabs = {}
+        self.path = str(getattr(history, "source", "") or "the historical workbook")
+        self._cache = {}
+        self.notes: list[str] = []
+
+        def by_years(held: dict, label: str):
+            want = tenor_to_years(label)
+            for k, v in held.items():
+                try:
+                    if abs(tenor_to_years(k) - want) < 1e-9:
+                        return v
+                except ValueError:
+                    continue
+            return None
+
+        for pair, h in history.pairs.items():
+            if not h.dates:
+                continue
+            dates = pd.to_datetime(pd.Index(h.dates))
+
+            def put(tab, values):
+                v = np.asarray(values, dtype=float)
+                if v.size == len(dates) and np.isfinite(v).any():
+                    self.tabs[tab] = pd.DataFrame({"Date": dates, "PX_LAST": v})
+
+            if h.spot.size:
+                put(f"{pair} Curncy", h.spot)
+            # ``load_history`` holds every vol as a decimal, whatever unit the sheet was in; a
+            # store tab holds vol points, which is what ``atm`` and ``smile`` divide back out.
+            for label in self.ATM_TENORS:
+                a = by_years(h.atm, label)
+                if a is not None:
+                    put(f"{pair}V{label} Curncy", np.asarray(a, dtype=float) * 100.0)
+                for kind, book in (("R", h.rr), ("B", h.bf)):
+                    w = by_years(book.get("25", {}), label)
+                    if w is not None:
+                        put(f"{pair}25{kind}{label} Curncy", np.asarray(w, dtype=float) * 100.0)
+            usd = "USD" in (pair[:3], pair[3:6])
+            if usd and h.spot.size and h.forwards:
+                ccy = pair[3:6] if pair[:3] == "USD" else pair[:3]
+                for label in self.FWD_TENORS:
+                    f = by_years(h.forwards, label)
+                    if f is not None:
+                        put(f"{ccy}{label} Curncy", (f - h.spot) * pip_divisor(pair))
+            if not any(k.startswith(f"{pair}V") for k in self.tabs):
+                self.notes.append(f"{pair}: no ATM at 1W/1M/3M/6M/1Y on its sheet, so no vol "
+                                  f"history for the study")
+
+
 def _on_days(series: pd.Series | None, days: pd.DatetimeIndex) -> np.ndarray:
     if series is None:
         return np.full(len(days), np.nan)

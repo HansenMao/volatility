@@ -136,7 +136,8 @@ SCREENS: tuple[Screen, ...] = (
         # its own routes; a build without this tab keeps them.
         routes=("/api/export/state", "/api/export/build", "/api/export/run",
                 "/api/export/overlay", "/api/export/file", "/api/export/seed",
-                "/api/export/compare", "/api/export/widths"),
+                "/api/export/compare", "/api/export/widths",
+                "/api/bidoffer/study"),
         commands=("export",),
     ),
     Screen(

@@ -21,9 +21,31 @@ hold  = wait for comparable flow  +  size / (share x flow per hour)
 
 ## Where each input comes from
 
-All of it is read by `volkit bidoffer study` into `bidoffer_study.pkl` beside the
-workbook. The quote reads only that file. The inputs live in the quant repo (`--tape`,
-`--store`, `--bars`):
+All of it is read by `bidoffer.build_study` into `bidoffer_study.pkl` beside the
+workbook -- from `volkit bidoffer study`, or the **Build study** button on the export screen's
+*Suggest from the bid-offer study* (`POST /api/bidoffer/study` starts it on a thread,
+`GET` polls its log). The quote reads only that file.
+
+Each input comes from the desk's own files where `volkit.cfg` names them (owner, 2026-09-25:
+the Windows exe has no quant repo), and from the quant repo otherwise:
+
+- **tape**: the `sdr` folders' raw DTCC zips, turned into the extract by `tapeextract.build`
+  (the quant repo's `qcore/data/external/dtcc/extract.py`, ported back unchanged in its
+  reading) and cached in `tape_extract/` beside the workbook; else `--tape`. On the full year
+  the port matches the quant extract on all but 16 of 723,000 prints: ties between two
+  versions of one correction, which a one-pass build resolves differently from a day-by-day one.
+- **history**: the cfg's `history` workbook, as loaded, through `tapespread.HistoryStore`,
+  which lays each sheet out under the store's own tab names (vols back to points, outrights
+  back to pips); else `--store`. Pinned by a test to read exactly as a store holding the same
+  numbers; on the real store, a workbook written from it gives the same 397,771 inverted prints
+  and all 200 suggested widths checked equal. Only the store's tenors are read (ATM and 25Δ
+  RR/BF at 1W/1M/3M/6M/1Y, forwards at 1W/1M/3M/9M/12M). A pair with no spot on any sheet
+  cannot be inverted; `run_study` logs those prints by pair (`meta["no_spot"]`).
+- **bars**: the quant repo only. Without them every print is read off the day's close (on the
+  quant tape about half are read off an intraday spot).
+- A missing input is refused naming the cfg setting that would supply it.
+
+The quant-repo inputs (`--tape`, `--store`, `--bars`):
 
 | Input | Source | How |
 |---|---|---|

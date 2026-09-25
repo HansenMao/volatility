@@ -1127,10 +1127,24 @@ class Study:
 
 def run_study(*, tape=tsp.DEFAULT_TAPE, store=tsp.DEFAULT_STORE, bars=tsp.DEFAULT_BARS,
               since: str | None = None, boot: int = 100, log=print) -> Study:
-    """Measure the tape and extract the histories: the one slow step, run when the tape has grown."""
+    """Measure the tape and extract the histories: the one slow step, run when the tape has grown.
+
+    ``tape`` is a folder of ``fx_options_<year>.csv.gz`` (the quant repo's extract, or
+    ``tapeextract.build``'s off an ``sdr`` folder).  ``store`` is a path to the Bloomberg store or
+    a :class:`tapespread.Store` already made -- ``tapespread.HistoryStore`` over volkit's own
+    historical workbook, on a desk that has no quant repo.
+    """
     import datetime as _dt
-    st = tsp.Store(store)
+    st = store if isinstance(store, tsp.Store) else tsp.Store(store)
     prints = tsp.load_prints(tape, since=since)
+    # A pair the store holds no spot for cannot be inverted, and ``invert`` passes it over; said
+    # here with its count, because on a desk history workbook it is a sheet somebody can add.
+    counts = prints.pair.value_counts()
+    no_spot = {p: int(n) for p, n in counts.items() if st.spot(p) is None}
+    if no_spot:
+        top = ", ".join(f"{p} {n:,}" for p, n in list(no_spot.items())[:8])
+        log(f"  {sum(no_spot.values()):,} prints in {len(no_spot)} pair(s) with no spot in "
+            f"{st.path}, not read: {top}{' ...' if len(no_spot) > 8 else ''}")
     trades, merged = tsp.merge_pieces(prints)
     obs = tsp.buckets(tsp.invert(tsp.packages(trades), st, bars=bars))
     log(f"tape: {len(prints)} live vanilla prints, {merged} merged as pieces of one trade, "
@@ -1159,10 +1173,10 @@ def run_study(*, tape=tsp.DEFAULT_TAPE, store=tsp.DEFAULT_STORE, bars=tsp.DEFAUL
             if sp is not None and len(sp) > 300:
                 ladders[(name, "spot")] = {0.0: sp.iloc[-HISTORY_DAYS:].astype("float64")}
     meta = {"built": _dt.datetime.now().isoformat(timespec="seconds"), "tape": str(tape),
-            "store": str(store), "bars": str(bars), "prints": len(prints), "merged": merged,
+            "store": st.path, "bars": str(bars), "prints": len(prints), "merged": merged,
             "observations": len(obs), "pairs_with_history": len(pairs),
             "tape_first": str(prints.ts.min())[:10], "tape_last": str(prints.ts.max())[:10],
-            "wing10": DEFAULT_WING10,
+            "wing10": DEFAULT_WING10, "no_spot": no_spot,
             "median_ticket_usd_mm": float(np.nanmedian(_usd_mm(obs, st))),
             # What the tape itself says the at-the-money is, pair by tenor bucket, over its last
             # twenty trading days: the level a vega is taken at for a pair the store has no
@@ -1172,6 +1186,68 @@ def run_study(*, tape=tsp.DEFAULT_TAPE, store=tsp.DEFAULT_STORE, bars=tsp.DEFAUL
             # on the crosses with a history of their own; what a cross with none is scaled by
             "cross_smile": cross_smile_scales(StoredHistory(ladders))}
     return Study(facts, ladders, measured, meta)
+
+
+def build_study(out, *, history=None, sdr=(), tape=None, store=None, bars=tsp.DEFAULT_BARS,
+                since: str | None = "2025-09-01", boot: int = 100, cache=None,
+                log=print) -> dict:
+    """Build the study from where this desk keeps its data, save it at ``out``, and say what it read.
+
+    The one call behind ``volkit bidoffer study`` and the screen's *Build study*.  Each input comes
+    from the desk's own files when one is named, and from the quant repo otherwise:
+
+    * the **tape**: ``sdr``, the folders ``volkit.cfg`` names (``sdr =``), whose raw DTCC zips
+      ``tapeextract.build`` turns into the extract, kept at ``cache``; else ``tape``, a folder that
+      already holds one;
+    * the **history**: ``history``, the historical workbook (``history =``) -- a path, or the
+      ``history.History`` the server already has loaded -- read through
+      ``tapespread.HistoryStore``; else ``store``, the Bloomberg store.
+
+    A missing input is refused by name, never replaced by a guess.  Returns the study's meta with
+    ``sources`` (where each input came from) and ``tape_report`` (the extract's own account).
+    """
+    from pathlib import Path as _P
+    from . import tapeextract
+    sdr = [str(x) for x in (sdr or []) if str(x).strip()]
+    sources, tape_report = {}, None
+    if sdr:
+        cache = _P(cache) if cache else _P(out).parent / tapeextract.CACHE_DIRNAME
+        log(f"reading the dissemination zips under {', '.join(sdr)}")
+        tape_report = tapeextract.build(sdr, cache, log=log)
+        tape = cache
+        sources["tape"] = f"sdr: {', '.join(sdr)} (extract kept in {cache})"
+    else:
+        tape = _P(tape or tsp.DEFAULT_TAPE)
+        if not any(tape.glob("fx_options_*.csv.gz")):
+            raise FileNotFoundError(
+                f"no tape: no sdr folder is configured and {tape} holds no fx_options_*.csv.gz; "
+                f"set `sdr = <folder of DTCC zips>` in volkit.cfg (or pass --sdr)")
+        sources["tape"] = f"extract: {tape}"
+    if history is not None and not (isinstance(history, str) and not history.strip()):
+        if isinstance(history, (str, _P)):
+            from .history import load_history
+            log(f"reading the historical workbook {history}")
+            history = load_history(history)
+        st = tsp.HistoryStore(history)
+        for n in st.notes:
+            log("  " + n)
+        sources["history"] = f"history: {st.path}"
+    else:
+        path = _P(store or tsp.DEFAULT_STORE)
+        if not path.exists():
+            raise FileNotFoundError(
+                f"no history: no historical workbook is configured and there is no Bloomberg "
+                f"store at {path}; set `history = <workbook>` in volkit.cfg (or pass --history)")
+        st = tsp.Store(path)
+        sources["history"] = f"store: {path}"
+    study = run_study(tape=tape, store=st, bars=bars, since=since, boot=boot, log=log)
+    study.meta["sources"] = sources
+    study.save(out)
+    ok = study.measured[study.measured.spread.notna()]
+    log(f"study written: {out}")
+    return {**study.meta, "path": str(out), "buckets": len(study.measured),
+            "buckets_measured": len(ok), "tape_report": tape_report,
+            "history_notes": list(getattr(st, "notes", []))}
 
 
 def _tape_levels(obs: pd.DataFrame, days: int = 20) -> dict:

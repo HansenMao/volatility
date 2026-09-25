@@ -1894,15 +1894,14 @@ def cmd_bidoffer(args) -> int:
 
     if args.action == "study":
         out = Path(args.out or Path(args.workbook).parent / bidoffer.STUDY_FILENAME)
-        study = bidoffer.run_study(tape=args.tape, store=args.store, bars=args.bars,
-                                   since=args.since, boot=args.boot)
-        study.save(out)
-        m = study.meta
-        print(f"study written: {out}")
+        m = bidoffer.build_study(out, history=args.history, sdr=args.sdr, tape=args.tape,
+                                 store=args.store, bars=args.bars, since=args.since,
+                                 boot=args.boot)
+        for k, v in m["sources"].items():
+            print(f"  {k}: {v}")
         print(f"  tape {m['tape_first']} -> {m['tape_last']}: {m['prints']} prints, "
               f"{m['observations']} read; {m['pairs_with_history']} pairs with a vol history")
-        ok = study.measured[study.measured.spread.notna()]
-        print(f"  {len(ok)} of {len(study.measured)} buckets measured on the tape")
+        print(f"  {m['buckets_measured']} of {m['buckets']} buckets measured on the tape")
         return 0
     if args.action == "coverage":
         st = tapespread.Store(args.store)
@@ -3637,7 +3636,14 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--study", help="the study file (default: bidoffer_study.pkl beside the workbook)")
     s.add_argument("--out", help="study: where to write it (default: beside the workbook)")
     s.add_argument("--tape", default=str(Path("~/quant/data/external/dtcc").expanduser()),
-                   help="study: the DTCC option extract (the quant repo's)")
+                   help="study: the DTCC option extract (the quant repo's); not read when --sdr "
+                        "is given")
+    s.add_argument("--sdr", action="append", default=[], metavar="DIR",
+                   help="study: a folder of DTCC dissemination zips, as volkit.cfg's sdr names "
+                        "it; read into an extract kept beside the workbook. Repeatable")
+    s.add_argument("--history", default=None,
+                   help="study: the historical workbook, as volkit.cfg's history names it; read "
+                        "in place of the Bloomberg store (--store)")
     s.add_argument("--store", default=str(Path("~/quant/data/raw/DATA.pkl").expanduser()),
                    help="study/coverage: the Bloomberg store (the quant repo's)")
     s.add_argument("--bars", default=str(Path("~/quant/data/external/bbg_intraday").expanduser()),

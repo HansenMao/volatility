@@ -7363,7 +7363,15 @@ function cfgWidthHtml(i){
     'quoting agent would show under its default policy &mdash; the tape&rsquo;s cost of crossing the '+
     'market on each leg, plus twice the likely move of the option&rsquo;s vol over the time to lay it off '+
     '(the ATM, RR and fly history in today&rsquo;s regime) and the size&rsquo;s impact, rounded up to the '+
-    'tick. A cross is made off its legs where that is cheaper. Built by <b>volkit bidoffer study</b>.</div>'+
+    'tick. A cross is made off its legs where that is cheaper.</div>'+
+    '<div class="row" style="margin-top:8px;align-items:center;flex-wrap:wrap;gap:6px">'+
+    '<button class="cfgwbuild" style="width:auto;padding:4px 11px;font-size:11px;'+
+    'background:transparent;color:var(--ink);border:1px solid var(--line);font-weight:500" '+
+    'title="measure the tape and the history again and write bidoffer_study.pkl beside the workbook: '+
+    'the DTCC zips in the sdr folder and the historical workbook volkit.cfg names">Build study</button>'+
+    '<span class="meta"><span class="cfgwstudy"></span></span></div>'+
+    '<pre class="cfgwlog" style="display:none;margin:6px 0 0;max-height:160px;overflow:auto;font-size:10.5px;'+
+    'white-space:pre-wrap"></pre>'+
     '<div class="row" style="margin-top:8px;flex-wrap:wrap;gap:6px">'+
     '<select class="cfgwpair" style="width:auto;padding:3px 6px"></select>'+
     '<span class="meta">size USD mm</span><input class="cfgwsize" style="width:64px" '+
@@ -7372,6 +7380,37 @@ function cfgWidthHtml(i){
     'background:transparent;color:var(--ink);border:1px solid var(--line);font-weight:500">Suggest</button></div>'+
     '<div class="cfgwout" data-tab="'+i+'" style="margin-top:8px"></div></details>';
 }
+/* ---- building the study the suggestion reads, from the screen ----
+   The server reads the history and sdr it was started with (volkit.cfg); the page names no
+   path.  The build runs on the server's own thread and this polls it; the study it writes is
+   picked up by the next Suggest on its own. */
+let WSTUDY=null, WSTUDY_POLL=null;
+function cfgStudyLine(j){
+  if(!j)return '';
+  const src=j.sources||{}, st=j.study;
+  const from='history: '+(src.history?esc(src.history):'<i>none in volkit.cfg</i>')+
+    ' · sdr: '+((src.sdr||[]).length?esc(src.sdr.join(', ')):'<i>none in volkit.cfg</i>');
+  if(j.state==='running')return '<span class="spin"></span> building the study… ('+from+')';
+  if(j.state==='failed')return '<span class="pill bad">failed</span> '+esc(j.error||'')+' · '+from;
+  const have=st?('study built '+esc(String(st.built||'').replace('T',' ').slice(0,16))+
+    ', tape '+esc(st.tape_first||'')+' → '+esc(st.tape_last||'')):'no study yet';
+  return (j.state==='done'?'<span class="pill ok">built</span> ':'')+have+' · '+from;
+}
+function cfgStudyPaint(){
+  document.querySelectorAll('.cfgwstudy').forEach(el=>{el.innerHTML=cfgStudyLine(WSTUDY)});
+  document.querySelectorAll('.cfgwlog').forEach(el=>{
+    const lines=(WSTUDY&&WSTUDY.log)||[];
+    el.style.display=lines.length?'':'none';el.textContent=lines.join('\n');
+    el.scrollTop=el.scrollHeight;});
+  document.querySelectorAll('.cfgwbuild').forEach(b=>{
+    b.disabled=!!(WSTUDY&&WSTUDY.state==='running')});
+}
+async function cfgStudyRefresh(){
+  try{WSTUDY=await api('/api/bidoffer/study')}catch(e){WSTUDY={state:'failed',error:e.message,log:[]}}
+  cfgStudyPaint();
+  clearTimeout(WSTUDY_POLL);
+  if(WSTUDY&&WSTUDY.state==='running')WSTUDY_POLL=setTimeout(cfgStudyRefresh,2000);
+}
 function cfgWidthTenors(t){
   const seen=[];
   (t.rows||[]).forEach(r=>{const x=String(r.tenor||'').trim().toUpperCase();
@@ -7379,6 +7418,16 @@ function cfgWidthTenors(t){
   return seen;
 }
 function cfgWidthBind(root){
+  root.querySelectorAll('.cfgwbuild').forEach(b=>{
+    b.onclick=async()=>{
+      b.disabled=true;
+      try{WSTUDY=await post('/api/bidoffer/study',{})}
+      catch(e){WSTUDY={state:'failed',error:e.message,log:[],sources:(WSTUDY||{}).sources}}
+      cfgStudyPaint();
+      if(WSTUDY.state==='running'){clearTimeout(WSTUDY_POLL);WSTUDY_POLL=setTimeout(cfgStudyRefresh,2000)}
+    };
+  });
+  if(root.querySelector('.cfgwstudy')){if(WSTUDY)cfgStudyPaint();else cfgStudyRefresh();}
   root.querySelectorAll('.cfgwgo').forEach(go=>{
     const i=+go.dataset.tab, box=go.parentNode.querySelector('.cfgwpair'),
           size=go.parentNode.querySelector('.cfgwsize');

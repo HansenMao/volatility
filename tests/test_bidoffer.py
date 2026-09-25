@@ -462,5 +462,169 @@ class TestSuggestWidths(unittest.TestCase):
             service.export_suggest_widths({"pair": "EURUSD"})
 
 
+
+# -- the desk's own sources: the sdr folder and the historical workbook -----------------------------
+_SDR_HEADER = ["Dissemination Identifier", "Original Dissemination Identifier", "Action type",
+               "Event type", "Event timestamp", "Execution Timestamp", "Expiration Date",
+               "Strike Price", "Option Premium Amount", "Option Premium Currency",
+               "Notional amount-Leg 1", "Notional currency-Leg 1", "Call amount", "Call currency",
+               "Put amount", "Put currency", "UPI FISN"]
+
+
+def _sdr_zip(folder, day: str, rows) -> Path:
+    """One day's dissemination zip, named the way the DTCC download names it."""
+    import csv, io, zipfile
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(_SDR_HEADER)
+    for r in rows:
+        w.writerow([r.get(h, "") for h in _SDR_HEADER])
+    stamp = day.replace("-", "_")
+    path = Path(folder) / f"CFTC_CUMULATIVE_FOREX_{stamp}.zip"
+    with zipfile.ZipFile(path, "w") as zf:
+        zf.writestr(f"CFTC_CUMULATIVE_FOREX_{stamp}.csv", buf.getvalue())
+    return path
+
+
+def _eurusd_call(diss, ts, prem, action="NEWT", orig=""):
+    return {"Dissemination Identifier": diss, "Original Dissemination Identifier": orig,
+            "Action type": action, "Event type": "TRAD", "Event timestamp": ts,
+            "Execution Timestamp": ts, "Expiration Date": "2026-12-01", "Strike Price": "1.1",
+            "Option Premium Amount": str(prem), "Option Premium Currency": "USD",
+            "Notional amount-Leg 1": "10000000", "Notional currency-Leg 1": "EUR",
+            "Call amount": "10000000", "Call currency": "EUR", "Put amount": "11000000",
+            "Put currency": "USD", "UPI FISN": "NA/O Van Call EUR USD"}
+
+
+class TestTheDesksOwnSources(unittest.TestCase):
+    """``volkit.cfg``'s ``sdr`` and ``history`` in place of the quant repo's extract and store.
+
+    The desk's exe has no quant repo, so the study used to be buildable on one machine only.
+    """
+
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.dir, True)
+
+    def test_the_sdr_folder_becomes_the_tape_the_study_reads(self):
+        from volkit import tapeextract
+        sdr = self.dir / "sdr"
+        sdr.mkdir()
+        _sdr_zip(sdr, "2026-09-01", [
+            _eurusd_call("1", "2026-09-01T10:00:00Z", 40000),
+            _eurusd_call("2", "2026-09-01T11:00:00Z", 41000),
+            _eurusd_call("3", "2026-09-01T12:00:00Z", 42000),
+            # a correction replaces print 2: one trade, at the corrected premium
+            _eurusd_call("4", "2026-09-01T11:00:00Z", 41500, action="CORR", orig="2"),
+        ])
+        # a cancel of print 3 arrives in the next day's file, as they do
+        _sdr_zip(sdr, "2026-09-02", [
+            _eurusd_call("5", "2026-09-01T12:00:00Z", 42000, action="CANC", orig="3")])
+        (sdr / "notes.zip").write_bytes(b"")          # no date in the name: said, not read
+        cache = self.dir / "extract"
+        r = tapeextract.build([sdr], cache, log=lambda *a: None)
+        self.assertEqual((r["days"], r["parsed"]), (2, 2))
+        self.assertTrue(any("notes.zip" in n for n in r["notes"]))
+        live = tsp.load_prints(cache)
+        self.assertEqual(sorted(live.prem.tolist()), [40000.0, 41500.0])
+        self.assertTrue((live.pair == "EURUSD").all())
+        # a second build reads nothing it has already read
+        again = tapeextract.build([sdr], cache, log=lambda *a: None)
+        self.assertEqual(again["parsed"], 0)
+        self.assertEqual(len(tsp.load_prints(cache)), 2)
+
+    def test_a_folder_with_no_zips_is_refused_by_name(self):
+        from volkit import tapeextract
+        with self.assertRaises(tapeextract.ExtractError) as cm:
+            tapeextract.build([self.dir], self.dir / "x", log=lambda *a: None)
+        self.assertIn(str(self.dir), str(cm.exception))
+
+    def test_the_history_workbook_reads_exactly_as_the_store_would(self):
+        """One set of numbers, laid out once as volkit's history sheet and once as the Bloomberg
+        store's tabs: every reading the study makes is the same.  The vols are the trap -- the
+        workbook holds them as decimals and the store as points."""
+        from volkit.history import load_history
+        days = pd.bdate_range("2026-06-01", periods=60)
+        rng = np.random.default_rng(3)
+        spot = 1.10 + np.cumsum(rng.normal(0, 0.004, len(days)))
+        pts1m, pts1y = 25 + rng.normal(0, 1, len(days)), 180 + rng.normal(0, 3, len(days))
+        atm1m, atm3m = 7.5 + rng.normal(0, 0.2, len(days)), 7.9 + rng.normal(0, 0.1, len(days))
+        rr1m, bf1m = -0.4 + rng.normal(0, 0.05, len(days)), 0.2 + rng.normal(0, 0.01, len(days))
+        sheet = pd.DataFrame({"Date": days, "Spot": spot, "1M swap points": pts1m,
+                              "12M swap points": pts1y, "ATM 1M": atm1m, "ATM 3M": atm3m,
+                              "RR25 1M": rr1m, "BF25 1M": bf1m})
+        xl = self.dir / "hist.xlsx"
+        with pd.ExcelWriter(xl) as xw:
+            sheet.to_excel(xw, sheet_name="EURUSD", index=False)
+        tabs = {name: pd.DataFrame({"Date": days, "PX_LAST": v}) for name, v in {
+            "EURUSD Curncy": spot, "EUR1M Curncy": pts1m, "EUR12M Curncy": pts1y,
+            "EURUSDV1M Curncy": atm1m, "EURUSDV3M Curncy": atm3m,
+            "EURUSD25R1M Curncy": rr1m, "EURUSD25B1M Curncy": bf1m}.items()}
+        pkl = self.dir / "store.pkl"
+        pkl.write_bytes(pickle.dumps(tabs))
+        want, got = tsp.Store(pkl), tsp.HistoryStore(load_history(xl))
+
+        def same(a, b):
+            self.assertEqual(sorted(a), sorted(b))
+            for k in a:
+                np.testing.assert_allclose(b[k].values, a[k].values, rtol=1e-12)
+                self.assertTrue(b[k].index.equals(a[k].index))
+
+        np.testing.assert_allclose(got.spot("EURUSD").values, want.spot("EURUSD").values)
+        same(want.atm("EURUSD"), got.atm("EURUSD"))
+        same(want.smile("EURUSD", "rr"), got.smile("EURUSD", "rr"))
+        same(want.smile("EURUSD", "bf"), got.smile("EURUSD", "bf"))
+        same(want.forward_points("EURUSD"), got.forward_points("EURUSD"))
+        self.assertAlmostEqual(float(got.atm("EURUSD")[1 / 12].iloc[0]), atm1m[0] / 100.0)
+
+    def test_the_build_refuses_a_missing_source_by_the_setting_that_names_it(self):
+        empty = self.dir / "empty"
+        empty.mkdir()
+        with self.assertRaises(FileNotFoundError) as cm:
+            bo.build_study(self.dir / "s.pkl", tape=empty, store=self.dir / "none.pkl",
+                           log=lambda *a: None)
+        self.assertIn("sdr =", str(cm.exception))
+        sdr = self.dir / "sdr"
+        sdr.mkdir()
+        _sdr_zip(sdr, "2026-09-01", [_eurusd_call("1", "2026-09-01T10:00:00Z", 40000)])
+        with self.assertRaises(FileNotFoundError) as cm:
+            bo.build_study(self.dir / "s.pkl", sdr=[sdr], store=self.dir / "none.pkl",
+                           log=lambda *a: None)
+        self.assertIn("history =", str(cm.exception))
+
+    def test_the_screen_builds_from_the_servers_own_sources_in_the_background(self):
+        """The page names no path: the build reads the ``sdr`` and ``history`` the server was
+        started with, runs on its own thread, and refuses a second one while it runs."""
+        import threading
+        from unittest import mock
+        from volkit.webapp import BookService
+        service = BookService(str(book_for("EURUSD")), ASOF, agent_sdr=[str(self.dir)])
+        seen, release = {}, threading.Event()
+
+        def fake(out, **kw):
+            seen.update(kw, out=str(out))
+            kw["log"]("read the tape")
+            release.wait(10)
+            return {"built": "now", "sources": {}, "tape_atm": {"big": 1}}
+
+        with mock.patch.object(bo, "build_study", fake):
+            started = service.bidoffer_build_study({})
+            self.assertEqual(started["state"], "running")
+            self.assertEqual(started["sources"]["sdr"], [str(self.dir)])
+            with self.assertRaises(ValueError):
+                service.bidoffer_build_study({})
+            release.set()
+            for t in threading.enumerate():
+                if t.name == "bidoffer-study":
+                    t.join(10)
+        state = service.bidoffer_study_state()
+        self.assertEqual(state["state"], "done")
+        self.assertEqual(seen["sdr"], [str(self.dir)])
+        self.assertIsNone(seen["history"])
+        self.assertTrue(seen["out"].endswith(bo.STUDY_FILENAME))
+        self.assertIn("read the tape", state["log"])
+        self.assertNotIn("tape_atm", state["result"])
+
+
 if __name__ == "__main__":
     unittest.main()
