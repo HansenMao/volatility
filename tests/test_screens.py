@@ -2109,6 +2109,16 @@ class TestPackaging(unittest.TestCase):
         for rel in build_exe.USER_DATA:
             self.assertNotIn("screens.txt", rel)
 
+    def test_the_handover_zip_carries_the_bloomberg_overlay_sheet(self):
+        """stage_data writes bbg_overlay.xlsx beside the exe, but the one-file zip was built
+        from USER_DATA's sources and left it out: the first build that shipped the sheet's
+        macro shipped no sheet."""
+        import build_exe
+        names = [arc for _, arc in
+                 build_exe.zip_entries(self.ROOT / "dist" / "volkit.exe", onefile=True)]
+        self.assertIn("bbg_overlay.xlsx", names)
+        self.assertIn("volkit_bbg_overlay.bas", names)
+
     def test_the_handover_zip_keeps_samples_out_of_the_exes_own_folder(self):
         """The one-file zip flattened everything to the top level.
 

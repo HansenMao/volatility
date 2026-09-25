@@ -423,6 +423,12 @@ def zip_entries(exe: Path, onefile: bool) -> list[tuple[Path, str]]:
                 for p in sorted(root.rglob("*")) if p.is_file()]
     out = [(exe, exe.name)]
     out += [(ROOT / rel, Path(rel).name) for rel in USER_DATA if (ROOT / rel).exists()]
+    # Written by stage_data beside the exe, not a USER_DATA source: take the staged one, which
+    # is the shipped workbook's list, and the checked-in copy only if staging did not run.
+    staged = exe.parent / "bbg_overlay.xlsx"
+    sheet = staged if staged.exists() else ROOT / "files" / "bbg_overlay.xlsx"
+    if sheet.exists():
+        out.append((sheet, sheet.name))
     out += [(ROOT / rel, f"samples/{Path(rel).name}")
             for rel in SAMPLE_DATA if (ROOT / rel).exists()]
     return out
