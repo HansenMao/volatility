@@ -478,7 +478,7 @@ class TestSuggestWidths(unittest.TestCase):
             service.export_suggest_widths({"pairs": " , "})
 
     def test_the_export_screen_carries_the_card(self):
-        html = (Path(__file__).resolve().parents[1] / "volkit" / "web" / "index.html").read_text()
+        html = _source("volkit", "web", "index.html")
         for needle in ('id="xwpairs"', 'id="xwtenors"', 'id="xwgo"', 'id="xwout"',
                        "function xwSuggest", "cfgwbuild"):
             self.assertIn(needle, html)
