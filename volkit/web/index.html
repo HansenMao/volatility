@@ -1229,6 +1229,14 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
           to. This is a query and not a position: the pricing tab freezes a leg's strike so a
           re-price cannot silently re-solve it, and here re-solving is the whole point. Move a
           mark and the same question is asked again of the surface as it now stands.</details>
+        <!-- Small pricers: the same question as above, one line each, kept
+             side by side -- an expiry, a strike or a delta, and the vol.
+             The pair, the cut and the interpolation are the card's. -->
+        <div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--line)">
+          <div id="vqlines"></div>
+          <button class="ghost" id="vqadd" style="width:auto;padding:3px 10px;font-size:11px;margin-top:4px"
+            title="another line: an expiry and a strike (1.0850, ATM) or a delta (25d, 10p, -25), read against the pair above">+ Pricer</button>
+        </div>
       </section>
 
       <section class="card">
@@ -1769,6 +1777,34 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
           <button id="xcmpgo" style="width:auto;padding:6px 14px;font-size:12px">Compare</button>
         </div>
         <div id="xcmp" style="margin-top:8px"><div class="etoempty">Load an overlay and press <b>Compare</b>.</div></div>
+      </section>
+
+      <!-- The bid-offer study's widths for any pair at any tenor, read and
+           shown.  No channel and no table: the numbers are the study's, for
+           the desk to carry wherever it wants them. -->
+      <section class="card"><h2>Suggested widths <small>the bid-offer study&rsquo;s two-way per pair and tenor, for any channel</small></h2>
+        <div class="row" style="flex-wrap:wrap;gap:8px;align-items:flex-end">
+          <div class="f" style="flex:1;min-width:150px" title="one or more pairs, comma separated; blank is the marking screen's pair"><label>Pairs</label>
+            <input id="xwpairs" spellcheck="false" autocomplete="off" placeholder="EURUSD, USDJPY" style="width:100%;text-transform:uppercase"></div>
+          <div class="f" style="flex:1.4;min-width:170px" title="the tenors to read, comma separated: O/N, 1W, 2W, 1M ... 2Y"><label>Tenors</label>
+            <input id="xwtenors" spellcheck="false" autocomplete="off" style="width:100%;text-transform:uppercase"></div>
+          <div class="f" title="the ticket the width is for, USD millions; blank is the tape's median ticket"><label>Size USD mm</label>
+            <input id="xwsize" placeholder="median" style="width:64px"></div>
+          <button id="xwgo" style="width:auto;padding:6px 14px;font-size:12px">Suggest</button>
+        </div>
+        <div class="row" style="margin-top:6px;gap:6px;flex-wrap:wrap">
+          <button class="ghost" id="xwbook" style="width:auto;padding:3px 9px;font-size:11px" title="every pair the book builds">book pairs</button>
+          <button class="ghost" id="xwtdef" style="width:auto;padding:3px 9px;font-size:11px" title="O/N, 1W, 2W, 1M, 2M, 3M, 6M, 9M, 1Y, 2Y">default tenors</button>
+        </div>
+        <details class="hint" style="margin-top:8px"><summary>What the width is, and the study it reads</summary>
+          <div style="margin:6px 0 0">The width the quoting agent would show under its default policy: the tape&rsquo;s cost of crossing the market on each leg, plus twice the likely move of the option&rsquo;s vol over the time to lay it off (the ATM, RR and fly history in today&rsquo;s regime) and the size&rsquo;s impact, rounded up to the tick. A cross is made off its legs where that is cheaper. Each number is a full two-way in vol points, whatever channel it is carried to; how a channel&rsquo;s own table takes it (Bloomberg adds <code>ADD_UPS</code> on top of <code>MARKET_WIDTHS</code>, COS is one-sided, kACE reads a tier) is the desk&rsquo;s call. Nothing is written anywhere.</div>
+          <div class="row" style="margin-top:8px;align-items:center;flex-wrap:wrap;gap:6px">
+            <button class="cfgwbuild" style="width:auto;padding:4px 11px;font-size:11px;background:transparent;color:var(--ink);border:1px solid var(--line);font-weight:500"
+              title="measure the tape and the history again and write bidoffer_study.pkl beside the workbook: the DTCC zips in the sdr folder and the historical workbook volkit.cfg names">Build study</button>
+            <span class="meta"><span class="cfgwstudy"></span></span></div>
+          <pre class="cfgwlog" style="display:none;margin:6px 0 0;max-height:160px;overflow:auto;font-size:10.5px;white-space:pre-wrap"></pre>
+        </details>
+        <div id="xwout" style="margin-top:8px"><div class="etoempty">Name the pairs and tenors and press <b>Suggest</b>.</div></div>
       </section>
     </div>
 
@@ -2621,10 +2657,16 @@ function chart(el,series,opts={}){
     g+=`<line x1="${P.l}" y1="${y}" x2="${W-P.r}" y2="${y}" stroke="var(--grid)"/>`;
     g+=`<text x="${P.l-7}" y="${y+3}" text-anchor="end">${(rg.l[1]-i*(rg.l[1]-rg.l[0])/ny).toFixed(opts.ldp??2)}</text>`;
     if(rg.r)g+=`<text x="${W-P.r+7}" y="${y+3}">${(rg.r[1]-i*(rg.r[1]-rg.r[0])/ny).toFixed(opts.rdp??2)}</text>`;}
+  /* `xticks` puts a tick at exactly those x values -- one per point, where
+     every point is a tenor the eye has to find its label under.  Without it
+     the axis is cut into even steps, which on an index axis lands the labels
+     between points and skips some of them. */
   const nx=Math.min(6,xs.length);
-  for(let i=0;i<=nx;i++){const v=xmin+i*(xmax-xmin)/nx,x=X(v);
+  const ticks=opts.xticks||Array.from({length:nx+1},(_,i)=>xmin+i*(xmax-xmin)/nx);
+  const tfs=opts.xticks&&ticks.length>1&&(W-P.l-P.r)/(ticks.length-1)<30?' font-size="9"':'';
+  ticks.forEach(v=>{const x=X(v);
     g+=`<line x1="${x}" y1="${P.t}" x2="${x}" y2="${H-P.b}" stroke="var(--grid)"/>`;
-    g+=`<text x="${x}" y="${H-8}" text-anchor="middle">${opts.xfmt?opts.xfmt(v):v.toFixed(3)}</text>`;}
+    g+=`<text x="${x}" y="${H-8}" text-anchor="middle"${tfs}>${opts.xfmt?opts.xfmt(v):v.toFixed(3)}</text>`;});
   series.forEach(s=>{const a=s.axis||'l';
     if(s.type==='bar'){const bw=Math.max(1,(W-P.l-P.r)/s.pts.length-1);
       s.pts.forEach(p=>{const y0=Y(Math.max(0,rg[a][0]),a),y=Y(p[1],a);
@@ -4028,7 +4070,7 @@ async function corrfitRun(apply){
     {color:C3,dash:true,pts:r.rows.map((x,i)=>[i,x.before])},
     {color:C1,pts:r.rows.map((x,i)=>[i,x.after])},
     {type:'dot',color:C2,pts:r.rows.map((x,i)=>[i,x.realized]).filter(p=>p[1]!=null)},
-  ],{xfmt:anTenorFmt(names),ldp:3,r:16,height:190});
+  ],{xfmt:anTenorFmt(names),xticks:names.map((_,i)=>i),ldp:3,r:16,height:190});
   if(apply){await loadCurve();await loadMarks();await redraw();schedulePrice()}
   CORRFIT=apply?null:{sig:corrfitSig()};
   corrfitStale();
@@ -4289,7 +4331,7 @@ function owfitPaint(){
        moves, and it has to be readable where it sits on top of the fit. */
     {color:C1,w:2.4,pts:r.rows.map((x,i)=>[i,now[i]]).filter(p=>p[1]!=null)},
     {type:'dot',color:C2,pts:r.rows.map((x,i)=>[i,x.target])},
-  ],{xfmt:anTenorFmt(names),ldp:2,r:16,height:190});
+  ],{xfmt:anTenorFmt(names),xticks:names.map((_,i)=>i),ldp:2,r:16,height:190});
   owfitStale();
 }
 async function owfitRun(apply){
@@ -4979,8 +5021,84 @@ async function runVQ(spin){
   if(seq!==VQSEQ)return;
   VQR=r; vqShow();
 }
-/* Ask the same question again as the marks move. */
-function refreshVQ(){if(VQR&&!VQR.error)runVQ(false)}
+/* Ask the same question again as the marks move -- the card's and every
+   pricer line's. */
+function refreshVQ(){if(VQR&&!VQR.error)runVQ(false); VQL.forEach(l=>runVQL(l,false))}
+
+/* The pricer lines.  One box names the point on the smile, so it takes both
+   ways of naming it: a bare number is a strike, and a delta says so -- `25d`,
+   `10dp`, `-25d` as the pricing screen writes them, or `25p` / `-25` as the
+   desk says them, which is the only rewriting done here.  A bare `25` stays a
+   strike because in a yen pair it is one.  The lines are kept in the browser
+   so a set of standing questions survives a reload; the answers are not. */
+let VQL=[], VQLKEY=0;
+function vqlStrike(raw){
+  const t=String(raw||'').trim(); if(!t)return 'ATM';
+  const m=/^(-?)\s*(\d+(?:\.\d+)?)\s*([cp])?$/i.exec(t);
+  return m&&(m[1]||m[3])?(m[1]+m[2]+'d'+(m[3]||'')):t;
+}
+function saveVQL(){try{localStorage.setItem('volkit.vqlines',
+  JSON.stringify(VQL.map(l=>({expiry:l.expiry,strike:l.strike}))))}catch(e){}}
+function loadVQL(){
+  let v=[]; try{v=JSON.parse(localStorage.getItem('volkit.vqlines')||'[]')}catch(e){}
+  VQL=(Array.isArray(v)?v:[]).map(l=>({key:++VQLKEY,expiry:String(l.expiry||''),strike:String(l.strike||''),seq:0,r:null}));
+}
+function vqlOut(l){
+  const o=document.getElementById('vqlo'+l.key); if(!o)return;
+  const r=l.r;
+  if(!r){o.innerHTML='<span class="meta">&mdash;</span>';o.title='';return}
+  if(r.spin){o.innerHTML='<span class="spin"></span>';return}
+  if(r.error){o.innerHTML='<span style="color:var(--bad)">! '+esc(r.error)+'</span>';o.title=r.error;return}
+  /* The other reading of the point: a delta asked for comes back as the
+     strike it solved to, a strike (or ATM) as its delta. */
+  const byDelta=/d/i.test(vqlStrike(l.strike));
+  const other=byDelta?(r.scaled?'K '+num(r.strike,6):'K/F '+num(r.strike_ratio,6))
+    :(r.delta==null?'':sgn(r.delta,VOLDP)+'Δ'+(r.delta_is_call?'c':'p'));
+  const w=r.warnings||[];
+  o.innerHTML='<b style="font-variant-numeric:tabular-nums">'+vnum(r.vol)+'</b>'
+    +(other?' <span class="meta">'+esc(other)+'</span>':'')
+    +(w.length?' <span style="color:var(--warn)">!</span>':'');
+  o.title=r.pair+' '+r.expiry+(r.settle?' (settles '+r.settle+')':'')+' · '+r.strike_spec
+    +' · ATM '+vnum(r.atm_vol)+w.map(x=>'\n! '+x).join('');
+}
+async function runVQL(l,spin){
+  if(!l.expiry.trim()){l.seq++;l.r=null;vqlOut(l);return}
+  const o=mq(), seq=++l.seq;
+  if(spin){l.r={spin:true};vqlOut(l)}
+  let r;
+  try{r=await api('/api/vol?'+qs({pair:o.pair,cut:o.cut,method:o.method,
+                                  expiry:l.expiry.trim(),strike:vqlStrike(l.strike)}))}
+  catch(e){r={error:e.message}}
+  if(seq!==l.seq)return;
+  l.r=r; vqlOut(l);
+}
+/* Built only when a line comes or goes, so an answer landing never redraws
+   a box somebody is typing in. */
+function paintVQL(){
+  const box=$('#vqlines'); if(!box)return;
+  const f='padding:3px 6px;font-size:12px';
+  box.innerHTML=VQL.map(l=>'<div class="row" data-vql="'+l.key+'" style="gap:5px;align-items:center;margin-top:4px;flex-wrap:nowrap">'
+    +'<input data-f="expiry" value="'+esc(l.expiry)+'" placeholder="1M, 15Sep" style="width:78px;flex:none;'+f+'">'
+    +'<input data-f="strike" value="'+esc(l.strike)+'" placeholder="ATM, 1.0850, 25d" style="width:112px;flex:none;'+f+'">'
+    +'<span id="vqlo'+l.key+'" style="flex:1;min-width:0;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"></span>'
+    +'<button class="ghost" data-vqldel="'+l.key+'" title="remove this line" style="width:auto;flex:none;padding:1px 7px;font-size:11px;color:var(--muted)">&#10005;</button></div>').join('');
+  VQL.forEach(l=>{
+    const row=box.querySelector('[data-vql="'+l.key+'"]');
+    row.querySelectorAll('input').forEach(inp=>{
+      inp.oninput=()=>{l[inp.dataset.f]=inp.value;saveVQL()};
+      inp.onchange=()=>runVQL(l,true);
+      inp.onkeydown=e=>{if(e.key==='Enter')runVQL(l,true)};
+    });
+    row.querySelector('[data-vqldel]').onclick=()=>{VQL=VQL.filter(x=>x!==l);saveVQL();paintVQL()};
+    vqlOut(l);
+  });
+}
+$('#vqadd').onclick=()=>{
+  const l={key:++VQLKEY,expiry:'',strike:'',seq:0,r:null};
+  VQL.push(l);saveVQL();paintVQL();
+  const el=$('[data-vql="'+l.key+'"] input');if(el)el.focus();
+};
+loadVQL(); paintVQL();
 $('#vqrun').onclick=()=>runVQ(true);
 ['#vqexpiry','#vqstrike','#vqdelta'].forEach(id=>{
   $(id).onkeydown=e=>{if(e.key==='Enter')runVQ(true)};
@@ -5716,7 +5834,7 @@ function renderCarry(d){
     {color:C1,pts:live.map((r,i)=>[i,r.level*100])},
     {color:C3,dash:true,pts:live.map((r,i)=>[i,r.level_rolled*100])},
     {type:'bar',color:C2,axis:'r',pts:live.map((r,i)=>[i,r.roll_annual*100])},
-  ],{xfmt:anTenorFmt(names),ldp:2,rdp:2});
+  ],{xfmt:anTenorFmt(names),xticks:names.map((_,i)=>i),ldp:2,rdp:2});
 }
 
 function renderFair(d){
@@ -5748,7 +5866,7 @@ function renderFair(d){
     series.push({color:C2,pts:rows.filter(r=>r.realized!=null).map(r=>[names.indexOf(r.tenor),r.realized*100])});
     series.push({color:C3,dash:true,pts:rows.filter(r=>r.fair!=null).map(r=>[names.indexOf(r.tenor),r.fair*100])});
   }
-  chart(host.querySelector('.anchart'),series,{xfmt:anTenorFmt(names),ldp:2,r:16});
+  chart(host.querySelector('.anchart'),series,{xfmt:anTenorFmt(names),xticks:names.map((_,i)=>i),ldp:2,r:16});
 }
 
 function renderRealized(d){
@@ -5790,7 +5908,7 @@ function renderRealized(d){
     {color:C1,pts:live.map((r,i)=>[i,r.implied*100])},
     {color:C2,pts:live.map((r,i)=>[i,r.realized*100])},
     {type:'bar',color:C3,axis:'r',pts:live.map((r,i)=>[i,r.premium*100])},
-  ],{xfmt:anTenorFmt(names),ldp:2,rdp:2});
+  ],{xfmt:anTenorFmt(names),xticks:names.map((_,i)=>i),ldp:2,rdp:2});
 }
 
 /* The risk reversal and the butterfly said in SABR's two words.
@@ -5856,7 +5974,7 @@ function renderShape(d){
     {color:C2,pts:rows.filter(have).map(r=>[names.indexOf(r.tenor),r.realized_rho])},
     {type:'bar',color:C3,axis:'r',pts:rows.filter(r=>r.implied_nu!=null).map(
       r=>[names.indexOf(r.tenor),r.implied_nu*Math.sqrt(r.t)])},
-  ],{xfmt:anTenorFmt(names),ldp:2,rdp:2});
+  ],{xfmt:anTenorFmt(names),xticks:names.map((_,i)=>i),ldp:2,rdp:2});
 }
 
 function renderTriangle(d){
@@ -6153,7 +6271,7 @@ function renderRelValue(d){
       const c=r.cells.filter(x=>x.column===col.name)[0];
       return (c&&c.score!=null)?[ri,c.score]:null}).filter(Boolean)}))
     .filter(x=>x.pts.length);
-  if(series.length)chart($('#rvchart'),series,{xfmt:anTenorFmt(names),ldp:2,r:16,height:230});
+  if(series.length)chart($('#rvchart'),series,{xfmt:anTenorFmt(names),xticks:names.map((_,i)=>i),ldp:2,r:16,height:230});
   else $('#rvchart').innerHTML='';
 }
 const RVC=['#7a5af5',C1,'var(--muted)',C2,'var(--warn)'];
@@ -6858,7 +6976,7 @@ function paintCompare(d){
     color:CMPC[d.curves.indexOf(c)%CMPC.length],
     pts:d.tenors.map((t,i)=>[i,cmpValue(c,t,'values',d.field)]).filter(pt=>pt[1]!=null)
                 .map(pt=>[pt[0],pt[1]*100]),
-  })),{xfmt:anTenorFmt(d.tenors),ldp:3,r:16});
+  })),{xfmt:anTenorFmt(d.tenors),xticks:d.tenors.map((_,i)=>i),ldp:3,r:16});
 }
 $('#cmpadd').onclick=()=>{CMP.push(cmpDefault());saveCmp();renderCmp();runCompare()};
 $('#cmpdup').onclick=()=>{if(!CMP.length)return;
@@ -7052,8 +7170,7 @@ function cfgTabHtml(t,i,fold){
       'title="'+esc(t.shape||'')+'; blank cells in the column fall back to default">'+
       '<button class="ghost cfgaddcol" data-tab="'+i+
       '" style="width:auto;padding:4px 11px;font-size:11px">Add '+esc(t.open)+'</button>':'')+
-    '</div>'+(t.measure==='vega'?cfgVegaHtml(i):t.measure==='dependence'?cfgDepHtml(i):
-              t.measure==='widths'?cfgWidthHtml(i):'')+end;
+    '</div>'+(t.measure==='vega'?cfgVegaHtml(i):t.measure==='dependence'?cfgDepHtml(i):'')+end;
 }
 /* Which folded tables are open, by sheet: this page's memory only, so a
    reload shuts them all again.  Both editors fold -- the Config window's
@@ -7118,7 +7235,6 @@ function cfgPaintTabs(where){
       R.show(name+' is off '+t.sheet+' in this window; press Apply '+t.sheet+
         ' to take it off the book, and Write to workbook to take it out of the file',false);};});
   if(where==='config'){cfgVegaBind();cfgDepBind()}
-  cfgWidthBind(root);
 }
 /* One added column's name, as the tab's reader will spell it -- or '' when it
    is not one.  The same rule as configsheets.open_column_ok, on the box the
@@ -7395,37 +7511,6 @@ function cfgDepPaint(i){
     cfgShow(n+' tenor(s) of '+r.pair+' suggested into '+t.sheet+'; check them and press Apply '+t.sheet,false);
   };
 }
-/* ---- a pair's widths, suggested by the quoting agent into the export tables ----
-   The dependence suggestion's arrangement for MARKET_WIDTHS and WING_WIDTHS: the
-   bid-offer study's widths for one pair at the tenors the table already carries,
-   into the boxes for somebody to look at and apply -- never onto the tab on its
-   own.  MARKET_WIDTHS takes the at-the-money into the pair's column; WING_WIDTHS
-   takes the four wings as the pair's rows. */
-let WSUG={};
-let WSUI={pair:'',size:''};
-function cfgWidthHtml(i){
-  return '<details class="hint" style="margin-top:9px"><summary>Suggest from the bid-offer study</summary>'+
-    '<div style="margin:8px 0 0">For one pair, at the tenors this table carries: the width the '+
-    'quoting agent would show under its default policy &mdash; the tape&rsquo;s cost of crossing the '+
-    'market on each leg, plus twice the likely move of the option&rsquo;s vol over the time to lay it off '+
-    '(the ATM, RR and fly history in today&rsquo;s regime) and the size&rsquo;s impact, rounded up to the '+
-    'tick. A cross is made off its legs where that is cheaper.</div>'+
-    '<div class="row" style="margin-top:8px;align-items:center;flex-wrap:wrap;gap:6px">'+
-    '<button class="cfgwbuild" style="width:auto;padding:4px 11px;font-size:11px;'+
-    'background:transparent;color:var(--ink);border:1px solid var(--line);font-weight:500" '+
-    'title="measure the tape and the history again and write bidoffer_study.pkl beside the workbook: '+
-    'the DTCC zips in the sdr folder and the historical workbook volkit.cfg names">Build study</button>'+
-    '<span class="meta"><span class="cfgwstudy"></span></span></div>'+
-    '<pre class="cfgwlog" style="display:none;margin:6px 0 0;max-height:160px;overflow:auto;font-size:10.5px;'+
-    'white-space:pre-wrap"></pre>'+
-    '<div class="row" style="margin-top:8px;flex-wrap:wrap;gap:6px">'+
-    '<select class="cfgwpair" style="width:auto;padding:3px 6px"></select>'+
-    '<span class="meta">size USD mm</span><input class="cfgwsize" style="width:64px" '+
-    'placeholder="median" title="the ticket the width is for; blank is the tape&rsquo;s median ticket">'+
-    '<button class="cfgwgo" data-tab="'+i+'" style="width:auto;padding:4px 11px;font-size:11px;'+
-    'background:transparent;color:var(--ink);border:1px solid var(--line);font-weight:500">Suggest</button></div>'+
-    '<div class="cfgwout" data-tab="'+i+'" style="margin-top:8px"></div></details>';
-}
 /* ---- building the study the suggestion reads, from the screen ----
    The server reads the history and sdr it was started with (volkit.cfg); the page names no
    path.  The build runs on the server's own thread and this polls it; the study it writes is
@@ -7457,14 +7542,26 @@ async function cfgStudyRefresh(){
   clearTimeout(WSTUDY_POLL);
   if(WSTUDY&&WSTUDY.state==='running')WSTUDY_POLL=setTimeout(cfgStudyRefresh,2000);
 }
-function cfgWidthTenors(t){
-  const seen=[];
-  (t.rows||[]).forEach(r=>{const x=String(r.tenor||'').trim().toUpperCase();
-    if(x&&seen.indexOf(x)<0)seen.push(x)});
-  return seen;
-}
-function cfgWidthBind(root){
-  root.querySelectorAll('.cfgwbuild').forEach(b=>{
+/* ---- the Suggested widths card: the study's widths for any pair and tenor ----
+   No channel, no table: the pairs and tenors are typed, the answer is shown
+   and nothing is written.  Remembered in this browser, like the export
+   screen's other choices. */
+const XW_TENORS='O/N, 1W, 2W, 1M, 2M, 3M, 6M, 9M, 1Y, 2Y';
+function xwSaved(){try{return JSON.parse(localStorage.getItem('volkit.xwidths')||'{}')||{}}catch(e){return {}}}
+function xwKeep(){try{localStorage.setItem('volkit.xwidths',JSON.stringify(
+  {pairs:$('#xwpairs').value,tenors:$('#xwtenors').value,size:$('#xwsize').value}))}catch(e){}}
+function xwBind(){
+  const S=xwSaved();
+  $('#xwpairs').value=S.pairs||'';
+  $('#xwtenors').value=S.tenors||XW_TENORS;
+  $('#xwsize').value=S.size||'';
+  ['#xwpairs','#xwtenors','#xwsize'].forEach(id=>{$(id).onchange=xwKeep});
+  $('#xwbook').onclick=()=>{$('#xwpairs').value=(STATE.pairs||[]).join(', ');xwKeep()};
+  $('#xwtdef').onclick=()=>{$('#xwtenors').value=XW_TENORS;xwKeep()};
+  $('#xwgo').onclick=xwSuggest;
+  [$('#xwpairs'),$('#xwtenors'),$('#xwsize')].forEach(el=>{
+    el.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();xwSuggest()}})});
+  $$('#p-export .cfgwbuild').forEach(b=>{
     b.onclick=async()=>{
       b.disabled=true;
       try{WSTUDY=await post('/api/bidoffer/study',{})}
@@ -7473,72 +7570,38 @@ function cfgWidthBind(root){
       if(WSTUDY.state==='running'){clearTimeout(WSTUDY_POLL);WSTUDY_POLL=setTimeout(cfgStudyRefresh,2000)}
     };
   });
-  if(root.querySelector('.cfgwstudy')){if(WSTUDY)cfgStudyPaint();else cfgStudyRefresh();}
-  root.querySelectorAll('.cfgwgo').forEach(go=>{
-    const i=+go.dataset.tab, box=go.parentNode.querySelector('.cfgwpair'),
-          size=go.parentNode.querySelector('.cfgwsize');
-    const pairs=STATE.pairs||[];
-    box.innerHTML=pairs.map(p=>'<option value="'+esc(p)+'">'+esc(p)+'</option>').join('');
-    box.value=WSUI.pair&&pairs.indexOf(WSUI.pair)>=0?WSUI.pair:(pairs.indexOf(markingPair())>=0?markingPair():pairs[0]);
-    size.value=WSUI.size;
-    box.onchange=()=>{WSUI.pair=box.value};size.onchange=()=>{WSUI.size=size.value};
-    if(WSUG[i])cfgWidthPaint(root,i);
-    go.onclick=async()=>{
-      WSUI.pair=box.value;WSUI.size=size.value;
-      cfgHarvest(i);
-      const t=CFG.tabs[i], out=root.querySelector('.cfgwout[data-tab="'+i+'"]');
-      out.innerHTML='<span class="spin"></span> asking the quoting agent…';
-      try{WSUG[i]=await post('/api/export/widths',{pair:box.value,tenors:cfgWidthTenors(t),
-                                                   size:size.value.trim()})}
-      catch(e){WSUG[i]=null;out.innerHTML='<div class="msg bad">'+esc(e.message)+'</div>';return}
-      cfgWidthPaint(root,i);
-    };
-  });
 }
-function cfgWidthPaint(root,i){
-  const out=root.querySelector('.cfgwout[data-tab="'+i+'"]'); if(!out)return;
-  const r=WSUG[i]; if(!r){out.innerHTML='';return}
-  const t=CFG.tabs[i], atm=t.sheet==='MARKET_WIDTHS';
-  const cols=atm?['atm']:['rr25','rr10','bf25','bf10'];
+async function xwSuggest(){
+  if(!$('#xwpairs').value.trim())$('#xwpairs').value=markingPair()||'';
+  if(!$('#xwtenors').value.trim())$('#xwtenors').value=XW_TENORS;
+  xwKeep();
+  const out=$('#xwout');
+  out.innerHTML='<span class="spin"></span> asking the quoting agent…';
+  let r;
+  try{r=await post('/api/export/widths',{pairs:$('#xwpairs').value,tenors:$('#xwtenors').value,
+                                          size:$('#xwsize').value.trim()})}
+  catch(e){out.innerHTML='<div class="msg bad">'+esc(e.message)+'</div>';return}
+  const cols=['atm','rr25','rr10','bf25','bf10'];
+  const head={atm:'ATM',rr25:'RR 25',rr10:'RR 10',bf25:'BF 25',bf10:'BF 10'};
   const cell=v=>(v==null||!isFinite(v))?'—':num(v,3);
-  out.innerHTML='<div class="meta">'+esc(r.pair)+' · USD '+num(r.size_usd_mm||0,0)+'mm · study built '+
-    esc(((r.study||{}).built||'').replace('T',' ').slice(0,16))+' (tape to '+esc((r.study||{}).tape_last||'')+')</div>'+
-    '<div class="scroll" style="margin-top:6px"><table class="mark"><thead><tr><th>Tenor</th>'+
-    cols.map(c=>'<th>'+esc(c)+'</th>').join('')+'<th>rung</th></tr></thead><tbody>'+
-    r.rows.map(x=>{
-      const rung=cols.map(c=>(x.rungs||{})[c]).filter(Boolean)[0]||'';
+  let h='<div class="mmstat"><span>'+r.results.length+' pair(s) × '+r.tenors.length+' tenor(s)</span>'+
+    '<span>USD '+num(r.size_usd_mm||0,0)+'mm</span>'+
+    '<span>study built '+esc(((r.study||{}).built||'').replace('T',' ').slice(0,16))+
+    ', tape to '+esc((r.study||{}).tape_last||'')+'</span></div>';
+  h+='<div class="mmwide"><table class="mmxr"><thead><tr><th>Pair</th><th>Tenor</th>'+
+    cols.map(c=>'<th>'+head[c]+'</th>').join('')+'<th>rung</th></tr></thead><tbody>';
+  r.results.forEach(p=>{
+    if(p.error){h+='<tr><td><b>'+esc(p.pair)+'</b></td><td colspan="'+(cols.length+2)+'" class="meta" style="text-align:left">! '+esc(p.error)+'</td></tr>';return}
+    p.rows.forEach((x,k)=>{
+      const rungs=cols.map(c=>(x.rungs||{})[c]).filter(Boolean);
+      const rung=rungs.filter((v,j)=>rungs.indexOf(v)===j).join(' / ');
       const why=(x.notes||[]).length?' <span class="pill warn" title="'+esc(x.notes.join(' · '))+'">note</span>':'';
-      return '<tr><td>'+esc(x.tenor)+why+'</td>'+cols.map(c=>'<td><b>'+cell(x[c])+'</b></td>').join('')+
-        '<td class="meta">'+esc(rung)+'</td></tr>';}).join('')+
-    '</tbody></table></div>'+
-    '<div class="row" style="margin-top:8px;align-items:center;gap:6px"><button class="cfgwuse" '+
-    'style="width:auto;padding:4px 11px;font-size:11px;background:transparent;'+
-    'color:var(--ink);border:1px solid var(--line);font-weight:500">Suggest into the tab</button>'+
-    '<span class="meta">'+(atm?'fills the '+esc(r.pair)+' column at these tenors':
-      'replaces '+esc(r.pair)+'&rsquo;s rows')+' in the boxes above — nothing is applied until you press Apply'+
-      (atm?'; the Bloomberg feed adds ADD_UPS on top':'')+'</span></div>';
-  out.querySelector('.cfgwuse').onclick=()=>{
-    cfgHarvest(i);
-    const note='bid-offer study '+(((r.study||{}).built)||'').slice(0,10);
-    let n=0;
-    if(atm){
-      if(t.columns.indexOf(r.pair)<0){const at=t.columns.indexOf('note');
-        t.columns.splice(at<0?t.columns.length:at,0,r.pair)}
-      const by={};r.rows.forEach(x=>{by[x.tenor]=x});
-      t.rows.forEach(row=>{const x=by[String(row.tenor||'').trim().toUpperCase()];
-        if(x&&x.atm!=null){row[r.pair]=Math.round(x.atm*1e4)/1e4;n++}});
-    } else {
-      const keep=t.rows.filter(row=>String(row.pair||'').toUpperCase()!==r.pair);
-      r.rows.forEach(x=>{
-        if(cols.every(c=>x[c]==null))return;
-        const row={pair:r.pair,tenor:x.tenor,note:note};
-        cols.forEach(c=>{row[c]=x[c]==null?null:Math.round(x[c]*1e4)/1e4});
-        keep.push(row);n++;});
-      t.rows=keep;
-    }
-    cfgPaintTabs('export');
-    xcfgShow(n+' tenor(s) of '+r.pair+' suggested into '+t.sheet+'; check them and press Apply '+t.sheet,false);
-  };
+      h+='<tr><td>'+(k?'':'<b>'+esc(p.pair)+'</b>')+'</td><td>'+esc(x.tenor)+why+'</td>'+
+        cols.map(c=>'<td class="mmv">'+cell(x[c])+'</td>').join('')+
+        '<td class="meta" style="text-align:left">'+esc(rung)+'</td></tr>';});
+  });
+  h+='</tbody></table></div><div class="meta" style="margin-top:6px">Full two-ways in vol points; nothing is written.</div>';
+  out.innerHTML=h;
 }
 function cfgConfirm(html,label,run,where){
   const R=CFG_ROOTS[where||'config'];
@@ -8935,7 +8998,7 @@ function paintCurve(d){
     {color:C3,dash:true,pts:c.rows.map((r,i)=>[i,r.before])},
     {color:C1,pts:c.rows.map((r,i)=>[i,r.after])},
     {type:'dot',color:C2,pts:c.rows.map((r,i)=>[i,r.target])},
-  ],{xfmt:anTenorFmt(names),ldp:2,r:16});
+  ],{xfmt:anTenorFmt(names),xticks:names.map((_,i)=>i),ldp:2,r:16});
 }
 
 function paintWings(d){
@@ -9854,7 +9917,7 @@ function xPaintOverlay(){
         ': '+esc((O.applied_pairs||[]).join(', '))+' ('+O.applied_rows+' rows); the session before it is in '+esc(O.snapshot||'')+'. Write to workbook refuses until Revert.</span>':'')+
       (O.notes||[]).map(n=>'<br><span class="meta">· '+esc(n)+'</span>').join('');
     /* One line per pair, with the tick that writes it over the book. */
-    tbl.innerHTML='<div class="mmwide"><table class="mmxr"><thead><tr><th title="tick to write this pair\'s rows over the book">Overwrite</th><th>Pair</th><th>Rows</th><th>Tenors</th><th>In the book</th><th>Fields</th><th>State</th></tr></thead><tbody>'+
+    tbl.innerHTML='<div class="mmwide"><table class="mmxr"><thead><tr><th title="tick to write this pair\'s rows over the book"><label style="display:inline-flex;align-items:center;gap:4px;margin:0;cursor:pointer" title="tick or untick every pair that can still be written over the book"><input type="checkbox" id="xovall" style="width:auto">Overwrite</label></th><th>Pair</th><th>Rows</th><th>Tenors</th><th>In the book</th><th>Fields</th><th>State</th></tr></thead><tbody>'+
       (O.per_pair||[]).map(e=>'<tr><td>'+(e.in_book&&(e.tenors_in_book||[]).length?'<input type="checkbox" data-ovp="'+esc(e.pair)+'" style="width:auto"'+(e.applied?' checked disabled':'')+'>':
           '<span class="meta" title="the book does not hold this pair or these tenors, so there is nothing to overwrite; the Output side can still read it">—</span>')+
         '</td><td><b>'+esc(e.pair)+'</b></td><td class="mmv">'+e.rows+'</td><td class="meta">'+(e.tenors||[]).map(esc).join(' ')+'</td>'+
@@ -9863,6 +9926,14 @@ function xPaintOverlay(){
         '<td class="meta">'+(e.fields||[]).map(esc).join(', ')+(e.two_way?' · two-way':'')+'</td>'+
         '<td>'+(e.applied?'<span class="mmtag thru">overwrites the book</span>':'<span class="mmtag out">overlay only</span>')+'</td></tr>').join('')+
       '</tbody></table></div>';
+    /* The header tick: every pair that can still go over the book, at once.
+       Pairs already written over it stay ticked and locked either way. */
+    const all=$('#xovall'), open=()=>[...tbl.querySelectorAll('input[data-ovp]:not(:disabled)')];
+    const syncAll=()=>{const o=open(), n=o.filter(el=>el.checked).length;
+      all.disabled=!o.length;all.checked=!!o.length&&n===o.length;all.indeterminate=n>0&&n<o.length};
+    all.onchange=()=>{open().forEach(el=>{el.checked=all.checked});syncAll()};
+    open().forEach(el=>{el.onchange=syncAll});
+    syncAll();
     acts.innerHTML='<button class="ghost" id="xovapply" style="width:auto;padding:4px 11px;font-size:11px" title="write the ticked pairs\' rows over the book itself, after saving the session as it was; every screen then shows them and the kACE feed tab posts from them">Overwrite book for ticked</button>'+
       (O.applied?'<button class="ghost" id="xovrevert" style="width:auto;padding:4px 11px;font-size:11px" title="put the saved session back: every pair as it was before the overlay">Revert</button>':'')+
       '<button class="ghost" id="xovclear" style="width:auto;padding:4px 11px;font-size:11px">Clear</button>';
@@ -10123,6 +10194,7 @@ function xInit(){
   $('#xovload').onclick=()=>xLoadOverlay(false);
   $('#xovpaste').onclick=()=>xLoadOverlay(true);
   $('#xcmpgo').onclick=xCompare;
+  xwBind();
   $('#xbuild').onclick=xBuild;
   $('#xsend').onclick=xSend;
   $('#xseed').onclick=()=>cfgConfirm('Put the export tables this workbook lacks into the session, seeded from the desk\'s own files of 2026-09-10 '+
@@ -10162,7 +10234,7 @@ function showPanel(name){
     if(MCR&&MCR._cm!==cm&&($('#mmtext').value||'').trim())runCheck();
     if(MQR&&MQR._cm!==cm&&($('#mqtext').value||'').trim())runMQ();}
   else if(PANEL==='pricing')renderGrid();
-  else if(PANEL==='export'){if(!XS)xLoad();}
+  else if(PANEL==='export'){if(!XS)xLoad(); if(!WSTUDY)cfgStudyRefresh();}
 }
 $('#nav').onclick=e=>{const b=e.target.closest('button');if(!b)return;showPanel(b.dataset.p);};
 $('#tabs').onclick=e=>{const b=e.target.closest('button');if(!b)return;

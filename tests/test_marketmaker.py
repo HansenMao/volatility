@@ -198,6 +198,48 @@ class TestMarketMakerApi(unittest.TestCase):
             self.assertEqual(set(service._archive_lock.book_held), {0})
             self.assertEqual(service._lock.depth, 0)
 
+    def test_a_quote_never_waits_for_the_archive_while_holding_the_book(self):
+        """The quote reads the book and the archive together, so it holds both
+        -- archive first.  It used to take the book and then wait for the
+        archive, and a folder scan or an agent question holding the archive
+        for minutes left the quote parked on the book's lock: every screen
+        froze behind one Quote press."""
+        import tempfile, threading
+
+        class Watched:
+            def __init__(self):
+                self._lock = threading.RLock()
+                self.depth = 0
+
+            def __enter__(self):
+                self._lock.acquire()
+                self.depth += 1
+                return self
+
+            def __exit__(self, *exc):
+                self.depth -= 1
+                self._lock.release()
+
+        class WatchedArchive(Watched):
+            def __init__(self, book_lock):
+                super().__init__()
+                self.book_lock = book_lock
+                self.book_held = []
+
+            def __enter__(self):
+                self.book_held.append(self.book_lock.depth)
+                return super().__enter__()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self.service(tmp)
+            service._lock = Watched()
+            service._archive_lock = WatchedArchive(service._lock)
+            out = service.mm_quote({"request_text": "EURUSD 1M ATM\n"})
+            self.assertIn("bank", out)
+            self.assertTrue(service._archive_lock.book_held)
+            self.assertEqual(set(service._archive_lock.book_held), {0})
+            self.assertEqual(service._lock.depth, 0)
+
     def test_the_tape_leans_the_mid_only_when_a_weight_says_so(self):
         """The one inference in the package -- a print's side, decided against
         our own mark -- may not move a price until a desk has said it may.

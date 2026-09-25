@@ -345,6 +345,16 @@ minute, and under the book's lock that is a minute in which no screen answers
   the book, and Check Market beside it, which asks the archive nothing, sat
   spinning until they were done. A test pins it: the book's lock is provably
   not held at the moment the archive's is taken.
+- **The quote holds both, archive first** (`with self._archive_lock, self._lock`),
+  because its sheet reads the two together. It used to take the book and then
+  wait for the archive -- the same trap -- so one Quote pressed during a scan
+  or an agent question froze every screen. Nothing takes the book's lock and
+  then the archive's, which is what makes archive-then-book safe. Pinned by
+  `test_a_quote_never_waits_for_the_archive_while_holding_the_book`.
+- **A DTCC download holds neither lock.** It only writes files into the SDR
+  folder; the archive is taken afterwards, for the read of what arrived. A
+  `_fetch_lock` of its own, tried rather than waited on, refuses a second
+  Fetch while one runs. Pinned by `test_a_download_holds_no_lock_the_screens_share`.
 - The page cannot tell a queued run from a working one either, so it says:
   the status line counts the seconds after three of them and names the
   possibility after ten (`busy()` in `index.html`, used by the fit, the quote

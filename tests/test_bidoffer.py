@@ -452,14 +452,37 @@ class TestSuggestWidths(unittest.TestCase):
         self.assertGreaterEqual(m["bf10"], m["bf25"])
         self.assertIn("not a tenor", r["rows"][2]["notes"][0])
 
-    def test_the_export_tables_offer_it_and_the_route_refuses_without_a_study(self):
+    def test_no_table_carries_it_and_the_route_refuses_without_a_study(self):
+        # The suggestion is a card of its own, independent of channel: no export table offers it.
         from volkit.webapp import BookService
         service = BookService(str(book_for("EURUSD")), ASOF)
         tabs = {t["sheet"]: t for t in service.config_tabs()["tabs"]}
-        self.assertEqual(tabs["MARKET_WIDTHS"]["measure"], "widths")
-        self.assertEqual(tabs["WING_WIDTHS"]["measure"], "widths")
+        self.assertEqual(tabs["MARKET_WIDTHS"]["measure"], "")
+        self.assertEqual(tabs["WING_WIDTHS"]["measure"], "")
         with self.assertRaises(ValueError):
-            service.export_suggest_widths({"pair": "EURUSD"})
+            service.export_suggest_widths({"pairs": "EURUSD"})
+
+    def test_the_route_reads_several_pairs_and_refuses_a_bad_one_in_its_place(self):
+        from volkit.webapp import BookService
+        service = BookService(str(book_for("EURUSD")), ASOF)
+        service._bidoffer = lambda: _study()
+        r = service.export_suggest_widths({"pairs": "eurusd, EURUSD; BAD", "tenors": "1M, 3M"})
+        self.assertEqual([x["pair"] for x in r["results"]], ["EURUSD", "BAD"])
+        self.assertEqual([x["tenor"] for x in r["results"][0]["rows"]], ["1M", "3M"])
+        self.assertIsNotNone(r["results"][0]["rows"][0]["atm"])
+        self.assertIn("six-letter", r["results"][1]["error"])
+        self.assertEqual(r["tenors"], ["1M", "3M"])
+        d = service.export_suggest_widths({"pair": "EURUSD"})
+        self.assertEqual(len(d["results"][0]["rows"]), 10)
+        with self.assertRaises(ValueError):
+            service.export_suggest_widths({"pairs": " , "})
+
+    def test_the_export_screen_carries_the_card(self):
+        html = (Path(__file__).resolve().parents[1] / "volkit" / "web" / "index.html").read_text()
+        for needle in ('id="xwpairs"', 'id="xwtenors"', 'id="xwgo"', 'id="xwout"',
+                       "function xwSuggest", "cfgwbuild"):
+            self.assertIn(needle, html)
+        self.assertNotIn("cfgWidthHtml", html)
 
 
 

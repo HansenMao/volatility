@@ -2018,22 +2018,27 @@ price's width, and a bank rule, the archive's width or a fallback tier is used o
 has none. *Bank first* keeps any bank rule the desk has written. *Study shown only* is the old
 ladder, with the study beside it for comparison. A bank **floor** always holds.
 
-On **Vol bulk processing**, `MARKET_WIDTHS` and `WING_WIDTHS` each have **Suggest from the bid-offer
-study**:
+On **Vol bulk processing**, the **Suggested widths** card (left side, under *Compare*) reads the
+study for any pairs and tenors, whatever channel they are for:
 0. **Build study** (re)builds the study the suggestion reads, from the files `volkit.cfg` names:
    the DTCC zips in the `sdr` folder (fetch them on the Market maker screen's agent card) and the
    historical workbook `history`. The line beside the button says which files it will read and
-   when the current study was built; the log under it says what was read. It runs in the
+   when the current study was built (both are under *What the width is, and the study it reads*);
+   the log under it says what was read. It runs in the
    background and takes a minute or two, several the first time, when it reads every zip into an
    extract kept in `tape_extract/` beside the workbook; after that only new days are read.
    Nothing reloads and no mark moves: the next **Suggest** and every quote use the new study.
    If neither setting is present it reads the quant repo's copies where the machine has them,
    and otherwise refuses, naming the setting to add.
-1. Pick a pair and, optionally, a size.
-2. Press **Suggest**. The quoting agent fills a table of widths at the tenors the table carries.
-3. **Suggest into the tab** puts them in the boxes: the pair's column in `MARKET_WIDTHS`, the
-   pair's rows in `WING_WIDTHS`.
-4. Nothing changes until you press **Apply**.
+1. Type one or more pairs, comma separated (blank is the marking screen's pair; **book pairs**
+   fills every pair the book builds), the tenors (**default tenors** is O/N to 2Y) and,
+   optionally, a size.
+2. Press **Suggest** (or Enter). The quoting agent shows, per pair and tenor, the ATM and the
+   25- and 10-delta risk reversal and fly, each a full two-way in vol points, with the rung it
+   stood on and a *note* to hover where the study says more.
+3. Nothing is written. Carry a number into whichever channel's table you want it in; how that
+   table takes it is yours to decide (Bloomberg adds `ADD_UPS` on top of `MARKET_WIDTHS`, COS
+   is one-sided, kACE reads a tier).
 
 What the history workbook needs for this: a sheet per pair with its spot, and, for the pairs you
 want widths measured on their own history, ATM at 1W/1M/3M/6M/1Y and 25-delta RR and BF, plus

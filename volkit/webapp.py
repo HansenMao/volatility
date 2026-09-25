@@ -289,6 +289,11 @@ class BookService:
         # screen does not answer. Nothing here touches the book beyond
         # borrowing its clock, which is read under the book's lock and let go.
         self._archive_lock = threading.RLock()
+        # A DTCC download holds neither lock: it only writes files into the SDR
+        # folder, and the archive is taken afterwards, for the read of what
+        # arrived.  This one keeps two downloads out of the same folder, and is
+        # tried rather than waited on -- a second Fetch is refused, not queued.
+        self._fetch_lock = threading.Lock()
         try:
             self.archive = Archive.load(archive_path)
         except ArchiveError as exc:
@@ -2064,11 +2069,8 @@ class BookService:
                                     else "dependence"
                                     if (sheet == CROSS_DEPENDENCE_SHEET
                                         and "marking" in screens.enabled())
-                                    # the quoting agent's widths off the bid-offer study,
-                                    # suggested into the two tables a pair's two-way lives in
-                                    else "widths"
-                                    if (sheet in ("MARKET_WIDTHS", "WING_WIDTHS")
-                                        and "export" in screens.enabled())
+                                    # the bid-offer study's widths are a card of their own on
+                                    # the export screen, read per pair and tenor, not a table's
                                     else "")
                 out.append(entry)
             return {"workbook": path, "tabs": out,
@@ -2808,22 +2810,26 @@ class BookService:
         surface as it stands and says so.  The knowledge bank is the one thing
         that *is* server state, because it is a file the desk keeps.
         """
-        with self._lock:
+        # A sheet: one quote panel per pair the request box names, each
+        # with its own history sheet if the book has one (§11).
+        sheet = mm_quote_sheet_from_request(payload)
+        # The archive is the quoting agent's file and the quote's third rung
+        # (§17), and the sheet reads it and the book together, so both are
+        # held -- archive first, book inside it.  The other way round, a quote
+        # pressed during a folder scan or an agent question sat waiting for the
+        # archive *while holding the book*, and every screen froze behind it
+        # (the same trap ``mm_mark`` was taken out of).  Nothing takes the
+        # book's lock and then the archive's, so this order cannot deadlock.
+        with self._archive_lock, self._lock:
             if self.book is None:
                 raise ValueError(self.load_error or "no workbook is loaded")
-            # A sheet: one quote panel per pair the request box names, each
-            # with its own history sheet if the book has one (§11).
-            sheet = mm_quote_sheet_from_request(payload)
-            # The archive is the quoting agent's file and the quote's third rung
-            # (§17): read under its own lock, like the agent card reads it.
-            with self._archive_lock:
-                # The fallback rung is a spreading tier off the same
-                # KACE_SPREADS table the feed posts from -- one ladder on the
-                # workbook, read by both, so a width shown to a client and a
-                # width posted to the platform cannot quietly differ.
-                out = sheet.run(self.book, bank=self.bank, hists=self.history,
-                                archive=self.archive, spreads=self.kace_spreads,
-                                widths=self._bidoffer())
+            # The fallback rung is a spreading tier off the same
+            # KACE_SPREADS table the feed posts from -- one ladder on the
+            # workbook, read by both, so a width shown to a client and a
+            # width posted to the platform cannot quietly differ.
+            out = sheet.run(self.book, bank=self.bank, hists=self.history,
+                            archive=self.archive, spreads=self.kace_spreads,
+                            widths=self._bidoffer())
             out["bank"]["error"] = self.bank_error
             out["archive"]["error"] = self.archive_error
             # For the archive card under the sheet: where more can come from.
@@ -2849,28 +2855,43 @@ class BookService:
         return self._bidoffer_cache[1]
 
     def export_suggest_widths(self, payload: dict) -> dict:
-        """The quoting agent's widths for one pair across the tenors a table carries.
+        """The quoting agent's widths for the pairs and tenors asked, whatever the channel.
 
-        For the Vol bulk processing screen's ``MARKET_WIDTHS`` and ``WING_WIDTHS``: the boxes are
-        filled from this and nothing is applied until the desk presses Apply, as the Config
-        window's dependence suggestion does.  ``agent.suggest_widths`` is the one reading.
+        For the Vol bulk processing screen's *Suggested widths* card: the at-the-money and the
+        25- and 10-delta risk reversal and butterfly for each pair at each tenor, read and shown.
+        No channel and no table is consulted and nothing is written -- the numbers are the
+        study's, for the desk to carry wherever it wants them.  ``agent.suggest_widths`` is the
+        one reading.  ``pairs`` is a list or a comma-separated string (``pair`` is one pair); a
+        pair that is not six letters is refused by name in its own place and the rest are read.
         """
         from . import agent as agent_mod, bidoffer
         study = self._bidoffer()
         if study is None:
             raise ValueError(f"no {bidoffer.STUDY_FILENAME} beside the workbook; run "
                              f"`volkit bidoffer study` first")
-        pair = str(payload.get("pair") or "").strip().upper()
-        if len(pair) != 6 or not pair.isalpha():
-            raise ValueError(f"{pair or 'no pair'} is not a six-letter pair")
-        tenors = payload.get("tenors") or ["O/N", "1W", "2W", "1M", "2M", "3M", "6M", "9M",
-                                           "1Y", "2Y"]
+        pairs = payload.get("pairs") or payload.get("pair") or ""
+        if isinstance(pairs, str):
+            pairs = pairs.replace(";", ",").replace(" ", ",").split(",")
+        pairs = list(dict.fromkeys(str(p).strip().upper() for p in pairs if str(p).strip()))
+        if not pairs:
+            raise ValueError("no pair asked for")
+        tenors = payload.get("tenors") or list(agent_mod.SUGGEST_TENORS)
         if isinstance(tenors, str):
-            tenors = [t for t in tenors.replace(";", ",").split(",") if t.strip()]
+            tenors = tenors.replace(";", ",").replace(" ", ",").split(",")
+        tenors = [str(t).strip() for t in tenors if str(t).strip()]
         size = payload.get("size")
         size = float(size) if size not in (None, "") else None
+        results = []
         with self._lock:
-            return agent_mod.suggest_widths(study, pair, tenors, size_usd_mm=size)
+            for pair in pairs:
+                if len(pair) != 6 or not pair.isalpha():
+                    results.append({"pair": pair, "error": f"{pair} is not a six-letter pair",
+                                    "rows": []})
+                    continue
+                results.append(agent_mod.suggest_widths(study, pair, tenors, size_usd_mm=size))
+        return {"results": results, "tenors": tenors,
+                "size_usd_mm": size or study.meta.get("median_ticket_usd_mm"),
+                "study": {k: study.meta.get(k) for k in ("built", "tape_first", "tape_last")}}
 
     # -- building the bid-offer study from the screen --------------------------
     def _study_sources(self) -> dict:
@@ -3157,7 +3178,13 @@ class BookService:
             known = self.book.pairs if self.book is not None else None
         folder = self.agent_sdr[0]
         down = dtcc.Downloader(proxy=self.dtcc_proxy, direct=self.dtcc_direct)
-        with self._archive_lock:
+        # The download is minutes of network and pauses and touches nothing but
+        # the folder, so it runs under no lock the screens share: held under the
+        # archive's, it froze the quote, the agent card and the folder scan for
+        # as long as DTCC took to answer.
+        if not self._fetch_lock.acquire(blocking=False):
+            raise ValueError("a DTCC download is already running; wait for it to finish")
+        try:
             try:
                 result = down.fetch(dtcc.recent_days(days_back, today=today), folder,
                                     today=today)
@@ -3165,15 +3192,19 @@ class BookService:
                 return {"available": True, "written": 0, "days": [], "reason": str(exc),
                         "proxy": self.dtcc_proxy or "", "route": down.route,
                         "folder": folder}
-            out = {
-                "available": True, "written": result.written, "folder": folder,
-                "proxy": self.dtcc_proxy or "", "route": down.route,
-                "seconds": result.seconds,
-                "summary": result.summary(), "reason": "",
-                "days": [{"day": d.day.isoformat(), "status": d.status, "line": d.line(),
-                          "bytes": d.bytes} for d in result.days],
-                "notes": list(result.notes), "read": None,
-            }
+        finally:
+            self._fetch_lock.release()
+        out = {
+            "available": True, "written": result.written, "folder": folder,
+            "proxy": self.dtcc_proxy or "", "route": down.route,
+            "seconds": result.seconds,
+            "summary": result.summary(), "reason": "",
+            "days": [{"day": d.day.isoformat(), "status": d.status, "line": d.line(),
+                      "bytes": d.bytes} for d in result.days],
+            "notes": list(result.notes), "read": None,
+        }
+        # Only the read of what arrived touches the archive.
+        with self._archive_lock:
             if result.written:
                 state = ingest_mod.State.load(self.ingest_state_path)
                 scan = ingest_mod.scan([(folder, "sdr")], archive=self.archive, state=state,

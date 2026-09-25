@@ -1078,6 +1078,53 @@ class TestDtccDownload(unittest.TestCase):
         with self.assertRaises(ValueError):
             service.mm_agent_fetch({"days": 0})
 
+    def test_a_download_holds_no_lock_the_screens_share(self):
+        """A DTCC download is minutes of network and pauses, and it only writes
+        files into the folder.  Held under the archive's lock it froze the
+        quote, the agent card and a folder scan until DTCC had answered -- and
+        a quote waiting there held the book's lock too, so every screen froze.
+        While it runs both locks are free, and a second Fetch is refused rather
+        than queued behind it."""
+        import threading
+        from unittest import mock
+        from volkit.webapp import BookService
+        service = BookService(str(Path(self.folder) / "no_book.xlsx"), agent_sdr=[self.folder],
+                              ingest_state_path=str(Path(self.folder) / "ingest.json"))
+        seen = {}
+
+        def free(lock):
+            # From another thread: an RLock is always free to its own holder.
+            got = []
+
+            def probe():
+                got.append(lock.acquire(blocking=False))
+                if got[0]:
+                    lock.release()
+            t = threading.Thread(target=probe)
+            t.start()
+            t.join()
+            return got[0]
+
+        def fake_fetch(_down, days, folder, **_kw):
+            seen["archive"] = free(service._archive_lock)
+            seen["book"] = free(service._lock)
+            with self.assertRaises(ValueError) as again:
+                service.mm_agent_fetch({"days": 1})
+            seen["second"] = str(again.exception)
+            return self.dtcc.FetchResult(folder=str(folder))
+
+        with mock.patch.object(self.dtcc.Downloader, "fetch", fake_fetch):
+            out = service.mm_agent_fetch({"days": 3})
+        self.assertTrue(out["available"])
+        self.assertTrue(seen["archive"], "the download ran under the archive's lock")
+        self.assertTrue(seen["book"], "the download ran under the book's lock")
+        self.assertIn("already running", seen["second"])
+        # and the guard is let go, so the next Fetch runs
+        with mock.patch.object(self.dtcc.Downloader, "fetch",
+                               lambda _d, days, folder, **_k: self.dtcc.FetchResult(
+                                   folder=str(folder))):
+            self.assertTrue(service.mm_agent_fetch({"days": 1})["available"])
+
     def test_a_date_outside_what_dtcc_keeps_is_refused_before_any_request(self):
         # "That is older than DTCC keeps" is a sentence.  As a 404 it is a
         # thing the caller has to interpret, and usually interprets as broken.

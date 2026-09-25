@@ -868,20 +868,22 @@ def file_paste(archive: arch.Archive, payload: dict, *, clock,
 
 
 # --------------------------------------------------------------------------
-#: The instruments a width suggestion fills, as the export tables name them:
-#: ``MARKET_WIDTHS`` holds the at-the-money, ``WING_WIDTHS`` the four wings.
+#: The instruments a width suggestion reads: the at-the-money and the four wings.
 SUGGEST_POINTS = (("atm", "atm", {}), ("rr25", "rr", {"wing": 25}), ("rr10", "rr", {"wing": 10}),
                   ("bf25", "fly", {"wing": 25}), ("bf10", "fly", {"wing": 10}))
 
 
+#: The tenors a suggestion reads when none are asked for.
+SUGGEST_TENORS = ("O/N", "1W", "2W", "1M", "2M", "3M", "6M", "9M", "1Y", "2Y")
+
+
 def suggest_widths(study, pair: str, tenors, *, size_usd_mm: float | None = None) -> dict:
-    """The quoting agent's widths for one pair across tenors, for the export tables' boxes.
+    """The quoting agent's widths for one pair across tenors, whatever channel they go to.
 
     The same widths the quote engine shows under its default policy (``bidoffer.quote_width``):
-    the at-the-money for a ``MARKET_WIDTHS`` column and the 25- and 10-delta risk reversal and
-    butterfly for ``WING_WIDTHS`` rows, each with the rung it stood on.  A suggestion, never a
-    write: the screen puts it into the boxes and the desk applies it or not.  A tenor the study
-    cannot read keeps its place with the reason.
+    the at-the-money and the 25- and 10-delta risk reversal and butterfly, each a two-way in vol
+    points with the rung it stood on.  A reading, never a write.  A tenor the study cannot read
+    keeps its place with the reason.
     """
     from . import bidoffer
     from .timeutil import TenorError, tenor_to_years

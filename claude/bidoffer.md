@@ -23,7 +23,7 @@ hold  = wait for comparable flow  +  size / (share x flow per hour)
 
 All of it is read by `bidoffer.build_study` into `bidoffer_study.pkl` beside the
 workbook -- from `volkit bidoffer study`, or the **Build study** button on the export screen's
-*Suggest from the bid-offer study* (`POST /api/bidoffer/study` starts it on a thread,
+*Suggested widths* card (`POST /api/bidoffer/study` starts it on a thread,
 `GET` polls its log). The quote reads only that file.
 
 Each input comes from the desk's own files where `volkit.cfg` names them (owner, 2026-09-25:
@@ -131,16 +131,15 @@ least one tick wide, and ATM straddles print at about one tick (1M ≈ 0.096 aga
 The quote's bid and offer are still the mid ± half the width; putting them on the grid
 themselves is the quote engine's business and has not been done.
 
-## Quoting, and suggesting into the export tables
+## Quoting, and the suggested widths card
 
 The quote engine takes its width from this study first (`width_policy`, default `study`: study,
 bank, archive, rule of thumb, tier, none; `bank` puts a bank rule first; `off` shows it only).
 `claude/agent-quoting.md` is the ladder in full.
 
-On the Vol bulk processing screen, `MARKET_WIDTHS` and `WING_WIDTHS` get their widths suggested
-by the quoting agent (`agent.suggest_widths`) for one pair at the table's tenors: the ATM into
-the pair's column, and the four wings as the pair's rows. It is a suggestion into the boxes,
-never a write (`claude/screen-export.md`).
+On the Vol bulk processing screen, the *Suggested widths* card shows the quoting agent's widths
+(`agent.suggest_widths`) for any pairs at any tenors, independent of channel: the ATM and the
+four wings as full two-ways. It reads and shows, never writes (`claude/screen-export.md`).
 
 A 10Δ RR or fly is never cheaper a leg to lay off than its 25Δ one, for the same reason a 10Δ
 strike is never cheaper than a 25Δ one.
