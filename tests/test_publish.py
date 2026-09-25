@@ -1090,6 +1090,66 @@ class TestOverlay(_Fixture):
         self.assertIn("15 outside it", report["message"])
 
 
+class TestTheBloombergOverlaySheet(unittest.TestCase):
+    """``files/bbg_overlay.xlsx``: Bloomberg's last prices, laid out so the overlay loads them.
+
+    ``volkit/bbgoverlay.py`` writes it and ``files/volkit_bbg_overlay.bas`` keeps its list in
+    step with ``CONFIG``; neither can be run here, so what is pinned is what would make the
+    overlay refuse the file, and that the macro writes the formulas the generator does.
+    """
+
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.dir, True)
+
+    def test_one_row_per_pair_and_tenor_the_workbook_lists(self):
+        from volkit import bbgoverlay
+        pairs, tenors = bbgoverlay.config_list(BOOK)
+        got = bbgoverlay.write(BOOK, self.dir / "bbg.xlsx")
+        self.assertEqual(got["rows"], len(pairs) * len(tenors))
+        self.assertGreater(got["rows"], 0)
+
+    def test_the_sheet_loads_before_and_after_the_pulls_arrive(self):
+        """Fresh, its formulas have no saved values: every quote is blank and falls through to
+        the book.  Saved on a terminal, the numbers are read, and a pull that came back as
+        text (``#N/A Requesting Data...``) is the blank the ISNUMBER guard leaves, never a
+        refusal of the file."""
+        import openpyxl
+        from volkit import bbgoverlay
+        path = self.dir / "bbg.xlsx"
+        bbgoverlay.write(BOOK, path)
+        pairs, tenors = bbgoverlay.config_list(BOOK)
+        fresh = overlay.load(path)
+        self.assertEqual(len(fresh.rows), len(pairs) * len(tenors))
+        self.assertTrue(all(not r.values for r in fresh.rows.values()))
+
+        # what Excel saves once Bloomberg has answered: values in place of the formulas
+        wb = openpyxl.load_workbook(path)
+        ws = wb["overlay"]
+        ws["A1"] = "# volkit overlay from Bloomberg: 3 of 5 quotes in -- save after they arrive"
+        ws["C3"], ws["D3"], ws["E3"] = 9.1, -1.8, ""
+        ws["F3"], ws["G3"] = 0.32, ""
+        for r in range(4, ws.max_row + 1):
+            for c in "CDEFG":
+                ws[f"{c}{r}"] = ""
+        wb.save(path)
+        got = overlay.load(path)
+        first = got.get(pairs[0], tenors[0])
+        self.assertEqual(first.values, {"atm": 9.1, "rr25": -1.8, "bf25": 0.32})
+        self.assertEqual(len(got.rows), len(pairs) * len(tenors))
+
+    def test_the_macro_writes_the_formulas_the_generator_does(self):
+        from volkit import bbgoverlay
+        bas = (Path(__file__).resolve().parents[1] / "files" / "volkit_bbg_overlay.bas") \
+            .read_text(encoding="utf-8")
+        for (sheet, col), formula in bbgoverlay.FORMULAS.items():
+            ws = "ov" if sheet == "overlay" else "bb"
+            vba = formula.replace('"', '""')
+            self.assertIn(f'FillDown {ws}, "{col}", last, "{vba}"', bas, f"{sheet}!{col}")
+        # and nothing else is filled
+        self.assertEqual(bas.count("    FillDown "), len(bbgoverlay.FORMULAS))
+
+
 class TestOverlayOnTheService(unittest.TestCase):
     """Export only versus applied to the session, on the server."""
 

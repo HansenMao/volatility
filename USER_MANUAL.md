@@ -1984,15 +1984,32 @@ ladder, with the study beside it for comparison. A bank **floor** always holds.
 
 On **Vol bulk processing**, `MARKET_WIDTHS` and `WING_WIDTHS` each have **Suggest from the bid-offer
 study**:
+0. **Build study** (re)builds the study the suggestion reads, from the files `volkit.cfg` names:
+   the DTCC zips in the `sdr` folder (fetch them on the Market maker screen's agent card) and the
+   historical workbook `history`. The line beside the button says which files it will read and
+   when the current study was built; the log under it says what was read. It runs in the
+   background and takes a minute or two, several the first time, when it reads every zip into an
+   extract kept in `tape_extract/` beside the workbook; after that only new days are read.
+   Nothing reloads and no mark moves: the next **Suggest** and every quote use the new study.
+   If neither setting is present it reads the quant repo's copies where the machine has them,
+   and otherwise refuses, naming the setting to add.
 1. Pick a pair and, optionally, a size.
 2. Press **Suggest**. The quoting agent fills a table of widths at the tenors the table carries.
 3. **Suggest into the tab** puts them in the boxes: the pair's column in `MARKET_WIDTHS`, the
    pair's rows in `WING_WIDTHS`.
 4. Nothing changes until you press **Apply**.
 
+What the history workbook needs for this: a sheet per pair with its spot, and, for the pairs you
+want widths measured on their own history, ATM at 1W/1M/3M/6M/1Y and 25-delta RR and BF, plus
+forward points or outrights for the dollar pairs. A print in a pair whose spot is not on any sheet
+cannot be read, and the log counts them by pair, so add a spot-only sheet for any pair that trades
+and is missing. Without the quant repo's intraday bars, every print is read against the day's
+close rather than the spot at the moment it traded.
+
 From a shell:
-- `volkit bidoffer study` measures the tape. It reads the quant repo's data and takes about 20
-  seconds; re-run it when the tape has grown.
+- `volkit bidoffer study --history vol_history.xlsx --sdr sdr` is the button, from the command
+  line. Without `--history` / `--sdr` it reads the quant repo's store and extract; re-run it when
+  the tape has grown.
 - `volkit bidoffer grid EURJPY --explain` prints every width and its parts.
 - `volkit bidoffer coverage EURUSD` checks out of sample how often the buffer covered the next
   day's move.
@@ -2308,6 +2325,33 @@ then the tier is not used for that row. A blank cell falls through to the
 book. The file **is not confined to the pairs and tenors the book holds**: a
 row for `AUDHKD`, or a `3Y` row, is a perfectly good row, and a full file goes
 out on a morning the book marks two thirds of it.
+
+**An overlay straight from Bloomberg.** `bbg_overlay.xlsx`, beside the exe, is an
+overlay that fills itself: for every pair and tenor the workbook's `CONFIG` lists it
+pulls Bloomberg's last price of the ATM and the 25- and 10-delta risk reversal and
+butterfly (`=BDP("EURUSDV1M Curncy","PX_LAST")`, `EURUSD25R1M`, `EURUSD10B1M` ...).
+1. Open it on a Bloomberg terminal. On its `settings` sheet, **B2** names your
+   workbook (a bare name means the same folder), **B3** a pricing source if you want
+   one other than the terminal's default (`BGN`, `CMPN` ...), and the tenor table
+   says which Bloomberg code each `CONFIG` tenor is asked under (`1d` → `ON`).
+2. Wait for the comment line above the header to stop counting up (*"… 1,070 of
+   1,125 quotes in"*), then **save**. volkit reads what was saved, not the live cells.
+3. Load it here like any other file.
+
+A quote Bloomberg did not return, still loading or has no ticker for is left blank,
+so it falls through to the book rather than stopping the file. **Keep `overlay` the
+first sheet**: only the first sheet is read.
+
+*So the list follows the workbook*: import `volkit_bbg_overlay.bas` into it once
+(Alt+F11, File › Import File…) and save it as `bbg_overlay.xlsm`. From then on it
+re-reads `CONFIG` every time it is opened and rebuilds its rows; **Alt+F8 ›
+VolkitBbgRefreshList** does it on demand. If the workbook cannot be read, the
+list is left as it was and `settings!B8` says why. Without the macro the sheet
+still works, with the list it was built with.
+
+Check once on the terminal that Bloomberg's butterfly (`25B`, `10B`) is the same
+strangle convention your sheets mark before relying on the wings; **Compare**,
+below, shows the difference pair by pair.
 
 Loaded, the overlay changes nothing: a badge at the top says so, every other
 screen — the kACE feed tab included — still shows and posts the marks, and

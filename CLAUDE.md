@@ -171,9 +171,10 @@ marketmaker  two panels, neither of which moves a mark: the check (a pasted
            runs per pair and the rows come back in the order they were
            written. The two fitters live here as model code; the only caller
            is `marking`
-tapespread the bid-offer the market traded at, off the DTCC option tape the quant
-           repo keeps: prints merged when they are one trade in pieces, sorted
-           into straddles, two-strike packages and singles, inverted off one
+tapespread the bid-offer the market traded at, off the DTCC option tape (the quant
+           repo's extract, or `tapeextract`'s off the cfg's `sdr` folder; the Bloomberg
+           store, or `HistoryStore` over the cfg's `history` workbook): prints
+           merged when they are one trade in pieces, sorted into straddles, two-strike packages and singles, inverted off one
            spot reference a day, and the spread read as the intercept of
            print-pair dispersion against the gap. Measures, never quotes
 bidoffer   how wide a two-way should be: the tape's cost of crossing the market
@@ -189,6 +190,9 @@ dtcc       fetching the public dissemination files from DTCC: which URL, whether
            a 200 is really a file, and what a 404 on a Saturday means
 sdr        the public dissemination file, both layouts, zipped or not, without
            guessing
+tapeextract the sdr folder's zips as the study's tape: the quant repo's extract,
+           ported back, incremental, cached in tape_extract/ beside the workbook.
+           Keeps TERM live (a close, not a cancel), unlike `sdr` for the archive
 llm        a local model on a short leash: prose into the house grammar, and the
            finished decision into English. Every number it returns is checked
            against the text it was given
@@ -244,6 +248,11 @@ publish    every channel the marks go out on -- kACE, Bloomberg DCAP, the two
 overlay    an outside file of pillar quotes laid over the book for the bulk
            export -- not confined to the book's pairs and tenors -- and, when
            asked, applied to the session behind a snapshot that reverts it
+bbgoverlay files/bbg_overlay.xlsx: Bloomberg's last ATM / RR / BF (25d, 10d) for
+           CONFIG's pairs x tenors, laid out as an overlay (first sheet, blanks not
+           #N/A text); files/volkit_bbg_overlay.bas re-reads CONFIG on open and
+           writes the same FORMULAS (a test holds the two); build_exe writes the
+           sheet from the workbook it stages
 session    the marks a session made, saved beside the workbook and put back
 config     the startup settings file a double-clicked exe reads
 paths      resource vs user-data paths (source and frozen), and the one

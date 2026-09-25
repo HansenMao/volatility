@@ -109,6 +109,10 @@ USER_DATA = [
     # The VBA module for pricing a range from Excel (USER_MANUAL, "Prices in
     # Excel"): imported into a desk spreadsheet, so it has to be beside the exe.
     "files/volkit_excel.bas",
+    # The Bloomberg overlay sheet's macro (USER_MANUAL, "A Bloomberg overlay").  The sheet
+    # itself is written at staging from the workbook shipped beside it (stage_data), so its
+    # list is that workbook's and cannot fall behind it.
+    "files/volkit_bbg_overlay.bas",
     "USER_MANUAL.md",
 ]
 
@@ -320,6 +324,17 @@ def stage_data(exe: Path) -> None:
             print(f"  staged   {src.name}")
         else:
             print(f"  MISSING  {rel} -- copy it beside the exe before use")
+
+    # The Bloomberg overlay sheet, for the pairs and tenors of the workbook just staged.  Written
+    # rather than copied: files/bbg_overlay.xlsx is only as current as whoever last regenerated it.
+    try:
+        from volkit import bbgoverlay
+        got = bbgoverlay.write(dest / "vol_marks.xlsx", dest / "bbg_overlay.xlsx")
+        print(f"  wrote    bbg_overlay.xlsx ({len(got['pairs'])} pairs x "
+              f"{len(got['tenors'])} tenors)")
+    except Exception as exc:  # noqa: BLE001 -- said, and the checked-in copy staged instead
+        shutil.copy2(ROOT / "files" / "bbg_overlay.xlsx", dest / "bbg_overlay.xlsx")
+        print(f"  staged   bbg_overlay.xlsx as checked in; could not write it: {exc}")
 
     samples = [ROOT / rel for rel in SAMPLE_DATA if (ROOT / rel).exists()]
     if samples:
