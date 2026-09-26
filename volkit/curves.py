@@ -166,7 +166,7 @@ def surface_curve(book, pair: str, *, cut: str = "NY", method: str | None = None
     curve = Curve(label="", kind="surface", pair=pair,
                   source=f"fitted surface, {method or surface.method} at the {cut} cut",
                   asof=book.clock.now.isoformat())
-    for tenor in book.data.tenor_points:
+    for tenor in book.data.tenors_for(pair):
         t = surface.tenor_years(tenor)
         expiry = book.clock.datetime_from_years(t)
         values: dict[str, float | None] = {}

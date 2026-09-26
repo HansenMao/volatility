@@ -67,6 +67,23 @@ and says *why*; this file says what is there and what must not be broken.
   there are: the channel's list, **book pairs** (`in_book`) or, with an
   overlay loaded, **overlay pairs** (`in_overlay`); it never touches a pair's
   source, and the summary names the set while the ticks match it.
+- **A book pair is published on its own tenors** (2026-09-26, owner). A pair
+  the ATM term structure card gave tenors of its own (`PAIR_TENORS`,
+  `MarketData.pair_tenors`, looked up by `feed_from`) and that is read from
+  the **book** takes those changes on the channel's list (`publish.own_tenors`):
+  a removed tenor is not published for it, an added one is -- past the
+  channel's ladder and past an `EXPORT_PAIRS` `last_tenor` cap, the pair's own
+  decision being the more specific one -- and still refused by name by any
+  width table without a row for it. A pair read from the overlay keeps the
+  channel's list. **COS keeps its grid** (`Channel.fixed_grid`): its file is
+  five fixed columns, so the changes are not read there and a note says so.
+  The coverage row carries `own_tenors` (what changed against the channel's
+  list, or `None`) and a note names each pair; `wants` is the per-pair list
+  the overlay bookkeeping and the preflight's row count read. kACE's whole-
+  book feed posts the same list as its pillars (`kace.build(tenors=)`), an
+  added pillar taking the tier read at its maturity (`width_at`, stepped) as
+  the preflight did. The single-pair kACE feed tab is unchanged and posts the
+  `SPREADS` rows.
 - **The source is chosen per pair** (`publish.build(sources={pair: "book" |
   "overlay"})`, `source` the default for the rest).  A run is not all from
   one or all from the other; the preflight's coverage carries each pair's

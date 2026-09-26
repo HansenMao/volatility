@@ -647,7 +647,7 @@ class Book:
 
         common = dict(
             pair=name, clock=self.clock, weighting=weighting, events=events,
-            tenor_points=tuple(self.data.tenor_points), calendars=self.calendars,
+            tenor_points=tuple(self.data.tenors_for(name)), calendars=self.calendars,
         )
 
         if spec.is_cross:

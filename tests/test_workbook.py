@@ -146,6 +146,9 @@ class TestConfigurationTabs(unittest.TestCase):
         # And CROSS_DEPENDENCE: a cross with no row is the Gaussian copula,
         # which is what every cross was before the tab existed.
         optional.add("CROSS_DEPENDENCE")
+        # And PAIR_TENORS: a pair with no row follows TENORS, which is what
+        # every pair did before the tab existed.
+        optional.add("PAIR_TENORS")
         # The export-policy tables are optional too: a desk that publishes
         # nothing has no business carrying them, and the channels refuse by
         # name until they are typed (`volkit export --init-tables` seeds).
@@ -703,6 +706,160 @@ class TestTenorsOnTheConfigWindow(unittest.TestCase):
                 self.assertEqual([r[c] if c < len(r) else None for r in before],
                                  [r[c] if c < len(r) else None for r in after[:len(before)]])
         self.assertEqual(ExcelSource(wb).load().tenor_points, ("1m", "3y"))
+
+
+class TestAPairsOwnTenors(unittest.TestCase):
+    """One pair marked on more or fewer tenors than CONFIG lists.
+
+    The ATM term structure card adds a tenor to one pair or takes one off it,
+    held as changes to CONFIG's list on the ``PAIR_TENORS`` tab: in the
+    session like any tab, the book read again on it, the workbook untouched
+    until Write to workbook.  The safeguards are refusals by name that leave
+    the book as it was.  Tried against a workbook whose tab is **populated**
+    as well as against the session's rows, because the fixture has no such
+    tab and a control that only works on what the session typed is broken on
+    the desk.
+    """
+
+    def _service(self, tab=None):
+        import tempfile
+        from volkit.webapp import BookService
+        d = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d, True)
+        wb = book_copy(d, pairs=("USDJPY",))
+        if tab is not None:
+            from volkit import session
+            session.write_config_tabs(wb, {"PAIR_TENORS": tab})
+        return BookService(str(wb), ASOF), wb
+
+    def test_the_pairs_list_is_configs_with_its_changes(self):
+        data = MarketData(tenor_points=("1w", "1m", "3m"), tenors_stated=True,
+                          pair_tenors={"USDJPY": {"add": ("2y",), "remove": ("1m",)}})
+        self.assertEqual(data.tenors_for("usdjpy"), ("1w", "3m", "2y"))
+        self.assertEqual(data.tenors_for("EURUSD"), ("1w", "1m", "3m"))
+        marks = [SmileMark(tenor=t, rr_25=0.01, rr_10=0.02, st_25=0.003, st_10=0.008)
+                 for t in ("1W", "1M", "3M", "2Y")]
+        kept = ExcelSource._config_tenors_only("USDJPY", marks, data)
+        self.assertEqual([m.tenor for m in kept], ["1W", "3M", "2Y"])
+        self.assertTrue(any("PAIR_TENORS" in n for n in data.notes), data.notes)
+
+    def test_adding_a_tenor_the_sheet_quotes_fits_it_for_that_pair_alone(self):
+        from volkit import session
+        svc, wb = self._service()
+        stamp = session.workbook_stamp(wb)
+        out = svc.pair_tenors({"pair": "USDJPY", "action": "add", "tenor": "2y"})
+        self.assertIn("fitted", out["notes"][0])
+        self.assertEqual(session.workbook_stamp(wb), stamp)          # the file is untouched
+        self.assertIn("2Y", {f.tenor.upper() for f in svc.book["USDJPY"].fits})
+        self.assertNotIn("2y", svc.book.data.tenor_points)           # CONFIG's list is not
+        self.assertEqual(svc.config_edits["PAIR_TENORS"],
+                         [{"pair": "USDJPY", "add": "2y", "remove": "", "note": ""}])
+        rows = [r["tenor"] for r in svc.marks({"pair": "USDJPY", "cut": "NY"})["atm"]]
+        self.assertEqual(rows[-1], "2y")
+        # Written with the marks, the tab is what the next load reads.
+        session.write_config_tabs(wb, svc.config_edits)
+        self.assertIn("2y", ExcelSource(wb).load().tenors_for("USDJPY"))
+
+    def test_removing_a_tenor_and_putting_it_back(self):
+        svc, _ = self._service()
+        out = svc.pair_tenors({"pair": "USDJPY", "action": "remove", "tenor": "2M"})
+        self.assertNotIn("2m", out["pair_tenors"]["tenors"])
+        self.assertEqual(out["pair_tenors"]["remove"], ["2m"])
+        self.assertNotIn("2M", {f.tenor.upper() for f in svc.book["USDJPY"].fits})
+        out = svc.pair_tenors({"pair": "USDJPY", "action": "add", "tenor": "2m"})
+        self.assertEqual(out["pair_tenors"]["remove"], [])
+        self.assertIn("2M", {f.tenor.upper() for f in svc.book["USDJPY"].fits})
+        self.assertEqual(svc.config_edits["PAIR_TENORS"], [])
+
+    def test_a_tab_in_the_workbook_is_read_and_changed_from_the_card(self):
+        """The workbook layer, not only the session's: a tab the file carries."""
+        svc, _ = self._service(tab=[{"pair": "USDJPY", "add": "2y", "remove": "2m",
+                                     "note": "the desk marks USDJPY to 2Y"}])
+        view = svc.marks({"pair": "USDJPY", "cut": "NY"})["pair_tenors"]
+        self.assertEqual((view["add"], view["remove"], view["held"]), (["2y"], ["2m"], False))
+        self.assertIn("2Y", {f.tenor.upper() for f in svc.book["USDJPY"].fits})
+        svc.pair_tenors({"pair": "USDJPY", "action": "add", "tenor": "2M"})
+        self.assertEqual(svc.config_edits["PAIR_TENORS"],
+                         [{"pair": "USDJPY", "add": "2y", "remove": "",
+                           "note": "the desk marks USDJPY to 2Y"}])
+        out = svc.pair_tenors({"pair": "USDJPY", "action": "reset"})
+        self.assertEqual(out["pair_tenors"]["tenors"], list(svc.book.data.tenor_points))
+        self.assertEqual(svc.config_edits["PAIR_TENORS"], [])
+
+    def test_the_safeguards_refuse_by_name_and_hold_nothing(self):
+        svc, _ = self._service()
+        for q, said in (({"action": "add", "tenor": "1m"}, "already marks 1M"),
+                        ({"action": "remove", "tenor": "2y"}, "does not mark 2Y"),
+                        ({"action": "add", "tenor": "soon"}, "not a tenor"),
+                        ({"action": "reset"}, "already follows"),
+                        ({"action": "rename", "tenor": "1m"}, "unknown action")):
+            with self.assertRaises(ValueError) as cm:
+                svc.pair_tenors({"pair": "USDJPY", **q})
+            self.assertIn(said, str(cm.exception))
+        self.assertNotIn("PAIR_TENORS", svc.config_edits)
+
+    def test_a_tenor_carrying_a_mark_cannot_be_taken_off(self):
+        """The mark would leave the screen while still moving the book."""
+        svc, _ = self._service()
+        svc.book["USDJPY"].atm.tenor_overwrites["3m"] = 0.09
+        with self.assertRaises(ValueError) as cm:
+            svc.pair_tenors({"pair": "USDJPY", "action": "remove", "tenor": "3M"})
+        self.assertIn("ATM overwrite", str(cm.exception))
+        self.assertIn("Clear", str(cm.exception))
+        self.assertNotIn("PAIR_TENORS", svc.config_edits)
+        self.assertIn("3m", svc.book.data.tenors_for("USDJPY"))
+
+    def test_a_pair_keeps_at_least_two_tenors(self):
+        svc, _ = self._service()
+        keep = list(svc.book.data.tenor_points)
+        svc.config_edits["PAIR_TENORS"] = [{"pair": "USDJPY", "add": "",
+                                            "remove": ", ".join(keep[2:]), "note": ""}]
+        svc.reload()
+        self.assertEqual(len(svc.book.data.tenors_for("USDJPY")), 2)
+        with self.assertRaises(ValueError) as cm:
+            svc.pair_tenors({"pair": "USDJPY", "action": "remove", "tenor": keep[0]})
+        self.assertIn("at least 2", str(cm.exception))
+
+    def test_a_change_that_breaks_the_pair_is_undone(self):
+        """Read again, the pair is checked; if it broke, the old tabs go back."""
+        from unittest import mock
+        from volkit.webapp import BookService
+        svc, _ = self._service()
+        real = BookService.reload
+
+        def reload(self, discard=False):
+            out = real(self, discard)
+            if self.config_edits.get("PAIR_TENORS"):
+                self.book.surfaces.pop("USDJPY", None)      # as though it failed to build
+            return out
+
+        with mock.patch.object(BookService, "reload", reload):
+            with self.assertRaises(ValueError) as cm:
+                svc.pair_tenors({"pair": "USDJPY", "action": "add", "tenor": "2y"})
+        self.assertIn("book is as it was", str(cm.exception))
+        self.assertNotIn("PAIR_TENORS", svc.config_edits)
+        self.assertIn("USDJPY", svc.book)
+        self.assertNotIn("2y", svc.book.data.tenors_for("USDJPY"))
+
+    def test_a_bad_row_is_refused_before_it_is_held(self):
+        svc, _ = self._service()
+        for rows, said in (
+                ([{"pair": "USDJPY", "add": "2y", "remove": "2y"}], "both adds and removes"),
+                ([{"pair": "USDJPY", "add": "soon"}], "not a tenor"),
+                ([{"pair": "USDJPY", "add": "2y"}, {"pair": "usdjpy", "remove": "1m"}],
+                 "a pair has one row"),
+                ([{"pair": "YEN", "add": "2y"}], "six-letter")):
+            with self.assertRaises(ValueError) as cm:
+                svc.config_save({"sheet": "PAIR_TENORS", "rows": rows})
+            self.assertIn(said, str(cm.exception))
+        self.assertNotIn("PAIR_TENORS", svc.config_edits)
+
+    def test_with_no_tenors_stated_there_is_nothing_to_depart_from(self):
+        data = ExcelSource(book_for("USDJPY"), config={
+            "TENORS": [], "PAIR_TENORS": [{"pair": "USDJPY", "add": "2y"}]}).load()
+        self.assertFalse(data.tenors_stated)
+        self.assertEqual(data.pair_tenors, {})
+        self.assertTrue(any("PAIR_TENORS" in p for p in data.problems), data.problems)
 
 
 class TestWorkbookAsDatabase(unittest.TestCase):

@@ -21,7 +21,10 @@ from .numerics import ConvergenceError
 from .timeutil import UTC, parse_datetime, parse_tenor
 
 # "25d", "25dc", "25 delta put", "-10d", "atm", "dns", or a plain number.
-_DELTA_RE = re.compile(r"^\s*(-?)\s*(\d+(?:\.\d+)?)\s*d(?:elta)?\s*([cp])?\s*$", re.IGNORECASE)
+# An ``f`` before the ``d`` asks for **forward** delta whatever the pair
+# quotes in: "25fd", "25fdp", "-10fd", "25 fwd delta".
+_DELTA_RE = re.compile(r"^\s*(-?)\s*(\d+(?:\.\d+)?)\s*(f(?:wd|orward)?\s*)?d(?:elta)?\s*([cp])?\s*$",
+                       re.IGNORECASE)
 # Three ways of asking for the money.  ``ATM`` is the pair's own convention
 # at that tenor -- the delta-neutral straddle out to the boundary, the
 # forward beyond it -- and the other two name one of those outright: a desk
@@ -42,13 +45,20 @@ class StrikeSpec:
     side_explicit: bool = False  # True when the text itself said call or put
     text: str = ""
     atm_kind: str = "convention"  # for an ATM strike: "convention" | "forward" | "straddle"
+    #: For a delta strike, which delta: ``""`` is the pair's own convention at
+    #: that tenor (spot or forward, ``DeltaConvention.at``), ``"forward"`` is
+    #: forward delta asked for outright (``25fd``).  Premium adjustment stays
+    #: the pair's either way: it is about the premium currency, not the hedge.
+    delta_type: str = ""
 
 
 def parse_strike(text) -> StrikeSpec:
     """Accept a number, ``ATM``, or a delta such as ``25d`` / ``10dp`` / ``-25d``.
 
     Traders quote strikes both ways, so the panel should take both rather than
-    forcing a conversion by hand.
+    forcing a conversion by hand.  ``25fd`` (``25fdp``, ``-25fd``) is the same
+    delta read as **forward** delta rather than in the pair's convention,
+    which on a spot-delta pair is a different strike.
     """
     if text is None or (isinstance(text, str) and not text.strip()):
         return StrikeSpec("atm", text="ATM")
@@ -61,7 +71,8 @@ def parse_strike(text) -> StrikeSpec:
         return StrikeSpec("atm", text=label, atm_kind=atm_kind)
     m = _DELTA_RE.match(s)
     if m:
-        sign, number, side = m.group(1), float(m.group(2)), (m.group(3) or "").lower()
+        sign, number, side = m.group(1), float(m.group(2)), (m.group(4) or "").lower()
+        delta_type = "forward" if m.group(3) else ""
         delta = number / 100.0 if number >= 1.0 else number
         if not 0.0 < delta < 0.5:
             raise ValueError(
@@ -76,18 +87,20 @@ def parse_strike(text) -> StrikeSpec:
         else:
             # A bare "25d" does not say which wing; the option type decides.
             is_call, explicit = True, False
-        return StrikeSpec("delta", delta, is_call, explicit, text=s)
+        return StrikeSpec("delta", delta, is_call, explicit, text=s, delta_type=delta_type)
     try:
         return StrikeSpec("absolute", float(s), text=s)
     except ValueError:
         raise ValueError(
-            f"cannot read strike {s!r}; use a number, 'ATM', or a delta like '25d', '10dp', '-25d'"
+            f"cannot read strike {s!r}; use a number, 'ATM', a delta like '25d', '10dp', "
+            f"'-25d', or a forward delta like '25fd', '10fdp'"
         ) from None
 
 
 def resolve_strike(surface, text, slice_, forward: float, expiry_dt, *,
                    method: str | None = None, cut: str = "TK",
-                   option_type: str = "Auto") -> tuple[float, float, StrikeSpec]:
+                   option_type: str = "Auto",
+                   premium_adjusted: bool | None = None) -> tuple[float, float, StrikeSpec]:
     """Where a typed strike lands on the marks: ratio, absolute level, and what was asked.
 
     ``ATM`` and ``25d`` are ways of *asking for* a strike and both are answered
@@ -100,15 +113,24 @@ def resolve_strike(surface, text, slice_, forward: float, expiry_dt, *,
     be read two different ways: the pricing grid and the marking screen's vol
     query ask the same question of the same marks and must never differ on
     which strike the answer is at.
+
+    ``premium_adjusted`` overrides the pair's premium adjustment for the
+    strikes a delta defines -- ``25d``, ``25fd`` and ``DNS`` -- when the leg's
+    premium is paid in the other currency (``OptionLeg.premium_ccy``).
+    ``ATM`` stays the pair's own at-the-money: it is where the marked ATM
+    volatility is quoted, whoever pays the premium.
     """
     spec = parse_strike(text)
+    conv = (slice_.conv if premium_adjusted is None
+            else replace(slice_.conv, premium_adjusted=bool(premium_adjusted)))
     if spec.kind == "absolute":
         return spec.value / forward, spec.value, spec
     if spec.kind == "atm":
         if spec.atm_kind == "forward":
             ratio = 1.0
         elif spec.atm_kind == "straddle":
-            ratio = float(black.dns_strike(1.0, slice_.atm_vol, slice_.t, surface.conv))
+            ratio = float(black.dns_strike(1.0, slice_.atm_vol, slice_.t,
+                                           surface.conv if premium_adjusted is None else conv))
         else:
             ratio = float(slice_.strikes[2])
         return ratio, ratio * forward, spec
@@ -121,8 +143,11 @@ def resolve_strike(surface, text, slice_, forward: float, expiry_dt, *,
         # A bare "25d" names two strikes; the call is the one `parse_strike`
         # takes, and the row says which wing it was answered on.
         side_is_call = True
-    ratio, _ = surface.delta_strike(expiry_dt, spec.value, side_is_call, method, cut)
-    return ratio, ratio * forward, StrikeSpec("delta", spec.value, side_is_call, True, spec.text)
+    ratio, _ = surface.delta_strike(expiry_dt, spec.value, side_is_call, method, cut,
+                                    forward_delta=spec.delta_type == "forward",
+                                    premium_adjusted=premium_adjusted)
+    return ratio, ratio * forward, StrikeSpec("delta", spec.value, side_is_call, True, spec.text,
+                                              delta_type=spec.delta_type)
 
 
 def leg_dates(book, pair: str, text, settle=None):
@@ -400,8 +425,12 @@ def quick_vol(book, pair: str, expiry, strike="ATM", *,
     # function of moneyness, so it is read at `F = 1`: it comes back for a pair
     # with no feed exactly as it does for one with a level.
     delta_is_call = bool(spec.is_call) if spec.kind == "delta" else True
+    # A forward delta asked for is reported as one: the number that comes
+    # back is the one that was typed, in the delta that was typed.
+    delta_conv = (slice_.conv.forward_delta() if spec.delta_type == "forward"
+                  else slice_.conv)
     delta_pct = float(black.delta(1.0, ratio, vol, t, delta_is_call,
-                                  slice_.conv)) * 100.0
+                                  delta_conv)) * 100.0
 
     warnings = list(slice_.warnings)
     if scaled:
@@ -422,7 +451,7 @@ def quick_vol(book, pair: str, expiry, strike="ATM", *,
         "side_explicit": side_asked,
         "delta": delta_pct, "delta_is_call": delta_is_call,
         "premium_adjusted": bool(surface.conv),
-        "delta_kind": slice_.conv.delta_label(),
+        "delta_kind": delta_conv.delta_label(),
         "atm_kind": surface.conv.atm_label(t),
         "convention": slice_.conv.describe(),
         "scaled": scaled, "cut": cut, "method": method or surface.method,
@@ -479,6 +508,14 @@ class OptionLeg:
     #: see ``discount``.  It reaches the premium as paid and nothing else: a
     #: delta is a hedge ratio, not a discounted cashflow.
     csa: str = ""
+    #: The currency this leg's premium is paid in.  Blank is the pair's own
+    #: convention (``CONVENTIONS``, else the dollar when it is in the pair,
+    #: else the base).  Paid in the base currency the premium is itself a
+    #: position in the underlying, so the delta is premium adjusted; paid in
+    #: the quote currency it is not.  It moves every delta on the leg -- the
+    #: strike a delta asks for, the delta, the smile delta and gamma, the
+    #: hedge -- and never the volatility or the price.
+    premium_ccy: str = ""
 
 
 @dataclass
@@ -520,8 +557,15 @@ class LegResult:
     #: Carried because a premium discounted two ways must not read the same.
     csa: str = ""
     csa_source: str = ""
-    delta_pct: float = 0.0          # in the pair's quoted convention
+    delta_pct: float = 0.0          # in the pair's quoted convention, or the leg's premium's
     delta_kind: str = "forward delta"   # spot or forward, and why
+    #: The currency the premium is paid in (the leg's, else the pair's), and
+    #: whether that makes the delta premium adjusted.  ``premium_ccy_amount``
+    #: is ``premium_amount`` in that currency -- millions of it, like the rest.
+    premium_ccy: str = ""
+    premium_adjusted: bool = False
+    premium_ccy_amount: float = 0.0
+    premium_ccy_pv_amount: float | None = None
     smile_delta_pct: float = 0.0
     # millions of base the hedge moves by per 1% move in spot, on the smile
     smile_cash_gamma: float = 0.0
@@ -583,6 +627,7 @@ def _discounted(book, leg: OptionLeg, r: LegResult) -> LegResult:
     r.premium_pv_dom = r.premium_dom * df
     r.premium_pv_pct_base = r.premium_pct_base * df
     r.pv_amount = r.premium_amount * df
+    r.premium_ccy_pv_amount = r.premium_ccy_amount * df
     return r
 
 
@@ -684,6 +729,18 @@ def _price_leg(book, leg: OptionLeg) -> LegResult:
     expiry_dt = datetime.combine(expiry, datetime.min.time()).replace(tzinfo=UTC)
     sl = surface.slice_at(expiry_dt, leg.method, leg.cut)
     t = sl.t
+    # The premium currency: the leg's, else the pair's.  Only which of the
+    # pair's two it is matters -- the base makes the delta premium adjusted
+    # -- so the slice's convention is kept whole (its spot or forward delta,
+    # its discount factor) with that one flag set.
+    pair = leg.pair.upper()
+    asked_ccy = str(getattr(leg, "premium_ccy", "") or "").strip().upper()
+    if asked_ccy and asked_ccy not in (pair[:3], pair[3:6]):
+        raise ValueError(f"{pair}: the premium currency {asked_ccy} is not one of the "
+                         f"pair's; it is {pair[:3]} or {pair[3:6]}")
+    pa_override = (asked_ccy == pair[:3]) if asked_ccy else None
+    conv = sl.conv if pa_override is None else replace(sl.conv, premium_adjusted=pa_override)
+    prem_ccy = pair[:3] if conv.premium_adjusted else pair[3:6]
     spot, forward, pip, market_source, feed_via = _resolve_market(
         book, leg, expiry, dates.delivery)
 
@@ -692,6 +749,7 @@ def _price_leg(book, leg: OptionLeg) -> LegResult:
         return float(surface.vol(K_abs / (fwd or forward), expiry_dt, leg.method, leg.cut)) + shift
 
     common = dict(
+        premium_ccy=prem_ccy, premium_adjusted=bool(conv.premium_adjusted),
         ok=True, label=leg.label or f"{leg.pair} {expiry:%d%b%y}",
         pair=leg.pair, expiry=expiry.strftime("%Y-%m-%d"),
         spot_date=dates.spot.isoformat(), settle=dates.delivery.isoformat(),
@@ -708,7 +766,15 @@ def _price_leg(book, leg: OptionLeg) -> LegResult:
         common["warnings"] = list(common["warnings"]) + [
             f"the feed does not quote {leg.pair.upper()}; spot and the outright forward "
             f"came from the {feed_via} triangle"]
+    if pa_override is not None and product != "vanilla":
+        common["warnings"] = list(common["warnings"]) + [
+            f"premium in {asked_ccy}: the {product.replace('_', ' ')}'s premium amount is "
+            f"shown in it, but its delta is a bump of the price and is not premium adjusted"]
     notional = float(leg.notional) * float(leg.direction)
+
+    def in_premium_ccy(amount_dom: float) -> float:
+        """A term-currency amount in the currency the premium is paid in."""
+        return amount_dom if prem_ccy == pair[3:6] else amount_dom / spot
 
     def band_note(level: float) -> None:
         """Flag a level a lognormal smile has no business pricing.
@@ -787,12 +853,14 @@ def _price_leg(book, leg: OptionLeg) -> LegResult:
             vega_dom=vega, gamma=0.0,
             premium_amount=notional * price, vega_amount=notional * vega,
             delta_amount=notional * delta * spot,
+            premium_ccy_amount=in_premium_ccy(notional * price),
         )
 
     # ---- strike-based products ------------------------------------------
     ratio, strike, spec = resolve_strike(
         surface, leg.strike, sl, forward, expiry_dt,
-        method=leg.method, cut=leg.cut, option_type=leg.option_type)
+        method=leg.method, cut=leg.cut, option_type=leg.option_type,
+        premium_adjusted=pa_override)
 
     band_note(strike)
 
@@ -833,13 +901,15 @@ def _price_leg(book, leg: OptionLeg) -> LegResult:
             vega_dom=vega, gamma=0.0,
             premium_amount=notional * price, vega_amount=notional * vega,
             delta_amount=notional * delta * spot,
+            premium_ccy_amount=in_premium_ccy(notional * price),
         )
 
     # ---- vanilla --------------------------------------------------------
     premium_dom = float(black.price(forward, strike, vol, t, is_call))
     # The slice's convention: spot delta where the pair quotes one and the
-    # feed can discount it, forward delta otherwise -- and the row says which.
-    delta = float(black.delta(forward, strike, vol, t, is_call, sl.conv))
+    # feed can discount it, forward delta otherwise -- and the row says which;
+    # premium adjusted as the leg's premium currency says.
+    delta = float(black.delta(forward, strike, vol, t, is_call, conv))
     vega = float(black.vega(forward, strike, vol, t)) / 100.0
     gamma = float(black.gamma(forward, strike, vol, t))
     try:
@@ -848,7 +918,8 @@ def _price_leg(book, leg: OptionLeg) -> LegResult:
         # once, and on a pair with any forward points that is the delta of a
         # different option -- a 3M EURUSD ATM read 44.6.
         smile_delta = surface.smile_delta(forward, strike, expiry_dt, is_call,
-                                          leg.method, leg.cut)
+                                          leg.method, leg.cut,
+                                          conv=None if pa_override is None else conv)
     except (ValueError, ConvergenceError):
         smile_delta = float("nan")
     # The gamma the desk quotes: how far the delta hedge moves for a one per
@@ -858,19 +929,21 @@ def _price_leg(book, leg: OptionLeg) -> LegResult:
     # short gamma it is.
     try:
         smile_gamma = surface.smile_gamma(forward, strike, expiry_dt, is_call,
-                                          leg.method, leg.cut)
+                                          leg.method, leg.cut,
+                                          conv=None if pa_override is None else conv)
     except (ValueError, ConvergenceError):
         smile_gamma = float("nan")
     return LegResult(
         **common, strike=strike, strike_ratio=ratio, strike_spec=spec.text,
         is_call=is_call, vol=vol * 100.0, fair_value=premium_dom,
         premium_dom=premium_dom, premium_pct_base=premium_dom / spot * 100.0,
-        delta_pct=delta * 100.0, delta_kind=sl.conv.delta_label(),
+        delta_pct=delta * 100.0, delta_kind=conv.delta_label(),
         smile_delta_pct=smile_delta * 100.0,
         smile_cash_gamma=notional * smile_gamma,
         vega_dom=vega, gamma=gamma,
         premium_amount=notional * premium_dom, vega_amount=notional * vega,
         delta_amount=notional * delta,
+        premium_ccy_amount=in_premium_ccy(notional * premium_dom),
     )
 
 

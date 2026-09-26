@@ -179,6 +179,16 @@ class DeltaConvention:
                            delta_note=f"forward delta ({who} from the feed)")
         return replace(self, df_foreign=float(df_foreign), delta_note="spot delta")
 
+    def forward_delta(self) -> "DeltaConvention":
+        """This convention reading forward delta, asked for outright (``25fd``).
+
+        The premium adjustment is kept: it is about which currency the premium
+        is paid in, and a forward delta on a premium-adjusted pair is still
+        net of it.  Only the hedge instrument changes -- the forward rather than
+        spot -- which is the foreign discount factor coming off.
+        """
+        return replace(self, df_foreign=1.0, delta_note="forward delta")
+
     @property
     def delta_is_spot(self) -> bool:
         """Whether this (slice) convention is actually reading spot delta."""

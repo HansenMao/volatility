@@ -335,7 +335,7 @@ def cmd_tenors(args) -> int:
     surface = book[args.pair]
     print(f"{args.pair}  (valuation {book.clock.now:%Y-%m-%d %H:%M}Z, cut {args.cut})")
     print(f"  {'tenor':<6}{'curve %':>10}{'cut %':>10}  {'expiry':<10}  {'settles':<10}")
-    for tenor in book.data.tenor_points:
+    for tenor in book.data.tenors_for(args.pair):
         d = book.fx_dates(args.pair, tenor)
         t = surface.tenor_years(tenor)
         cut = surface.atm.cut_vol(book.clock.datetime_from_years(t), args.cut)
@@ -441,7 +441,7 @@ def cmd_vega(args) -> int:
     pair = args.pair.upper()
     surface = book[pair]
     weights = book.vega_weights
-    tenors = list(book.data.tenor_points)
+    tenors = list(book.data.tenors_for(pair))
     column = weights.column_for(pair)
     print(f"{pair}   {vegaweights.VEGA_WEIGHTS_SHEET}: "
           + ("not on this workbook" if not weights.present
@@ -674,7 +674,7 @@ def cmd_band(args) -> int:
     book = _book(args, [args.pair])
     _apply_band(args, book)
     surface = book[args.pair]
-    tenors = [args.tenor] if args.tenor else list(book.data.tenor_points)
+    tenors = [args.tenor] if args.tenor else list(book.data.tenors_for(args.pair))
     panel = band_panel(surface, tenors, cut=args.cut)
 
     print(f"{args.pair}   valuation {book.clock.now:%Y-%m-%d %H:%M}Z   cut {args.cut}")

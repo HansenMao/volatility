@@ -223,7 +223,7 @@ are remembered between sessions. Prices refresh as you type unless you untick
 |---|---|
 | Product | `vanilla`, `digital`, `one_touch`, `no_touch` |
 | Expiry | a tenor — `1W`, `8d`, `3M`, `2Y` — or a short-date code — `O/N`, `T/N`, `S/N`, `S/W` — resolved on the pair's holiday calendar (see **How a tenor resolves** below), or a date written any of the usual ways: `2026-09-15`, `15Sep26`, `15 Sep 2026`, `September 15, 2026`, `2026/09/15`, `9/15/2026`, `20260915`. However you type it, the box comes back holding the one standard date, so what is priced is what you can read |
-| Strike | a number, `ATM`, or a delta — `25d`, `10dp`, `-25d`. A bare `25d` takes its wing from the option Type. Once the marks have solved it the box holds that absolute strike and its tooltip says what you asked for; type the request in again to solve it afresh |
+| Strike | a number, `ATM`, or a delta — `25d`, `10dp`, `-25d`. A bare `25d` takes its wing from the option Type. A delta is in the pair's own convention (spot delta to its ATMF boundary on most pairs, forward beyond); an `f` before the `d` asks for **forward delta** — `25fd`, `10fdp`, `-25fd`, `25 fwd delta` — keeping the pair's premium adjustment. Past the boundary `25d` and `25fd` are the same strike. Once the marks have solved it the box holds that absolute strike and its tooltip says what you asked for; type the request in again to solve it afresh |
 | Settlement | the date this option pays on and the date the forward under it is a forward *to*. It fills itself from the pair's own calendar — the spot lag past the expiry — and is shown *greyed* while it is the calendar's. Type a date over it for a trade settling somewhere the calendar would not have put it, and the forward is read there instead; the expiry does not move. Empty the box to hand it back to the calendar |
 | Barrier | level for touch products; the volatility is read *at the barrier* |
 | Type | `C`, `P`, or `Auto` (call if the strike is above the forward). `Auto` comes back as the `C` or `P` it resolved to |
@@ -423,6 +423,35 @@ move the screen.
   counted rather than written as a quote, and the note above the table says so.
   One cell that is not a number refuses the whole block, and a tenor name the
   table does not have is refused with it.
+* **This pair's own tenors** — tick **tenors** in the heading. The rows of the
+  table are `CONFIG`'s `TENORS` for every pair; here one pair departs from it.
+  Type a tenor into the box and press **Add tenor** to mark it on this pair
+  alone (the sheet's quote there is read and fitted; unquoted, the row reads off
+  the fitted smile until you type one), or press **×** on a tenor to take it off
+  this pair (the sheet's quote leaves the fit and stays in the workbook). A
+  tenor struck through is one `CONFIG` lists that this pair does not mark;
+  **restore** puts it back, and **Follow CONFIG** drops all of the pair's own
+  changes. The changes are held in this session like a configuration tab — the
+  book is read again on them and your marks are kept — and **Write to workbook**
+  puts them on the `PAIR_TENORS` tab. Shut, the heading still counts them
+  (`· +1 −1`).
+
+  The safeguards: **×** and **Follow CONFIG** each ask a second click before
+  anything happens. A tenor that carries a mark made in this session — an ATM
+  overwrite, a typed quote, a wing ratio, a smile parameter — cannot be taken
+  off until the mark is cleared, because it would leave the screen while still
+  moving the book. A pair keeps at least two tenors. And after the book is read
+  again the pair is checked: if it no longer builds, or a tenor that fitted a
+  smile no longer does, the change is undone and the message says what broke.
+
+  The **Vol bulk processing** export reads the same changes for this pair when
+  it is taken **from the book**: a tenor you removed is not published for it,
+  and one you added is — beyond the channel's own tenors and beyond an
+  `EXPORT_PAIRS` `last_tenor` cap — as long as the channel has a width for it
+  (Bloomberg needs a `MARKET_WIDTHS` row; kACE reads the tier at that
+  maturity). A pair taken from the overlay keeps the channel's list, and COS
+  keeps its five fixed columns. The preflight names every pair published on
+  tenors of its own.
 * **The quotes, on the same rows** — `RR 25d`, `RR 10d`, `ST 25d`, `ST 10d`:
   the four numbers each tenor's smile is fitted from, as the pair's own sheet
   holds them, in volatility points. They are **editable**. Type into one and
@@ -720,7 +749,8 @@ move the screen.
   `1wk`, `3mth`, `2yr`, `10 days`) or a date in any of the ways one is written,
   with the year optional (`15 Sep` is the next fifteenth of September); **Strike** takes a number or `ATM`; **Delta** takes `25`, `10p`,
   `-25`, or the pricing tab's own `25d` / `10dp` / `-25d`, a bare delta being
-  the call wing. Expiry and strike are the **pricing tab's own boxes**, read by
+  the call wing. Add an `f` for **forward delta** — `25f`, `10fp`, `25fd` — and
+  the line under the answer reports the delta as a forward delta. Expiry and strike are the **pricing tab's own boxes**, read by
   the same code on the server, so the two screens cannot understand `1M` or
   `25d` differently. The pair, cut and interpolation are the ones on the card
   above.
@@ -835,6 +865,24 @@ move the screen.
   volatility, the strike and the delta are the same numbers under every CSA,
   because a delta is a hedge ratio rather than a discounted cashflow and the
   spot delta the market quotes is defined off the *forward's* factors.
+
+  **Which currency the premium is paid in.** The **Premium ccy** row, per
+  leg: *pair's* (the default — the pair's own convention from the
+  `CONVENTIONS` tab, else USD when it is in the pair, else the base; the option
+  names it once the leg is priced) or either of the pair's two currencies. A
+  premium paid in the **base** currency is itself a position in the
+  underlying, so the delta is **premium adjusted** — net of the premium — and
+  one paid in the quote currency is not. Changing it moves every delta on the
+  leg: the strike a delta asks for (`25d`, `25fd`, `DNS` re-solve in the new
+  convention; `ATM` stays the pair's quoted at-the-money), **Delta %** (its
+  tag reads `spot pa` / `fwd pa` when adjusted, and the hover names the
+  currency), **Smile delta %**, the smile cash gamma and the **Delta hedge**.
+  On a USDJPY 3M 150 call the delta is 48.05 with the premium in USD and
+  49.20 in JPY — apart by the premium as a share of the dollar. The
+  volatility at a given strike and the price do not move. **Premium in
+  premium ccy** shows the premium amount in that currency (millions, at
+  today's spot where it is the base). A digital's or a touch's delta is a
+  bump of its price and is not adjusted; the leg says so.
 
   There is **no forward box**: the level is the market feed's outright to that
   expiry's **settlement date** — the answer line says which date — which is
@@ -2733,7 +2781,8 @@ cell needs:
 - **`/xl/price`** is the Pricing tab. A leg is written with the tab's own
   boxes: `pair`, `expiry` (a tenor or a date), `strike` (`ATM`, `25DP`,
   `1.12`, ...), and optionally `side`, `notional`, `type`, `cut`, `method`,
-  `spot`, `forward`, `points`, `settle`, `csa`, `product`, `barrier`, ... A
+  `spot`, `forward`, `points`, `settle`, `csa`, `premccy` (the premium
+  currency), `product`, `barrier`, ... A
   word it does not read is refused by name, so a misspelt `stirke` is an
   error, not an ATM. It prices off whatever the tool's book holds right now,
   including every mark moved on the screen.
@@ -2890,6 +2939,11 @@ vol marking screen in both directions.
   like any other; empty the row again and it goes back to being a reading.
 - A workbook with **no** `TENORS` column governs nothing: every quote on every
   sheet is read, as before. An absent column is not an empty one.
+- **One pair can depart from it** on the `PAIR_TENORS` tab — `pair`, `add`,
+  `remove`, `note`, the tenors comma separated — which the vol marking
+  screen's ATM term structure card writes for you (*This pair's own tenors*,
+  above). A pair with no row follows `TENORS`, and a tenor added to `TENORS`
+  later reaches every pair that has not removed it.
 
 A pair with the dollar on one side is marked on its own backbone. A pair
 without one is a **cross**, and a cross is never marked directly: it is broken

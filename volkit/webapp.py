@@ -32,6 +32,7 @@ import numpy as np
 from .atm import CUTS
 from .exotics import TOUCH_MODES
 from .book import IN_PLACE_TABS, Book
+from .marketdata import PAIR_TENORS_SHEET
 from .events import event_entries, leg_weights, pair_legs
 from .cross import CROSS_DEPENDENCE_SHEET, CrossAtmCurve
 from .feed import FeedError, load_for
@@ -76,7 +77,7 @@ from . import paths, remarks, screens, session
 from .marking import MIN_INSTANCES as MARK_MIN_INSTANCES
 from .marking import SCREEN_VERDICTS as MARK_VERDICTS
 from .smile import INTERPOLATORS
-from .timeutil import UTC, Clock, parse_datetime, tenor_to_years
+from .timeutil import UTC, Clock, parse_datetime, tenor_key, tenor_to_years
 from . import kace as kace_mod
 from . import overlay as overlay_mod
 from . import publish
@@ -745,7 +746,7 @@ class BookService:
         with self._lock:
             surface = self.book[q["pair"]]
             cut = q.get("cut", "TK")
-            tenors = list(self.book.data.tenor_points)
+            tenors = list(self.book.data.tenors_for(q["pair"]))
             curve = []
             for tp in tenors:
                 t = surface.tenor_years(tp)
@@ -1205,6 +1206,10 @@ class BookService:
                 # anchor, which is what the FX-implied factor already is, so a
                 # screen that never sends it prices exactly as it did.
                 csa=str(row.get("csa") or ""),
+                # The currency the premium is paid in.  Blank is the pair's
+                # own convention, so a screen that never sends it prices and
+                # hedges exactly as it did.
+                premium_ccy=str(row.get("premccy") or row.get("premium_ccy") or ""),
                 # Which of the market boxes are still the feed's.  Only the
                 # screen knows -- it fills them and then posts what is in
                 # them -- and without it every leg reported its market as
@@ -1293,6 +1298,9 @@ class BookService:
                 smile_rows.append(row)
             spec = self.book.data.pairs.get(q["pair"])
             return {"atm": atm_rows, "smile": smile_rows,
+                    # Which tenors this pair is marked on and how they differ
+                    # from CONFIG's, for the card's tenor control.
+                    "pair_tenors": self._tenor_view(surface.pair),
                     # A cross's two dollar legs, which is what offers the fill
                     # of its quotes from them; None on anything else.
                     "legs": list(spec.legs) if spec is not None and spec.is_cross else None,
@@ -1351,7 +1359,7 @@ class BookService:
                 "pair": q["pair"], "is_cross": is_cross,
                 "legs_ccy": list(pair_legs(q["pair"])),
                 "events": self._event_rows(q["pair"]),
-                "tenors": list(self.book.data.tenor_points),
+                "tenors": list(self.book.data.tenors_for(q["pair"])),
             }
             if is_cross:
                 spec = self.book.data.pairs[q["pair"]]
@@ -1628,12 +1636,200 @@ class BookService:
         *no* tenors falls back to -- there the sheets are read whole and this
         is the only thing that knows their tenors.  Shared with the bump so
         the two tables cannot end up listing different curves.
+
+        The pair's **own** list where it has one (``PAIR_TENORS``, set on this
+        card by :meth:`pair_tenors`): CONFIG's with that pair's changes.
         """
-        names = list(self.book.data.tenor_points)
+        names = list(self.book.data.tenors_for(surface.pair))
         seen = {t.upper() for t in names}
         extra = {m.tenor.upper() for m in surface.marks} | set(surface.quote_overwrites)
         names += sorted((t for t in extra if t not in seen), key=tenor_to_years)
         return names
+
+    #: The fewest tenors a pair may be left marking.  A smile term structure
+    #: of one point is not a term structure, and removing the second-to-last
+    #: tenor is far more likely a slip than a decision.
+    MIN_PAIR_TENORS = 2
+
+    def _tenor_view(self, pair: str) -> dict:
+        """One pair's tenors as the ATM card's control shows them."""
+        data = self.book.data
+        changes = data.pair_tenors.get(pair, {})
+        return {"stated": bool(data.tenors_stated), "listed": list(data.tenor_points),
+                "tenors": list(data.tenors_for(pair)),
+                "add": list(changes.get("add", ())), "remove": list(changes.get("remove", ())),
+                "held": PAIR_TENORS_SHEET in self.config_edits}
+
+    @staticmethod
+    def _marks_at(surface, keys) -> list[str]:
+        """What this session has marked on the pair at these tenors, one line each."""
+        out = []
+        for key in keys:
+            what = []
+            if any(tenor_key(t) == key for t in surface.atm.tenor_overwrites):
+                what.append("an ATM overwrite")
+            if any(tenor_key(t) == key and v for t, v in surface.quote_overwrites.items()):
+                what.append("typed quotes")
+            if any(tenor_key(t) == key and v for t, v in surface.ratio_overwrites.items()):
+                what.append("a wing ratio")
+            if any(tenor_key(t) == key for ow in surface.param_overwrites.values() for t in ow):
+                what.append("a smile parameter overwrite")
+            if what:
+                out.append(f"{key} ({', '.join(what)})")
+        return out
+
+    def _pair_tenor_rows(self) -> list[dict]:
+        """The ``PAIR_TENORS`` rows this session builds on: its own, else the file's."""
+        from . import configsheets
+        held = self.config_edits.get(PAIR_TENORS_SHEET)
+        if held is not None:
+            return [dict(r) for r in held]
+        rows = configsheets.read_rows(self.path, PAIR_TENORS_SHEET, required=("pair",))
+        return [{c: r.text(c) for c in ("pair", "add", "remove", "note")} for r in rows or []]
+
+    def pair_tenors(self, payload: dict) -> dict:
+        """Add a tenor to one pair, take one off it, or put it back on CONFIG's list.
+
+        CONFIG's ``TENORS`` column is the pillar set for every pair; a pair
+        that is marked on more or fewer tenors than the rest says so on the
+        ``PAIR_TENORS`` tab, as changes to that list.  The change is a
+        configuration tab like any other: held in this session, the book read
+        again on it with the marks kept (:meth:`_rebuild`), and written into
+        the workbook by **Write to workbook**.  The bulk export reads the same
+        changes for a pair it takes from the book (``publish.build``).
+
+        ``action`` is ``add``, ``remove`` or ``reset``.  The safeguards, each a
+        refusal by name that leaves the book as it was:
+
+        * a tenor must parse, and must be (for a removal) or not be (for an
+          addition) on the pair's list already;
+        * a tenor this session has marked -- an ATM overwrite, a typed quote,
+          a wing ratio, a smile parameter -- cannot be taken off: the mark
+          would leave the screen while still being on the book.  Clear it
+          first;
+        * a pair keeps at least :data:`MIN_PAIR_TENORS` tenors;
+        * the book is read again and the pair checked: if it no longer builds,
+          or a tenor's smile that fitted before no longer does, the previous
+          configuration is put back and the refusal says what broke.
+        """
+        from . import configsheets
+        with self._lock:
+            if self.book is None:
+                raise ValueError(self.load_error or "no workbook is loaded")
+            pair = str(payload.get("pair") or "").strip().upper()
+            if pair not in self.book:
+                raise ValueError(f"{pair or 'no pair'} is not built in this book")
+            action = str(payload.get("action") or "").strip().lower()
+            data = self.book.data
+            if not data.tenors_stated:
+                raise ValueError(
+                    "CONFIG lists no TENORS, so every tenor a sheet quotes is read already and "
+                    "there is no list for one pair to depart from; state the list on the Config "
+                    "window's TENORS tab first")
+            surface = self.book[pair]
+            listed = {tenor_key(t): t for t in data.tenor_points}
+            changes = data.pair_tenors.get(pair, {})
+            add = list(changes.get("add", ()))
+            remove = list(changes.get("remove", ()))
+            before = list(data.tenors_for(pair))
+            on = {tenor_key(t) for t in before}
+            key = ""
+            if action == "reset":
+                if not add and not remove:
+                    raise ValueError(f"{pair} already follows CONFIG's TENORS")
+                gone = [tenor_key(t) for t in add]
+                add, remove = [], []
+            elif action in ("add", "remove"):
+                raw = str(payload.get("tenor") or "").strip()
+                if not raw:
+                    raise ValueError(f"name the tenor to {action}")
+                try:
+                    tenor_to_years(raw)
+                except ValueError:
+                    raise ValueError(f"{raw!r} is not a tenor -- write it like 1w, 3m, 18m "
+                                     f"or 3y") from None
+                key = tenor_key(raw)
+                if action == "add":
+                    if key in on:
+                        raise ValueError(f"{pair} already marks {key}")
+                    gone = []
+                    if key in listed:
+                        remove = [t for t in remove if tenor_key(t) != key]
+                    else:
+                        add.append(raw.lower())
+                else:
+                    if key not in on:
+                        raise ValueError(f"{pair} does not mark {key}, so there is nothing "
+                                         f"to remove")
+                    if len(before) <= self.MIN_PAIR_TENORS:
+                        raise ValueError(
+                            f"{pair} marks {len(before)} tenors ({', '.join(before)}); a pair "
+                            f"keeps at least {self.MIN_PAIR_TENORS}, so {key} stays")
+                    gone = [key]
+                    if key in listed:
+                        remove.append(listed[key])
+                    else:
+                        add = [t for t in add if tenor_key(t) != key]
+            else:
+                raise ValueError(f"unknown action {action!r}; expected add, remove or reset")
+            held = self._marks_at(surface, gone)
+            if held:
+                raise ValueError(
+                    f"{pair} has marks at {'; '.join(held)}, made in this session; taking the "
+                    f"tenor off would hide them while they still move the book. Clear "
+                    f"{'it' if len(held) == 1 else 'them'} first")
+
+            rows = [r for r in self._pair_tenor_rows()
+                    if str(r.get("pair") or "").strip().upper().replace("/", "") != pair]
+            note = next((str(r.get("note") or "") for r in self._pair_tenor_rows()
+                         if str(r.get("pair") or "").strip().upper().replace("/", "") == pair), "")
+            if add or remove:
+                rows.append({"pair": pair, "add": ", ".join(add), "remove": ", ".join(remove),
+                             "note": note})
+            old_tabs = {k: [dict(r) for r in v] for k, v in self.config_edits.items()}
+            tabs = dict(old_tabs)
+            tabs[PAIR_TENORS_SHEET] = rows
+            quoted_before = {tenor_key(m.tenor) for m in surface.marks}
+            failed_before = {tenor_key(f.tenor) for f in surface.fits if not f.ok}
+
+            problems = self._rebuild(config=tabs)
+            broke: list[str] = []
+            after = None
+            if self.load_error:
+                broke.append(self.load_error)
+            elif pair not in self.book:
+                broke += [w for w in self.book.warnings if w.startswith(pair)] or [
+                    f"{pair} is not built"]
+            else:
+                after = self.book[pair]
+                if not any(f.ok for f in after.fits):
+                    broke.append(f"no tenor of {pair} fits a smile")
+                broke += [f"{tenor_key(f.tenor)}: {f.message}" for f in after.fits
+                          if not f.ok and tenor_key(f.tenor) not in failed_before]
+            if broke:
+                self._rebuild(config=old_tabs)
+                raise ValueError(f"{pair}: {'; '.join(broke)} -- so the change is not made "
+                                 f"and the book is as it was")
+
+            notes = []
+            if action == "reset":
+                notes.append(f"{pair} follows CONFIG's TENORS again")
+            elif action == "add":
+                quoted = key in {tenor_key(m.tenor) for m in after.marks}
+                notes.append(f"{pair} marks {key} now: " + (
+                    f"the sheet's {key} quote is shown and fitted" if quoted else
+                    f"the sheet does not quote it, so its row reads off the fitted smile until "
+                    f"a quote is typed"))
+            else:
+                notes.append(f"{pair} no longer marks {key}" + (
+                    f": the sheet's {key} quote is out of the fit and stays in the workbook"
+                    if key in quoted_before else ""))
+            notes.append("held in this session; Write to workbook puts it on the "
+                         f"{PAIR_TENORS_SHEET} tab, and the bulk export reads it for {pair} "
+                         f"when {pair} is taken from the book")
+            return {"ok": True, "pair": pair, "notes": notes,
+                    "problems": [f"! {x}" for x in problems],
+                    "pair_tenors": self._tenor_view(pair)}
 
     def vega_weights(self, q: dict | None = None) -> dict:
         """The ``Vega Weights`` tab as one pair reads it, tenor by tenor.
@@ -2525,7 +2721,7 @@ class BookService:
                 "lookback_days": lookback, "annualisation": annualisation,
                 "realized_basis": realized_basis, "sabr": with_sabr, "sabr_delta": sabr_delta,
                 "valuation": self.book.clock.now.isoformat(),
-                "tenors": list(self.book.data.tenor_points),
+                "tenors": list(self.book.data.tenors_for(pair)),
                 "is_cross": bool(self.book.data.pairs[pair].is_cross),
                 "legs": list(self.book.data.pairs[pair].legs),
                 # The same lookup every level on every screen comes from, so
@@ -2637,7 +2833,7 @@ class BookService:
             if pair not in self.book:
                 raise ValueError(f"{pair} is not built in this book")
             surface = self.book[pair]
-            tenors = [q["tenor"]] if q.get("tenor") else list(self.book.data.tenor_points)
+            tenors = [q["tenor"]] if q.get("tenor") else list(self.book.data.tenors_for(pair))
             out = band_panel(surface, tenors, cut=q.get("cut", "NY"))
             out["has_feed"] = bool(self.book.market_level(pair, 1.0)["feed"])
             return out
@@ -2663,7 +2859,8 @@ class BookService:
             free = payload.get("free") or list(DEFAULT_FREE)
             if isinstance(free, str):
                 free = [f.strip() for f in free.split(",") if f.strip()]
-            tenors = [payload["tenor"]] if payload.get("tenor") else list(self.book.data.tenor_points)
+            tenors = ([payload["tenor"]] if payload.get("tenor")
+                      else list(self.book.data.tenors_for(pair)))
             out = fit_band_treatment(surface, tenors, free=free, treatment=treatment,
                                      cut=payload.get("cut", "NY"))
             out["has_feed"] = bool(self.book.market_level(pair, 1.0)["feed"])
@@ -2714,7 +2911,7 @@ class BookService:
             hist = None
             if self.history is not None and pair in self.history:
                 hist = self.history[pair]
-            tenors = [q["tenor"]] if q.get("tenor") else list(self.book.data.tenor_points)
+            tenors = [q["tenor"]] if q.get("tenor") else list(self.book.data.tenors_for(pair))
             days = q.get("days")
             return dynamics_panel(self.book, pair, hist, tenors,
                                   cut=q.get("cut", "NY"),
@@ -2742,7 +2939,7 @@ class BookService:
             pair = q["pair"]
             if pair not in self.book:
                 raise ValueError(f"{pair} is not built in this book")
-            tenors = [q["tenor"]] if q.get("tenor") else list(self.book.data.tenor_points)
+            tenors = [q["tenor"]] if q.get("tenor") else list(self.book.data.tenors_for(pair))
             out = peg_carry_panel(self.book, pair, tenors, cut=q.get("cut", "NY"),
                                   history=self.history)
             out["has_feed"] = bool(self.book.market_level(pair, 1.0)["feed"])
@@ -4258,6 +4455,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self.service.atm_fit(payload))
             elif url.path == "/api/marks/cross":
                 self._json(self.service.cross_quotes(payload))
+            elif url.path == "/api/marks/tenors":
+                self._json(self.service.pair_tenors(payload))
             elif url.path == "/api/marks/correlation/fit":
                 self._json(self.service.correlation_fit(payload))
             elif url.path == "/api/config/pair":

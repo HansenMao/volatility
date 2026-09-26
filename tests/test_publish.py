@@ -767,6 +767,77 @@ class TestTheBookSourceIsTheMarkedCurve(_Fixture):
             surface.invalidate()
 
 
+class TestAPairsOwnTenors(_Fixture):
+    """A pair marked on tenors of its own is published on them from the book.
+
+    The marking screen's ATM card can add a tenor CONFIG does not list to one
+    pair, or take one off it (``PAIR_TENORS``).  The bulk export reads the
+    same changes for a pair it takes from the book: a removed tenor is not
+    published for it and an added one is, past the channel's ladder and past
+    an ``EXPORT_PAIRS`` cap.  A pair read from the overlay keeps the channel's
+    list, and COS keeps its grid of five columns.
+    """
+
+    OWN = [{"pair": "USDJPY", "add": "2y", "remove": "2w", "note": ""},
+           {"pair": "USDCNH", "add": "2y", "remove": "2w", "note": ""}]
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.own = Book.from_excel(cls.wb, ASOF, config={"PAIR_TENORS": cls.OWN}).load_all(
+            ["USDJPY", "USDCNH"])
+
+    def test_the_book_is_marked_on_the_pairs_own_tenors(self):
+        data = self.own.data
+        self.assertIn("2y", data.tenors_for("USDJPY"))
+        self.assertNotIn("2w", data.tenors_for("USDJPY"))
+        self.assertEqual(data.tenors_for("AUDUSD"), data.tenor_points)
+        self.assertIn("2Y", {m.tenor.upper() for m in self.own["USDJPY"].quoted_marks()})
+        self.assertNotIn("2W", {m.tenor.upper() for m in self.own["USDJPY"].quoted_marks()})
+
+    def test_murex_publishes_the_added_tenor_past_the_cap_and_not_the_removed_one(self):
+        b = publish.build("murex", self.own, self.tables, pairs=["USDJPY"])
+        self.assertTrue(b.ok, b.refused)
+        tenors = [q.tenor for q in b.quotes if q.pair == "USDJPY"]
+        self.assertEqual(tenors, ["O/N", "1W", "1M", "2M", "3M", "6M", "9M", "1Y", "2Y"])
+        cov = {c["pair"]: c for c in b.preflight["coverage"]}["USDJPY"]
+        self.assertEqual(cov["own_tenors"], {"add": ["2Y"], "remove": ["2W"]})
+        self.assertTrue(any("PAIR_TENORS" in n and "+2Y -2W" in n for n in b.notes), b.notes)
+        # The book without the changes publishes the channel's own list.
+        plain = publish.build("murex", self.book, self.tables, pairs=["USDJPY"])
+        self.assertIn("2W", [q.tenor for q in plain.quotes if q.pair == "USDJPY"])
+        self.assertNotIn("2Y", [q.tenor for q in plain.quotes if q.pair == "USDJPY"])
+
+    def test_a_pair_read_from_the_overlay_keeps_the_channels_list(self):
+        b = publish.build("murex", self.own, self.tables, pairs=["USDJPY"],
+                          overlay=self.overlay, sources={"USDJPY": "overlay"})
+        self.assertTrue(b.ok, b.refused)
+        tenors = [q.tenor for q in b.quotes if q.pair == "USDJPY"]
+        self.assertIn("2W", tenors)
+        self.assertNotIn("2Y", tenors)
+        cov = {c["pair"]: c for c in b.preflight["coverage"]}["USDJPY"]
+        self.assertIsNone(cov["own_tenors"])
+
+    def test_cos_keeps_its_grid_and_says_why(self):
+        b = publish.build("cos", self.own, self.tables, pairs=["USDCNH"])
+        cov = {c["pair"]: c for c in b.preflight["coverage"]}["USDCNH"]
+        self.assertEqual(list(cov["tenors"]), list(publish.COS_TENORS))
+        self.assertTrue(any("grid" in n and "USDCNH" in n for n in b.notes), b.notes)
+
+    def test_kace_posts_the_pairs_own_tenors_as_its_pillars(self):
+        b = publish.build("kace", self.own, self.tables, pairs=["USDCNH"])
+        self.assertTrue(b.ok, b.refused)
+        pillars = [p.tenor for p in b.feeds["USDCNH"].pillars]
+        self.assertIn("2Y", pillars)
+        self.assertNotIn("2W", pillars)
+        self.assertEqual(pillars, [q.tenor for q in b.quotes if q.pair == "USDCNH"])
+        # An added pillar the tier has no row for takes the tier read at it,
+        # the same width in the preflight and on the message.
+        q = next(q for q in b.quotes if q.pair == "USDCNH" and q.tenor == "2Y")
+        p = next(p for p in b.feeds["USDCNH"].pillars if p.tenor == "2Y")
+        self.assertAlmostEqual(p.spread, q.width)
+
+
 class TestReferenceFiles(unittest.TestCase):
     """The desk's own files reproduced grid for grid.
 

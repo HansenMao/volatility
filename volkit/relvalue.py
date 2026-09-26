@@ -896,7 +896,7 @@ def relative_value(book, pair: str, hist=None, *, horizon_days: float = 30.0,
     if history_days <= 0:
         raise RelativeValueError(
             f"the history window must be positive, got {history_days!r} days")
-    names = list(tenors or book.data.tenor_points)
+    names = list(tenors or book.data.tenors_for(pair))
     info = book.data.pairs[pair]
     is_cross = bool(info.is_cross)
     unavailable: dict[str, str] = {}

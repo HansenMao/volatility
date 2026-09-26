@@ -45,6 +45,13 @@ class TestWebAssets(unittest.TestCase):
         # Ordinary entries: a key, a label, a control, and no gate after them.
         self.assertIn("['csa','CSA','csa'],", ins)
         self.assertIn("['prem','Premium','premswitch'],", ins)
+        # The premium currency is a row of its own too, per leg like the CSA,
+        # and a new pair clears it with the CSA; changing it re-solves a strike
+        # a delta asked for, since that strike was solved in the old convention.
+        self.assertIn("['premccy','Premium ccy','premccy'],", ins)
+        js = html.split("<script>")[1].split("</script>")[0]
+        self.assertIn("L.csa='';L.premccy='';", js)
+        self.assertIn("if(k==='premccy'&&L.strikeask){L.strike=L.strikeask;", js)
         # Nothing left of the toggle it used to need.
         for gone in ("ADV", "advbar", "data-adv", "volkit.advrows"):
             self.assertNotIn(gone, html)
@@ -397,6 +404,10 @@ class TestWebAssets(unittest.TestCase):
         # gains the `d` the server's grammar wants.
         ask = js.split("function vqAsk(){")[1].split("\n}")[0]
         self.assertIn("vqDeltaText", ask)
+        # An `f` in the delta box is forward delta: `25f` goes up as `25fd`.
+        said = js.split("function vqDeltaText(raw){")[1].split("\n}")[0]
+        self.assertIn("(f)?", said)
+        self.assertIn("m[3]?'fd':'d'", said)
         self.assertIn("strike:vqAsk()", js.replace(" ", ""))
         # The resolution lands in the placeholders, never in the values.
         hints = js.split("function vqHints(r){")[1].split("\n}")[0]
@@ -650,6 +661,32 @@ class TestWebAssets(unittest.TestCase):
         from volkit import screens
         owner = {r: sc.name for sc in screens.SCREENS for r in sc.routes}
         self.assertEqual(owner.get("/api/marks/correlation/fit"), "marking")
+
+    def test_a_pairs_own_tenors_are_a_marking_route_and_a_removal_asks_twice(self):
+        """The tenor control on the ATM card re-reads the book, so it is one of
+        the routes that flags a held fit stale; the page arms a removal on the
+        first click and makes it on the second, and a shut control still counts
+        the pair's changes in the card's heading."""
+        page = _source("volkit", "web", "index.html")
+        js = page.split("<script>")[1].split("</script>")[0]
+        flat = js.replace(" ", "").replace("\n", "")
+        routes = js.split("const MARKING_ROUTES=")[1].split("];")[0]
+        self.assertIn("'/api/marks/tenors'", routes)
+        from volkit import screens
+        owner = {r: sc.name for sc in screens.SCREENS for r in sc.routes}
+        self.assertEqual(owner.get("/api/marks/tenors"), "marking")
+        for el in ("mtenorshow", "mtenorcount", "mtenorrow", "mtenorchips", "mtenoradd",
+                   "mtenoraddgo", "mtenorreset", "mtenormsg"):
+            self.assertIn(f'id="{el}"', page)
+        run = js.split("async function tenorRun(action,tenor){")[1].split("\n}")[0].replace(" ", "")
+        self.assertIn("post('/api/marks/tenors'", run)
+        arm = js.split("function tenArm(k,action){")[1].split("\n}")[0].replace(" ", "")
+        self.assertIn("if(TENARM===k){", arm)
+        self.assertIn("tenorRun(action", arm)
+        self.assertIn("b.onclick=()=>tenArm(b.dataset.tenrm,'remove')", flat)
+        self.assertIn("$('#mtenorreset').onclick=()=>tenArm('*','reset')", flat)
+        self.assertIn("tenors:$('#mtenorshow').checked", flat)
+        self.assertIn("$('#mtenorcount').textContent=(!on&&nch)", flat)
 
     def test_the_fit_to_the_overwrites_is_shown_with_the_column_or_while_it_is_held(self):
         """Its target curve is the overwrite column, so it opens with it -- and

@@ -446,7 +446,7 @@ def carry_table(book, pair: str, *, horizon_days: float = 30.0, target: str = "a
                         atm=nan, ratio_atm=nan, ratio_target=None, vega=None, pnl=None,
                         forward_carry=nan, warnings=(why,))
 
-    for tenor in (tenors or book.data.tenor_points):
+    for tenor in (tenors or book.data.tenors_for(pair)):
         dates = book.fx_dates(pair, tenor)
         t = surface.tenor_years(tenor)
         warn: list[str] = []
@@ -686,7 +686,7 @@ def fair_value_table(book, pair: str, hist=None, *,
     # of quiet mismatch this project exists to remove.
     by_tenor = {r.tenor: r for r in carry_table(
         book, pair, horizon_days=horizon_days, target="atm", method=method, cut=cut)}
-    for tenor in book.data.tenor_points:
+    for tenor in book.data.tenors_for(pair):
         row = by_tenor.get(tenor)
         t = surface.tenor_years(tenor)
         warn: list[str] = []
@@ -878,7 +878,7 @@ def realized_table(book, pair: str, hist, *, lookback_days: float | None = None,
     """
     surface = book[pair]
     out: list[RealizedRow] = []
-    for tenor in book.data.tenor_points:
+    for tenor in book.data.tenors_for(pair):
         t = surface.tenor_years(tenor)
         window = float(lookback_days) if lookback_days else t * 365.2425
         dyn_window = max(window, float(DYNAMICS_DAYS if dynamics_days is None
@@ -1177,7 +1177,7 @@ def triangle_table(book, pair: str, *, method: str | None = None, cut: str = "NY
     surface, curve, (leg_a, leg_b), (ca, cb) = _cross_legs(book, pair)
 
     rows: list[TriangleRow] = []
-    for tenor in (tenors or book.data.tenor_points):
+    for tenor in (tenors or book.data.tenors_for(pair)):
         t = surface.tenor_years(tenor)
         expiry = book.clock.datetime_from_years(t)
         warn: list[str] = []
@@ -1352,7 +1352,7 @@ def implied_cross_quotes(book, pair: str, *, method: str | None = None, cut: str
     surface, curve, (leg_a, leg_b), (ca, cb) = _cross_legs(book, pair)
     rows: list[ImpliedQuoteRow] = []
     nan = float("nan")
-    for tenor in (tenors or book.data.tenor_points):
+    for tenor in (tenors or book.data.tenors_for(pair)):
         t = surface.tenor_years(tenor)
         expiry = book.clock.datetime_from_years(t)
         rho = float(np.asarray(curve.correlation(t)))
@@ -1604,7 +1604,7 @@ def correlation_table(book, pair: str, history=None, *, lookback_days: float | N
                            f"so the legs' realized correlation cannot be measured; it holds "
                            f"{', '.join(sorted(history.pairs)) or 'no readable sheets'}")
     rows: list[CorrelationRow] = []
-    for tenor in (tenors or book.data.tenor_points):
+    for tenor in (tenors or book.data.tenors_for(pair)):
         t = surface.tenor_years(tenor)
         marked = float(np.asarray(curve.correlation(t)))
         window = float(lookback_days) if lookback_days else t * 365.2425
@@ -2093,7 +2093,7 @@ def dependence_table(book, pair: str, history, *, premium: str = PREMIUM_OWN,
         raise ValueError(f"a correlation vol lookback is a positive number of days, got "
                          f"{corr_vol_lookback_days!r}")
     surface, curve, (leg_a, leg_b), _ = _cross_legs(book, pair)
-    names = list(tenors or book.data.tenor_points)
+    names = list(tenors or book.data.tenors_for(pair))
     premium = str(premium or PREMIUM_OWN).strip()
     analog: dict[str, DependenceRow] = {}
     source = premium.lower() if premium.lower() in (PREMIUM_OWN, PREMIUM_NONE) else premium.upper()

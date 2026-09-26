@@ -58,7 +58,8 @@ ERR = "#ERR: "
 # a word in the URL the model does not read is a silent default with a cell
 # reference in it.
 LEG_KEYS = ("pair", "expiry", "strike", "type", "side", "notional", "cut", "method",
-            "spot", "forward", "points", "pip", "settle", "csa", "product", "barrier",
+            "spot", "forward", "points", "pip", "settle", "csa", "premccy", "product",
+            "barrier",
             "ramp", "overhedge", "buffer", "label")
 QUOTE_KEYS = ("q", "tier")
 OWN_KEYS = ("field", "fields", "token", "r")   # r: a refresh counter the sheet may bump

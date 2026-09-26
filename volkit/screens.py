@@ -108,7 +108,7 @@ SCREENS: tuple[Screen, ...] = (
                 "/api/band/dynamics", "/api/peg-carry", "/api/vol",
                 "/api/kace", "/api/export/kace", "/api/kace/post",
                 "/api/vega", "/api/vega/realized", "/api/atm/bump", "/api/atm/fit",
-                "/api/marks/correlation", "/api/marks/correlation/fit",
+                "/api/marks/correlation", "/api/marks/correlation/fit", "/api/marks/tenors",
                 "/api/dependence/realized"),
         commands=("tenors", "daily", "events", "validate", "band", "peg-carry",
                   "kace", "vega"),

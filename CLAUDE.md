@@ -119,7 +119,8 @@ configsheets the workbook's settings tabs -- PEG_BANDS, SPREADS (was
            WING_RATIOS, Vega Weights, CROSS_DEPENDENCE, and the export-policy tables
            TIER_GROUPS, MARKET_WIDTHS, ADD_UPS, SHADES, WING_WIDTHS, EXPORT_PAIRS,
            and TENORS, which is CONFIG's TENORS column edited as a tab of its own
-           and written back into that column alone (`COLUMN_TABS`) --
+           and written back into that column alone (`COLUMN_TABS`), and
+           PAIR_TENORS, one pair's adds and removes against it --
            read one way, with '#' comment rows and a header found rather than assumed, and off
            the session's own rows where it holds the tab (`overlay`). A new
            setting is a tab here, not a new file
@@ -351,6 +352,14 @@ to safely amend.
   .COLUMN_TABS`): held in the session like any tab, read by `_load_config`
   instead of the column, and written into that one column of CONFIG by the
   export -- never a rewrite of the sheet, whose PAIRS column sits beside it.
+  **One pair may depart from it** (`PAIR_TENORS`: `pair`, `add`, `remove`, set
+  on the ATM card, `BookService.pair_tenors`): `MarketData.tenors_for(pair)` is
+  the one reading of a pair's pillar set -- the sheet cut, the curve's
+  `tenor_points`, the ATM table and every per-pair panel go through it, never
+  `tenor_points` for one pair. A removal that would hide a session mark is
+  refused, and a change that breaks the pair's build or fit is undone. The bulk
+  export applies the same changes to a **book-sourced** pair's channel tenors
+  (`publish.own_tenors`; not COS, a fixed grid).
 - **The quoting conventions are the pair's, from `DeltaConvention.for_pair`**
   (`black.py`): premium adjusted iff the premium currency -- USD when it is in
   the pair, else the base -- is the base currency, so every cross is adjusted;
@@ -364,7 +373,15 @@ to safely amend.
   which puts the foreign discount factor in `df_foreign`; `black.delta` and
   `strike_from_delta` scale by it), forward delta with a stated reason
   otherwise. Every delta read off a slice goes through `sl.conv`, never
-  `surface.conv`. A `CONVENTIONS` tab overrides per pair (`premium`, `atmf
+  `surface.conv`. A strike typed `25fd` (`pricing.parse_strike`,
+  `StrikeSpec.delta_type`) asks for forward delta outright:
+  `sl.conv.forward_delta()` -- the pair's premium adjustment kept, the
+  foreign discount factor off -- through `VolSurface.delta_strike(forward_delta=)`.
+  A pricing leg's `premium_ccy` (the grid's Premium ccy row, `premccy`)
+  overrides the premium adjustment for that leg alone -- `replace(sl.conv,
+  premium_adjusted=)`, the spot/forward delta and `df_foreign` kept -- and
+  reaches its delta strikes (`resolve_strike(premium_adjusted=)`), delta, smile
+  delta and gamma and hedge; never the vol, the price or `ATM`. A `CONVENTIONS` tab overrides per pair (`premium`, `atmf
   beyond`, `delta`, `fit cutoff`); `DeltaConvention.of` coerces the legacy bool and passes a
   convention through whole. `pricing._discounted` adds the premium as paid
   (quote-currency discount factor) beside the forward premium, `None` without

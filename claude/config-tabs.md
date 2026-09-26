@@ -64,6 +64,28 @@ whole tab a load warning and no dependence (the wing ratios' rule); a cross the
 workbook does not carry is a warning and dropped. No tab, no row, or both cells
 blank: the Gaussian copula, exactly as before.
 
+`PAIR_TENORS` (added 2026-09-26) is **the book's**, and is written from the
+vol marking screen's ATM term structure card rather than typed (it is editable
+in the Config window too): `pair`, `add`, `remove`, `note`, the tenors comma
+separated. It holds one pair's departures from `TENORS` -- changes, not a list,
+so a tenor added to `TENORS` later reaches every pair that has not removed it.
+Read by `ExcelSource._load_pair_tenors` into `MarketData.pair_tenors` and only
+ever read through `MarketData.tenors_for(pair)`, which the sheet cut
+(`_config_tenors_only`), the curve's `tenor_points` (`Book._build_surface`),
+the ATM table (`BookService._atm_tenors`) and every per-pair panel use. With no
+`TENORS` stated the tab is a problem and not read (there is nothing to depart
+from); a change that changes nothing is a note; a row removing every tenor is a
+problem and not applied. `configsheets.check_pair_tenors` refuses a bad tenor,
+a pair twice and a tenor both added and removed before a row is held. The card
+posts `/api/marks/tenors` (`BookService.pair_tenors`: `add`, `remove`,
+`reset`), which builds the session's rows (or the file's, keeping their note),
+holds them and calls `_rebuild` like the window's Apply -- after refusing a
+removal at a tenor this session has marked (ATM overwrite, typed quote, wing
+ratio, smile parameter), a pair left under two tenors, and afterwards undoing
+the change if the pair no longer builds or a tenor that fitted no longer does.
+The bulk export reads the same changes for a pair taken from the book
+(`claude/screen-export.md`).
+
 `market_feed.csv` stays a file on purpose: it is market data with an `asof`,
 overwritten daily, and a file is easier to overwrite than a tab in a workbook
 Excel may have open. It has since taken the **discount curves** as well (the

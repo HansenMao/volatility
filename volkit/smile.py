@@ -400,13 +400,19 @@ class SmileSlice:
                 f"of {self.forward:.6g}")
         return v
 
-    def strike_from_delta(self, target_delta: float, is_call: bool, **kw) -> tuple[float, float]:
-        """Delta strike on the *interpolated* smile, not on a single SABR."""
+    def strike_from_delta(self, target_delta: float, is_call: bool, *,
+                          conv: DeltaConvention | None = None, **kw) -> tuple[float, float]:
+        """Delta strike on the *interpolated* smile, not on a single SABR.
+
+        ``conv`` reads the delta in another convention than the slice's own --
+        forward delta asked for outright on a spot-delta pair (``25fd``).
+        """
         from .numerics import fixed_point
+        conv = self.conv if conv is None else conv
         vol = self.atm_vol
 
         def step(v: float) -> float:
-            K = black.strike_from_delta(target_delta, self.forward, v, self.t, is_call, self.conv)
+            K = black.strike_from_delta(target_delta, self.forward, v, self.t, is_call, conv)
             return float(self.vol(K))
 
         try:
@@ -418,12 +424,13 @@ class SmileSlice:
             # iterate can land outside the support, where there is no
             # volatility to read at all.  The bracketed walk below either
             # finds the strike or re-raises this, so nothing is masked.
-            return self._delta_strike_bracketed(target_delta, is_call, exc)
-        K = black.strike_from_delta(target_delta, self.forward, vol, self.t, is_call, self.conv)
+            return self._delta_strike_bracketed(target_delta, is_call, exc, conv=conv)
+        K = black.strike_from_delta(target_delta, self.forward, vol, self.t, is_call, conv)
         return K, vol
 
     def _delta_strike_bracketed(self, target_delta: float, is_call: bool,
-                                why: Exception) -> tuple[float, float]:
+                                why: Exception, *,
+                                conv: DeltaConvention | None = None) -> tuple[float, float]:
         """The same strike, solved one level down, when the iteration will not
         contract.
 
@@ -440,6 +447,7 @@ class SmileSlice:
         published numbers in the last decimal for no reason.
         """
         from .numerics import solve_scalar
+        conv = self.conv if conv is None else conv
 
         def gap(K: float) -> float:
             try:
@@ -452,7 +460,7 @@ class SmileSlice:
             if not math.isfinite(v) or v <= 0:
                 return float("nan")
             return float(black.delta(self.forward, K, v, self.t, is_call,
-                                     self.conv)) - target_delta
+                                     conv)) - target_delta
 
         k0 = float(self.strikes[2])
         g0 = gap(k0)

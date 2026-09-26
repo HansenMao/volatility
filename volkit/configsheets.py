@@ -80,6 +80,11 @@ SHEETS: dict[str, str] = {
               "shows, the smile is fitted at and a mark can be made on. A tenor a pair "
               "sheet quotes and this list leaves out is not read; an empty list reads "
               "every tenor the sheets quote. One tenor per row, in the order shown",
+    "PAIR_TENORS": "one pair's departures from TENORS, set on the marking screen's ATM term "
+                   "structure card: pair, add (tenors this pair marks that TENORS does not "
+                   "list), remove (tenors TENORS lists that this pair does not mark), note -- "
+                   "comma separated. A pair with no row follows TENORS. The bulk export reads "
+                   "the same changes for a pair it takes from the book",
     # The export policy tables (claude/publishing-channels-design.md).  In the
     # workbook like every other table -- it is the database -- but edited on
     # the Vol bulk processing screen rather than in the Config window, because
@@ -149,6 +154,7 @@ EDITABLE: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "EXPORT_PAIRS": (("channel", "pair", "label", "feed_from", "last_tenor", "note"),
                      ("channel", "pair")),
     "TENORS": (("tenor",), ("tenor",)),
+    "PAIR_TENORS": (("pair", "add", "remove", "note"), ("pair",)),
 }
 
 #: Tabs that are **one column of another sheet** rather than a sheet of their
@@ -163,14 +169,67 @@ EDITABLE: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
 COLUMN_TABS: dict[str, tuple[str, str]] = {"TENORS": ("CONFIG", "TENORS")}
 
 
+def split_tenors(text) -> list[str]:
+    """A cell of comma-separated tenors, as the tenors in it: ``"2y, 18m"``."""
+    return [t.strip() for t in str(text or "").replace(";", ",").split(",") if t.strip()]
+
+
+def check_pair_tenors(rows) -> None:
+    """Refuse a ``PAIR_TENORS`` row its reader would refuse, before it is held.
+
+    A pair once, six letters; every tenor one the calendars can place; and no
+    tenor both added and removed on one row, which is two answers to one
+    question.  Takes the tab's own rows or the session's records, so a
+    refusal names the row Excel numbers when it came off the workbook.
+    """
+    from .timeutil import tenor_key, tenor_to_years
+
+    rows = list(rows or [])
+    if not all(isinstance(r, Row) for r in rows):
+        rows = rows_from_records("PAIR_TENORS", rows)
+    seen: dict[str, int] = {}
+    for row in rows:
+        pair = row.text("pair").upper().replace("/", "")
+        if not pair:
+            continue
+        if len(pair) != 6 or not pair.isalpha():
+            raise ConfigSheetError(
+                f"PAIR_TENORS row {row.number}: {pair!r} is not a six-letter currency pair")
+        if pair in seen:
+            raise ConfigSheetError(
+                f"PAIR_TENORS rows {seen[pair]} and {row.number} are both {pair}; a pair "
+                f"has one row")
+        seen[pair] = row.number
+        keys: dict[str, set[str]] = {}
+        for column in ("add", "remove"):
+            keys[column] = set()
+            for text in split_tenors(row.text(column)):
+                try:
+                    tenor_to_years(text)
+                except ValueError:
+                    raise ConfigSheetError(
+                        f"PAIR_TENORS row {row.number} ({pair}), {column}: {text!r} is not a "
+                        f"tenor -- write it like 1w, 3m, 18m or 3y") from None
+                keys[column].add(tenor_key(text))
+        both = sorted(keys["add"] & keys["remove"])
+        if both:
+            raise ConfigSheetError(
+                f"PAIR_TENORS row {row.number} ({pair}) both adds and removes "
+                f"{', '.join(both)}; a tenor is one or the other")
+
+
 def check_rows(sheet: str, rows) -> None:
     """Refuse rows a tab's own reader would refuse, before they are held.
 
-    Only the tenor list has a rule here: every row a tenor the calendars can
+    The tenor list has a rule here: every row a tenor the calendars can
     place, and no tenor twice.  Stored without this, ``3yr`` would be held in
     the session, the book rebuilt on it, and every pair sheet's quote at that
-    tenor silently dropped as one CONFIG does not list.
+    tenor silently dropped as one CONFIG does not list.  ``PAIR_TENORS`` has
+    the same rule per pair (:func:`check_pair_tenors`).
     """
+    if sheet == "PAIR_TENORS":
+        check_pair_tenors(rows)
+        return
     if sheet != "TENORS":
         return
     from .timeutil import tenor_key, tenor_to_years

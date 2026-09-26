@@ -1271,10 +1271,26 @@ class VolSurface:
         return self.atm.daily_vol(when)
 
     def delta_strike(self, expiry, delta: float, is_call: bool,
-                     method: str | None = None, cut: str = "TK") -> tuple[float, float]:
-        """Strike and volatility for a delta, solved on the interpolated smile."""
+                     method: str | None = None, cut: str = "TK", *,
+                     forward_delta: bool = False,
+                     premium_adjusted: bool | None = None) -> tuple[float, float]:
+        """Strike and volatility for a delta, solved on the interpolated smile.
+
+        In the slice's own convention, or in **forward** delta when asked
+        (``25fd``): the foreign discount factor off.  ``premium_adjusted``
+        overrides the pair's premium adjustment, for a leg whose premium is
+        paid in the other currency; ``None`` keeps the pair's.
+        """
         signed = abs(delta) if is_call else -abs(delta)
-        return self.slice_at(expiry, method, cut).strike_from_delta(signed, is_call)
+        sl = self.slice_at(expiry, method, cut)
+        conv = sl.conv
+        if premium_adjusted is not None:
+            conv = replace(conv, premium_adjusted=bool(premium_adjusted))
+        if forward_delta:
+            conv = conv.forward_delta()
+        if conv is sl.conv:
+            return sl.strike_from_delta(signed, is_call)
+        return sl.strike_from_delta(signed, is_call, conv=conv)
 
     def risk_reversal(self, expiry, delta: float, method: str | None = None,
                       cut: str = "TK") -> float:

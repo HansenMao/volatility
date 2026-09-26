@@ -24,6 +24,45 @@ class TestPricing(unittest.TestCase):
         self.assertTrue(parse_strike("25dp").side_explicit)
         self.assertFalse(parse_strike("25d").side_explicit)
 
+    def test_a_forward_delta_is_asked_for_with_an_f(self):
+        """``25fd`` is 25 forward delta; ``25d`` stays the pair's convention."""
+        for text, call, explicit in (("25fd", True, False), ("25fdp", False, True),
+                                     ("-25fd", False, True), ("10 fwd delta", True, False),
+                                     ("25FDC", True, True), ("25 forward delta", True, False)):
+            spec = parse_strike(text)
+            self.assertEqual((spec.kind, spec.delta_type), ("delta", "forward"), text)
+            self.assertEqual((spec.is_call, spec.side_explicit), (call, explicit), text)
+        self.assertAlmostEqual(parse_strike("10 fwd delta").value, 0.10)
+        self.assertEqual(parse_strike("25d").delta_type, "")
+        for bad in ("25fx", "60fd", "0fd"):
+            with self.assertRaises(ValueError, msg=bad):
+                parse_strike(bad)
+
+    def test_a_forward_delta_is_a_different_strike_where_the_pair_quotes_spot(self):
+        """Inside the ATMF boundary the pair quotes spot delta: 25fd is its own
+        strike, answered and reported in forward delta, and the premium
+        adjustment stays the pair's.  Beyond the boundary the two are one."""
+        book = Book.from_excel(BOOK, ASOF).load_all(["USDJPY"])
+        book.feed = MarketFeed.load(FEED)
+        spot = quick_vol(book, "USDJPY", "3M", "25dp")
+        fwd = quick_vol(book, "USDJPY", "3M", "25fdp")
+        self.assertEqual(spot["delta_kind"], "spot delta")
+        self.assertEqual(fwd["delta_kind"], "forward delta")
+        self.assertNotAlmostEqual(spot["strike"], fwd["strike"], places=3)
+        self.assertAlmostEqual(fwd["delta"], -25.0, places=6)
+        self.assertTrue(fwd["premium_adjusted"])
+        sl = book["USDJPY"].slice_at(expiry_datetime(book, "USDJPY", "3M"), None, "TK")
+        k = fwd["strike"] / fwd["forward"]
+        self.assertAlmostEqual(
+            float(black.delta(1.0, k, fwd["vol"] / 100.0, sl.t, False,
+                              sl.conv.forward_delta())), -0.25, places=8)
+        # The pricing grid lands on the same strike through the same reader.
+        leg = price_strip(book, [OptionLeg("USDJPY", "3M", "25fdp")])["legs"][0]
+        self.assertAlmostEqual(leg["strike"], fwd["strike"], places=10)
+        # Past the boundary every pair quotes forward delta already.
+        self.assertAlmostEqual(quick_vol(book, "USDJPY", "2Y", "25d")["strike"],
+                               quick_vol(book, "USDJPY", "2Y", "25fd")["strike"], places=10)
+
     # ---- the marking screen's vol query --------------------------------
     # Two boxes and one number, sharing the pricing screen's strike and
     # expiry vocabulary through `resolve_strike` / `expiry_datetime`.  These
@@ -289,6 +328,54 @@ class TestPricing(unittest.TestCase):
         self.assertIn("USDOIS quotes 7D and 1W, which are the same tenor", joined)
         self.assertEqual(sorted(broken.ois), ["USD"])
         self.assertEqual(sorted(broken.pairs), ["USDJPY"])
+
+    def test_the_premium_currency_moves_the_deltas_and_not_the_price(self):
+        """A leg's premium paid in the base currency is premium adjusted.
+
+        USDJPY pays in USD by convention, so its deltas are adjusted; the same
+        option with the premium paid in JPY is not, and its delta is larger by
+        exactly the premium as a fraction of the base.  EURUSD the other way
+        round.  The strike a delta asks for moves with it; the volatility at a
+        given strike, the price and the premium amount do not.
+        """
+        book = Book.from_excel(BOOK, ASOF).load_all(["USDJPY", "EURUSD"])
+        book.feed = MarketFeed.load(FEED)
+
+        def leg(pair, strike, ccy, kind="C"):
+            r = price_strip(book, [OptionLeg(pair, "3M", strike, option_type=kind,
+                                             premium_ccy=ccy)])["legs"][0]
+            self.assertTrue(r["ok"], r.get("error"))
+            return r
+
+        for pair, fixed, adjusted_by_default in (("USDJPY", "150", True),
+                                                 ("EURUSD", "1.10", False)):
+            own = leg(pair, fixed, "")
+            base, quote = leg(pair, fixed, pair[:3]), leg(pair, fixed, pair[3:])
+            self.assertEqual(own["premium_adjusted"], adjusted_by_default)
+            self.assertEqual((base["premium_ccy"], base["premium_adjusted"]), (pair[:3], True))
+            self.assertEqual((quote["premium_ccy"], quote["premium_adjusted"]), (pair[3:], False))
+            for key in ("vol", "premium_dom", "premium_amount", "strike"):
+                self.assertEqual(base[key], quote[key], key)
+            # delta_pa = delta - premium / spot, in the spot-delta convention
+            # scaled by the foreign discount factor the pair quotes it with.
+            gap = (quote["delta_pct"] - base["delta_pct"]) / 100.0
+            sl = book[pair].slice_at(expiry_datetime(book, pair, "3M"), None, "TK")
+            self.assertAlmostEqual(gap, sl.conv.df_foreign * base["premium_dom"] / base["forward"],
+                                   places=8)
+            self.assertNotAlmostEqual(base["smile_delta_pct"], quote["smile_delta_pct"], places=4)
+            self.assertAlmostEqual(base["delta_amount"], base["delta_pct"] / 100.0)
+            # The premium in the currency it is paid in.
+            self.assertAlmostEqual(quote["premium_ccy_amount"], quote["premium_amount"])
+            self.assertAlmostEqual(base["premium_ccy_amount"],
+                                   base["premium_amount"] / base["spot"])
+            # A delta asks for a different strike in each convention.
+            d_base, d_quote = leg(pair, "25d", pair[:3]), leg(pair, "25d", pair[3:])
+            self.assertNotAlmostEqual(d_base["strike"], d_quote["strike"], places=4)
+            self.assertAlmostEqual(d_base["delta_pct"], 25.0, places=6)
+            self.assertAlmostEqual(d_quote["delta_pct"], 25.0, places=6)
+        bad = price_strip(book, [OptionLeg("USDJPY", "3M", "25d", premium_ccy="EUR")])["legs"][0]
+        self.assertFalse(bad["ok"])
+        self.assertIn("not one of the pair's", bad["error"])
 
     def test_a_csa_moves_the_premium_and_nothing_else(self):
         """Collateral changes what a cashflow is worth, not what a hedge is.

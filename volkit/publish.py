@@ -851,6 +851,9 @@ class Channel:
     #: somebody typed; this is for a pair picked off the book or an overlay,
     #: which has no row (``default_label``).
     slash_labels: bool = False
+    #: The file is a grid whose columns are the channel's tenors (COS), so a
+    #: pair cannot carry tenors of its own on it: ``PAIR_TENORS`` is not read.
+    fixed_grid: bool = False
 
     def default_label(self, pair: str) -> str:
         """How the file spells a pair with no ``EXPORT_PAIRS`` row of its own."""
@@ -917,7 +920,7 @@ CHANNELS: dict[str, Channel] = {
     "cos": Channel(
         key="cos", label="COS", kind="file", tenors=COS_TENORS, width="cos",
         default_tier="", precision=2, needs=("atm",), one_sided=True,
-        correlated_crosses=True, slash_labels=True,
+        correlated_crosses=True, slash_labels=True, fixed_grid=True,
         what="COS_86830_Bid.csv: the ATM bid alone, five tenors, CNY-labelled rows fed "
              "from the CNH curves; the bid sits COS_WIDTHS under the mid, one-sided, "
              "per pair and tenor; a cross CROSS_CORR names takes its ATM off its two "
@@ -1102,6 +1105,30 @@ def _tenors_for(entry: PairEntry, tenors: list[str]) -> list[str]:
         return list(tenors)
     cap = pillar_years(entry.last_tenor)
     return [t for t in tenors if pillar_years(t) <= cap + 1e-12]
+
+
+def own_tenors(book, pair: str, tenors: list[str]) -> tuple[list[str], dict | None]:
+    """A book pair's channel tenors with the pair's own changes on them.
+
+    The marking screen's ATM card can mark one pair on more or fewer tenors
+    than CONFIG lists (``PAIR_TENORS``, ``MarketData.pair_tenors``).  A pair
+    the export takes from the book takes those changes too: a tenor the pair
+    removed is not published for it, and one it added is -- past the
+    channel's own ladder and past an ``EXPORT_PAIRS`` cap, because the
+    pair's own row is the more specific decision.  Returns the list and what
+    it changed against the channel's (``None`` when the pair has no changes).
+    """
+    data = getattr(book, "data", None)
+    changes = (getattr(data, "pair_tenors", None) or {}).get(str(pair).upper())
+    if not changes:
+        return list(tenors), None
+    gone = {canonical_tenor(t) for t in changes.get("remove", ())}
+    extra = [canonical_tenor(t) for t in changes.get("add", ())]
+    out = [t for t in tenors if t not in gone]
+    out += [t for t in dict.fromkeys(extra) if t not in out]
+    return (sorted(out, key=pillar_years),
+            {"add": [t for t in dict.fromkeys(extra) if t not in tenors],
+             "remove": [t for t in tenors if t in gone]})
 
 
 def _book_read(book, pair: str, tenors: list[str], *, cut: str, source: str,
@@ -1297,8 +1324,40 @@ def build(channel_name: str, book, tables: ExportTables, *, source: str = "book"
     pair_tiers: dict[str, str] = {}
     tier_by_pair: dict[str, dict] = {}
 
+    wants: dict[str, list[str]] = {}
+    grid_skipped: list[str] = []
     for entry in entries:
         want = _tenors_for(entry, tenors)
+        # A pair taken from the book is published on its own tenors where the
+        # marking screen gave it some; a pair read from the overlay keeps the
+        # channel's list, and a grid (COS) keeps its columns.
+        own = None
+        if chosen[entry.pair] == "book":
+            if ch.fixed_grid:
+                if own_tenors(book, entry.feed_from, want)[1]:
+                    grid_skipped.append(entry.feed_from)
+            else:
+                want, own = own_tenors(book, entry.feed_from, want)
+                if own is not None and not (own["add"] or own["remove"]):
+                    own = None
+        if own is not None:
+            said = [f"+{t}" for t in own["add"]] + [f"-{t}" for t in own["remove"]]
+            notes.append(f"{entry.pair}: published on "
+                         + (f"{entry.feed_from}'s" if entry.feed_from != entry.pair
+                            else "its")
+                         + f" own tenors from the marking screen (PAIR_TENORS): "
+                         f"{' '.join(said)} against the {ch.label} list")
+        wants[entry.pair] = want
+        if not want:
+            refused.append(f"{entry.pair}: its own tenors (PAIR_TENORS) leave nothing on the "
+                           f"{ch.label} list to publish")
+            coverage.append({"pair": entry.pair, "label": entry.label,
+                             "feed_from": entry.feed_from if entry.feed_from != entry.pair
+                             else "", "source": chosen[entry.pair], "from": [],
+                             "tenors": {}, "missing": [], "in_book": entry.feed_from in book,
+                             "in_overlay": False, "tier": "", "group": "",
+                             "own_tenors": own})
+            continue
         pair_tier, pair_group = chosen_tier, ""
         if ch.width == "tier":
             try:
@@ -1312,7 +1371,7 @@ def build(channel_name: str, book, tables: ExportTables, *, source: str = "book"
                                  "in_book": entry.feed_from in book,
                                  "in_overlay": (overlay is not None and any(
                                      k[0] == entry.pair for k in overlay.rows)),
-                                 "tier": "", "group": ""})
+                                 "tier": "", "group": "", "own_tenors": own})
                 continue
             if pair_tier != chosen_tier:
                 pair_tiers[entry.pair] = pair_tier
@@ -1479,14 +1538,24 @@ def build(channel_name: str, book, tables: ExportTables, *, source: str = "book"
                          "in_book": entry.feed_from in book,
                          "in_overlay": (overlay is not None
                                         and any(k[0] == entry.pair for k in overlay.rows)),
-                         "tier": pair_tier, "group": pair_group})
+                         "tier": pair_tier, "group": pair_group,
+                         # What the pair's own tenors changed against the
+                         # channel's list, or None: the marking screen's.
+                         "own_tenors": own})
+    if grid_skipped:
+        notes.append(f"{', '.join(sorted(set(grid_skipped)))} "
+                     f"{'has' if len(set(grid_skipped)) == 1 else 'have'} tenors of "
+                     f"{'its' if len(set(grid_skipped)) == 1 else 'their'} own on the "
+                     f"marking screen (PAIR_TENORS); the {ch.label} file is a grid of its "
+                     f"{len(tenors)} columns, so it keeps them")
 
     # Rows the overlay carries that this channel does not publish, and rows
     # for a pair the run reads from the book instead.
     ignored: list[str] = []
     left_on_book: list[str] = []
     if overlay is not None:
-        published = {(e.pair, t) for e in entries for t in _tenors_for(e, tenors)}
+        published = {(e.pair, t) for e in entries
+                     for t in wants.get(e.pair, _tenors_for(e, tenors))}
         book_pairs = {e.pair for e in entries if chosen[e.pair] == "book"}
         for key in overlay.rows:
             if key in used_keys:
@@ -1529,7 +1598,8 @@ def build(channel_name: str, book, tables: ExportTables, *, source: str = "book"
               refused=refused,
               preflight={"coverage": coverage,
                          "wanted": {"pairs": len(entries), "tenors": tenors,
-                                    "rows": sum(len(_tenors_for(e, tenors)) for e in entries)},
+                                    "rows": sum(len(wants.get(e.pair, _tenors_for(e, tenors)))
+                                                for e in entries)},
                          "from_book": from_book, "from_overlay": from_overlay,
                          "fell_through": fell_through,
                          "ignored": ignored, "left_on_book": left_on_book,
@@ -1581,16 +1651,20 @@ def _kace_feeds(b: Build, book, tables: ExportTables, *, cut: str, wings: str, m
     for q in b.quotes:
         by_pair.setdefault(q.pair, []).append(q)
     today = book.clock.now.date()
+    own = {c["pair"] for c in b.preflight.get("coverage", []) if c.get("own_tenors")}
     for pair, qs in by_pair.items():
         whole = all(q.source == "book" for q in qs) and pair in book and not any(
             q.feed_from for q in qs)
         shade = qs[0].shade
         if whole:
+            # A pair on tenors of its own posts those as its pillars rather
+            # than the spread table's rows: the ones the preflight read.
             feed = kace.build(book, pair, tables.spreads, tier=b.tier_of(pair), cut=cut,
                               source=wings,
                               method=methods.get(pair, book[pair].method),
                               multiplier=b.multiplier, interpolate=interpolate,
-                              pillars_only=pillars_only)
+                              pillars_only=pillars_only,
+                              tenors=[q.tenor for q in qs] if pair in own else None)
             if shade:
                 feed.daily = {d: v + shade for d, v in feed.daily.items()}
                 feed.pillars = [kace.Pillar(tenor=p.tenor, expiry=p.expiry, spread=p.spread,

@@ -638,17 +638,28 @@ def credentials(user: str | None = None, password: str | None = None) -> tuple[s
 def build(book, pair: str, spreads: SpreadTable, *, tier: str | None = None,
           cut: str = "NY", source: str = "marks", method: str = "SVI",
           multiplier: float | str | None = None, interpolate: bool = False,
-          pillars_only: bool = False) -> Feed:
+          pillars_only: bool = False, tenors=None) -> Feed:
     """The feed for one pair at one spreading tier, off the book as it is marked now.
 
     ``pillars_only`` writes the key tenors alone -- each pillar's ATM two-way
     and its four wing nodes -- and leaves the calendar-day ATM nodes out; the
     default is the whole daily series, which is what the sheet posted.
+
+    ``tenors`` replaces the spread table's rows as the pillars: the bulk
+    export's list for a pair marked on tenors of its own (``PAIR_TENORS``).
+    A pillar the tier has no row for takes the tier's width read at its
+    maturity (:func:`width_at`, stepped), the way the export's preflight read it.
     """
     pair = pair.upper()
     chosen = spreads.resolve_tier(tier)
     factor = spread_multiplier(multiplier)
-    widths = {t: w * factor for t, w in spreads.for_tier(chosen).items()}
+    ladder = spreads.for_tier(chosen)
+    widths = {t: w * factor for t, w in ladder.items()}
+    if tenors is not None:
+        own = [canonical_tenor(t) for t in tenors]
+        widths = {t: (widths[t] if t in widths
+                      else width_at(ladder, pillar_years(t), multiplier=factor))
+                  for t in dict.fromkeys(own)}
     notes: list[str] = []
     if factor != 1.0:
         notes.append(f"the ATM widths are the {chosen} tier's multiplied by {factor:g}; "

@@ -30,7 +30,7 @@ from .black import DeltaConvention
 from .cross import dollar_legs, infer_leg_signs, is_cross as pair_is_cross
 from .surface import PARAM_NAMES, TERM_COEFFS, SmileMark, fit_cutoff_years
 from .events import EventBook, EventRow
-from .timeutil import UTC, parse_datetime, tenor_key
+from .timeutil import UTC, parse_datetime, tenor_key, tenor_to_years
 
 # Row labels in the PARAMS sheet, matched case- and space-insensitively.
 PARAM_ROWS = {
@@ -167,6 +167,8 @@ class PairSpec:
 
 #: The workbook tab a desk states a pair's conventions on.
 CONVENTIONS_SHEET = "CONVENTIONS"
+#: The tab one pair's own tenors are held on, as changes to CONFIG's list.
+PAIR_TENORS_SHEET = "PAIR_TENORS"
 
 
 def load_conventions(path: str | Path, *, overlay=None) -> dict[str, dict] | None:
@@ -243,6 +245,11 @@ class MarketData:
     #: are shown, fitted and marked -- and a pair sheet's quotes are cut down
     #: to it (:meth:`ExcelSource._config_tenors_only`).
     tenors_stated: bool = False
+    #: One pair's departures from ``tenor_points``, off the ``PAIR_TENORS``
+    #: tab: ``{pair: {"add": (...), "remove": (...)}}``, tenors spelled as
+    #: ``tenor_points`` spells them.  Only ever read through :meth:`tenors_for`,
+    #: so a pair with no row is the global list exactly.
+    pair_tenors: dict[str, dict[str, tuple[str, ...]]] = field(default_factory=dict)
     #: The EVENTS sheet: one row per release, weights per currency, an
     #: adjustment per pair.  A pair's schedule is derived from it and never
     #: stored beside it (``EventBook.for_pair``).
@@ -258,6 +265,24 @@ class MarketData:
     #: the workbook is fine -- but never silent either.
     notes: list[str] = field(default_factory=list)
     source: str = ""
+
+    def tenors_for(self, pair: str) -> tuple[str, ...]:
+        """The pillar set one pair is marked on: ``tenor_points`` with its own changes.
+
+        ``PAIR_TENORS`` departs from the global list tenor by tenor, so a
+        tenor added to CONFIG later reaches every pair that has not removed
+        it.  A pair with no changes gets ``tenor_points`` itself, in its own
+        order; one with changes is sorted by length, because an added tenor
+        has no other place to go.
+        """
+        changes = self.pair_tenors.get(str(pair).upper())
+        if not changes:
+            return tuple(self.tenor_points)
+        gone = {tenor_key(t) for t in changes.get("remove", ())}
+        kept = [t for t in self.tenor_points if tenor_key(t) not in gone]
+        have = {tenor_key(t) for t in kept}
+        kept += [t for t in changes.get("add", ()) if tenor_key(t) not in have]
+        return tuple(sorted(kept, key=tenor_to_years))
 
     def require_clean(self) -> None:
         if self.problems:
@@ -328,6 +353,7 @@ class ExcelSource:
                     )
 
             self._load_config(xls, data)
+            self._load_pair_tenors(data)
             self._load_conventions(data)
             if EVENTS_SHEET in sheets:
                 self._load_events_sheet(xls, data)
@@ -336,6 +362,64 @@ class ExcelSource:
             if BANDS_SHEET in sheets:
                 self._load_bands_sheet(xls, data)
         return data
+
+    # -- PAIR_TENORS ------------------------------------------------------
+    def _load_pair_tenors(self, data: MarketData) -> None:
+        """Put the ``PAIR_TENORS`` tab's changes on the pairs they name.
+
+        A departure needs something to depart from: with no ``TENORS`` list
+        stated every quote is read already, so a row is a problem rather than
+        a silent no-op.  A change that changes nothing -- adding a tenor the
+        list already has, removing one it has not -- is a note; a row that
+        would leave its pair no tenor at all is a problem, and not applied.
+        """
+        from . import configsheets
+
+        try:
+            rows = configsheets.read_rows(self.path, PAIR_TENORS_SHEET, required=("pair",),
+                                          overlay=self.config)
+            if rows is not None:
+                configsheets.check_pair_tenors(rows)
+        except (OSError, ValueError) as exc:
+            data.problems.append(str(exc))
+            return
+        if not rows:
+            return
+        if not data.tenors_stated:
+            data.problems.append(
+                f"{PAIR_TENORS_SHEET}: CONFIG lists no TENORS, so every quote is read "
+                f"already and there is no list for a pair to depart from; the tab is not read")
+            return
+        listed = {tenor_key(t) for t in data.tenor_points}
+        for row in rows:
+            pair = row.text("pair").upper().replace("/", "")
+            if not pair:
+                continue
+            if pair not in data.pairs:
+                data.notes.append(f"{PAIR_TENORS_SHEET}: {pair} has a row but CONFIG does "
+                                  f"not list it, so nothing reads it")
+                continue
+            add = [t.lower() for t in configsheets.split_tenors(row.text("add"))]
+            remove = [t.lower() for t in configsheets.split_tenors(row.text("remove"))]
+            idle = ([t for t in add if tenor_key(t) in listed]
+                    + [t for t in remove if tenor_key(t) not in listed])
+            if idle:
+                data.notes.append(f"{PAIR_TENORS_SHEET}: {pair}'s {', '.join(idle)} "
+                                  f"change{'s' if len(idle) == 1 else ''} nothing -- TENORS "
+                                  f"already says the same")
+            add = [t for t in add if tenor_key(t) not in listed]
+            remove = [t for t in remove if tenor_key(t) in listed]
+            if not add and not remove:
+                continue
+            data.pair_tenors[pair] = {"add": tuple(add), "remove": tuple(remove)}
+            if not data.tenors_for(pair):
+                del data.pair_tenors[pair]
+                data.problems.append(f"{PAIR_TENORS_SHEET}: {pair}'s row removes every tenor "
+                                     f"TENORS lists and adds none, so it is not applied")
+                continue
+            said = [f"+{t}" for t in add] + [f"-{t}" for t in remove]
+            data.notes.append(f"{PAIR_TENORS_SHEET}: {pair} marks its own tenors "
+                              f"({' '.join(said)} against TENORS)")
 
     # -- CONVENTIONS ------------------------------------------------------
     def _load_conventions(self, data: MarketData) -> None:
@@ -817,13 +901,16 @@ class ExcelSource:
         """
         if not data.tenors_stated:
             return marks
-        wanted = {tenor_key(t) for t in data.tenor_points}
+        wanted = {tenor_key(t) for t in data.tenors_for(name)}
         keep = [m for m in marks if tenor_key(m.tenor) in wanted]
         dropped = [m.tenor for m in marks if tenor_key(m.tenor) not in wanted]
         if dropped:
+            own = name in data.pair_tenors
             data.notes.append(
-                f"sheet {name!r} quotes {', '.join(dropped)}, which CONFIG's TENORS column "
-                f"does not list, so {'it is' if len(dropped) == 1 else 'they are'} neither "
+                f"sheet {name!r} quotes {', '.join(dropped)}, which "
+                + (f"{name}'s own tenors (TENORS with its PAIR_TENORS row) do"
+                   if own else "CONFIG's TENORS column does")
+                + f" not list, so {'it is' if len(dropped) == 1 else 'they are'} neither "
                 f"shown nor fitted; the row(s) are still in the workbook"
             )
         return keep

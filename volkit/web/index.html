@@ -622,7 +622,11 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
   <div class="totals" id="ptotals"></div>
   <details class="hint"><summary>How a leg is read</summary>
     <b>Strike</b> takes a number, <code>ATM</code>, or a delta — <code>25d</code>, <code>10dp</code>,
-    <code>-25d</code>. A bare <code>25d</code> takes its wing from the option type.
+    <code>-25d</code>. A bare <code>25d</code> takes its wing from the option type. A delta is
+    read in the pair's own convention (spot delta to its ATMF boundary on most pairs); put an
+    <code>f</code> before the <code>d</code> for <b>forward delta</b> &mdash; <code>25fd</code>,
+    <code>10fdp</code>, <code>-25fd</code> &mdash; which keeps the pair's premium adjustment and
+    drops the foreign discount factor. Beyond the boundary the two are the same strike.
     <b>Expiry</b> takes a tenor (<code>1W</code>, <code>8d</code>, <code>3M</code>, <code>2Y</code>,
     and the unit spelled out — <code>1wk</code>, <code>3mth</code>, <code>2yr</code>,
     <code>10 days</code>),
@@ -813,6 +817,10 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
             title="the four quotes each tenor is fitted from, as the pair's sheet holds them">
             <input type="checkbox" id="mquoteshow" checked style="width:auto"> quotes</label>
           <label style="margin:0;display:flex;align-items:center;gap:5px;width:auto;font-size:11px"
+            title="this pair's own tenors: add one CONFIG does not list, or take one off, for this pair alone">
+            <input type="checkbox" id="mtenorshow" style="width:auto"> tenors
+            <span class="meta" id="mtenorcount"></span></label>
+          <label style="margin:0;display:flex;align-items:center;gap:5px;width:auto;font-size:11px"
             title="how each tenor's 10-delta wings follow its 25-delta ones, off the workbook's WING_RATIOS tab">
             <input type="checkbox" id="mratioshow" style="width:auto"> ratios
             <span class="meta" id="mrationote"></span></label>
@@ -833,6 +841,48 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
           <button class="ghost" id="matmcopy" style="flex:none;width:auto;padding:3px 9px;font-size:11px;margin-left:9px"
             title="copy the marked ATM and the 25d / 10d RR and ST of every tenor, as a table that pastes into Excel">Copy table</button></h2>
         <div class="scroll"><table class="mark" id="matm"></table></div>
+        <!-- This pair's own tenors, as changes to CONFIG's TENORS list.  Held
+             in the session like any configuration tab (PAIR_TENORS), the book
+             read again on them, and read by the bulk export for this pair
+             when it is taken from the book.  A removal is two clicks, and the
+             server refuses one that would hide a mark or break the fit. -->
+        <div class="hide" id="mtenorrow" style="margin-top:11px">
+          <div class="row" style="flex-wrap:wrap;gap:6px;align-items:center">
+            <b style="font-size:12px;width:auto">Tenors for <span id="mtenorpair"></span></b>
+            <span class="meta" id="mtenorsum" style="width:auto"></span>
+          </div>
+          <div id="mtenorchips" style="display:flex;flex-wrap:wrap;gap:5px;margin-top:7px"></div>
+          <div class="row" style="flex-wrap:wrap;gap:6px;align-items:center;margin-top:7px">
+            <input id="mtenoradd" placeholder="18m" style="width:70px"
+              title="a tenor for this pair alone: 18m, 2y, 3w">
+            <button class="ghost" id="mtenoraddgo" style="width:auto;padding:4px 11px;font-size:11px"
+              title="mark this tenor on this pair: the sheet's quote there is read and fitted, or its row reads off the smile until one is typed">Add tenor</button>
+            <span class="grow"></span>
+            <button class="ghost" id="mtenorreset" style="width:auto;padding:4px 11px;font-size:11px"
+              title="drop this pair's own tenors and follow CONFIG's TENORS again">Follow CONFIG</button>
+          </div>
+          <div class="msg" id="mtenormsg"></div>
+          <details class="hint" style="margin-top:6px"><summary>What a pair's own tenors
+            change, and what guards them</summary>CONFIG's <code>TENORS</code> column is every
+            pair's pillar set. Here one pair departs from it: <b>add</b> a tenor it does not list
+            (the pair's sheet quote there is shown and fitted, or, unquoted, its row is read off the
+            fitted smile until one is typed), or <b>&times;</b> one it does (the sheet's quote leaves
+            the fit and stays in the workbook). A tenor struck through is one CONFIG lists that this
+            pair does not mark; <b>restore</b> puts it back. The changes are held in this session
+            like any configuration tab, the book is read again on them with the marks kept, and
+            <b>Write to workbook</b> puts them on the <code>PAIR_TENORS</code> tab.
+            <br><br>The <b>Vol bulk processing</b> export reads them for this pair when it is taken
+            <b>from the book</b>: a tenor removed here is not published for it, a tenor added here
+            is, beyond the channel's own ladder and an <code>EXPORT_PAIRS</code> cap, and still
+            needs a width wherever the channel reads one. A pair taken from the overlay keeps the
+            channel's list, and COS keeps its five-column grid.
+            <br><br><b>Safeguards.</b> Taking a tenor off asks twice. It is refused while the tenor
+            carries a mark made in this session &mdash; an ATM overwrite, a typed quote, a wing
+            ratio, a smile parameter &mdash; since the mark would leave the screen while still
+            moving the book; clear it first. A pair keeps at least two tenors. And the book is
+            read again and the pair checked: if it stops building, or a tenor that fitted a smile
+            no longer does, the change is undone and the refusal says what broke.</details>
+        </div>
         <details class="hint" style="margin-top:7px"><summary>Which tenors are on this table,
           and what a <span class="pill">smile</span> row is</summary>The tenors on this table are the ones
           <b>CONFIG</b> lists. A tenor the pair's sheet quotes and CONFIG does not is not shown,
@@ -1206,7 +1256,10 @@ td.mmnow.thru:hover,td.mmnow.edge:hover{cursor:help}
           a number or <code>ATM</code>.
           <b>Delta</b> is the same point on the smile asked for the other way round &mdash;
           <code>25</code>, <code>10p</code>, <code>-25</code>, or the pricing screen's own
-          <code>25d</code> / <code>10dp</code>; a bare delta is the call wing.
+          <code>25d</code> / <code>10dp</code>; a bare delta is the call wing. An <code>f</code>
+          asks for <b>forward delta</b> instead of the pair's convention: <code>25f</code>,
+          <code>10fp</code>, <code>25fd</code>; the line under the answer says which delta it
+          read.
           <b>Fill in either one</b>: typing in one box clears the other, and the answer puts what
           it resolved to into the empty box's greyed-out hint, so the strike and the delta of the
           volatility being read are both on the card whichever way it was asked for.
@@ -2544,6 +2597,8 @@ const api=async(p,o)=>{const r=await fetch(p,o);const j=await r.json();
    marks and the quote refuses a stale one whatever the browser believed. */
 const MARKING_ROUTES=['/api/overwrite','/api/curve','/api/events','/api/events/weights',
   '/api/band','/api/atm/bump','/api/atm/fit','/api/marks/cross','/api/marks/correlation/fit','/api/reload','/api/session/load','/api/config/save',
+  /* A pair's own tenors: a configuration tab, and the book read again on it. */
+  '/api/marks/tenors',
   '/api/config/pair','/api/workbook/restore','/api/mm/mark/fit','/api/mm/mark/record',
   /* The export overlay applied to (or reverted off) the session, and the
      export tables seeded into it: both put marks on the book or rebuild it. */
@@ -2706,7 +2761,7 @@ function defaultLeg(from){
     method:methodFor(pair,(STATE.methods||['SVI'])[0]),type:'C',strike:'ATM',barrier:'',
     settle:'',settlesrc:'calc',
     spot:'',swap:'',forward:'',pip:'',spotsrc:'feed',fwdsrc:'feed',strikeask:'',
-    notional:'100',side:'buy',ramp:'0',overhedge:'none',buffer:'0',csa:'',prem:'forward'};
+    notional:'100',side:'buy',ramp:'0',overhedge:'none',buffer:'0',csa:'',prem:'forward',premccy:''};
 }
 function pipFor(leg){
   const p=parseFloat(leg.pip);
@@ -2759,6 +2814,13 @@ const IN=[
     toggle is a number nobody can check.  A CSA is a property of the
     agreement, not of the pair, which is why it is per leg and not a setting. */
  ['csa','CSA','csa'],
+ /* The currency the premium is paid in.  Blank is the pair's own convention;
+    either of its two currencies overrides it for this leg.  Paid in the base
+    the premium is itself a position in the underlying, so the delta is
+    premium adjusted -- and the strike a delta asks for (25d, DNS), the delta,
+    the smile delta and gamma and the hedge all follow.  The vol and the
+    price do not move. */
+ ['premccy','Premium ccy','premccy'],
  /* Forward (the undiscounted value the model makes) or spot (the premium as
     paid, discounted on the term currency's feed curve).  Reads a number the
     pricer already returns for every leg either way, so it is never sent to
@@ -2850,7 +2912,9 @@ const OUT=[
  ['overhedge_cost','Overhedge cost',v=>dash(v)??num(v,6),'sign',['digital','one_touch','no_touch']],
  /* Spot delta where the pair quotes one and the feed can discount it,
     forward delta otherwise; the small word says which and the hover says why. */
- ['delta_pct','Delta %',(v,r)=>num(v,2)+(r&&r.delta_kind?' <span style="color:var(--muted);font-size:11px" title="'+esc(r.delta_kind)+'">'+(r.delta_kind.indexOf('spot')===0?'spot':'fwd')+'</span>':'')],
+ ['delta_pct','Delta %',(v,r)=>num(v,2)+(r&&r.delta_kind?' <span style="color:var(--muted);font-size:11px" title="'+esc(r.delta_kind)+
+   (r.premium_ccy?', premium in '+esc(r.premium_ccy)+(r.premium_adjusted?', premium adjusted':', unadjusted'):'')+'">'+
+   (r.delta_kind.indexOf('spot')===0?'spot':'fwd')+(r.premium_adjusted?' pa':'')+'</span>':'')],
  ['smile_delta_pct','Smile delta %',v=>num(v,2),'',VANILLA],
  /* What the delta hedge has to be moved by, in millions of base, for a one
     per cent move in spot -- the gamma a desk says it is long or short, and
@@ -2859,6 +2923,10 @@ const OUT=[
  ['smile_cash_gamma','Smile cash gamma (m base / 1%)',v=>num(v,4),'sign',VANILLA],
  ['vega_dom','Vega per vol pt',v=>num(v,6)],
  [prem('premium_amount','pv_amount'),'Premium amount',(v,r,L)=>premCell(v,r,L,x=>num(x,4)),'big sign'],
+ /* The same premium in the currency it is paid in -- the leg's Premium ccy,
+    else the pair's -- through today's spot where that is the base. */
+ [prem('premium_ccy_amount','premium_ccy_pv_amount'),'Premium in premium ccy (m)',
+  (v,r,L)=>premCell(v,r,L,x=>num(x,4)+(r&&r.premium_ccy?' <span style="color:var(--muted);font-size:11px">'+esc(r.premium_ccy)+'</span>':'')),'sign'],
  ['vega_amount','Vega amount / vol pt',v=>num(v,4),'sign'],
  ['delta_amount','Delta hedge (m base)',v=>num(v,4),'sign'],
  ['pricing_method','Method',v=>esc(v),'',['digital','one_touch','no_touch']],
@@ -2881,6 +2949,18 @@ function ctl(kind,i,key,val){
   if(kind==='overhedge')return `<select ${a}>${opts(STATE.overhedges||['none'],val)}</select>`;
   if(kind==='side')  return `<select ${a}>${opts(['buy','sell'],val)}</select>`;
   if(kind==='premswitch')return `<select ${a}>${opts(['forward','spot'],val||'forward')}</select>`;
+  if(kind==='premccy'){
+    /* The pair's two currencies and its own convention.  What the convention
+       is, and so what blank means, is the server's (CONVENTIONS can move it),
+       so the default option names it once a price has said. */
+    const P=String((LEGS[i]||{}).pair||'').toUpperCase();
+    const r=RESULT&&RESULT.legs&&RESULT.legs[i];
+    const said=(r&&r.ok&&!val&&r.premium_ccy)?' ('+esc(r.premium_ccy)+')':'';
+    let o=`<option value=""${val?'':' selected'}>pair's${said}</option>`;
+    [P.slice(0,3),P.slice(3,6)].filter(Boolean).forEach(c=>{
+      o+=`<option value="${esc(c)}"${String(val)===c?' selected':''}>${esc(c)}</option>`});
+    return `<select ${a} title="the currency this leg's premium is paid in: the base makes its delta premium adjusted">${o}</select>`;
+  }
   if(kind==='csa'){
     /* The collateral currency of the agreement this leg trades under.  The
        choices are USD -- which is what the feed's implied factors already
@@ -3032,6 +3112,9 @@ function loadLegs(){
     /* A leg saved before the CSA row existed is a USD CSA, which is what it
        was priced under: blank, and the same number. */
     if(L.csa===undefined)L.csa='';
+    /* A leg saved before the premium currency existed paid it in the pair's
+       own convention, which is what blank still means. */
+    if(L.premccy===undefined)L.premccy='';
     /* A leg saved before the Premium row existed was reading the one
        screen-wide switch, and that switch defaulted to forward. */
     if(L.prem===undefined)L.prem='forward';
@@ -3196,6 +3279,9 @@ $('#pgrid').addEventListener('change',async e=>{
   L[k]=t.value;
   // A strike typed over is a strike asked for again, whatever it says.
   if(k==='strike')L.strikeask='';
+  // A strike a delta solved (25d, DNS) was solved in the old premium
+  // convention; the request goes back so it is solved afresh in the new one.
+  if(k==='premccy'&&L.strikeask){L.strike=L.strikeask;L.strikeask='';setBox(+i,'strike',L.strike);}
   // A level somebody has typed is theirs from now on, and an emptied box
   // goes back to the feed -- which is the only way back, so it is the
   // documented one.  Typing a swap and typing an outright are the same
@@ -3228,7 +3314,8 @@ $('#pgrid').addEventListener('change',async e=>{
     L.settle='';L.settle_default='';L.settlesrc='calc';
     // A CSA in the old pair's currency is not a currency of the new one, so
     // it goes back to the default rather than travelling as a dead string.
-    L.csa='';
+    // The premium currency the same.
+    L.csa='';L.premccy='';
     // And a strike this screen solved belongs to the pair it solved it on --
     // 150.446 is a considered strike on USDJPY and nonsense on EURUSD, the
     // same trap the two level boxes are cleared for.  The *request* goes
@@ -3446,6 +3533,7 @@ function saveMarking(){try{localStorage.setItem('volkit.marking',JSON.stringify(
   {atm_overwrites:$('#matmowshow').checked,quotes:$('#mquoteshow').checked,
    ratios:$('#mratioshow').checked,smile:$('#msmileshow').checked,
    bump:$('#mbumpshow').checked,corr:$('#mcorrshow').checked,corr_lookback:$('#mcorrlook').value,
+   tenors:$('#mtenorshow').checked,
    owfit_dof:owfitDof(),corrfit_dof:corrfitDof()}))}catch(e){}}
 function loadMarking(){
   let v=null; try{v=JSON.parse(localStorage.getItem('volkit.marking')||'null')}catch(e){}
@@ -3456,6 +3544,7 @@ function loadMarking(){
   $('#mquoteshow').checked=v.quotes!==false;
   $('#mratioshow').checked=!!v.ratios;
   $('#mbumpshow').checked=!!v.bump;
+  $('#mtenorshow').checked=!!v.tenors;
   $('#mcorrshow').checked=!!v.corr;
   if(typeof v.corr_lookback==='string'&&v.corr_lookback)$('#mcorrlook').value=v.corr_lookback;
   if(Array.isArray(v.owfit_dof))$$('#mowfitrow input[data-owdof]').forEach(
@@ -3609,6 +3698,7 @@ function paintMarks(){
         placeholder="${ph}"></td>`;}).join('')+
       '</tr>';}).join('')+'</tbody>';
   paintRatios();
+  paintTenors();
   /* The anchor is one of the tenors on the table above it, and keeps what was
      chosen across a repaint -- fillSel does that -- so a pair change that
      still has the tenor leaves the bump where it was set. */
@@ -3952,6 +4042,76 @@ $('#matmowshow').onchange=()=>{markingVisible();saveMarking();paintMarks()};
 $('#mquoteshow').onchange=()=>{saveMarking();paintMarks()};
 $('#mratioshow').onchange=()=>{saveMarking();paintMarks()};
 $('#mbumpshow').onchange=()=>{markingVisible();saveMarking();bumpWeights()};
+$('#mtenorshow').onchange=()=>{saveMarking();paintTenors()};
+/* ---- a pair's own tenors ---------------------------------------------------
+   CONFIG's TENORS with this pair's changes on them (PAIR_TENORS), sent with the
+   marks.  A chip per tenor the pair marks, an added one outlined as its own,
+   and a struck-through chip per CONFIG tenor it has taken off.  Shut, the
+   heading still counts the changes: a pair marked on tenors of its own is a
+   decision somebody made, and it must not be hidden by shutting the row. */
+let TENARM='', TENARMT=null;
+function paintTenors(){
+  const V=MARKS&&MARKS.pair_tenors, on=$('#mtenorshow').checked;
+  const nch=V?(V.add.length+V.remove.length):0;
+  $('#mtenorcount').textContent=(!on&&nch)?`· ${V.add.length?'+'+V.add.length:''}${V.add.length&&V.remove.length?' ':''}${V.remove.length?'−'+V.remove.length:''}`:'';
+  $('#mtenorrow').classList.toggle('hide',!on);
+  if(!on||!V)return;
+  $('#mtenorpair').textContent=MARKS.pair||mq().pair;
+  const key=t=>String(t||'').replace(/\s+/g,'').toUpperCase();
+  const added=V.add.map(key), gone=V.remove.map(key), listed=V.listed.map(key);
+  $('#mtenorsum').textContent=!V.stated?'CONFIG lists no TENORS, so every quoted tenor is read already'
+    :nch?`${V.add.length?'+'+V.add.map(key).join(' +'):''}${V.add.length&&V.remove.length?'  ':''}${V.remove.length?'−'+V.remove.map(key).join(' −'):''} against CONFIG`+(V.held?' · held in this session':'')
+    :'follows CONFIG';
+  const chip=(t,kind)=>{
+    const k=key(t), armed=TENARM===k;
+    if(kind==='gone')return `<span class="pill" style="text-decoration:line-through;opacity:.7" title="CONFIG lists ${esc(k)}; this pair does not mark it">${esc(k)}</span>`+
+      `<button class="ghost" data-tenadd="${esc(k)}" style="width:auto;padding:1px 7px;font-size:10.5px;margin-left:-3px" title="mark ${esc(k)} on this pair again">restore</button>`;
+    return `<span class="pill${kind==='own'?' ok':''}" title="${kind==='own'?'this pair alone marks '+esc(k):'from CONFIG'}">${esc(k)}`+
+      `<button class="${armed?'danger':'ghost'}" data-tenrm="${esc(k)}" style="width:auto;padding:0 5px;margin-left:4px;font-size:10.5px;border:0" `+
+      `title="${armed?'click again to take '+esc(k)+' off this pair':'take '+esc(k)+' off this pair'}">${armed?'remove '+esc(k)+'?':'&times;'}</button></span>`;
+  };
+  const host=$('#mtenorchips');
+  host.innerHTML=V.tenors.map(t=>chip(t,listed.indexOf(key(t))>=0?'config':'own')).join('')+
+    gone.map(t=>chip(t,'gone')).join('');
+  const dis=!V.stated;
+  $('#mtenoradd').disabled=dis; $('#mtenoraddgo').disabled=dis;
+  $('#mtenorreset').disabled=dis||!nch;
+  $('#mtenorreset').textContent=TENARM==='*'?'Follow CONFIG? click again':'Follow CONFIG';
+  $('#mtenorreset').className=TENARM==='*'?'danger':'ghost';
+  host.querySelectorAll('[data-tenrm]').forEach(b=>{b.onclick=()=>tenArm(b.dataset.tenrm,'remove')});
+  host.querySelectorAll('[data-tenadd]').forEach(b=>{b.onclick=()=>tenorRun('add',b.dataset.tenadd)});
+}
+/* The safeguard's first half, in the page: a removal is armed by the first
+   click and made by the second, and lapses after a few seconds or on any
+   other click.  The second half is the server's -- it refuses a removal that
+   would hide a mark or break the fit, and undoes one that breaks the book. */
+function tenArm(k,action){
+  clearTimeout(TENARMT);
+  if(TENARM===k){TENARM='';paintTenors();tenorRun(action,k==='*'?'':k);return}
+  TENARM=k; paintTenors();
+  TENARMT=setTimeout(()=>{TENARM='';paintTenors()},4000);
+}
+async function tenorRun(action,tenor){
+  const m=$('#mtenormsg'), pair=(MARKS&&MARKS.pair)||mq().pair;
+  m.className='msg'; m.textContent='reading the book again on '+pair+'’s tenors…';
+  try{
+    const r=await post('/api/marks/tenors',{pair:pair,action:action,tenor:tenor});
+    if(action==='add')$('#mtenoradd').value='';
+    /* The book underneath every screen was read again, as a Config apply
+       reads it, so every screen is rebooted over it, and the Config window,
+       if open, shows the tab the session now holds. */
+    await boot(); await loadConfig();
+    m.className='msg '+(r.problems&&r.problems.length?'warn':'ok');
+    m.textContent=r.notes.concat(r.problems||[]).join(' · ');
+  }catch(e){m.className='msg bad';m.textContent=e.message;paintTenors()}
+}
+$('#mtenoraddgo').onclick=()=>{
+  const t=$('#mtenoradd').value.trim();
+  if(!t){const m=$('#mtenormsg');m.className='msg bad';m.textContent='type the tenor to add: 18m, 2y, 3w';return}
+  tenorRun('add',t);
+};
+$('#mtenoradd').onkeydown=e=>{if(e.key==='Enter')$('#mtenoraddgo').click()};
+$('#mtenorreset').onclick=()=>tenArm('*','reset');
 $('#mcorrshow').onchange=()=>{saveMarking();paintMarks();corrLoad()};
 let CORRT=null;
 $('#mcorrlook').oninput=()=>{corrfitStale();clearTimeout(CORRT);CORRT=setTimeout(()=>{saveMarking();corrLoad()},400)};
@@ -4935,11 +5095,12 @@ let VQR=null;
    `d` in the middle.  Putting it there is the only difference between this box
    and the strike box -- the grammar itself stays on the server, so `10dp` and
    `-25d` typed in here are passed through and read exactly as they are on the
-   pricing screen. */
+   pricing screen.  An `f` asks for forward delta: `25f` / `25fp` become
+   `25fd` / `25fdp`, and `25fd` itself passes through. */
 function vqDeltaText(raw){
   const t=String(raw||'').trim(); if(!t)return '';
-  const m=/^(-?)\s*(\d+(?:\.\d+)?)\s*([cp])?$/i.exec(t);
-  return m?(m[1]+m[2]+'d'+(m[3]||'')):t;
+  const m=/^(-?)\s*(\d+(?:\.\d+)?)\s*(f)?\s*([cp])?$/i.exec(t);
+  return m?(m[1]+m[2]+(m[3]?'fd':'d')+(m[4]||'')):t;
 }
 /* Which box holds the request, and what it says.  Delta wins when it has
    something in it: the two are cleared against each other as they are typed,
@@ -4951,7 +5112,7 @@ function vqAsk(){
   const k=$('#vqstrike').value.trim();
   return k||'ATM';
 }
-const VQ_HINT={strike:'ATM or 1.0850',delta:'25, 10p, -25'};
+const VQ_HINT={strike:'ATM or 1.0850',delta:'25, 10p, -25, 25f'};
 /* The resolution, shown where the request is not.  A strike with no feed
    behind it has no level to show, so the moneyness is what goes there and
    says so; the delta always has one, because delta is a function of
@@ -4961,7 +5122,8 @@ function vqHints(r){
   if(!r||r.error){ks.placeholder=VQ_HINT.strike; ds.placeholder=VQ_HINT.delta; return}
   ks.placeholder=r.scaled?num(r.strike,6):('K/F '+num(r.strike_ratio,6));
   ds.placeholder=r.delta==null?VQ_HINT.delta
-    :(sgn(r.delta,VOLDP)+(r.delta_is_call?' call':' put'));
+    :(sgn(r.delta,VOLDP)+(r.delta_is_call?' call':' put')
+      +(String(r.delta_kind||'').indexOf('forward')===0?' fwd':''));
 }
 function vqLevel(r){
   if(!r||r.error)return '';
@@ -5034,8 +5196,8 @@ function refreshVQ(){if(VQR&&!VQR.error)runVQ(false); VQL.forEach(l=>runVQL(l,fa
 let VQL=[], VQLKEY=0;
 function vqlStrike(raw){
   const t=String(raw||'').trim(); if(!t)return 'ATM';
-  const m=/^(-?)\s*(\d+(?:\.\d+)?)\s*([cp])?$/i.exec(t);
-  return m&&(m[1]||m[3])?(m[1]+m[2]+'d'+(m[3]||'')):t;
+  const m=/^(-?)\s*(\d+(?:\.\d+)?)\s*(f)?\s*([cp])?$/i.exec(t);
+  return m&&(m[1]||m[3]||m[4])?(m[1]+m[2]+(m[3]?'fd':'d')+(m[4]||'')):t;
 }
 function saveVQL(){try{localStorage.setItem('volkit.vqlines',
   JSON.stringify(VQL.map(l=>({expiry:l.expiry,strike:l.strike}))))}catch(e){}}
